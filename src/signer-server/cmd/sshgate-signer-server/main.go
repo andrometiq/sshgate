@@ -10,6 +10,9 @@
 //	                          or $SSHGATE_SIGNER_SERVER_CONFIG)
 //	--api-key-file <path>    Single bearer-token file (0600). v2.0 only;
 //	                          v2.1 replaces with per-client keys + WebAuthn.
+//	--signing-key-file <path> 64-byte raw Ed25519 master signing key (0600).
+//	                          The server mints gate-valid SSHGATE_SIG
+//	                          envelopes with this; missing/insecure = fatal.
 //	--addr <host:port>       Listen address (default: :8443). TLS is
 //	                          terminated upstream (Caddy/nginx) in v2.0.
 //	--db <path>              SQLite database path (default:
@@ -22,10 +25,12 @@
 //     holds signing capability should never be the kernel).
 //  2. Load the API key from --api-key-file (single-token bearer auth
 //     for v2.0). Empty file = fatal.
-//  3. Open the SQLite store (scaffold commit 2 wires this in; commit 1
+//  3. Load the Ed25519 master signing key from --signing-key-file
+//     (64-byte raw, 0600). Missing/insecure/wrong-size = fatal.
+//  4. Open the SQLite store (scaffold commit 2 wires this in; commit 1
 //     leaves the field nil and handlers fall through to placeholders).
-//  4. Build the http.Server and listen.
-//  5. Shut down cleanly on SIGTERM/SIGINT (5s drain window).
+//  5. Build the http.Server and listen.
+//  6. Shut down cleanly on SIGTERM/SIGINT (5s drain window).
 //
 // v2.0 does NOT terminate TLS itself: that's the reverse proxy's job
 // (Caddy or nginx in the deploy script). The server binds plain HTTP
@@ -60,6 +65,7 @@ func run(args []string) int {
 	fs := flag.NewFlagSet("signer-server", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	apiKeyFile := fs.String("api-key-file", "", "Path to a 0600 file containing the bearer API key")
+	signingKeyFile := fs.String("signing-key-file", "", "Path to a 0600 file containing the 64-byte raw Ed25519 master signing key")
 	addr := fs.String("addr", ":8443", "Listen address (host:port). Default :8443; TLS terminated upstream.")
 	dbPath := fs.String("db", "/var/lib/signer-server/state.db", "SQLite database path")
 	_ = fs.String("config", defaultConfigPath(), "TOML config file (reserved for v2.1)")
@@ -87,6 +93,22 @@ func run(args []string) int {
 		return 1
 	}
 
+	// Load the Ed25519 master signing key. A server that cannot sign is
+	// useless, and one that starts with a missing/insecure key would be
+	// a silent security hole, so we fail closed here — the same reflex
+	// as the empty-API-key panic in NewServer and the v1 signer's 0600
+	// key-load. Where the prod key lives is a separate ops decision; we
+	// only accept a path.
+	if *signingKeyFile == "" {
+		logf("--signing-key-file is required (see --help)")
+		return 1
+	}
+	signer, err := signerserver.LoadSigningKey(*signingKeyFile)
+	if err != nil {
+		logf("load signing key: %v", err)
+		return 1
+	}
+
 	logger := log.New(os.Stderr, "signer-server: ", log.LstdFlags|log.Lmicroseconds)
 
 	// SQLite store. Open creates the file + applies the schema on
@@ -101,6 +123,7 @@ func run(args []string) int {
 	defer func() { _ = db.Close() }()
 
 	srv := signerserver.NewServer(apiKey, db, logger)
+	srv.Signer = signer
 
 	httpSrv := &http.Server{
 		Addr:              *addr,

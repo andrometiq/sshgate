@@ -32,6 +32,16 @@ type Server struct {
 	// commit-1 test fixtures + smoke runs without a DB file).
 	Store store.Store
 
+	// Signer is the signing engine: it holds the hosted signer's
+	// Ed25519 master key and mints gate-valid SSHGATE_SIG envelopes at
+	// approval time. Production wiring (cmd/sshgate-signer-server)
+	// loads it via LoadSigningKey and refuses to start if the key is
+	// missing or insecure; the route/auth tests leave it nil because
+	// they exercise transport, not signing. The approval surface that
+	// drives Signer.Sign (HTTP→approval→sign) lands in a later phase;
+	// this phase establishes the engine itself.
+	Signer *Signer
+
 	// PollWait bounds the long-poll wait inside /v1/poll/{id}. The
 	// HTTP client may pass a shorter wait via ?wait= (v2.1); for now
 	// this is the only knob. Defaults to 30s in NewServer.
