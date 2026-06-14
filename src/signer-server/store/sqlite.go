@@ -15,25 +15,12 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// schema is the single source of truth for the requests table. The
-// migration story for v2.0 is "drop + recreate"; v2.1 adds a real
-// migrations runner (golang-migrate or our own table). The schema is
-// duplicated in docs/specs §"v2 vision → Wire protocol" — keep them
-// in lockstep.
-const schema = `
-CREATE TABLE IF NOT EXISTS requests (
-  request_id   TEXT PRIMARY KEY,
-  status       TEXT NOT NULL,
-  client_id    TEXT NOT NULL,
-  commands     TEXT NOT NULL,
-  signatures   TEXT,
-  created_at   INTEGER NOT NULL,
-  resolved_at  INTEGER,
-  approved_by  TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_requests_status  ON requests(status);
-CREATE INDEX IF NOT EXISTS idx_requests_created ON requests(created_at);
-`
+// The schema lives in store/migrations.go as a versioned, append-only
+// migration ledger applied by runMigrations on Open. v2.0 shipped one
+// CREATE-TABLE-IF-NOT-EXISTS string with a "drop + recreate" story; v2
+// (Tier 3) replaces that with a real migration runner so the
+// multi-operator + auth-backend tables can land additively without
+// losing the existing requests data.
 
 // pollInterval is how often WaitForResolution re-reads the row. 100ms
 // is a deliberate compromise: tight enough that approvals feel near-
@@ -49,11 +36,17 @@ type DB struct {
 	db *sql.DB
 }
 
-// Open opens (or creates) a SQLite database at path and applies the
-// schema. Path may be ":memory:" for tests; the journal mode is set
-// to WAL so concurrent readers don't block the writer. busy_timeout
-// is set to 5s to absorb transient lock contention without surfacing
-// SQLITE_BUSY errors to handlers.
+// Open opens (or creates) a SQLite database at path and runs every
+// pending schema migration (see store/migrations.go). Path may be
+// ":memory:" for tests; the journal mode is set to WAL so concurrent
+// readers don't block the writer. busy_timeout is set to 5s to absorb
+// transient lock contention without surfacing SQLITE_BUSY errors to
+// handlers.
+//
+// Open is idempotent with respect to schema: re-opening an already-
+// migrated database re-runs runMigrations, which finds every version
+// already recorded in schema_migrations and applies nothing. Calling
+// Open twice against the same path is a safe no-op on the second call.
 func Open(path string) (*DB, error) {
 	// modernc.org/sqlite accepts a DSN with `_pragma` query params
 	// for one-shot startup configuration. We set:
@@ -71,9 +64,9 @@ func Open(path string) (*DB, error) {
 		_ = d.Close()
 		return nil, fmt.Errorf("ping %s: %w", path, err)
 	}
-	if _, err := d.Exec(schema); err != nil {
+	if err := runMigrations(d); err != nil {
 		_ = d.Close()
-		return nil, fmt.Errorf("apply schema: %w", err)
+		return nil, fmt.Errorf("apply migrations: %w", err)
 	}
 	return &DB{db: d}, nil
 }
@@ -108,13 +101,23 @@ func (s *DB) Insert(ctx context.Context, r *Request) error {
 	if r.CreatedAt.IsZero() {
 		r.CreatedAt = time.Now().UTC()
 	}
+	// RequiredApprovals defaults to 1 at the column level; mirror that
+	// here so a zero-valued Request (the common handler path, which
+	// does not set the field) stores a sane non-zero N rather than 0,
+	// which would mean "approved with no votes". This is a non-null
+	// fallback, NOT a policy claim — callers that want a different N
+	// set the field (or call SetRequiredApprovals) explicitly.
+	reqApprovals := r.RequiredApprovals
+	if reqApprovals <= 0 {
+		reqApprovals = 1
+	}
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO requests (request_id, status, client_id, commands, signatures, created_at, resolved_at, approved_by)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO requests (request_id, status, client_id, commands, signatures, created_at, resolved_at, approved_by, required_approvals)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		r.RequestID, string(r.Status), r.ClientID, string(r.Commands),
 		nullableString(r.Signatures), r.CreatedAt.Unix(),
-		nullableTime(r.ResolvedAt), nullableEmpty(r.ApprovedBy),
+		nullableTime(r.ResolvedAt), nullableEmpty(r.ApprovedBy), reqApprovals,
 	)
 	if err != nil {
 		// modernc.org/sqlite surfaces unique-violation as a generic
@@ -132,7 +135,7 @@ func (s *DB) Insert(ctx context.Context, r *Request) error {
 // GetByID implements Store.GetByID.
 func (s *DB) GetByID(ctx context.Context, id string) (*Request, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT request_id, status, client_id, commands, signatures, created_at, resolved_at, approved_by
+		SELECT request_id, status, client_id, commands, signatures, created_at, resolved_at, approved_by, required_approvals
 		FROM requests WHERE request_id = ?
 	`, id)
 	r, err := scanRequest(row)
@@ -212,7 +215,7 @@ func (s *DB) WaitForResolution(ctx context.Context, id string, timeout time.Dura
 // ListPending implements Store.ListPending.
 func (s *DB) ListPending(ctx context.Context) ([]*Request, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT request_id, status, client_id, commands, signatures, created_at, resolved_at, approved_by
+		SELECT request_id, status, client_id, commands, signatures, created_at, resolved_at, approved_by, required_approvals
 		FROM requests WHERE status = ? ORDER BY created_at ASC
 	`, string(StatusPending))
 	if err != nil {
@@ -228,7 +231,7 @@ func (s *DB) RecentAudit(ctx context.Context, limit int) ([]*Request, error) {
 		limit = 100
 	}
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT request_id, status, client_id, commands, signatures, created_at, resolved_at, approved_by
+		SELECT request_id, status, client_id, commands, signatures, created_at, resolved_at, approved_by, required_approvals
 		FROM requests ORDER BY created_at DESC LIMIT ?
 	`, limit)
 	if err != nil {
@@ -253,10 +256,12 @@ func scanRequest(s rowScanner) (*Request, error) {
 		resolvedUnix sql.NullInt64
 		approvedBy   sql.NullString
 		commands     string
+		reqApprovals int
 	)
-	if err := s.Scan(&r.RequestID, &statusStr, &r.ClientID, &commands, &signatures, &createdUnix, &resolvedUnix, &approvedBy); err != nil {
+	if err := s.Scan(&r.RequestID, &statusStr, &r.ClientID, &commands, &signatures, &createdUnix, &resolvedUnix, &approvedBy, &reqApprovals); err != nil {
 		return nil, err
 	}
+	r.RequiredApprovals = reqApprovals
 	r.Status = Status(statusStr)
 	r.Commands = []byte(commands)
 	if signatures.Valid {
@@ -310,6 +315,13 @@ func nullableTime(t *time.Time) any {
 		return nil
 	}
 	return t.UTC().Unix()
+}
+
+// nowUnix is the single clock source for store-internal writes
+// (migration timestamps, vote timestamps when the caller leaves them
+// zero). UTC seconds, matching every other stored time column.
+func nowUnix() int64 {
+	return time.Now().UTC().Unix()
 }
 
 // isUniqueConstraintErr matches the modernc.org/sqlite UNIQUE
