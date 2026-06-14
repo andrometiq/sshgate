@@ -201,6 +201,13 @@ type Store interface {
 	// An empty slice (not ErrNotFound) when the user has none.
 	ListCredentials(ctx context.Context, userID string) ([]*Credential, error)
 
+	// UpdateCredential replaces the opaque blob of the credential with the
+	// given rowid. Used after a successful assertion to persist the
+	// advanced signature counter (WebAuthn clone/replay detection). The
+	// credential_id is immutable; only the blob changes. ErrNotFound if
+	// no row has that id.
+	UpdateCredential(ctx context.Context, id int64, blob []byte) error
+
 	// --- TOTP ---
 
 	// SetTOTP sets (or replaces) the user's TOTP secret. At most one

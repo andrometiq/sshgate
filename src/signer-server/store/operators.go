@@ -160,6 +160,26 @@ func (s *DB) ListCredentials(ctx context.Context, userID string) ([]*Credential,
 	return out, nil
 }
 
+// UpdateCredential implements Store.UpdateCredential. It rewrites only
+// the opaque blob (the advanced signature counter lives inside it); the
+// credential_id is immutable and is not touched.
+func (s *DB) UpdateCredential(ctx context.Context, id int64, blob []byte) error {
+	if len(blob) == 0 {
+		return errors.New("store: UpdateCredential: empty blob")
+	}
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE webauthn_credentials SET credential = ? WHERE id = ?
+	`, blob, id)
+	if err != nil {
+		return fmt.Errorf("update credential %d: %w", id, err)
+	}
+	affected, _ := res.RowsAffected()
+	if affected == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // SetTOTP implements Store.SetTOTP. An upsert: a user has at most one
 // TOTP secret, so re-setting replaces it.
 func (s *DB) SetTOTP(ctx context.Context, userID, secret string) error {
