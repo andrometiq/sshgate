@@ -45,6 +45,30 @@ A smoother in-place upgrade is planned (roadmap #17).
 - Gate denials surface as annotated errors: **exit 77** = missing signature /
   read-only host; **exit 65** = bad/expired signature (clock skew, stale approval).
 
+## Operating model (multi-agent work in this repo)
+
+How development work on SSHGate itself is run (dispatching subagents/workflows
+for design, implementation, or review):
+
+- **The main (orchestrator) session runs the most capable model available.**
+  It does the planning, dispatching, and verification, holds the executive
+  view, and is accountable for the end result. SSHGate work is judgment-heavy
+  (a security backbone with real trust boundaries), so the orchestrator seat
+  is not the place to economize.
+- **Subagents run the right-sized model per task** — the least powerful model
+  that does the job *well*, not the top tier by default:
+  - purely mechanical steps (scaffolding, fixture generation, rote edits to a
+    precise spec) → a fast/cheap model;
+  - integration and general implementation → a standard model;
+  - design, adversarial critique, security analysis, and code review → the
+    strongest tier available to subagents (never below it — these are
+    judgment/recall tasks where a weaker model's mistakes are expensive).
+- **The orchestrator verifies, never rubber-stamps.** Read the diffs, run the
+  build/vet/tests yourself, and confirm green before calling a unit done.
+  Catching subagent mistakes is the orchestrator's job.
+- The bar is "the change actually works end-to-end", not "tasks were
+  dispatched".
+
 ## Operator constraints
 
 - Treat Telegram-denial as final; do NOT loop on denials.
