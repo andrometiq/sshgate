@@ -603,7 +603,15 @@ CI's rebuild can match the committed hash. Flags (over today's
   patch is actually released and installed at build time, NIT-4). Reproducible
   output is tied to the exact compiler version, so pin the patch, not just the
   minor. CI selects the same toolchain via `actions/setup-go` with
-  `go-version-file: go.mod` + `check-latest: false`.
+  `go-version-file: go.mod` + `check-latest: false`. **As built,** the artifact
+  is governed by a stronger mechanism than setup-go's minimum-version
+  semantics: `release-gate` forces `GOTOOLCHAIN` to the **exact** toolchain
+  declared in `go.mod` — the Makefile derives `GATE_RELEASE_TOOLCHAIN` from the
+  `toolchain` directive at parse time (single-sourced, so the two pins cannot
+  drift) and fails loudly if the directive is missing. The forced exact pin
+  exists because a custom local toolchain that merely *satisfies* the directive
+  (version-compares ≥ the pinned patch, e.g. a patched local Go build) would
+  otherwise be eligible to build the artifact and emit different bytes.
 - **Assert the toolchain before building (MED-2).** `GOTOOLCHAIN=local` with a
   local `go` newer-than-or-equal to the pinned patch makes Go **ignore** the
   `go.mod` `toolchain` directive and build with the local compiler → different
@@ -945,4 +953,10 @@ mitigation.
     `update_gate` marker-scan unit test including the **self-match** case (a scanner
     whose own prefix constant is present must still resolve the injected version,
     not garbage — HIGH-1); and a gate `SSHGATE_VERSION` test asserting it prints the
-    injected version, not `unknown`.
+    injected version, not `unknown`. **As built,** the reproducibility assertion
+    runs at two layers: locally, `make verify-repro` (wired into `preflight` after
+    `verify-dist`) builds the gate twice with the shared `GATE_BUILD_FLAGS` on the
+    **local** toolchain into scratch paths and compares SHA-256 — catching flag-set
+    nondeterminism regressions before push without any pinned-toolchain download;
+    cross-machine reproducibility of the **committed** artifact (pinned toolchain,
+    rebuild vs committed bytes) is asserted by CI's `verify-gate.yml` (§11.4).

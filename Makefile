@@ -1,6 +1,6 @@
 .PHONY: all build install-local test test-integration vet clean sshgate-gate-linux \
 	sshgate-mcp-darwin sshgate-signer-telegram-darwin darwin cross sshgate-signer-server \
-	preflight e2e smoke gitleaks release-gate verify-dist
+	preflight e2e smoke gitleaks release-gate verify-dist verify-repro
 
 # ---------------------------------------------------------------------------
 # Verified release channel (spec §11)
@@ -19,12 +19,14 @@ VERSION := $(shell cat VERSION 2>/dev/null)
 # would break reproducibility, §11.1).
 GATE_BUILD_FLAGS := -trimpath -ldflags '-s -w -buildid= -X main.versionMarker=SSHGATE_GATE_VERSION{$(VERSION)}' -buildvcs=false
 
-# The pinned RELEASE toolchain (§11.1). release-gate forces GOTOOLCHAIN to this
-# exact patch so a byte-identical binary comes out on any machine — including one
-# whose LOCAL `go` is a custom build (this repo's dev box runs
+# The pinned RELEASE toolchain (§11.1), single-sourced from go.mod's `toolchain`
+# directive so the two pins can never drift. release-gate forces GOTOOLCHAIN to
+# this exact patch so a byte-identical binary comes out on any machine —
+# including one whose LOCAL `go` is a custom build (this repo's dev box runs
 # go1.26.4-X:nodwarf5, a live instance of the MED-2 trap). Go auto-downloads the
-# genuine release toolchain on first use.
-GATE_RELEASE_TOOLCHAIN := go1.26.4
+# genuine release toolchain on first use. release-gate asserts the derivation is
+# non-empty before compiling.
+GATE_RELEASE_TOOLCHAIN := $(shell awk '/^toolchain /{print $$2}' go.mod)
 
 DIST_GATE_DIR := dist/gate
 DIST_GATE_BIN := $(DIST_GATE_DIR)/sshgate-gate-linux-amd64
@@ -67,9 +69,16 @@ release-gate:
 	@# LOW-3: VERSION must be a single clean line — a stray CR/space/comment would
 	@# land outside the marker charset and blank every version scan.
 	@if [ ! -f VERSION ]; then echo "release-gate: VERSION file is missing" >&2; exit 1; fi
-	@if [ "$$(wc -l < VERSION)" -ne 1 ]; then echo "release-gate: VERSION must be exactly one line" >&2; exit 1; fi
+	@# grep -c '' counts LINES (including a final partial line); wc -l counts
+	@# newline bytes, which false-rejects a no-trailing-newline single-line file
+	@# and false-accepts "v1.3.0\ngarbage".
+	@if [ "$$(grep -c '' VERSION)" -ne 1 ]; then echo "release-gate: VERSION must be exactly one line" >&2; exit 1; fi
 	@if ! printf '%s' "$$(cat VERSION)" | grep -Eq '^v[0-9A-Za-z._+-]+$$'; then \
 		echo "release-gate: VERSION '$$(cat VERSION)' must match ^v[0-9A-Za-z._+-]+\$$ (no CRLF, spaces, or comments)" >&2; exit 1; fi
+	@# §11.1 single-source guard: the pin is derived from go.mod's `toolchain`
+	@# directive at parse time; an empty derivation means the directive is gone.
+	@if [ -z "$(GATE_RELEASE_TOOLCHAIN)" ]; then \
+		echo "release-gate: GATE_RELEASE_TOOLCHAIN is empty — go.mod must carry a 'toolchain goX.Y.Z' directive (§11.1 single-source pin)" >&2; exit 1; fi
 	@# MED-2: force the genuine release toolchain and ASSERT it before compiling.
 	@# The local go here is go1.26.4-X:nodwarf5 (custom); GOTOOLCHAIN pins the real
 	@# release build, which Go auto-downloads on first use.
@@ -166,9 +175,9 @@ clean:
 
 # preflight: the standing pre-push gate. Format-adjacent vet, the full race
 # unit suite, a secret scan of the commits about to be pushed, a clean build,
-# and the CHEAP verified-release-channel checks. No Docker, so it runs anywhere
-# in well under a minute.
-preflight: vet test gitleaks build verify-dist
+# the CHEAP verified-release-channel checks, and the two-build reproducibility
+# assertion. No Docker, so it runs anywhere in well under a minute.
+preflight: vet test gitleaks build verify-dist verify-repro
 	@echo "preflight: OK — safe to push"
 
 # verify-dist: the FAST verified-release-channel checks (§11). It deliberately
@@ -179,12 +188,34 @@ preflight: vet test gitleaks build verify-dist
 # scopes its claim honestly: source↔binary drift is caught ONLY by CI (NIT-1).
 verify-dist:
 	@if [ ! -f VERSION ]; then echo "verify-dist: VERSION file is missing" >&2; exit 1; fi
-	@if [ "$$(wc -l < VERSION)" -ne 1 ]; then echo "verify-dist: VERSION must be exactly one line" >&2; exit 1; fi
+	@# grep -c '' counts LINES (incl. a final partial line), not newline bytes.
+	@if [ "$$(grep -c '' VERSION)" -ne 1 ]; then echo "verify-dist: VERSION must be exactly one line" >&2; exit 1; fi
 	@if ! printf '%s' "$$(cat VERSION)" | grep -Eq '^v[0-9A-Za-z._+-]+$$'; then \
 		echo "verify-dist: VERSION '$$(cat VERSION)' must match ^v[0-9A-Za-z._+-]+\$$" >&2; exit 1; fi
 	@if [ ! -f $(DIST_GATE_BIN).sha256 ]; then echo "verify-dist: $(DIST_GATE_BIN).sha256 is missing" >&2; exit 1; fi
 	@cd $(DIST_GATE_DIR) && sha256sum -c sshgate-gate-linux-amd64.sha256
 	@echo "verify-dist: OK — committed gate matches its .sha256 (source↔binary is CI's job, §11.4)"
+
+# verify-repro: the STANDING two-build reproducibility assertion (spec §11.8
+# task 14). Builds the gate TWICE with the SHARED flag set (GATE_BUILD_FLAGS)
+# on the LOCAL toolchain into throwaway scratch paths — never bin/, never
+# dist/ — and fails loudly if the two hashes differ. This catches flag-set
+# nondeterminism regressions (a dropped -buildid= / -buildvcs=false, a stray
+# env-sensitive flag) at preflight time, before push; CROSS-MACHINE
+# reproducibility of the COMMITTED artifact (pinned toolchain, rebuild vs
+# committed bytes) stays CI's job (verify-gate.yml, §11.4).
+verify-repro:
+	@tmpdir=$$(mktemp -d) || exit 1; \
+	trap 'rm -rf "$$tmpdir"' EXIT; \
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+		go build $(GATE_BUILD_FLAGS) -o "$$tmpdir/gate-a" ./src/gate/cmd/sshgate-gate || exit 1; \
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+		go build $(GATE_BUILD_FLAGS) -o "$$tmpdir/gate-b" ./src/gate/cmd/sshgate-gate || exit 1; \
+	ha=$$(sha256sum "$$tmpdir/gate-a" | awk '{print $$1}'); \
+	hb=$$(sha256sum "$$tmpdir/gate-b" | awk '{print $$1}'); \
+	if [ "$$ha" != "$$hb" ]; then \
+		echo "verify-repro: FAIL — two identical-flag gate builds hashed differently ($$ha vs $$hb): GATE_BUILD_FLAGS has a nondeterminism regression" >&2; exit 1; fi; \
+	echo "verify-repro: OK — two local gate builds byte-identical ($$ha) (cross-machine repro vs the committed artifact is CI's job, §11.4)"
 
 # gitleaks scans the commits that would be pushed (origin/main..HEAD) for
 # secrets. Skips with a loud note if gitleaks is not installed — CI must have
