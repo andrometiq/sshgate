@@ -17,7 +17,7 @@
 #
 #     <repo>/bin/sshgate-mcp
 #     <repo>/bin/sshgate-signer-telegram
-#     <repo>/bin/sshgate-gate-linux-amd64
+#     <repo>/dist/gate/sshgate-gate-linux-amd64  (committed, CI-verified — §11)
 #
 # Build them first with `make install-local` (the canonical command used
 # throughout the install docs; it runs `make build` plus stages binaries
@@ -58,7 +58,10 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 SSHGATE_MCP_BIN="$REPO_ROOT/bin/sshgate-mcp"
 SIGNER_BIN="$REPO_ROOT/bin/sshgate-signer-telegram"
-GATE_BIN="$REPO_ROOT/bin/sshgate-gate-linux-amd64"
+# Ship the COMMITTED, CI-verified gate (verified release channel, §11) — NOT a
+# locally-rebuilt bin/ copy, which would be a second, unverified gate outside
+# the channel (MED-3). This is the same published artifact update_gate pushes.
+GATE_BIN="$REPO_ROOT/dist/gate/sshgate-gate-linux-amd64"
 
 # Probe binaries before touching the system (plugin.md §8.5 — external
 # tools probed with a clear error). We check sshgate-mcp too so a fresh
