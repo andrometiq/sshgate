@@ -228,7 +228,7 @@ func Provision(ctx context.Context, cfg provisionCfg, in ProvisionInput) (Provis
 
 	// Read local materials before touching the remote so we fail fast.
 	gateBin, err := readLocalFile(cfg.GateBinaryPath, "gate binary",
-		"run `make install-local` to build sshgate-gate-linux-amd64 into ~/.config/sshgate/bin/")
+		"run `make install-local` to install the committed, CI-verified sshgate-gate-linux-amd64 (copied from dist/gate/, never rebuilt) into ~/.config/sshgate/bin/")
 	if err != nil {
 		return ProvisionOutput{}, err
 	}

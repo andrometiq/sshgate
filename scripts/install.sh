@@ -67,12 +67,20 @@ GATE_BIN="$REPO_ROOT/dist/gate/sshgate-gate-linux-amd64"
 # tools probed with a clear error). We check sshgate-mcp too so a fresh
 # install doesn't half-succeed and leave the operator wondering why the
 # MCP server isn't there.
-for bin in "$SSHGATE_MCP_BIN" "$SIGNER_BIN" "$GATE_BIN"; do
+for bin in "$SSHGATE_MCP_BIN" "$SIGNER_BIN"; do
     if [ ! -f "$bin" ]; then
         printf '[install] ERROR: %s not found; run `make install-local` in your clone first\n' "$bin" >&2
         exit 66
     fi
 done
+# The gate gets its own message: it is the COMMITTED, CI-verified artifact
+# (verified release channel, §11) — `make install-local` COPIES it but cannot
+# recreate it, so pointing there would bounce the operator through a command
+# that cannot fix the problem.
+if [ ! -f "$GATE_BIN" ]; then
+    printf '[install] ERROR: %s not found; it is the committed, CI-verified artifact — restore it with `git checkout -- dist/gate/` (or a fresh clone), or rebuild it with `make release-gate`\n' "$GATE_BIN" >&2
+    exit 66
+fi
 if [ ! -x "$SIGNER_BIN" ]; then
     printf '[install] ERROR: %s not executable\n' "$SIGNER_BIN" >&2
     exit 66
