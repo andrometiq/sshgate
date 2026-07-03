@@ -834,9 +834,17 @@ func (d *Daemon) auditRevokeGrant(req revokeGrantRequest, status string) {
 // grant, recording the first is still an accurate "auto-approved under a
 // grant" marker.
 func (d *Daemon) matchGrant(cmds []signRequestCmd) (id string, ok bool) {
-	// Reveal short-circuit FIRST: a reveal anywhere forces a prompt.
+	// Reveal + admin-verb short-circuit FIRST: a reveal OR an administrative
+	// verb (SSHGATE_UPDATE / SSHGATE_REVOKE / any SSHGATE_ gate verb) anywhere
+	// forces a human prompt. A grant must NEVER auto-sign an admin verb: the
+	// gate dispatches on the command prefix regardless of which signer path
+	// minted the signature, so this carve-out is the ONLY control that stops a
+	// scope=all grant from silently authorizing a gate replacement or teardown
+	// (see docs/proposed/sshgate-update-verb-2026-07.md Finding 1). Checked
+	// first/outermost, like the reveal guard, so no later grant logic can
+	// re-admit it; it fails safe (over-prompt, never under-prompt).
 	for _, c := range cmds {
-		if c.Reveal {
+		if c.Reveal || isAdminVerb(c.Cmd) {
 			return "", false
 		}
 	}
@@ -869,6 +877,18 @@ func (d *Daemon) matchGrant(cmds []signRequestCmd) (id string, ok bool) {
 		}
 	}
 	return firstID, true
+}
+
+// isAdminVerb reports whether cmd is (or would dispatch to) an SSHGate
+// administrative gate verb — SSHGATE_REVOKE (gate teardown) or
+// SSHGATE_UPDATE (in-place gate-binary replacement). It matches the bare
+// "SSHGATE_" prefix: the gate keys its admin dispatch on this prefix
+// (main.go), no legitimate shell command begins with it, and a stray match
+// only forces a human prompt (fail-safe). It is the guard that keeps a
+// standing grant from ever auto-signing a gate-control verb; the human tap
+// (and, for updates, the scary approval banner) is then mandatory.
+func isAdminVerb(cmd string) bool {
+	return strings.HasPrefix(cmd, "SSHGATE_")
 }
 
 // grantCovers reports whether grant g authorises command cmd. scope=="all"

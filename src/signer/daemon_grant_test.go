@@ -365,6 +365,57 @@ func TestGrant_RevealNeverAutoSigned(t *testing.T) {
 	}
 }
 
+// TestGrant_AdminVerbNeverAutoSigned is the SSHGATE_UPDATE security test:
+// even under a scope=all grant, an administrative verb (SSHGATE_UPDATE /
+// SSHGATE_REVOKE) must ALWAYS prompt the human — a grant must never
+// auto-sign a gate-replacement or a gate-teardown. The gate dispatches on
+// the command PREFIX regardless of which signer path minted the signature,
+// so this signer-side carve-out is the ONLY control that stops a scope=all
+// grant from silently authorizing an admin verb (see
+// docs/proposed/sshgate-update-verb-2026-07.md Finding 1). A benign write on
+// the same alias must STILL auto-sign — the carve-out must not over-reach.
+func TestGrant_AdminVerbNeverAutoSigned(t *testing.T) {
+	t.Parallel()
+	mock := backend.NewMockBackend()
+	d, _, audit, auditPath, _ := newGrantDaemon(t, mock, time.Unix(1000, 0))
+	defer audit.Close()
+
+	mock.Approve("g_req", "karthi")
+	gr := createGrant(t, d, "g_req", "prod", "all", nil, 3600)
+	if gr.Status != "approved" {
+		t.Fatalf("grant status = %q; want approved", gr.Status)
+	}
+
+	// Each admin verb on the SAME alias the scope=all grant covers must
+	// PROMPT — arm the human approval; if the grant auto-signed it, the
+	// approver would be "grant:..." instead of the human name.
+	adminCmds := map[string]string{
+		"s_update": "SSHGATE_UPDATE 3a7bd3e2360a3d29eea436fcfb7e44c735d117c42d1c1835420b6b9942dd4f1b",
+		"s_revoke": "SSHGATE_REVOKE",
+	}
+	for reqID, cmd := range adminCmds {
+		mock.Approve(reqID, "karthi")
+		resp := signOne(t, d, reqID, "prod", cmd, grantHost, false, "")
+		if resp.Status != "approved" {
+			t.Fatalf("%s sign status = %q; want approved", reqID, resp.Status)
+		}
+		if got := approverFor(t, auditPath, reqID); got != "karthi" {
+			t.Fatalf("%s (%q) approved_by = %q; want human \"karthi\" — a grant MUST NOT auto-sign an admin verb", reqID, cmd, got)
+		}
+	}
+
+	// Control: a benign write on the SAME alias STILL auto-signs (the
+	// carve-out must not disable grants for ordinary commands). reqID
+	// UNARMED — only the grant can resolve it.
+	resp := signOne(t, d, "s_benign", "prod", "systemctl restart nginx", grantHost, false, "")
+	if resp.Status != "approved" {
+		t.Fatalf("benign sign status = %q; want approved", resp.Status)
+	}
+	if got := approverFor(t, auditPath, "s_benign"); !strings.HasPrefix(got, "grant:") {
+		t.Errorf("benign approved_by = %q; want grant:<id> (carve-out must not over-reach)", got)
+	}
+}
+
 // TestGrant_CrossServer pins that a grant for alias X never auto-signs a
 // command aimed at alias Y.
 func TestGrant_CrossServer(t *testing.T) {
