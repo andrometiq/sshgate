@@ -67,8 +67,11 @@ and the error messages below.
   pushed)`. Do NOT retry. To change a server's tier today: a human runs
   `/sshgate:revoke <alias>` (keeps its Telegram approval) and then re-provisions
   it with `sshgate add` at the desired tier (run `/sshgate:setup` first if no
-  signer is configured yet). A smoother in-place read-only→write upgrade is
-  planned (roadmap #17); there is no agent tool for any of this.
+  signer is configured yet). An in-place read-only→write flip was considered
+  and rejected for security (any unsigned tier-flip path the CLI could
+  exercise, the agent could emulate — read-only is read-only); re-tiering
+  stays revoke + re-provision — see roadmap #17 (redefined). There is no agent
+  tool for any of this.
 - **Gate deny exit codes** come back annotated, not bare:
   - **exit 77** — missing signature OR the host has no signer pubkey
     (read-only / Tier-1). Check `sshgate.status`; if the signer is not

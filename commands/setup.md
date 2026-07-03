@@ -561,17 +561,17 @@ jq -r '.servers | keys[]' "${HOME}/.config/sshgate/servers.json" 2>/dev/null || 
 
 If the list is empty, skip to T2.7 — there's nothing to upgrade.
 
-> ⚠️ **In-place tier-1 → tier-2 upgrade is not yet wired to a command.**
+> ⚠️ **There is no in-place tier-1 → tier-2 upgrade — by design.**
 > Re-running `sshgate add <alias> <user@host>` on an already-registered
-> alias is currently **rejected** ("alias already registered; use
-> sshgate.revoke_server first") — it does NOT upgrade in place. The deploy
-> routine that pushes gate.pub and clears the read-only flag
-> (`UpgradeServerToSigning`) exists in the code but is not yet bound to any
-> MCP tool or slash command (tracked as a follow-up — see
-> `docs/ROADMAP.md`). Until it is wired, a
-> server registered read-only stays read-only; deploy a signed-write
-> server by registering it (with the signer already set up) rather than
-> upgrading an existing read-only entry.
+> alias is **rejected** ("alias already registered; run `sshgate revoke`
+> first") — it does NOT upgrade in place. An in-place tier flip was
+> considered and rejected for security: any unsigned upgrade path the CLI
+> could exercise is a path the agent could emulate — read-only is
+> read-only (see roadmap #17, redefined, in `docs/ROADMAP.md`). Re-tiering
+> is always revoke + re-provision: `/sshgate:revoke <alias>` (its Telegram
+> approval is kept), then `sshgate add <alias> <user@host>` without
+> `--read-only` (with the signer already set up), which finds the staged
+> `gate.pub` and deploys signed-write.
 
 ### T2.7 — Final summary
 

@@ -206,9 +206,11 @@ runs in read-only mode: reads succeed, writes return exit 77 with the
 To move a tier-1 server to tier-2 later (after you've added a signer),
 **revoke and re-provision** it: run `/sshgate:revoke <alias>` (which keeps
 its Telegram approval), then `sshgate add <alias> <user@host>` **without**
-`--read-only`. The key is already gated, so an in-place upgrade is a
-re-provision rather than a re-add; a smoother in-place upgrade is planned
-(roadmap #17).
+`--read-only`. The key is already gated, so the tier change is a
+re-provision rather than a re-add. An in-place tier flip was considered
+and rejected for security (any unsigned upgrade path the CLI
+could exercise, the agent could emulate); revoke + re-provision stays the
+only path — see roadmap #17 (redefined).
 
 ---
 
@@ -427,8 +429,10 @@ re-provision, not a re-add: for each registered alias, run
 `/sshgate:revoke <alias>` (its Telegram approval is kept) and then
 `sshgate add <alias> <user@host>` **without** `--read-only`, which now
 finds the staged `gate.pub` and deploys signed-write. (Servers you
-provision fresh from here on pick up `gate.pub` automatically. A smoother
-in-place read-only→write upgrade is planned — roadmap #17.)
+provision fresh from here on pick up `gate.pub` automatically. An in-place
+read-only→write upgrade was considered and rejected for security — any
+unsigned tier-flip the CLI could exercise, the agent could emulate; revoke +
+re-provision stays the only path — see roadmap #17, redefined.)
 
 ### 6. Activate the sshgatesigner group, relaunch Claude Code (REQUIRED before writes)
 

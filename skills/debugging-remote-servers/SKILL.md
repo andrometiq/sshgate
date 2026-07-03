@@ -201,7 +201,9 @@ making the server signed-write is a **human-only** action — they run
 `/sshgate:setup` to add a Telegram signer (if they don't have one), then
 `/sshgate:revoke prod-db` (its Telegram approval is kept) and re-provision
 with `sshgate add prod-db <user@host>` (no `--read-only`). You have no tool
-to do this; a smoother in-place upgrade is planned (roadmap #17). Reads on
+to do this, and an in-place upgrade was considered and rejected for security
+(any unsigned tier-flip the CLI could exercise, the agent could emulate);
+revoke + re-provision is the only path — see roadmap #17 (redefined). Reads on
 the same server still work normally — keep diagnosing with `sshgate.run`.
 
 ## Denial, timeout, and signer-access handling
