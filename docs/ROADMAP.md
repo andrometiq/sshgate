@@ -108,6 +108,24 @@ These are the highest-priority forward items.
   Direction recorded 2026-07 — not scheduled; design questions go through the
   full pipeline before any build.
 
+- **Reconcile tier on the probe-idempotent re-add path.** When `sshgate add`
+  re-runs against an already-gated host (the probe-first idempotency that
+  recovers a lost `servers.json`), it registers the **caller-supplied** tier
+  flag without checking the remote's actual tier — the `SSHGATE_VERSION` probe
+  is deliberately tier-blind, and `gate.pub` is only ever uploaded by the full
+  provisioning flow. A mismatched flag records wrong state silently: a
+  read-only host re-added without `--read-only` registers as writable, and
+  every write then burns a human approval tap before failing exit 77 at the
+  gate; the inverse direction under-reports a signed-write host as read-only.
+  **Every mismatch direction fails closed** (the gate, not the registry, is
+  the enforcement point), so this is a state-hygiene/UX defect, not a
+  boundary break — reviewed and deliberately deferred rather than blocking
+  the release-channel ship. Likely fix: extend the gate's version reply with
+  a tier token (e.g. `SSHGATE_VERSION rev=<v> tier=ro|rw` — additive after
+  the frozen `rev=` key, so it needs a small §11.2 spec amendment and a
+  dist/gate republish) so the probe path can verify the flag it registers;
+  until then the tier on that path is taken on faith.
+
 - **Gated interactive session mode (#25).** A shell-*like* interactive prompt
   (history, `cd`/env that feel normal) where **every** command is still gated.
   The safe form is *not* wrapping a live `/bin/sh` — that is the read-only arms
