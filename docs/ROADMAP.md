@@ -184,13 +184,19 @@ anchor above and are marked *(subsumed)*.
   MCP host imposes no shorter per-tool-call deadline of its own.
 
 - **Output-value redaction must be default-deny, not allowlist-by-name
-  (security).** Read-path redaction keys off known field *names*, so a secret in
-  an unknown-named field passes through raw into agent context and the audit
-  log. Add value-shaped, default-deny detectors (token/key/secret field shapes,
-  high-entropy values in secret-named fields) as the primary layer, keeping the
-  name allowlist as a secondary layer. Distinct from the already-shipped
-  command-string redaction, which covers the *input* command, not *output*
-  values.
+  (security). — SHIPPED 2026-07-03 (P1-B).** The read path no longer relies on
+  known field *names* alone: `standard` now carries a bounded generic
+  default-deny net (the O(n) `scanGenericRuns` linear pass — telegram-token
+  stitches + generic high-entropy runs behind a 3-class + ssh-line-veto +
+  entropy-≥-3.5 gate), a live `Rule.Entropy` gate on broad-prefix rules, a
+  widened `sshgate-sensitive-assignment` (JSON/camelCase/`*_HASH`/`*_SESSION`/
+  `*_COOKIE`), and new openai-broad / github-fine-pat / zoho rules. All four
+  sinks (agent output, MCP live log, approval display, gate audit) get it via
+  `redactrules.Combined()`. Spec: `docs/proposed/redaction-widening-2026-07.md`.
+  *Residual:* bare lowercase-hex secrets and unanchored tokens < 32 chars are
+  still missed by design (see FUTURE.md limitation #8 / `thorough`'s looser
+  gates); the keyword-dense scan cost (~+19% median) is the standing motivation
+  for the Aho-Corasick prefilter item below.
 
 - **Distinguish DENY from TIMEOUT at the agent surface; persist verdicts.** When
   a verdict is not delivered, the agent cannot tell "human denied" from "network

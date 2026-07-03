@@ -28,8 +28,16 @@ cover:
 - Any rule with `entropy >= N` and no structural prefix.
 - Any rule that matches every base64 blob over a length threshold.
 
-These reappear in v1.2.1 thorough mode behind an explicit operator
-toggle. See `docs/FUTURE.md`.
+The exclusions stand, but the exclusion criterion is now sharper: what
+is excluded is entropy detection **without the three-guard gate**
+(3-class content + ssh-line veto + Shannon ≥ 3.5). SSHGate ships its own
+*gated* unanchored net natively as of 2026-07 — the O(n) linear
+`scanGenericRuns` pass in `src/redact/scanner_generic.go` (NOT a vendored
+gitleaks rule) — precisely because these upstream rules are ungated and
+would explode false positives on lowercase-hex ops output. The *unguarded*
+gitleaks rules above still reappear only in v1.2.1 thorough mode behind an
+explicit operator toggle. See `docs/redaction-architecture.md` and
+`docs/FUTURE.md`.
 
 ## How to re-pull from upstream
 

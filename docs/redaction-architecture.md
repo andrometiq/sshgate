@@ -2,6 +2,19 @@
 
 > Integrates findings from [`secrets-redaction-research.md`](secrets-redaction-research.md). This is the durable design reference for the gate-side output redactor.
 
+> **Changelog — 2026-07 default-deny widening (P1-B).** A production
+> multi-server run showed real secrets passing raw (JSON/camelCase-named
+> values, `*_API_HASH`/`*_SESSION`, Telegram bot tokens, fine-grained GitHub
+> PATs, and unknown-named high-entropy values). `standard` now carries a
+> **bounded generic default-deny net** — an O(n) linear pass
+> (`scanGenericRuns`) emitting telegram-bot-token stitches and generic
+> high-entropy runs behind a shared gate (3-class content + ssh-line veto +
+> Shannon entropy ≥ 3.5, ≥ 32 chars) — plus a live `Rule.Entropy` gate on
+> broad-prefix rules (`sk-<base62>`), a widened `sshgate-sensitive-assignment`
+> rule, and new `sshgate-openai-broad` / `-github-fine-pat` / `-zoho-token`
+> rules. A regex net was measured and rejected (+66–73%/MB vs ~+2% for the
+> linear pass). See spec `docs/proposed/redaction-widening-2026-07.md`.
+
 ## Summary
 
 This document specifies the v1.2 output redactor inside the `gate` binary on every SSHGate-managed host. Bytes flow `child process stdout/stderr → redact.Writer → SSH pipe → MCP → agent`. The redactor runs three detection layers — Layer 1 named-format regex (built-in + vendored gitleaks rules + SSHGate-native rules), Layer 2 file-mode heuristic over the inbound command, Layer 3 operator-curated `redactlist.append-only` — plus a recursive base64/hex/URL decode pass. A sibling `unredactlist.append-only` file holds signed false-positive overrides for the heuristics.
@@ -52,8 +65,8 @@ Integration point: `src/gate/executor.go` lines 39–40 (`c.Stdout = os.Stdout; 
 
 ### Detection modes — two only
 
-- **`standard` (default)** — Layer 1 named-format regex (built-in + vendored gitleaks + SSHGate-native) + Layer 2 file-mode heuristic + Layer 3 redactlist + recursive decode pass to depth 1. No entropy, no API verification. This is the "common case works out of the box" envelope.
-- **`thorough`** — `standard` + entropy/BPE scoring on unknown high-randomness tokens (named entropy rules from gitleaks only — no generic-anything-over-3.5-bits rule) + recursive decode to depth 3. Higher false-positive rate; appropriate for one-off audits or hosts where over-redaction is preferable.
+- **`standard` (default)** — Layer 1 named-format regex (built-in + vendored gitleaks + SSHGate-native) + the **bounded generic default-deny net** (2026-07: an O(n) linear pass emitting telegram-bot-token stitches and generic high-entropy runs ≥ 32 chars that clear a 3-class + ssh-line-veto + entropy ≥ 3.5 gate — the same gate broad-prefix rules opt into via `Rule.Entropy`) + Layer 2 file-mode heuristic + Layer 3 redactlist + recursive decode pass to depth 1. No API verification. This is the "common case works out of the box" envelope.
+- **`thorough`** — `standard` + **looser generic gates** (1-/2-class candidates and lower length/entropy floors than the standard net's 3-class ≥ 32 ≥ 3.5) + the *unguarded* gitleaks entropy rules + recursive decode to depth 3. Higher false-positive rate; appropriate for one-off audits or hosts where over-redaction is preferable.
 
 Because there is no `fast` fallback, **`standard` is optimised aggressively**: tight loops, no allocations in the hot path, benchmark with `go test -bench`, profile with `pprof`. The performance budget is the same as the prior `fast` mode's was — `standard` must hit it.
 
@@ -86,7 +99,7 @@ type Rule struct {
     Regex        *regexp.Regexp
     Keywords     []string  // cheap substring pre-filter
     SecretGroup  int       // which regex group is the secret (for entropy gating)
-    Entropy      float64   // only consulted in `thorough` mode; 0 = disabled
+    Entropy      float64   // shared-gate threshold (bits/byte); >0 = live in standard, 0 = ungated
     MinLen, MaxLen int
 }
 ```
@@ -105,9 +118,9 @@ Scope (the `standard`-mode ruleset):
 
 - Provider-issued tokens with structural prefixes: AWS access/secret/session, GitHub PAT (`ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_`), GitLab tokens (`glpat-`, `glptt-`), Stripe (`sk_live_`, `pk_live_`, `rk_live_`), Slack (`xox[bpa]-`), JWT (`eyJ...`), Google OAuth (`ya29.`), Azure (`AccountKey=`), Twilio (`SK`), SendGrid (`SG.`), Twitter (`AAAA...`), Square (`sq0atp-`).
 - Generic structural formats: PEM blocks (`-----BEGIN .* PRIVATE KEY-----`), SSH keys, certificate-with-secret bundles.
-- Keyword-anchored bearer tokens: `Authorization: Bearer <token>`, `token=...`, `password=...` — **keyword-anchored only, no free-floating entropy**.
+- Keyword-anchored bearer tokens: `Authorization: Bearer <token>`, `token=...`, `password=...` — keyword-anchored. Free-floating high-entropy runs are **also** caught as of 2026-07, but only through the bounded generic net (3-class + ssh-line veto + entropy ≥ 3.5, ≥ 32 chars — see Conflict resolution step 3), never by unguarded entropy on an arbitrary capture group.
 
-Explicitly **excluded from `standard`**: gitleaks's `Generic API Key`, `Hashicorp Token` heuristic, any rule whose detection relies on Shannon entropy of an unanchored capture group. Those reappear in `thorough` mode.
+Explicitly **excluded from `standard`**: gitleaks's `Generic API Key` / `Hashicorp Token` heuristics and any rule that redacts on Shannon entropy **without the three-guard gate** (3-class + ssh-line veto + ≥ 3.5). The bounded, gated net shipped 2026-07 after a live missed-secret report; the *unguarded* entropy rules still reappear only in `thorough`.
 
 ### Layer 2 — file-mode heuristic (registry of predicates)
 
@@ -201,7 +214,7 @@ Order of operations on each chunk. Layers run sequentially; each layer's marks a
 
 1. **Layer 1 named regex** (built-in + sshgate-native + gitleaks-vendored). Matches are **sticky** — only a signed `redact.remove` of that rule can un-stick. Unredactlist entries do NOT cancel Layer 1 named hits.
 2. **Layer 2 file-mode heuristic.** Check unredactlist for matching `unmask:` entries on the file path; remove matching marks.
-3. **Layer 1 entropy** (thorough mode only). Check unredactlist patterns/anchors; remove matching marks.
+3. **Layer 1 entropy + generic default-deny net** (`Rule.Entropy`-gated rules and the linear `scanGenericRuns` pass — live in `standard` as of 2026-07; `thorough` only adds looser gates). Check unredactlist patterns/anchors; remove matching marks.
 4. **Recursive decode pass.** Check unredactlist; remove matching marks.
 5. **Layer 3 redactlist** (user-curated patterns / anchors / files). Sticky — only signed `redact.remove` un-sticks.
 6. **Emit remaining flagged spans as redactions.**
