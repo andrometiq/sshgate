@@ -355,8 +355,18 @@ names); per-file fixed salts per existing convention.
 - `$`-bearing unquoted assignment values remain excluded (protects `$VAR`
   refs in approval display); the net catches their ≥32 high-entropy tail.
 - `DESKTOP_SESSION`-class over-redaction accepted (2 lines per env dump).
-- Random base64 blobs ≥ 32 (certs, `base64 file` output) redact —
+- Random base64**url** blobs ≥ 32 (3-class, no `+`/`/`) redact —
   redact-on-doubt by mandate; `reveal=true` is the operator escape hatch.
+  CAVEAT (security review F3): the generic net's run alphabet is
+  `[A-Za-z0-9_-]` (base64url), so standard-base64 `+`/`/`/`=` bytes SPLIT a
+  run — a `base64 <file>` dump (coreutils emits std-base64) is therefore NOT
+  reliably covered: a short std-base64 blob may pass whole, a long one is
+  redacted only in its ≥32 gaps between `+`/`/`. Same run-splitting applies
+  to dot-separated tokens and tokens broken by an inline ANSI/color escape.
+  These are inherent to O(n) run-segmentation; named/PEM rules and (future)
+  thorough-mode decode are the paths for those shapes. Adding `+`/`/` to the
+  alphabet was rejected — it re-introduces heavy path/prose FPs (and the
+  `/`-neighbour veto leaks after-slash secrets like Discord webhook tokens).
 - **Token-shaped path segments redact** (≥32-char mixed-case+digit segments:
   Go `t.TempDir()` names, some generated container/cache names). In the
   approval display a human may see `rm -rf /tmp/[SSHGATE_REDACTED …]/x` and

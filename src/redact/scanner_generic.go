@@ -61,20 +61,27 @@ var sshKeyMarkers = []string{
 	"ssh-rsa", "ssh-ed25519", "ssh-dss", "ecdsa-sha2-", "sk-ssh-", "sk-ecdsa-",
 }
 
-// passesSecretGate is the generic-candidate gate shared by Entropy-bearing
-// named rules (via findMatches) and the generic linear pass. A candidate
-// span buf[start:end] is dropped unless it
-//
-//	(a) contains upper+lower+digit — kills lowercase hex (git SHAs, docker
-//	    digests, sha256sums, nix hashes) and caseless identifiers;
-//	(b) is NOT on the same line as an SSH public-key type marker; and
-//	(c) has Shannon entropy >= threshold bits/byte — kills repetitive
-//	    three-class runs.
-//
-// Cheapest checks first: length is filtered by the caller, then 3-class
-// (single pass, early exit), then the bounded ssh-line look-back, then the
-// entropy histogram last. matchStart is the offset the ssh look-back scans
-// back from (the full-match start for a named rule, the run start for the
+// passesEntropyGate is the content-only secret gate: a span is dropped
+// unless it (a) contains upper+lower+digit — kills lowercase hex (git SHAs,
+// docker digests, sha256sums, nix hashes) and caseless identifiers — and
+// (c) has Shannon entropy >= threshold bits/byte — kills repetitive
+// three-class runs. It carries NO ssh-line veto, so it is safe for the
+// NAMED entropy path (findMatches): a named rule like sk-<base62> must fire
+// even on a line that also contains an ssh key-type marker. Cheapest first:
+// 3-class (single pass, early exit) then the entropy histogram.
+func passesEntropyGate(span []byte, threshold float64) bool {
+	if !has3Class(span) {
+		return false
+	}
+	return shannonEntropy(span) >= threshold
+}
+
+// passesSecretGate is the GENERIC-pass gate = passesEntropyGate PLUS the
+// ssh-line veto: a candidate span buf[start:end] is additionally dropped
+// when it sits on the same line as an SSH public-key type marker (a pubkey
+// body is a benign high-entropy blob, not a secret). Used only by
+// scanGenericRuns — the named entropy path uses passesEntropyGate. matchStart
+// is the offset the ssh look-back scans back from (the run start for the
 // generic pass); start/end bound the secret span whose content is judged.
 func passesSecretGate(buf []byte, matchStart, start, end int, threshold float64) bool {
 	span := buf[start:end]
@@ -154,6 +161,26 @@ func sshLineContext(buf []byte, matchStart int) bool {
 		}
 	}
 	return false
+}
+
+// isMangledSymbol reports whether run is a C++ (Itanium/Darwin) mangled
+// symbol we should NOT treat as a secret: one or more leading underscores,
+// then 'Z', then an uppercase-or-digit mangling production char (`_ZN`,
+// `__ZN` on Darwin, `_ZTV`, `_ZSt`, `_Z3foo`). Requiring the leading
+// underscore avoids vetoing a bare secret that merely starts 'Z' (`ZNabc…`);
+// requiring [A-Z0-9] after 'Z' avoids vetoing most base64url secrets that
+// happen to start '_Z' (real encodings start with an uppercase production or
+// a source-name length digit, not a lowercase char).
+func isMangledSymbol(run []byte) bool {
+	i := 0
+	for i < len(run) && run[i] == '_' {
+		i++
+	}
+	if i == 0 || i+1 >= len(run) || run[i] != 'Z' {
+		return false
+	}
+	c := run[i+1]
+	return c >= 'A' && c <= 'Z' || c >= '0' && c <= '9'
 }
 
 // isRunByte reports whether c can appear inside a maximal token run. The
@@ -241,10 +268,10 @@ func scanGenericRuns(buf []byte) []match {
 			}
 		}
 
-		// (b) Generic high-entropy net. Veto Itanium-mangled `_Z…` symbols
-		// on the RAW run (before edge-trim would strip the leading '_'),
-		// then trim edge '-'/'_' and gate the trimmed span.
-		if !(end-start >= 2 && buf[start] == '_' && buf[start+1] == 'Z') {
+		// (b) Generic high-entropy net. Veto C++ (Itanium/Darwin) mangled
+		// symbols on the RAW run (before edge-trim would strip the leading
+		// '_'), then trim edge '-'/'_' and gate the trimmed span.
+		if !isMangledSymbol(buf[start:end]) {
 			ts, te := start, end
 			for ts < te && (buf[ts] == '-' || buf[ts] == '_') {
 				ts++

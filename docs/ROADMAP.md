@@ -193,10 +193,17 @@ anchor above and are marked *(subsumed)*.
   `*_COOKIE`), and new openai-broad / github-fine-pat / zoho rules. All four
   sinks (agent output, MCP live log, approval display, gate audit) get it via
   `redactrules.Combined()`. Spec: `docs/proposed/redaction-widening-2026-07.md`.
-  *Residual:* bare lowercase-hex secrets and unanchored tokens < 32 chars are
-  still missed by design (see FUTURE.md limitation #8 / `thorough`'s looser
-  gates); the keyword-dense scan cost (~+19% median) is the standing motivation
-  for the Aho-Corasick prefilter item below.
+  *Residual (all reviewed + accepted):* bare lowercase-hex secrets and
+  unanchored tokens < 32 chars are still missed by design (see FUTURE.md
+  limitation #8 / `thorough`'s looser gates); standard-base64 (`+`/`/`) and
+  dot-/ANSI-split tokens are not reliably covered because the net's run
+  alphabet is base64url (security-review F3 — documented in the spec §6). The
+  keyword-dense scan cost (~+19% median) plus the generic pass's per-candidate
+  1 KiB ssh-line back-scan (security-review F4 — a streaming-amplification
+  concern only on remote-side newline-free candidate-dense output, e.g.
+  `base64 -w0 bigfile`; the operator MCP does not re-scan received output) are
+  the standing motivation for the Aho-Corasick / single-pass line-index item
+  below — fold the per-`findMatches` line-position precompute into it.
 
 - **Distinguish DENY from TIMEOUT at the agent surface; persist verdicts.** When
   a verdict is not delivered, the agent cannot tell "human denied" from "network

@@ -97,10 +97,14 @@ func (s *scanner) findMatches(buf []byte) []match {
 			// Layer 1 entropy (the conflict-resolution slot reserved
 			// above): a rule that opts in via Rule.Entropy > 0 is a broad
 			// prefix rule (sk-<base62>) that must additionally clear the
-			// shared generic gate — 3-class content + ssh-line veto +
-			// Shannon entropy — so it does not fire on lowercase key-type
-			// markers or prose slugs. See passesSecretGate.
-			if r.Entropy > 0 && !passesSecretGate(buf, matchStart, start, end, r.Entropy) {
+			// entropy gate — 3-class content + Shannon entropy — so it does
+			// not fire on lowercase key-type markers or prose slugs. NOTE:
+			// this is passesEntropyGate, NOT passesSecretGate — a NAMED rule
+			// must fire even on a line that also contains an ssh key-type
+			// marker (the ssh-line veto belongs only to the generic net;
+			// 3-class alone already rejects the lowercase FIDO markers the
+			// veto was meant for, so applying it here only leaked keys).
+			if r.Entropy > 0 && !passesEntropyGate(buf[start:end], r.Entropy) {
 				continue
 			}
 			out = append(out, match{
@@ -122,11 +126,18 @@ func (s *scanner) findMatches(buf []byte) []match {
 	return dedupMatches(out)
 }
 
-// dedupMatches sorts matches by start and drops any whose range
-// overlaps an earlier (already-kept) match. Same-start ties resolve
-// to the longer match — there are no consequential cases of two
-// rules matching the same span at the same start in v1.2, but the
-// rule is deterministic.
+// dedupMatches sorts matches by start and merges overlaps. Same-start
+// ties resolve to the longer match. When a later match overlaps an
+// already-kept one BUT extends past its end, the kept match is extended to
+// cover the UNION rather than the later match being dropped: dropping the
+// remainder would leak the bytes beyond the kept end. That leak is real —
+// a telegram-stitch match [id:body] whose id was peeled from the tail of a
+// longer, earlier-starting generic run overlaps that run and reaches past
+// it; a drop-the-remainder policy discarded the stitch and emitted the
+// token body raw. Extending (union-merge) redacts the whole span and is
+// always the safe direction for a default-deny redactor (never less
+// redaction than before). The merged marker is re-keyed over the union
+// bytes, reusing each match's own copied Secret (no buf needed).
 func dedupMatches(in []match) []match {
 	if len(in) <= 1 {
 		return in
@@ -142,6 +153,15 @@ func dedupMatches(in []match) []match {
 	lastEnd := -1
 	for _, m := range in {
 		if m.Start < lastEnd {
+			if m.End > lastEnd {
+				// Union-merge: extend the kept match to m.End and append the
+				// non-overlapping tail of m's secret (m.Secret is buf[m.Start:
+				// m.End]; the tail past lastEnd starts at lastEnd-m.Start).
+				k := &out[len(out)-1]
+				k.Secret = append(append([]byte(nil), k.Secret...), m.Secret[lastEnd-m.Start:]...)
+				k.End = m.End
+				lastEnd = m.End
+			}
 			continue
 		}
 		out = append(out, m)

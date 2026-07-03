@@ -97,6 +97,41 @@ func TestAcceptanceGitRemoteUserinfo(t *testing.T) {
 	if strings.Count(out, redact.MarkerPrefix) < 2 {
 		t.Errorf("acceptance git remote: expected >=2 markers; out=%q", out)
 	}
+
+	// Colon form `https://<user>:<pat>@host` — the ':' before '@' makes this
+	// the userinfo-password shape. The PAT must be redacted (the security
+	// property). NOTE: the host+path may ALSO be redacted here — the
+	// `x-access-token:` prefix reads as a `token: <value>` assignment and the
+	// sensitive-assignment value class spans through `@host/path` — accepted
+	// over-redaction (pre-existing, not introduced by the widening), so we
+	// only assert the PAT is gone and a marker is present.
+	pat := "github_pat_" + run3class(82)
+	colonForm := "origin\thttps://x-access-token:" + pat + "@github.com/org/repo.git (fetch)\n"
+	out2 := redactString(t, colonForm)
+	if strings.Contains(out2, pat) {
+		t.Errorf("acceptance git remote colon form: PAT leaked; out=%q", out2)
+	}
+	if !strings.Contains(out2, redact.MarkerPrefix) {
+		t.Errorf("acceptance git remote colon form: no marker; out=%q", out2)
+	}
+}
+
+// TestTwitterBearerRedactsPubkeyBody positively pins the PRE-EXISTING
+// gitleaks-twitter-bearer behaviour that the generic net's ssh-line veto
+// relies on for authorized_keys hygiene: an `AAAA…`-prefixed ed25519/rsa
+// pubkey body is redacted by that rule (so the ssh veto keeping the GENERIC
+// net off the line does not mean the line is marker-free). Pinning it guards
+// against a future change silently dropping that coverage.
+func TestTwitterBearerRedactsPubkeyBody(t *testing.T) {
+	// AAAA + 96 base62 (>= the rule's 64-char floor, 3-class).
+	body := "AAAA" + run3class(96)
+	out := redactString(t, "ssh-ed25519 "+body+" user@host\n")
+	if strings.Contains(out, body) {
+		t.Errorf("twitter-bearer no longer redacts an AAAA pubkey body; out=%q", out)
+	}
+	if !strings.Contains(out, redact.MarkerPrefix) {
+		t.Errorf("no marker on AAAA pubkey body; out=%q", out)
+	}
 }
 
 func TestAcceptanceBareTokens(t *testing.T) {
