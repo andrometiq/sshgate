@@ -893,9 +893,18 @@ func formatUpdateApprovalMessage(req ApprovalRequest, timeout time.Duration) str
 	}
 	b.WriteString("\n\n")
 
-	// The committed hash, rendered RAW (never through redactForDisplay).
+	// The committed hash. Validate its shape BEFORE rendering: a valid 64-lowercase-hex
+	// digest renders RAW (never through redactForDisplay — R2/Finding-7 WYSIWYG),
+	// but a crafted c.Cmd could smuggle newlines to inject fake banner lines
+	// (phishing). The gate already rejects any non-64-hex update so it can never
+	// install; the banner must likewise never render attacker-injected lines, so
+	// anything malformed collapses to a single-line marker.
 	hash := strings.TrimPrefix(c.Cmd, updateVerbPrefix)
-	fmt.Fprintf(&b, "New gate SHA-256: %s\n", hash)
+	if isLower64Hex(hash) {
+		fmt.Fprintf(&b, "New gate SHA-256: %s\n", hash)
+	} else {
+		b.WriteString("New gate SHA-256: <malformed hash — the gate will reject this update>\n")
+	}
 	if c.Reason != "" {
 		fmt.Fprintf(&b, "Build: %s\n", c.Reason)
 	}
@@ -903,6 +912,24 @@ func formatUpdateApprovalMessage(req ApprovalRequest, timeout time.Duration) str
 	fmt.Fprintf(&b, "Request ID: %s\n", req.RequestID)
 	fmt.Fprintf(&b, "Expires in %s\n", timeout)
 	return b.String()
+}
+
+// isLower64Hex reports whether s is EXACTLY 64 lowercase hex characters — the
+// shape of a SHA-256 digest the MCP emits (hex.EncodeToString). The update
+// banner renders a valid hash raw; anything else (wrong length, uppercase, or a
+// smuggled newline meant to inject fake banner lines) is a malformed hash the
+// gate will reject anyway, so the banner shows a marker instead of the raw bytes.
+func isLower64Hex(s string) bool {
+	if len(s) != 64 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 func formatApprovalMessage(req ApprovalRequest, timeout time.Duration, explanations []string, explainErr error, salt [32]byte, rules []redact.Rule) string {

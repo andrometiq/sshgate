@@ -33,18 +33,18 @@ func TestUpdateReason(t *testing.T) {
 			want:       "rev abc1234 · running rev def5678",
 		},
 		{
-			name:       "unknown staged rev yields an empty reason (nothing useful to show)",
+			name:       "unknown staged rev still shows the running rev (downgrade cue survives stripped buildinfo)",
 			stagedRev:  "unknown",
 			stagedTime: "",
 			runningRev: "def5678",
-			want:       "",
+			want:       "rev unknown · running rev def5678",
 		},
 		{
-			name:       "empty staged rev also yields an empty reason",
+			name:       "empty staged rev also still shows the running rev",
 			stagedRev:  "",
 			stagedTime: "2026-07-01",
 			runningRev: "def5678",
-			want:       "",
+			want:       "rev unknown · running rev def5678",
 		},
 		{
 			name:       "running rev unknown still threads through",

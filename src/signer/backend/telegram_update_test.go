@@ -99,6 +99,56 @@ func TestFormatApprovalMessage_UpdateNoReason(t *testing.T) {
 	}
 }
 
+// TestFormatApprovalMessage_UpdateMalformedHash proves the update banner
+// format-validates the committed hash before rendering: a crafted c.Cmd that
+// smuggles a newline (or is otherwise not a clean 64-lowercase-hex string) is
+// replaced by a single-line marker so it can never inject fake banner lines
+// (phishing), while a valid 64-hex hash still renders verbatim (WYSIWYG,
+// R2/Finding-7). The gate rejects a non-64-hex update too, so nothing installs
+// either way.
+func TestFormatApprovalMessage_UpdateMalformedHash(t *testing.T) {
+	t.Parallel()
+	// A "hash" carrying an injected newline plus a forged extra banner line.
+	evil := "deadbeef\nApprove: yes — trust me"
+	req := ApprovalRequest{
+		RequestID: "r_update_evil",
+		Commands: []CommandReq{
+			{Server: "prod-web", Cmd: "SSHGATE_UPDATE " + evil, TTLSec: 300},
+		},
+		Submitted: time.Now(),
+	}
+	got := formatApprovalMessage(req, 5*time.Second, nil, nil, [32]byte{}, nil)
+
+	// The malformed marker renders on a single line...
+	if !strings.Contains(got, "New gate SHA-256: <malformed hash — the gate will reject this update>") {
+		t.Errorf("malformed hash did not render the marker:\n%s", got)
+	}
+	// ...and exactly once (an injection would add more "New gate SHA-256:" lines).
+	if n := strings.Count(got, "New gate SHA-256:"); n != 1 {
+		t.Errorf("expected exactly one 'New gate SHA-256:' line; got %d (injection?):\n%s", n, got)
+	}
+	// The attacker-injected line must NOT appear as a raw banner line.
+	if strings.Contains(got, "Approve: yes") {
+		t.Errorf("attacker-injected line leaked into the banner:\n%s", got)
+	}
+
+	// A valid 64-hex hash still renders verbatim and is NOT flagged malformed.
+	reqOK := ApprovalRequest{
+		RequestID: "r_update_ok",
+		Commands: []CommandReq{
+			{Server: "prod-web", Cmd: "SSHGATE_UPDATE " + updateHashFixture, TTLSec: 300},
+		},
+		Submitted: time.Now(),
+	}
+	gotOK := formatApprovalMessage(reqOK, 5*time.Second, nil, nil, [32]byte{}, nil)
+	if !strings.Contains(gotOK, "New gate SHA-256: "+updateHashFixture) {
+		t.Errorf("valid hash was not rendered verbatim:\n%s", gotOK)
+	}
+	if strings.Contains(gotOK, "malformed hash") {
+		t.Errorf("valid hash wrongly flagged as malformed:\n%s", gotOK)
+	}
+}
+
 // TestFormatApprovalMessage_UpdateNormalWriteUnaffected proves an ordinary write
 // still gets the plain approval banner and NEVER the update banner. The scary
 // update UX must be reserved for real updates so it keeps its signal.

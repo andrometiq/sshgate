@@ -24,8 +24,11 @@ var maxGateBinaryBytes int64 = 64 << 20
 
 // minGateBinaryBytes rejects an absurdly small "binary". A hash match already
 // pins the exact bytes, but a mistaken tiny staged file should never land over
-// the gate; a real stripped gate binary is comfortably above this floor.
-const minGateBinaryBytes = 256 << 10
+// the gate; a real stripped gate binary is comfortably above this floor. It is
+// a var (not a const), mirroring maxGateBinaryBytes, only so a test can raise it
+// above a real ELF to exercise the undersize refusal; production never
+// reassigns it.
+var minGateBinaryBytes int64 = 256 << 10
 
 // updateHexLen is the hex length of a SHA-256 digest (32 bytes).
 const updateHexLen = 64
@@ -104,7 +107,7 @@ func handleUpdate(audit *gate.AuditLogger, innerCmd string) int {
 		logf("update: binary exceeds %d-byte cap", maxGateBinaryBytes)
 		auditNoExec(audit, innerCmd, "write", "signed", exitDataErr)
 		return exitDataErr
-	case len(body) < minGateBinaryBytes:
+	case int64(len(body)) < minGateBinaryBytes:
 		logf("update: binary too small (%d bytes)", len(body))
 		auditNoExec(audit, innerCmd, "write", "signed", exitDataErr)
 		return exitDataErr

@@ -147,7 +147,8 @@ func (r *Runner) UpdateGate(ctx context.Context, in UpdateGateInput) (UpdateGate
 
 	// The reason rides in CmdReq.Reason → the telegram "Build:" line. It is
 	// display-only/unsigned (downgrade visibility), so keep it a single clean
-	// line. Empty when the staged rev is unknown (nothing useful to show).
+	// line. Always non-empty and always carries the running rev, so a stripped
+	// staged buildinfo can never hide the downgrade cue (Finding 4).
 	reason := updateReason(stagedRev, stagedTime, runningRev)
 
 	reqID, err := newRequestID()
@@ -179,15 +180,33 @@ func (r *Runner) UpdateGate(ctx context.Context, in UpdateGateInput) (UpdateGate
 		return UpdateGateOutput{Alias: in.Alias}, fmt.Errorf("tools: ssh update: %w (stderr=%q exit=%d)",
 			err, strings.TrimSpace(string(stderr)), exit)
 	}
-	// A gate deny comes back as err=nil with a raw non-zero exit. Annotate the
-	// well-known gate codes so the model gets remediation, not a bare exit.
-	if note := gateDenyNote(exit); note != "" {
-		return UpdateGateOutput{Alias: in.Alias}, fmt.Errorf("tools: %s", note)
-	}
+	// A gate deny comes back as err=nil with a raw non-zero exit. The update
+	// path does NOT route through gateDenyNote: the gate reuses exit 65 for a
+	// DETERMINISTIC binary-check refusal (hash mismatch / non-ELF / wrong-arch /
+	// size), so gateDenyNote's "expired signature… retry" advice would be
+	// actively wrong here — re-firing the scary approval for a request that will
+	// fail identically. Annotate the update-specific exit codes instead.
 	if exit != 0 {
-		return UpdateGateOutput{Alias: in.Alias}, fmt.Errorf(
-			"tools: gate refused the update (exit=%d stdout=%q stderr=%q) — the gate refuses on hash/format/ELF (65) or a filesystem replace failure (70)",
-			exit, strings.TrimSpace(string(stdout)), strings.TrimSpace(string(stderr)))
+		outStr := strings.TrimSpace(string(stdout))
+		errStr := strings.TrimSpace(string(stderr))
+		switch exit {
+		case 65:
+			return UpdateGateOutput{Alias: in.Alias}, fmt.Errorf(
+				"tools: gate refused the update — the streamed binary failed a gate check (hash mismatch / not an ELF / wrong architecture / size violation); the old gate is unchanged. Do NOT re-run without first fixing the staged binary (re-run `make install-local`). (exit=%d stdout=%q stderr=%q)",
+				exit, outStr, errStr)
+		case 70:
+			return UpdateGateOutput{Alias: in.Alias}, fmt.Errorf(
+				"tools: gate could not replace its binary (filesystem error) — the old gate is still in place; check ~/.sshgate-gate on the server (disk space / permissions). (exit=%d stdout=%q stderr=%q)",
+				exit, outStr, errStr)
+		case 77:
+			return UpdateGateOutput{Alias: in.Alias}, fmt.Errorf(
+				"tools: the server denied the signed update (read-only / no signer pubkey / missing signature) — check sshgate.status. (exit=%d stdout=%q stderr=%q)",
+				exit, outStr, errStr)
+		default:
+			return UpdateGateOutput{Alias: in.Alias}, fmt.Errorf(
+				"tools: gate refused the update (exit=%d stdout=%q stderr=%q)",
+				exit, outStr, errStr)
+		}
 	}
 
 	gotHash, size, rev, ok := parseUpdatedMarker(string(stdout))
@@ -247,15 +266,17 @@ func stagedBuildInfo(body []byte) (rev, buildTime string) {
 }
 
 // updateReason builds the operator-facing Build line carried in CmdReq.Reason
-// (→ the telegram banner's "Build:" line). It is empty when the staged revision
-// is unknown (nothing useful to show); otherwise it presents the staged build
-// and the running build side by side so a downgrade is spottable. The build
-// time is omitted when absent. Format matches the signer banner's expected
-// Reason (backend/telegram_update_test.go): "rev <staged> (<time>) · running
-// rev <running>".
+// (→ the telegram banner's "Build:" line). It ALWAYS presents the staged build
+// and the running build side by side so a downgrade is spottable — critically,
+// it shows the running rev even when the staged rev is unknown, because a
+// hostile stager that strips buildinfo would otherwise hide BOTH revs and
+// defeat the downgrade cue (Finding 4) exactly when it matters. The build time
+// is omitted when absent. Format matches the signer banner's expected Reason
+// (backend/telegram_update_test.go): "rev <staged> (<time>) · running rev
+// <running>".
 func updateReason(stagedRev, stagedTime, runningRev string) string {
 	if stagedRev == "" || stagedRev == "unknown" {
-		return ""
+		return fmt.Sprintf("rev unknown · running rev %s", runningRev)
 	}
 	if stagedTime == "" {
 		return fmt.Sprintf("rev %s · running rev %s", stagedRev, runningRev)

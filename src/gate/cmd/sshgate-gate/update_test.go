@@ -131,7 +131,7 @@ func TestUpdate_NonELFRefused(t *testing.T) {
 	dir := t.TempDir()
 	binPath, _, priv := seedGate(t, dir)
 
-	body := bytes.Repeat([]byte("A"), minGateBinaryBytes+10) // big enough, not ELF
+	body := bytes.Repeat([]byte("A"), int(minGateBinaryBytes)+10) // big enough, not ELF
 	sum := sha256.Sum256(body)
 	line := signedLine(t, priv, freshPayload("SSHGATE_UPDATE "+hex.EncodeToString(sum[:])))
 
@@ -189,6 +189,80 @@ func TestUpdate_OverCapRefused(t *testing.T) {
 	line := signedLine(t, priv, freshPayload("SSHGATE_UPDATE "+hex.EncodeToString(sum[:])))
 	if code, _, _ := runWithStdin(t, line, body); code != exitDataErr {
 		t.Fatalf("exit = %d; want 65 over cap", code)
+	}
+}
+
+// TestUpdate_WrongArchELFRefused: bytes that match the signed hash and parse as
+// a valid ELF, but declare a DIFFERENT machine than the running gate's arch,
+// must be refused (exit 65) before any write — a wrong-arch binary passes the
+// ELF-magic check yet bricks the gate on its next exec (Finding 3, the whole
+// reason checkGateELF compares e_machine to GOARCH).
+func TestUpdate_WrongArchELFRefused(t *testing.T) {
+	dir := t.TempDir()
+	binPath, _, priv := seedGate(t, dir)
+
+	body := append([]byte(nil), readSelfELF(t)...) // copy — we mutate e_machine
+	// e_machine is a little-endian uint16 at byte offset 18. Only patch a
+	// confirmed little-endian ELF (EI_DATA == ELFDATA2LSB == 1 at offset 5);
+	// a big-endian header would place the field differently.
+	if body[5] != 1 {
+		t.Skip("self ELF is not little-endian (ELFDATA2LSB); wrong-arch patch assumes LE layout")
+	}
+	// Flip the declared machine to a DIFFERENT architecture so debug/elf still
+	// parses a valid ELF but checkGateELF sees the wrong e_machine for this
+	// gate's GOARCH and refuses: amd64 (EM_X86_64=62/0x3E) → aarch64
+	// (EM_AARCH64=183/0xB7), anything else → amd64.
+	const emX8664, emAArch64 = 62, 183
+	cur := uint16(body[18]) | uint16(body[19])<<8
+	target := uint16(emX8664)
+	if cur == emX8664 {
+		target = emAArch64
+	}
+	body[18] = byte(target)
+	body[19] = byte(target >> 8)
+
+	sum := sha256.Sum256(body)
+	line := signedLine(t, priv, freshPayload("SSHGATE_UPDATE "+hex.EncodeToString(sum[:])))
+
+	code, _, _ := runWithStdin(t, line, body)
+	if code != exitDataErr {
+		t.Fatalf("exit = %d; want 65 on a wrong-arch ELF", code)
+	}
+	if got, _ := os.ReadFile(binPath); !bytes.Equal(got, []byte("OLD-GATE-BINARY")) {
+		t.Errorf("gate replaced with a wrong-arch ELF")
+	}
+	if _, err := os.Stat(binPath + ".bak"); err == nil {
+		t.Errorf(".bak created for a refused wrong-arch update — nothing should be written")
+	}
+}
+
+// TestUpdate_UndersizeRefused: a real ELF below the minGateBinaryBytes floor is
+// refused (exit 65) with the gate untouched. The floor is temporarily RAISED
+// above a real ELF's size (restored via t.Cleanup) to exercise the undersize
+// guard specifically — mirroring TestUpdate_OverCapRefused's shrink-the-cap
+// pattern.
+func TestUpdate_UndersizeRefused(t *testing.T) {
+	dir := t.TempDir()
+	binPath, _, priv := seedGate(t, dir)
+
+	body := readSelfELF(t) // a real ELF, normally comfortably above the floor
+
+	saved := minGateBinaryBytes
+	minGateBinaryBytes = int64(len(body)) + 1 // now our real ELF is "undersize"
+	t.Cleanup(func() { minGateBinaryBytes = saved })
+
+	sum := sha256.Sum256(body)
+	line := signedLine(t, priv, freshPayload("SSHGATE_UPDATE "+hex.EncodeToString(sum[:])))
+
+	code, _, _ := runWithStdin(t, line, body)
+	if code != exitDataErr {
+		t.Fatalf("exit = %d; want 65 on an undersize binary", code)
+	}
+	if got, _ := os.ReadFile(binPath); !bytes.Equal(got, []byte("OLD-GATE-BINARY")) {
+		t.Errorf("gate replaced with an undersize binary")
+	}
+	if _, err := os.Stat(binPath + ".bak"); err == nil {
+		t.Errorf(".bak created for a refused undersize update — nothing should be written")
 	}
 }
 

@@ -260,13 +260,13 @@ func TestUpdateGate_MarkerHashMismatchErrors(t *testing.T) {
 	}
 }
 
-// TestUpdateGate_ReasonEmptyOnUnknownRevProbeConsulted pins the honest step-8
-// behaviour: a raw (non-Go) staged buffer parses to an unknown build revision,
-// so the CmdReq.Reason is empty — while the pre-sign SSHGATE_VERSION probe was
-// still consulted (the mechanism that would thread the running rev into the
-// Build line if the staged rev were known). The exact non-empty Reason format
-// is pinned directly in TestUpdateReason.
-func TestUpdateGate_ReasonEmptyOnUnknownRevProbeConsulted(t *testing.T) {
+// TestUpdateGate_ReasonShowsRunningRevOnUnknownStaged pins the downgrade-cue
+// behaviour (Finding 4): even when a raw (non-Go) staged buffer parses to an
+// unknown build revision, the CmdReq.Reason must STILL carry the running rev
+// (from the pre-sign SSHGATE_VERSION probe) — a stripped staged buildinfo must
+// not be able to hide both revs. The exact Reason format is pinned directly in
+// TestUpdateReason.
+func TestUpdateGate_ReasonShowsRunningRevOnUnknownStaged(t *testing.T) {
 	t.Parallel()
 	stagedPath, _, wantHash := stageGateFixture(t)
 	r := newRegistryWith(t, "prod", registry.Entry{Host: "h", Port: 22, User: "u", AddedAt: time.Now()})
@@ -281,8 +281,9 @@ func TestUpdateGate_ReasonEmptyOnUnknownRevProbeConsulted(t *testing.T) {
 	if len(sign.gotCmds) != 1 {
 		t.Fatalf("sign called with %d cmds; want 1", len(sign.gotCmds))
 	}
-	if sign.gotCmds[0].Reason != "" {
-		t.Errorf("Reason = %q; want empty for a non-Go staged buffer (unknown rev)", sign.gotCmds[0].Reason)
+	const wantReason = "rev unknown · running rev abc1234"
+	if sign.gotCmds[0].Reason != wantReason {
+		t.Errorf("Reason = %q; want %q (running rev must show even when the staged rev is unknown)", sign.gotCmds[0].Reason, wantReason)
 	}
 	if !probe.sawCommand("SSHGATE_VERSION") {
 		t.Error("the pre-sign SSHGATE_VERSION probe was never consulted")
@@ -309,5 +310,71 @@ func TestUpdateGate_VersionProbeBestEffort(t *testing.T) {
 	}
 	if out.NewHash != wantHash {
 		t.Errorf("NewHash = %q; want %q — update should have proceeded", out.NewHash, wantHash)
+	}
+}
+
+// TestUpdateGate_GateRefusalExit65NoRetryAdvice proves exit 65 from the gate is
+// surfaced as a DETERMINISTIC binary-check refusal (hash mismatch / non-ELF /
+// wrong-arch / size) — NOT the misrouted "signature expired… retry" advice that
+// gateDenyNote(65) gives an ordinary write. Retrying re-fires the scary approval
+// for a request that will fail identically, so the message must NOT say
+// "retry"/"expired" and must carry the gate's stderr for diagnosis.
+func TestUpdateGate_GateRefusalExit65NoRetryAdvice(t *testing.T) {
+	t.Parallel()
+	stagedPath, _, wantHash := stageGateFixture(t)
+	r := newRegistryWith(t, "prod", registry.Entry{Host: "h", Port: 22, User: "u", AddedAt: time.Now()})
+	sign := &fakeSign{signed: []signpkg.Signed{{Cmd: "SSHGATE_UPDATE " + wantHash, Sig: "SSHGATE_SIG:AAA:BBB"}}}
+	probe := &fakeProbeSSH{versionOut: []byte("SSHGATE_VERSION rev=abc1234\n"), aliveOut: []byte("SSHGATE_OK\n")}
+	stdin := &fakeStdinSSH{stderr: []byte("update: binary hash mismatch"), exit: 65}
+	runner := &tools.Runner{Servers: r, Sign: sign, SSH: probe, SSHStdin: stdin, StagedGatePath: stagedPath}
+
+	_, err := runner.UpdateGate(context.Background(), tools.UpdateGateInput{Alias: "prod"})
+	if err == nil {
+		t.Fatal("expected an error on gate exit 65")
+	}
+	msg := err.Error()
+	low := strings.ToLower(msg)
+	// Deterministic binary-check refusal, not a transient/retryable one.
+	if !strings.Contains(msg, "gate check") {
+		t.Errorf("err = %v; want a deterministic binary-check refusal", err)
+	}
+	if !strings.Contains(msg, "unchanged") {
+		t.Errorf("err = %v; want it to state the old gate is unchanged", err)
+	}
+	// The gate's stderr must ride along for diagnosis.
+	if !strings.Contains(msg, "hash mismatch") {
+		t.Errorf("err = %v; want the gate's stderr (hash mismatch) included", err)
+	}
+	// It must NOT misroute to the ordinary-write "expired… retry" advice.
+	if strings.Contains(low, "retry") {
+		t.Errorf("err = %v; must NOT advise a retry for a deterministic refusal", err)
+	}
+	if strings.Contains(low, "expired") {
+		t.Errorf("err = %v; must NOT claim the signature expired", err)
+	}
+}
+
+// TestUpdateGate_GateRefusalExit70FsReplace proves exit 70 is surfaced as a
+// filesystem-replace failure with the old gate still in place — distinct from
+// the binary-check refusal (65) and never the "retry" advice.
+func TestUpdateGate_GateRefusalExit70FsReplace(t *testing.T) {
+	t.Parallel()
+	stagedPath, _, wantHash := stageGateFixture(t)
+	r := newRegistryWith(t, "prod", registry.Entry{Host: "h", Port: 22, User: "u", AddedAt: time.Now()})
+	sign := &fakeSign{signed: []signpkg.Signed{{Cmd: "SSHGATE_UPDATE " + wantHash, Sig: "SSHGATE_SIG:AAA:BBB"}}}
+	probe := &fakeProbeSSH{versionOut: []byte("SSHGATE_VERSION rev=abc1234\n"), aliveOut: []byte("SSHGATE_OK\n")}
+	stdin := &fakeStdinSSH{stderr: []byte("update: replace failed"), exit: 70}
+	runner := &tools.Runner{Servers: r, Sign: sign, SSH: probe, SSHStdin: stdin, StagedGatePath: stagedPath}
+
+	_, err := runner.UpdateGate(context.Background(), tools.UpdateGateInput{Alias: "prod"})
+	if err == nil {
+		t.Fatal("expected an error on gate exit 70")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "still in place") {
+		t.Errorf("err = %v; want the fs-replace-failure wording (old gate still in place)", err)
+	}
+	if strings.Contains(strings.ToLower(msg), "retry") {
+		t.Errorf("err = %v; must NOT advise a retry", err)
 	}
 }

