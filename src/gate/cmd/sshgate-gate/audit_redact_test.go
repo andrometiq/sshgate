@@ -103,7 +103,18 @@ func TestGateAuditBenignCommandUnchanged(t *testing.T) {
 	seedPub(t, dir, pub, 0o644)
 	withGateDir(t, dir)
 
-	f := filepath.Join(dir, "data.txt")
+	// Use a SHORT data-file path, NOT one under t.TempDir(): the tempdir
+	// name embeds this test's 45-char function name — a 3-class run the
+	// 2026-07 generic default-deny net now redacts (accepted over-redaction
+	// posture: token-shaped path segments redact — see the redaction-widening
+	// spec §3.6 / §6). A short "x<digits>" segment (2-class, <32 chars) keeps
+	// the test meaning "a genuinely benign command is unchanged".
+	base, err := os.MkdirTemp("", "x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(base) })
+	f := filepath.Join(base, "data.txt")
 	if err := os.WriteFile(f, []byte("line1\nline2\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}

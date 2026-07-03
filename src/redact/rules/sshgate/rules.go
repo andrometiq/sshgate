@@ -9,8 +9,18 @@
 //   - have a stable, descriptive ID (gets logged, signed via redact.why)
 //   - have at least one keyword the pre-filter can use (a regex run on
 //     every chunk with no pre-filter is a hot-path bug)
-//   - match a structurally-anchored token, NOT free-floating entropy
-//     (entropy belongs in `thorough` mode, deferred to v1.2.1)
+//   - match a structurally-anchored token, or opt into the shared entropy
+//     gate via WithEntropy for a broad prefix (sk-<base62>)
+//
+// UNANCHORED free-floating high-entropy detection is deliberately NOT a
+// rule here: it lives in the engine as the O(n) linear pass
+// scanGenericRuns (src/redact/scanner_generic.go). A regex net was
+// measured and rejected — the two zero-keyword regex formulations cost
+// +66% and +73% per MB on BenchmarkScannerNoMatch (Go's regexp is
+// NFA-only: no DFA, no literal-prefix skip), while the linear pass does
+// the same work in ~+2%; a keyword-scoped regex net was rejected too
+// because it silently deactivates on keyword-free buffers, leaking an
+// unknown-named secret.
 //
 // The combined ruleset is built by src/redact/rules/gen.go; this
 // file's Rules() result is one input.
@@ -141,52 +151,73 @@ func Rules() []redact.Rule {
 		// truly secret will be scrubbed, which is the safe failure mode
 		// for a single-tap unsigned read path.
 
-		// Assignment of a secret-looking value to a key whose NAME ends
-		// in a sensitive word (KEY/TOKEN/SECRET/PASSWORD/PASS/PASSWD/PWD/
-		// APIKEY/ACCESSKEY/PRIVATEKEY/CREDENTIAL). Matches `NAME=value`,
-		// `NAME = value`, `NAME: value`, optional `export ` prefix, and
-		// quoted values (which may contain spaces). Value group is #2.
+		// Assignment of a secret-looking value to a sensitively-NAMED key.
+		// Widened 2026-07 (same rule ID) to cover the shapes a production
+		// multi-server run showed leaking raw: JSON-quoted keys
+		// (`"botToken": "…"`), Python-dict single-quoted keys, camelCase
+		// keys with no separator (`authToken:`, `apiKey:`), and the new
+		// stems API_HASH / SESSION / COOKIE — plus a newline-crossing bug
+		// fix. SecretGroup is #1 (the value); MinLen 4 / MaxLen 0 unchanged.
 		//
-		// The unquoted value class excludes whitespace/quotes/shell
-		// metacharacters so we redact one token, not the rest of the
-		// line. Quoted values capture everything up to the closing quote
-		// (so `PASSWORD="my secret"` is fully covered).
-		// SecretGroup 1 captures the whole value — including its
-		// surrounding quotes when present — so a quoted value with
-		// spaces (`PASSWORD="my secret"`) is redacted in full while the
-		// variable NAME and the `=`/`:` separator survive.
+		// The value class: unquoted values exclude whitespace/quotes/shell
+		// metacharacters (redact one token, not the rest of the line);
+		// quoted values capture through the closing quote INCLUDING the
+		// quotes (so `PASSWORD="my secret"` is redacted in full while the
+		// NAME and `=`/`:` survive). The `$`-exclusion in the unquoted
+		// class protects `$VAR` references in the approval display.
 		//
-		// Boundary discipline (over-redaction guard): the keyword stem
-		// must begin at a non-alphanumeric boundary — `(?:^|[^A-Za-z0-9])`
-		// — so a stem can never match *inside* a longer alphanumeric run
-		// (`KEYBOARD=` / `TOKENIZER=`). The leading class is `[^A-Za-z0-9]`
-		// (NOT `[^A-Za-z0-9_-]`) so a `_`/`-` separator inside a multi-part
-		// name still acts as the boundary — `MY_DB_PASSWORD=` matches on
-		// the `_` before `PASSWORD`. The bulk of the stems (KEY/TOKEN/
-		// SECRET/PASSWORD/PASSWD/CREDENTIAL, with an optional `NAME_`
-		// prefix) tolerate sitting at name-start. PWD and PASS are the
-		// exception: they are short, extremely common English fragments
-		// (`PWD`, `OLDPWD`, `COMPASS`, `BYPASS`, `WHISKEY`/`MONKEY` for the
-		// KEY case) so they get a stricter branch — `[A-Z0-9]+[_-](?:PWD|
-		// PASS)` REQUIRES a `_`/`-` separator before them. Thus `DB_PWD=`/
-		// `DB_PASS=` still redact, but the bare cwd env var `PWD=…` and
-		// `OLDPWD=…` (present in every `env`/`printenv` dump) pass through
-		// verbatim so the operator can still see its own working directory.
+		// Name shapes (three alternation branches):
+		//  1. `(?:[A-Z0-9]+[_-])?STEM` — an underscore/dash-suffix stem
+		//     (KEY/TOKEN/SECRET/PASSWORD/PASSWD/CREDENTIAL(S)/SESSION/COOKIE,
+		//     the API[_-]?KEY/HASH etc. compounds) with an OPTIONAL
+		//     `NAME_`/`NAME-` prefix — so `MY_DB_PASSWORD=`, `API_HASH=`,
+		//     `SESSION=` all match. Bare `HASH` is deliberately NOT a stem
+		//     (`GIT_COMMIT_HASH=` build metadata would over-redact); only
+		//     the `API_HASH` compound is secret-shaped.
+		//  2. camelCase — a WHITELISTED lowercase prefix (api/auth/oauth/
+		//     bot/access/refresh/client/app/session/user/private/service/
+		//     master/admin/db) glued directly to a suffix (key/token/secret/
+		//     hash/password/pass/pwd/cookie/session). A whitelist, not
+		//     `[a-z]+`, so `possession:` / `expression:` can NEVER match.
+		//  3. `[A-Z0-9]+[_-](?:PWD|PASS)` — PWD/PASS are short, extremely
+		//     common English fragments (PWD, OLDPWD, COMPASS, BYPASS,
+		//     WHISKEY/MONKEY for the KEY case), so they REQUIRE a `_`/`-`
+		//     separator: `DB_PWD=` redacts, but the bare cwd env var `PWD=…`
+		//     / `OLDPWD=…` (in every `env` dump) survive.
+		//
+		// Boundary discipline: the name must begin at `(?:^|[^A-Za-z0-9])`
+		// so a stem can never match inside a longer alphanumeric run
+		// (`KEYBOARD=`, `TOKENIZER=`). The `["']?` around the name lets a
+		// JSON/dict closing quote sit between the key and the `:`.
+		//
+		// Newline fix: the separator is `[ \t]*[:=][ \t]*` (NOT `\s*…\s*`).
+		// The old `\s*` crossed newlines, so names-only output
+		// (`grep -oE '^[A-Za-z_]+=' .env` → `A_API_KEY=\nB_API_KEY=`)
+		// redacted the NEXT LINE'S NAME as a value. Trade: a YAML
+		// block-scalar (`password:\n  value`) is no longer caught — a
+		// documented miss the bug fix outweighs.
+		//
+		// Accepted, test-pinned over-redaction: `DESKTOP_SESSION=gnome`
+		// loses its value (price of the SESSION stem). Verified survivors:
+		// SESSION_MANAGER, GDMSESSION, XDG_SESSION_*, SSH_AUTH_SOCK,
+		// SESSION_TIMEOUT=30.
 		redact.CompileRule(
 			"sshgate-sensitive-assignment",
-			"Secret value assigned to a *KEY/*TOKEN/*SECRET/*PASSWORD/*PASS-named variable",
-			`(?i)(?:^|[^A-Za-z0-9])(?:export\s+)?(?:(?:[A-Z0-9]+[_-])?(?:API[_-]?KEY|ACCESS[_-]?KEY|SECRET[_-]?KEY|PRIVATE[_-]?KEY|CLIENT[_-]?SECRET|KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIALS?)|[A-Z0-9]+[_-](?:PWD|PASS))\s*[:=]\s*("[^"\n]{1,1000}"|'[^'\n]{1,1000}'|[^\s'"`+"`"+`;&|<>$(){}]{4,1000})`,
-			[]string{"key", "token", "secret", "password", "pass", "passwd", "pwd", "credential"},
+			"Secret value assigned to a *KEY/*TOKEN/*SECRET/*PASSWORD/*PASS/*HASH/*SESSION/*COOKIE-named variable",
+			`(?i)(?:^|[^A-Za-z0-9])(?:export\s+)?["']?(?:(?:[A-Z0-9]+[_-])?(?:API[_-]?KEY|ACCESS[_-]?KEY|SECRET[_-]?KEY|PRIVATE[_-]?KEY|CLIENT[_-]?SECRET|API[_-]?HASH|KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIALS?|SESSION|COOKIE)|(?:api|auth|oauth|bot|access|refresh|client|app|session|user|private|service|master|admin|db)(?:key|token|secret|hash|password|pass|pwd|cookie|session)|[A-Z0-9]+[_-](?:PWD|PASS))["']?[ \t]*[:=][ \t]*("[^"\n]{1,1000}"|'[^'\n]{1,1000}'|[^\s'"`+"`"+`;&|<>$(){}]{4,1000})`,
+			[]string{"key", "token", "secret", "password", "pass", "passwd", "pwd", "credential", "hash", "session", "cookie"},
 			1, 4, 0,
 		),
 
 		// PGPASSWORD is special-cased: the libpq env var name has no
 		// `_PASS` boundary the rule above keys on cleanly, and it is an
-		// extremely common leak in `env` / `ps -e` dumps.
+		// extremely common leak in `env` / `ps -e` dumps. Separator is
+		// `[ \t]*[:=][ \t]*` (2026-07 newline-crossing fix, same as the
+		// rule above).
 		redact.CompileRule(
 			"sshgate-pgpassword",
 			"PGPASSWORD libpq environment variable",
-			`(?i)\bPGPASSWORD\s*[:=]\s*("[^"\n]{1,1000}"|'[^'\n]{1,1000}'|[^\s'"`+"`"+`;&|<>$(){}]{1,1000})`,
+			`(?i)\bPGPASSWORD[ \t]*[:=][ \t]*("[^"\n]{1,1000}"|'[^'\n]{1,1000}'|[^\s'"`+"`"+`;&|<>$(){}]{1,1000})`,
 			[]string{"pgpassword"},
 			1, 1, 0,
 		),
@@ -281,6 +312,49 @@ func Rules() []redact.Rule {
 			`\b(npm_[A-Za-z0-9]{36})\b`,
 			[]string{"npm_"},
 			1, 40, 40,
+		),
+
+		// --- 2026-07 default-deny widening: broad/new provider shapes.
+
+		// OpenAI-style secret key, BROAD `sk-<base62>` prefix. Entropy 3.5
+		// is load-bearing: the shared gate's 3-class check kills the
+		// lowercase FIDO2 key-type marker `sk-ecdsa-sha2-nistp256@openssh.com`
+		// and prose slugs (`sk-migration-notes-2026`) — all lowercase(+digit)
+		// — while a real base62 key (upper+lower+digit, ~5-6 bits/byte)
+		// passes. The narrow `sshgate-openai-project-key` /
+		// `sshgate-anthropic-key` rules stay ungated (belt-and-braces; dedup
+		// collapses the overlap). MinLen 19 = `sk-` + 16.
+		redact.CompileRule(
+			"sshgate-openai-broad",
+			"OpenAI-style secret key (sk-<base62>), entropy-gated",
+			`\b(sk-[A-Za-z0-9_-]{16,})\b`,
+			[]string{"sk-"},
+			1, 19, 320,
+		).WithEntropy(3.5),
+
+		// GitHub fine-grained PAT (github_pat_...). It needs its OWN keyword:
+		// `ghp_` (the existing sshgate-github-pat keyword) is NOT a substring
+		// of `github_pat_`, so widening that rule could never fire on this
+		// shape (verified prefilter blocker). Real tokens are 93 chars;
+		// `{20,}` per the operator spec. Not entropy-gated — the
+		// `github_pat_` prefix is already unambiguous.
+		redact.CompileRule(
+			"sshgate-github-fine-pat",
+			"GitHub fine-grained PAT (github_pat_...)",
+			`\b(github_pat_[A-Za-z0-9_]{20,})\b`,
+			[]string{"github_pat_"},
+			1, 31, 255,
+		),
+
+		// Zoho OAuth token: exact structural shape `1000.<32hex>.<32hex>`.
+		// The hex body must NOT be entropy-gated — hex is 2-class and caps
+		// at 4.0 bits/byte, and the fixed shape is confident on its own.
+		redact.CompileRule(
+			"sshgate-zoho-token",
+			"Zoho OAuth token (1000.<32hex>.<32hex>)",
+			`\b(1000\.[0-9a-fA-F]{32}\.[0-9a-fA-F]{32})\b`,
+			[]string{"1000."},
+			1, 70, 70,
 		),
 	}
 }

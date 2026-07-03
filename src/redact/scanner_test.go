@@ -123,6 +123,64 @@ func TestRuleGoldens(t *testing.T) {
 			negative: "AccountName=publicvalue",
 		},
 
+		// --- 2026-07 default-deny widening: new detectors ---
+		{
+			// BROAD sk-<base62>; the entropy gate lets a real base62 key
+			// through but vetoes the lowercase FIDO2 key-type marker.
+			name:     "sshgate-openai-broad",
+			ruleID:   "sshgate-openai-broad",
+			positive: "value sk-" + run3class(40),
+			secret:   "sk-" + run3class(40),
+			negative: "sk-ecdsa-sha2-nistp256@openssh.com",
+		},
+		{
+			name:     "sshgate-github-fine-pat",
+			ruleID:   "sshgate-github-fine-pat",
+			positive: "pat github_pat_" + run3class(82),
+			secret:   "github_pat_" + run3class(82),
+			negative: "github_pat (not a token, just words)",
+		},
+		{
+			name:     "sshgate-zoho-token",
+			ruleID:   "sshgate-zoho-token",
+			positive: "tok 1000." + hexRun(32) + "." + hexRun(32),
+			secret:   "1000." + hexRun(32) + "." + hexRun(32),
+			negative: "1000.50 price in the invoice",
+		},
+		{
+			// Generic net telegram stitch (bare form).
+			name:     "sshgate-telegram-bot-token/bare",
+			ruleID:   "sshgate-telegram-bot-token",
+			positive: "before " + mkTelegramToken() + " after",
+			secret:   mkTelegramToken(),
+			negative: "ts=1700000000:" + hexRun(36) + " (epoch:hex, A-pin miss)",
+		},
+		{
+			// Glued URL form (fires via the digit-suffix peel). Assert the
+			// full <id>:<body> is gone + a marker exists; do NOT assert
+			// which detector fired.
+			name:     "sshgate-telegram-bot-token/glued",
+			ruleID:   "sshgate-telegram-bot-token",
+			positive: "https://api.telegram.org/bot" + mkTelegramToken() + "/sendMessage",
+			secret:   mkTelegramToken(),
+			negative: "not a telegram url at all",
+		},
+		{
+			name:     "sshgate-generic-high-entropy/bare",
+			ruleID:   "sshgate-generic-high-entropy",
+			positive: "value=" + run3class(40),
+			secret:   run3class(40),
+			negative: "commit e54da87 " + hexRun(40) + " author (lowercase hex, 2-class)",
+		},
+		{
+			// Documented-bias: a token-shaped path segment redacts (spec §6).
+			name:     "sshgate-generic-high-entropy/path-segment",
+			ruleID:   "sshgate-generic-high-entropy",
+			positive: "/tmp/" + run3class(40) + "/data.txt",
+			secret:   run3class(40),
+			negative: "uuid " + hexRun(8) + "-" + hexRun(4) + "-" + hexRun(4) + "-" + hexRun(4) + "-" + hexRun(12),
+		},
+
 		// gitleaks-vendored
 		{
 			name:     "gitleaks-aws-secret-key",

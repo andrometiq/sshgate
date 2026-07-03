@@ -7,10 +7,13 @@ import (
 	"strings"
 )
 
-// Rule is a single named-format detection rule. Layer 1 in v1.2 ships
-// only named-format rules — Entropy is reserved for the future
-// "thorough" mode (see docs/FUTURE.md) and is unused by the standard
-// scanner today.
+// Rule is a single named-format detection rule. As of the 2026-07
+// default-deny widening, Entropy is a LIVE standard-scanner feature: a
+// rule with Entropy > 0 is additionally gated by passesSecretGate
+// (3-class content + ssh-line veto + Shannon entropy), so a broad prefix
+// rule (sk-<base62>) does not fire on lowercase key-type markers or prose
+// slugs. Set it via WithEntropy. `thorough` mode (docs/FUTURE.md) will add
+// looser gates on top; the standard scanner already consults this field.
 //
 // Keywords is a cheap substring pre-filter: if a chunk does not
 // contain at least one of the rule's keywords, the (much more
@@ -56,6 +59,18 @@ type Rule struct {
 // scanner exempts it from the MaxLen filter. See Rule.HighConfidence.
 func (r Rule) WithHighConfidence() Rule {
 	r.HighConfidence = true
+	return r
+}
+
+// WithEntropy returns a copy of r whose match is additionally gated by the
+// shared generic-secret gate at the given Shannon threshold (bits/byte):
+// findMatches keeps the match only if the secret span also clears
+// passesSecretGate (3-class content + ssh-line veto + entropy). Used by
+// broad-prefix rules (e.g. sk-<base62>) that would otherwise fire on
+// lowercase key-type markers (sk-ecdsa-sha2-…) and prose slugs. See
+// scanner_generic.go. A threshold of 0 leaves the rule ungated.
+func (r Rule) WithEntropy(bitsPerByte float64) Rule {
+	r.Entropy = bitsPerByte
 	return r
 }
 
