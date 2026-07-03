@@ -91,6 +91,15 @@ const ToolNameRevokeGrant = "revoke_grant"
 // grant). Claude Code's surface name is "mcp__sshgate__list_grants".
 const ToolNameListGrants = "list_grants"
 
+// ToolNameUpdateGate requests a SIGNED, in-place update of the gate binary on
+// an already-registered server: the MCP hashes the operator's locally-staged
+// gate binary and asks for a signature bound to that exact SHA-256, which the
+// operator must approve via a distinct, scary "GATE BINARY UPDATE" Telegram
+// banner. The agent supplies only the alias — never bytes or a hash — and
+// provisioning stays human-only, so this does not expand the agent's reach.
+// Claude Code's surface name is "mcp__sshgate__update_gate".
+const ToolNameUpdateGate = "update_gate"
+
 // serverInstructions is the MCP server-level prompt surfaced to the agent
 // at initialize. It teaches the agent how the gate's read/write split
 // behaves so it doesn't accidentally turn cheap inventory reads into
@@ -228,6 +237,23 @@ func (s *Server) Serve(ctx context.Context, in io.Reader, out io.Writer) error {
 		Name:        ToolNameListGrants,
 		Description: "List live standing grants the signer currently holds (optionally filtered to one alias). Read-only, no approval, always safe. Use it to reconcile after a request_grant timeout — a grant can be live even though you saw an error, and this re-learns its grant_id, scope, and expiry. Expired grants are never listed; grants die on signer restart.",
 	}, s.listGrantsHandler)
+
+	// update_gate — REQUESTS a SIGNED, in-place update of the gate binary on an
+	// already-registered server. The MCP hashes the operator's locally-staged
+	// gate binary; the operator must approve a distinct, alarming "GATE BINARY
+	// UPDATE" Telegram banner bound to that exact SHA-256. The agent supplies
+	// ONLY the alias — never binary bytes or a hash. It does not expand the
+	// agent's reach: no new server is onboarded (provisioning stays human-only),
+	// and a standing grant can never auto-sign it, so the agent can never cause
+	// arbitrary code to run.
+	mcpsdk.AddTool(server, &mcpsdk.Tool{
+		Name: ToolNameUpdateGate,
+		Description: "Request a SIGNED, in-place update of the gate binary on an already-registered server. " +
+			"You supply ONLY the alias — never binary bytes or a hash: the MCP reads the operator's locally-staged gate binary, computes its SHA-256, and requests a signature bound to that exact hash. " +
+			"A human MUST approve a distinct, scary \"GATE BINARY UPDATE\" Telegram banner showing that hash + build revision; a standing grant can NEVER auto-sign it. " +
+			"The gate re-hashes the bytes it receives and refuses on mismatch, so an approval authorizes exactly that one binary. " +
+			"This does not expand your reach — no new server is onboarded (provisioning stays the human-only sshgate CLI). Read-only (Tier-1) servers are refused before any tap.",
+	}, s.updateGateHandler)
 
 	t := &mcpsdk.IOTransport{
 		Reader: readerCloser{in},
@@ -453,6 +479,32 @@ func formatRevokeServerSummary(out tools.RevokeServerOutput) string {
 		fmt.Fprintf(&b, "\ngate: %s", out.Message)
 	}
 	return b.String()
+}
+
+// updateGateHandler is the typed handler for sshgate.update_gate. Sign
+// denials/timeouts (a human refused the update, or the signer was
+// unreachable), a missing staged binary, a read-only alias, an SSH failure,
+// and a marker/hash mismatch all surface as MCP tool errors (IsError=true) so
+// Claude sees exactly why the update did not happen; on success the structured
+// UpdateGateOutput carries the installed hash + size + revision.
+func (s *Server) updateGateHandler(ctx context.Context, _ *mcpsdk.CallToolRequest, in tools.UpdateGateInput) (*mcpsdk.CallToolResult, tools.UpdateGateOutput, error) {
+	out, err := s.Runner.UpdateGate(ctx, in)
+	if err != nil {
+		s.Logger.Printf("update_gate alias=%s err=%v", in.Alias, err)
+		return nil, out, err
+	}
+	s.Logger.Printf("update_gate alias=%s new_hash=%s size=%d rev=%s verified_alive=%v",
+		out.Alias, out.NewHash, out.Size, out.Revision, out.VerifiedAlive)
+	return &mcpsdk.CallToolResult{
+		Content: []mcpsdk.Content{&mcpsdk.TextContent{Text: formatUpdateGateSummary(out)}},
+	}, out, nil
+}
+
+// formatUpdateGateSummary renders a short human summary for the fallback
+// TextContent block. Structured output carries the full UpdateGateOutput.
+func formatUpdateGateSummary(out tools.UpdateGateOutput) string {
+	return fmt.Sprintf("updated gate on %s: sha256=%s size=%d rev=%s verified_alive=%v",
+		out.Alias, out.NewHash, out.Size, out.Revision, out.VerifiedAlive)
 }
 
 // requestGrantHandler is the typed handler for sshgate.request_grant. A

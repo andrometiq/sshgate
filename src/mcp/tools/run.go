@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"strings"
@@ -95,6 +96,13 @@ type SSHRunner interface {
 	Run(ctx context.Context, host, user string, port int, cmd string) ([]byte, []byte, int, error)
 }
 
+// StdinRunner is the subset of ssh.Client that update_gate needs to stream
+// the new gate binary on the SSH session's stdin. Kept separate from SSHRunner
+// so the many SSHRunner fakes need no update.
+type StdinRunner interface {
+	RunWithStdin(ctx context.Context, host, user string, port int, cmd string, stdin io.Reader) ([]byte, []byte, int, error)
+}
+
 // Runner is the sshgate.run tool implementation. All fields must be
 // non-nil before calling Run; the MCP entry point sets them at
 // startup.
@@ -102,6 +110,20 @@ type Runner struct {
 	Servers *registry.Servers
 	Sign    SignClient
 	SSH     SSHRunner
+
+	// SSHStdin streams the new gate binary on the SSH session's stdin. It is
+	// used ONLY by update_gate (the one gated command that carries channel
+	// stdin); every other path uses SSH. Production wires the same
+	// *ssh.Client into both fields. A nil SSHStdin disables update_gate.
+	SSHStdin StdinRunner
+
+	// StagedGatePath is the absolute path to the operator's locally-staged
+	// gate binary (what `make install-local` writes to
+	// ~/.config/sshgate/bin/sshgate-gate-linux-amd64, or $SSHGATE_GATE_BIN).
+	// update_gate reads it ONCE, hashes that buffer, and streams that same
+	// buffer — the agent never supplies bytes or a hash (R5). Set by main; an
+	// empty value disables update_gate with an actionable error.
+	StagedGatePath string
 
 	// KeyPath is the absolute path to the SSH private key used by the
 	// SSH client. It is stored here so the run/run_batch paths can
