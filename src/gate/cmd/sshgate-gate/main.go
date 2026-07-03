@@ -6,14 +6,18 @@
 // Exit codes (BSD sysexits where applicable):
 //
 //	0  — success (also: empty SSH_ORIGINAL_COMMAND, the post-install
-//	     verification probe; prints SSHGATE_OK and exits 0)
+//	     verification probe, prints SSHGATE_OK; the unsigned SSHGATE_VERSION
+//	     probe, prints the running gate's build revision; and a completed
+//	     SSHGATE_UPDATE, prints SSHGATE_UPDATED)
 //	1  — generic runtime failure or non-zero from /bin/sh -c on the
-//	     non-pass-through paths (the stub SSHGATE_REVOKE/SSHGATE_UPDATE
-//	     handlers fall here)
+//	     non-pass-through paths
 //	65 — EX_DATAERR: bad signature, bad envelope format, expired sig,
-//	     validity window too long
+//	     validity window too long; also a SSHGATE_UPDATE refusal (malformed
+//	     hash, empty/oversized/undersized stdin, hash mismatch, or a
+//	     non-ELF/wrong-arch binary — nothing is written)
 //	70 — EX_SOFTWARE: pubkey file unreadable, corrupt, or has insecure
-//	     mode
+//	     mode; also a SSHGATE_UPDATE filesystem/replace failure (old gate
+//	     left intact)
 //	77 — EX_NOPERM: write command without a verified SSHGATE_SIG prefix
 //
 // Exit codes from the executed inner command are passed through
@@ -93,6 +97,17 @@ func run() int {
 		// The probe is gate machinery, not a command the operator ran, so
 		// it is intentionally NOT audited.
 		fmt.Println("SSHGATE_OK")
+		return exitOK
+	}
+
+	if raw == "SSHGATE_VERSION" {
+		// Unsigned build-identity probe: report THIS running gate's build
+		// revision so the MCP can tell which gate is on a box and confirm a
+		// prior SSHGATE_UPDATE took effect. Version info only, no secrets and
+		// no filesystem/exec — treated like the empty-cmd probe (not audited,
+		// works on both tiers). Recognised BEFORE the pubkey load so a Tier-1
+		// read-only gate can answer it too.
+		fmt.Println(runningGateVersion())
 		return exitOK
 	}
 
@@ -194,10 +209,12 @@ func run() int {
 			return rc
 		}
 		if strings.HasPrefix(innerCmd, "SSHGATE_UPDATE ") {
-			// Future: self-update path (fetch + verify + replace the gate binary).
-			logf("SSHGATE_UPDATE not yet implemented")
-			auditNoExec(audit, innerCmd, "write", "signed", exitGeneric)
-			return exitGeneric
+			// Signed in-place gate self-update. The verified inner cmd commits
+			// to the SHA-256 of the new binary; handleUpdate reads the bytes
+			// from the gate's OWN stdin, refuses on any hash mismatch, and
+			// atomically replaces this binary. It ALWAYS returns — never falls
+			// through to classify/exec.
+			return handleUpdate(audit, innerCmd)
 		}
 	}
 

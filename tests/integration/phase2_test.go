@@ -398,24 +398,38 @@ func buildRunner(t *testing.T, socketPath, sshKeyPath string, alias, host string
 	if err != nil {
 		t.Fatalf("registry.New: %v", err)
 	}
-	if err := servers.Add(alias, registry.Entry{
-		Host:    host,
-		Port:    port,
-		User:    user,
-		AddedAt: time.Now(),
-	}); err != nil {
-		t.Fatalf("registry.Add: %v", err)
-	}
 
 	signClient := &signpkg.Client{
 		SocketPath: socketPath,
 		Timeout:    30 * time.Second,
 	}
+	khPath := filepath.Join(t.TempDir(), "known_hosts")
 	sshClient := &sshpkg.Client{
 		KeyPath:        sshKeyPath,
-		KnownHostsPath: filepath.Join(t.TempDir(), "known_hosts"),
+		KnownHostsPath: khPath,
 		Timeout:        15 * time.Second,
 	}
+
+	// The gate fails CLOSED on an empty/mismatched host binding (verify.go —
+	// ErrHostMismatch), so a signed write MUST carry the target's real
+	// host-key fingerprint. Production sources this from the TOFU pin recorded
+	// at provision time; here we pin it the same way (a SSHGATE_VERSION read
+	// populates known_hosts) and store it in Entry.Fingerprint, which
+	// Runner.Run / RunBatch copy into the signed payload's Host.
+	pinCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	fp := pinContainerHostFP(pinCtx, t, sshClient, khPath)
+
+	if err := servers.Add(alias, registry.Entry{
+		Host:        host,
+		Port:        port,
+		User:        user,
+		AddedAt:     time.Now(),
+		Fingerprint: fp,
+	}); err != nil {
+		t.Fatalf("registry.Add: %v", err)
+	}
+
 	return &tools.Runner{
 		Servers:     servers,
 		Sign:        signClient,

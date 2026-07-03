@@ -65,24 +65,35 @@ func TestPhase3SignedWrite_Executes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("registry.New: %v", err)
 	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+
+	// The gate fails CLOSED on an empty/mismatched host binding (verify.go —
+	// ErrHostMismatch), so the signed write's payload MUST bind to THIS gate's
+	// real host-key fingerprint. Production records it at provision time via
+	// TOFU; here we pin it the same way (a SSHGATE_VERSION read populates
+	// known_hosts) and store it in Entry.Fingerprint, which Runner.Run copies
+	// into the signed payload's Host.
+	khPath := filepath.Join(t.TempDir(), "known_hosts")
+	sshClient := &sshpkg.Client{
+		KeyPath:        sshPriv,
+		KnownHostsPath: khPath,
+		Timeout:        15 * time.Second,
+	}
+	fp := pinContainerHostFP(ctx, t, sshClient, khPath)
+
 	if err := servers.Add("mig", registry.Entry{
-		Host: "127.0.0.1", Port: sshContainerPort, User: remoteUser, AddedAt: time.Now(),
+		Host: "127.0.0.1", Port: sshContainerPort, User: remoteUser, AddedAt: time.Now(), Fingerprint: fp,
 	}); err != nil {
 		t.Fatalf("registry.Add: %v", err)
 	}
 	runner := &tools.Runner{
-		Servers: servers,
-		Sign:    &signpkg.Client{SocketPath: socket, Timeout: 15 * time.Second},
-		SSH: &sshpkg.Client{
-			KeyPath:        sshPriv,
-			KnownHostsPath: filepath.Join(t.TempDir(), "known_hosts"),
-			Timeout:        15 * time.Second,
-		},
+		Servers:     servers,
+		Sign:        &signpkg.Client{SocketPath: socket, Timeout: 15 * time.Second},
+		SSH:         sshClient,
 		WriteTTLSec: 60,
 	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
-	defer cancel()
 
 	const marker = "signed-write-works"
 	const remoteFile = "/tmp/sshgate_signed_ok"

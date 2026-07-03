@@ -517,8 +517,11 @@ func (t *TelegramBackend) Request(ctx context.Context, req ApprovalRequest) (<-c
 	// ("approve:<reqID>") is identical either way — the gate-enforced
 	// capability lives in the signed payload, not in the button.
 	approveLabel := "✓ Approve all"
-	if requestHasReveal(req) {
+	switch {
+	case requestHasReveal(req):
 		approveLabel = "✓ Approve SECRET-REVEAL"
+	case requestHasUpdate(req):
+		approveLabel = "✓ Approve GATE UPDATE"
 	}
 	msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
@@ -843,7 +846,101 @@ func redactForDisplay(cmd string, salt [32]byte, rules []redact.Rule) string {
 // matched secret is replaced by a per-session marker, the command shape stays
 // visible. This is display-only — req.Commands is read, never mutated, so the
 // raw command still flows through signing/execution.
+// updateVerbPrefix marks a signed gate-binary update command
+// (SSHGATE_UPDATE <sha256hex>). Kept in sync with the gate's dispatch prefix.
+const updateVerbPrefix = "SSHGATE_UPDATE "
+
+// requestHasUpdate reports whether any command in req is a signed gate-binary
+// update. update_gate sends exactly one such command.
+func requestHasUpdate(req ApprovalRequest) bool {
+	for _, c := range req.Commands {
+		if strings.HasPrefix(c.Cmd, updateVerbPrefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// formatUpdateApprovalMessage renders the gate-binary update approval body. It
+// is deliberately alarming: approving it REPLACES the security-critical gate
+// binary on the target server, so the banner names that consequence, names the
+// server, and renders the new binary's SHA-256 RAW — a hash is NOT a secret and
+// the operator must see exactly the bytes the master key signed, so it is
+// printed OUTSIDE redactForDisplay (Finding 7). Reason (when the MCP set one)
+// carries the staged + running build revisions so a downgrade is spottable.
+// Plain text (no parse-mode), like formatApprovalMessage.
+func formatUpdateApprovalMessage(req ApprovalRequest, timeout time.Duration) string {
+	var b strings.Builder
+	// update_gate always sends exactly one command; guard anyway.
+	if len(req.Commands) == 0 {
+		return ""
+	}
+	c := req.Commands[0]
+	server := c.Server
+
+	b.WriteString("⚠️ GATE BINARY UPDATE — approving this REPLACES the SSHGate gate binary on ")
+	if server != "" {
+		b.WriteString(server)
+	} else {
+		b.WriteString("this server")
+	}
+	b.WriteString(". The new gate governs every future command on this server. Only approve an update you initiated.\n\n")
+
+	b.WriteString("🔐 SSHGate GATE UPDATE")
+	if server != "" {
+		b.WriteString(" — ")
+		b.WriteString(server)
+	}
+	b.WriteString("\n\n")
+
+	// The committed hash. Validate its shape BEFORE rendering: a valid 64-lowercase-hex
+	// digest renders RAW (never through redactForDisplay — R2/Finding-7 WYSIWYG),
+	// but a crafted c.Cmd could smuggle newlines to inject fake banner lines
+	// (phishing). The gate already rejects any non-64-hex update so it can never
+	// install; the banner must likewise never render attacker-injected lines, so
+	// anything malformed collapses to a single-line marker.
+	hash := strings.TrimPrefix(c.Cmd, updateVerbPrefix)
+	if isLower64Hex(hash) {
+		fmt.Fprintf(&b, "New gate SHA-256: %s\n", hash)
+	} else {
+		b.WriteString("New gate SHA-256: <malformed hash — the gate will reject this update>\n")
+	}
+	if c.Reason != "" {
+		fmt.Fprintf(&b, "Build: %s\n", c.Reason)
+	}
+	b.WriteString("\n")
+	fmt.Fprintf(&b, "Request ID: %s\n", req.RequestID)
+	fmt.Fprintf(&b, "Expires in %s\n", timeout)
+	return b.String()
+}
+
+// isLower64Hex reports whether s is EXACTLY 64 lowercase hex characters — the
+// shape of a SHA-256 digest the MCP emits (hex.EncodeToString). The update
+// banner renders a valid hash raw; anything else (wrong length, uppercase, or a
+// smuggled newline meant to inject fake banner lines) is a malformed hash the
+// gate will reject anyway, so the banner shows a marker instead of the raw bytes.
+func isLower64Hex(s string) bool {
+	if len(s) != 64 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
+			return false
+		}
+	}
+	return true
+}
+
 func formatApprovalMessage(req ApprovalRequest, timeout time.Duration, explanations []string, explainErr error, salt [32]byte, rules []redact.Rule) string {
+	// A gate-binary update gets its own alarming layout and, crucially, renders
+	// the committed SHA-256 RAW (never through redactForDisplay) — see
+	// formatUpdateApprovalMessage. Checked first: an update is never also a
+	// reveal, so this cannot steal a reveal's banner.
+	if requestHasUpdate(req) {
+		return formatUpdateApprovalMessage(req, timeout)
+	}
+
 	var b strings.Builder
 	server := ""
 	if len(req.Commands) > 0 {

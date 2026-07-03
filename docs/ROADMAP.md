@@ -13,10 +13,10 @@ For the security model these items extend, see [design.md](design.md) and
 
 - **Human-only provisioning CLI.** Onboarding a server is a control-plane action
   done with the `sshgate` CLI (`pubkey` → paste → `add [--read-only]`), not an
-  agent tool. The agent surface is exactly eight tools (`run`, `run_batch`,
+  agent tool. The agent surface is exactly nine tools (`run`, `run_batch`,
   `list_servers`, `status`, `revoke_server`, `request_grant`, `revoke_grant`,
-  `list_grants`); there is deliberately no `add_server` tool, so the agent can
-  never expand its own reach.
+  `list_grants`, `update_gate`); there is deliberately no `add_server` tool, so
+  the agent can never expand its own reach.
 - **Read-only (Tier-1) and signed-write (Tier-2) provisioning**, selectable at
   `sshgate add` time.
 - **Inline secret redaction on the read path** in the gate.
@@ -92,10 +92,39 @@ These are the highest-priority forward items.
 
 ## Planned
 
-- **In-place Tier-1 → Tier-2 upgrade (#17).** Today, changing a server from
-  read-only to signed-write means revoking and re-provisioning it. Provide a
-  smoother in-place upgrade, including how the upgrade is surfaced and wired in
-  the setup flow.
+- **Multi-key gates + provisioning exposure window (#17, redefined).** The old
+  "in-place Tier-1 → Tier-2 upgrade" here is **rejected**: any unsigned
+  tier-flip path the CLI could exercise is a path the agent could emulate —
+  read-only is read-only, full stop; re-tiering stays out-of-band re-provision.
+  In its place, two captured directions: (a) **multiple signer keys per gate**
+  (per-agent identity — each agent its own keypair, no shared-key trust),
+  version-aware `sshgate add` (upgrade an older installed gate, defer to a
+  newer one, notify either way), single-vs-multiple gate binaries and signer
+  topology as open design questions; (b) **shrink the plain-key exposure
+  window in `add`** (run add first, it retries while the operator pastes the
+  key out-of-band, gate swap lands within milliseconds; fully-manual install
+  stays available for absolute security). Full capture with all constraints:
+  [docs/proposed/multi-key-gates-and-add-exposure-2026-07.md](proposed/multi-key-gates-and-add-exposure-2026-07.md).
+  Direction recorded 2026-07 — not scheduled; design questions go through the
+  full pipeline before any build.
+
+- **Reconcile tier on the probe-idempotent re-add path.** When `sshgate add`
+  re-runs against an already-gated host (the probe-first idempotency that
+  recovers a lost `servers.json`), it registers the **caller-supplied** tier
+  flag without checking the remote's actual tier — the `SSHGATE_VERSION` probe
+  is deliberately tier-blind, and `gate.pub` is only ever uploaded by the full
+  provisioning flow. A mismatched flag records wrong state silently: a
+  read-only host re-added without `--read-only` registers as writable, and
+  every write then burns a human approval tap before failing exit 77 at the
+  gate; the inverse direction under-reports a signed-write host as read-only.
+  **Every mismatch direction fails closed** (the gate, not the registry, is
+  the enforcement point), so this is a state-hygiene/UX defect, not a
+  boundary break — reviewed and deliberately deferred rather than blocking
+  the release-channel ship. Likely fix: extend the gate's version reply with
+  a tier token (e.g. `SSHGATE_VERSION rev=<v> tier=ro|rw` — additive after
+  the frozen `rev=` key, so it needs a small §11.2 spec amendment and a
+  dist/gate republish) so the probe path can verify the flag it registers;
+  until then the tier on that path is taken on faith.
 
 - **Gated interactive session mode (#25).** A shell-*like* interactive prompt
   (history, `cd`/env that feel normal) where **every** command is still gated.
@@ -154,12 +183,22 @@ These are the highest-priority forward items.
   Applies to current single-command mode now and to the gated session (#25)
   later, where a write could optionally trigger inline approval.
 
-- **Gate auto-update (`SSHGATE_UPDATE`).** A signed control verb to update the
-  gate binary in place (a stub handler already exists in the gate). Deferred
-  until its security is designed separately: an update path is a code-execution
-  path, so it must be at least as strict as the signing model — signed,
-  versioned, fail-closed, and audited. Until then, a changed gate is redeployed
-  via the `sshgate` CLI (revoke + re-add).
+- **Gate auto-update (`SSHGATE_UPDATE`) — built, deploy pending.** Delivered by
+  the `update_gate` MCP tool (built on branch `feat/update-verb`; triple-review
+  and operator deploy still pending — deploy is the last manual gate redeploy).
+  A signed control verb that updates the gate binary in place on an
+  already-registered server. It meets the bar this item reserved — an update path
+  is a code-execution path, so it is at least as strict as the signing model:
+  **signed** (goes through the master key like any other write), **versioned**
+  (returns the installed SHA-256 + build revision), **fail-closed** (hash
+  mismatch / wrong-arch binary / Tier-1 all refuse and write nothing), and
+  **audited** (gate + signer records). The agent supplies only the alias; the MCP
+  hashes the operator's locally-staged gate binary and the human approves a
+  distinct "GATE BINARY UPDATE" Telegram banner bound to that exact SHA-256. A
+  standing grant never auto-signs it, and it onboards no new server, so it does
+  not expand the agent's reach. Once deployed it replaces the old `sshgate` CLI
+  revoke + re-add redeploy for gate changes. Design:
+  `docs/proposed/sshgate-update-verb-2026-07.md`.
 
 - **Signed-at-rest redactor (deferred).** Strengthen the redaction path's signing
   posture and merge the deferred redactor work.

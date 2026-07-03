@@ -62,10 +62,14 @@ cryptographic gate is enforced on each remote server independently.
    via @BotFather. If you don't have one yet, you'll be walked through it.
 4. `~/.config/sshgate/` and *(Tier 2 only)* `/var/lib/sshgatesigner/` — local
    config + key + audit-log paths, mode 0700 / 0640.
-5. SSHGate binaries — built from your clone via `make install-local`
-   (puts `sshgate-mcp` + `sshgate-signer-telegram` on your `$PATH` and
-   the remote `sshgate-gate-linux-amd64` under `~/.config/sshgate/bin/`).
-   No remote dependencies fetched at runtime.
+5. SSHGate binaries — installed by `make install-local`. `sshgate-mcp` +
+   `sshgate-signer-telegram` are built from your clone onto your `$PATH`;
+   the remote `sshgate-gate-linux-amd64` is **copied** from the committed,
+   CI-verified `dist/gate/` artifact into `~/.config/sshgate/bin/` — it is
+   never rebuilt locally, because a local rebuild would hash to something
+   no published release matches and fail the update approval cross-check.
+   See README's "Verified release channel" section for how gate updates
+   are approved. No remote dependencies fetched at runtime.
 
 ### What you'll need handy
 

@@ -8,7 +8,7 @@ SSHGate is a Claude Code plugin that lets an agent SSH into Linux servers. Reads
 
 ## Architecture (one-liner)
 
-A small Go binary (`gate`) sits between OpenSSH and shell exec on each remote server. A local daemon (`signer-telegram`, running as a separate Unix user) holds the master Ed25519 signing key and asks the operator to approve writes via Telegram. The MCP server (`sshgate-mcp`) exposes eight tools to Claude (`run`, `run_batch`, `list_servers`, `status`, `revoke_server`, `request_grant`, `revoke_grant`, `list_grants`). Provisioning a server is a human-only `sshgate` CLI — deliberately off the agent surface so the agent can't expand its own reach.
+A small Go binary (`gate`) sits between OpenSSH and shell exec on each remote server. A local daemon (`signer-telegram`, running as a separate Unix user) holds the master Ed25519 signing key and asks the operator to approve writes via Telegram. The MCP server (`sshgate-mcp`) exposes nine tools to Claude (`run`, `run_batch`, `list_servers`, `status`, `revoke_server`, `request_grant`, `revoke_grant`, `list_grants`, `update_gate` — the last requesting a signed, human-approved, hash-bound in-place update of the gate binary on an already-registered server). Provisioning a server is a human-only `sshgate` CLI — deliberately off the agent surface so the agent can't expand its own reach.
 
 ## How to use this project as an agent
 
@@ -38,7 +38,9 @@ a Telegram signer approves writes. `sshgate add … --read-only` registers Tier-
 absent = read-only). To change a server's tier today, a human runs
 `/sshgate:revoke <alias>` (its Telegram approval is kept) and re-provisions with
 `sshgate add` at the desired tier (`/sshgate:setup` first if no signer exists).
-A smoother in-place upgrade is planned (roadmap #17).
+An in-place tier flip was considered and rejected for security (any unsigned
+upgrade path the CLI could exercise, the agent could emulate); re-tiering stays
+revoke + re-provision — see roadmap #17 (redefined).
 
 - A write aimed at a read-only server is **refused before any Telegram tap**.
   Don't retry; surface the re-provision path above (the agent can't do it).

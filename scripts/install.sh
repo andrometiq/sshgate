@@ -17,7 +17,7 @@
 #
 #     <repo>/bin/sshgate-mcp
 #     <repo>/bin/sshgate-signer-telegram
-#     <repo>/bin/sshgate-gate-linux-amd64
+#     <repo>/dist/gate/sshgate-gate-linux-amd64  (committed, CI-verified — §11)
 #
 # Build them first with `make install-local` (the canonical command used
 # throughout the install docs; it runs `make build` plus stages binaries
@@ -58,18 +58,29 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 SSHGATE_MCP_BIN="$REPO_ROOT/bin/sshgate-mcp"
 SIGNER_BIN="$REPO_ROOT/bin/sshgate-signer-telegram"
-GATE_BIN="$REPO_ROOT/bin/sshgate-gate-linux-amd64"
+# Ship the COMMITTED, CI-verified gate (verified release channel, §11) — NOT a
+# locally-rebuilt bin/ copy, which would be a second, unverified gate outside
+# the channel (MED-3). This is the same published artifact update_gate pushes.
+GATE_BIN="$REPO_ROOT/dist/gate/sshgate-gate-linux-amd64"
 
 # Probe binaries before touching the system (plugin.md §8.5 — external
 # tools probed with a clear error). We check sshgate-mcp too so a fresh
 # install doesn't half-succeed and leave the operator wondering why the
 # MCP server isn't there.
-for bin in "$SSHGATE_MCP_BIN" "$SIGNER_BIN" "$GATE_BIN"; do
+for bin in "$SSHGATE_MCP_BIN" "$SIGNER_BIN"; do
     if [ ! -f "$bin" ]; then
         printf '[install] ERROR: %s not found; run `make install-local` in your clone first\n' "$bin" >&2
         exit 66
     fi
 done
+# The gate gets its own message: it is the COMMITTED, CI-verified artifact
+# (verified release channel, §11) — `make install-local` COPIES it but cannot
+# recreate it, so pointing there would bounce the operator through a command
+# that cannot fix the problem.
+if [ ! -f "$GATE_BIN" ]; then
+    printf '[install] ERROR: %s not found; it is the committed, CI-verified artifact — restore it with `git checkout -- dist/gate/` (or a fresh clone), or rebuild it with `make release-gate`\n' "$GATE_BIN" >&2
+    exit 66
+fi
 if [ ! -x "$SIGNER_BIN" ]; then
     printf '[install] ERROR: %s not executable\n' "$SIGNER_BIN" >&2
     exit 66

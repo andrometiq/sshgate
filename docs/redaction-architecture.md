@@ -544,7 +544,7 @@ LOC ~250 + ~40 fixture files.
 ## Rollout and migration
 
 1. **v1.2.0 ships with `standard` as the default** for both fresh installs and upgrades. There is no `fast` mode to inherit; aggressive optimisation in `standard` should make it acceptable as the universal default.
-2. **`SSHGATE_UPDATE`** (currently stubbed at `src/gate/cmd/sshgate-gate/main.go:117`) gets implemented in v1.1 (orthogonal to redaction) and is the deployment vehicle. Operators can roll back from v1.2 to v1.1 by signing an `SSHGATE_UPDATE` to the previous binary.
+2. **`SSHGATE_UPDATE`** (stub handler at `src/gate/cmd/sshgate-gate/main.go:196`) gets implemented in v1.1 (orthogonal to redaction) and is the deployment vehicle. Operators can roll back from v1.2 to v1.1 by signing an `SSHGATE_UPDATE` to the previous binary.
 3. **Backwards compatibility of the redactlist/unredactlist files**: a v1.2 gate refuses to start if either file exists with a schema version it doesn't recognise (daemon guideline 5.5). For v1.2.0 the schema is "v1".
 4. **There is no opt-out flag.** If an operator wants no redaction, they uninstall the v1.2 binary and roll back. Vault's anti-`log_raw` discipline drives this — a redaction-off flag inevitably ships to production by mistake.
 5. **Backwards-compat for `SSHGATE_REVOKE` / `SSHGATE_UPDATE`**: both old wire forms accepted for one release alongside the `SSHGATE_CMD:` envelope; deprecation warning logged.

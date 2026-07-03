@@ -157,6 +157,8 @@ func buildServer(cfgRoot, socketPath string, logger *log.Logger) (*mcp.Server, e
 		Servers:        servers,
 		Sign:           signer,
 		SSH:            sshClient,
+		SSHStdin:       sshClient,
+		StagedGatePath: stagedGatePath(cfgRoot),
 		KeyPath:        keyPath,
 		SignerSockPath: socketPath,
 	}
@@ -212,6 +214,17 @@ func buildLiveLog(cfgRoot string, logger *log.Logger) *livelog.Log {
 		return nil
 	}
 	return livelog.New(filepath.Join(cfgRoot, "audit-live.log"), capBytes)
+}
+
+// stagedGatePath resolves the absolute path to the operator's locally-staged
+// gate binary that update_gate hashes and pushes. $SSHGATE_GATE_BIN overrides
+// it; otherwise it is cfgRoot/bin/sshgate-gate-linux-amd64 — the exact path
+// `make install-local` stages to. This is NEVER an agent parameter (R5).
+func stagedGatePath(cfgRoot string) string {
+	if p := os.Getenv("SSHGATE_GATE_BIN"); p != "" {
+		return p
+	}
+	return filepath.Join(cfgRoot, "bin", "sshgate-gate-linux-amd64")
 }
 
 // configRoot returns the sshgate config root, honouring

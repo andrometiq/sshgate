@@ -443,8 +443,24 @@ func TestPhase3Provision_NoGoroutineLeaks(t *testing.T) {
 // either (the read path is direct).
 type noopSign struct{}
 
-func (noopSign) Sign(_ context.Context, _ string, _ []signpkg.CmdReq) ([]signpkg.Signed, error) {
-	return nil, errors.New("noopSign: Sign should not be invoked in Phase 3 tests")
+func (noopSign) Sign(_ context.Context, _ string, _ []signpkg.CmdReq) (signpkg.SignResult, error) {
+	return signpkg.SignResult{}, errors.New("noopSign: Sign should not be invoked in Phase 3 tests")
+}
+
+// The grant methods below exist only so noopSign satisfies the current
+// tools.SignClient interface (it grew RequestGrant/RevokeGrant/ListGrants with
+// the standing-grants work). No Phase-3 test path mints or lists a grant, so
+// each errors if invoked — same fail-if-called posture as Sign.
+func (noopSign) RequestGrant(_ context.Context, _, _, _ string, _ []string, _ int64) (string, int64, error) {
+	return "", 0, errors.New("noopSign: RequestGrant should not be invoked in Phase 3 tests")
+}
+
+func (noopSign) RevokeGrant(_ context.Context, _, _ string) error {
+	return errors.New("noopSign: RevokeGrant should not be invoked in Phase 3 tests")
+}
+
+func (noopSign) ListGrants(_ context.Context, _, _ string) ([]signpkg.GrantInfo, error) {
+	return nil, errors.New("noopSign: ListGrants should not be invoked in Phase 3 tests")
 }
 
 // fingerprintFromKnownHosts reads the first host-key line out of path

@@ -200,17 +200,20 @@ func ExecWithRedaction(ctx context.Context, cmd string, opts ExecOpts) (res Exec
 	//
 	// The gate classifies $SSH_ORIGINAL_COMMAND but never inspects stdin. In
 	// the gated model the agent supplies a COMMAND STRING (any content is in
-	// the command itself, run via `sh -c`, e.g. `echo X | tee f`); the MCP
-	// client (src/mcp/ssh/client.go) never sets sess.Stdin, so NO legitimate
-	// gated command sends channel stdin. Wiring the gate's os.Stdin — which
-	// the agent controls over the SSH channel — to the child opened an
-	// unsigned-exec vector: a child that reads its PROGRAM from stdin
-	// (`awk -f /dev/stdin`, `awk -f -`, `awk -f /dev/fd/0`, `sed -f -`, …)
-	// would execute agent-supplied code with no signature and no classifier
-	// visibility (the classifier sees only the command string, never the
-	// piped program). Leaving Stdin nil makes os/exec attach /dev/null,
-	// closing the entire class structurally — independent of whether the
-	// classifier happens to flag a given program-from-stdin form.
+	// the command itself, run via `sh -c`, e.g. `echo X | tee f`). Exactly ONE
+	// gated command carries channel stdin: update_gate streams the new gate
+	// binary's bytes (src/mcp/ssh/client.go RunWithStdin sets sess.Stdin). But
+	// those bytes are consumed by handleUpdate as HASH-VERIFIED DATA, which
+	// returns before ever reaching this exec path — so no exec child ever sees
+	// channel stdin. Wiring the gate's os.Stdin — which the agent controls over
+	// the SSH channel — to the child would open an unsigned-exec vector: a child
+	// that reads its PROGRAM from stdin (`awk -f /dev/stdin`, `awk -f -`,
+	// `awk -f /dev/fd/0`, `sed -f -`, …) would execute agent-supplied code with
+	// no signature and no classifier visibility (the classifier sees only the
+	// command string, never the piped program). Setting Stdin nil here
+	// unconditionally makes os/exec attach /dev/null, closing the entire class
+	// structurally — independent of whether the classifier happens to flag a
+	// given program-from-stdin form.
 	c.Stdin = nil
 	// Run the child in its own process group so ctx cancellation kills
 	// the whole tree (the shell plus anything it spawned).

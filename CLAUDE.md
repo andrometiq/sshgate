@@ -4,9 +4,9 @@ The cross-tool source of truth is `AGENTS.md`. Read it now — Codex and any oth
 
 ## SSHGate-specific notes for Claude Code
 
-This is a Claude Code plugin. The agent (MCP) tool surface is exactly **eight
+This is a Claude Code plugin. The agent (MCP) tool surface is exactly **nine
 tools** — `run`, `run_batch`, `list_servers`, `status`, `revoke_server`,
-`request_grant`, `revoke_grant`, `list_grants`:
+`request_grant`, `revoke_grant`, `list_grants`, `update_gate`:
 
 - `sshgate.run(alias, command)` — run one command on a registered server
 - `sshgate.run_batch(alias, commands[])` — run several commands; writes bulk-approve in one Telegram tap
@@ -16,6 +16,7 @@ tools** — `run`, `run_batch`, `list_servers`, `status`, `revoke_server`,
 - `sshgate.request_grant(alias, scope, commands?, duration_hours, reason?)` — request a standing grant so matching writes auto-sign for a window (≤ 24h); needs a distinct human Telegram approval, the agent can only request one
 - `sshgate.revoke_grant(alias)` — drop a server's standing grant (de-escalation only — always safe, no approval)
 - `sshgate.list_grants(alias?)` — list the signer's live standing grants (read-only, no approval); use to reconcile after a request_grant timeout
+- `sshgate.update_gate(alias)` — request a signed, in-place update of the gate binary on an already-registered server; the agent supplies only the alias (never binary bytes or a hash), the MCP hashes the operator's locally-staged gate binary, and the operator must approve a distinct "GATE BINARY UPDATE" Telegram banner bound to that exact SHA-256 before it runs. Fail-closed (hash mismatch / wrong-arch binary / Tier-1 all refuse and write nothing), signed, and audited; it does not expand the agent's reach (no new server is onboarded), and a standing grant never auto-signs it
 
 **Provisioning is NOT an agent tool.** There is deliberately no `add_server`
 on the MCP surface: a new machine is onboarded by a human at a terminal with
@@ -66,8 +67,11 @@ and the error messages below.
   pushed)`. Do NOT retry. To change a server's tier today: a human runs
   `/sshgate:revoke <alias>` (keeps its Telegram approval) and then re-provisions
   it with `sshgate add` at the desired tier (run `/sshgate:setup` first if no
-  signer is configured yet). A smoother in-place read-only→write upgrade is
-  planned (roadmap #17); there is no agent tool for any of this.
+  signer is configured yet). An in-place read-only→write flip was considered
+  and rejected for security (any unsigned tier-flip path the CLI could
+  exercise, the agent could emulate — read-only is read-only); re-tiering
+  stays revoke + re-provision — see roadmap #17 (redefined). There is no agent
+  tool for any of this.
 - **Gate deny exit codes** come back annotated, not bare:
   - **exit 77** — missing signature OR the host has no signer pubkey
     (read-only / Tier-1). Check `sshgate.status`; if the signer is not

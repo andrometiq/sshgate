@@ -34,7 +34,7 @@ Three lines of logic. The signing key is held by a separate Unix user the agent 
 
 **signer-telegram** (`sshgate-signer-telegram`) — the local approval daemon on your laptop. Runs as a separate Unix user (`sshgatesigner`) so Claude — running as you — cannot read its key file, ptrace its process, or read its Telegram bot token. When a write arrives, signer-telegram DMs you on a dedicated Telegram bot with the command list and Approve/Deny buttons; it signs only after your tap, and only if Telegram's `from.id` matches the allowlisted user.
 
-**MCP server** (`sshgate-mcp`) — the Claude Code plugin half. Exposes exactly eight MCP tools: `run`, `run_batch`, `list_servers`, `status`, `revoke_server`, `request_grant`, `revoke_grant`, and `list_grants`. Reads SSH directly; writes go to signer-telegram first for approval, then SSH the signed command across. (`request_grant`/`revoke_grant` manage *standing grants* — a human-approved window in which matching writes auto-sign without a tap each; the agent can only request a grant, never create one. `list_grants` is a read-only query of the grants the signer currently holds — no approval — used to reconcile true grant state after a `request_grant` whose approval may have timed out.) Provisioning a server is *not* among these tools — see **gate** above and the `sshgate` CLI below; it is deliberately human-only.
+**MCP server** (`sshgate-mcp`) — the Claude Code plugin half. Exposes exactly nine MCP tools: `run`, `run_batch`, `list_servers`, `status`, `revoke_server`, `request_grant`, `revoke_grant`, `list_grants`, and `update_gate`. Reads SSH directly; writes go to signer-telegram first for approval, then SSH the signed command across. (`request_grant`/`revoke_grant` manage *standing grants* — a human-approved window in which matching writes auto-sign without a tap each; the agent can only request a grant, never create one. `list_grants` is a read-only query of the grants the signer currently holds — no approval — used to reconcile true grant state after a `request_grant` whose approval may have timed out. `update_gate` requests a *signed, in-place update of the gate binary* on an already-registered server: the agent supplies only the alias, the MCP hashes the operator's locally-staged gate binary, and the operator must approve a distinct "GATE BINARY UPDATE" Telegram banner bound to that exact SHA-256 before it runs — fail-closed, signed, audited, never auto-signed by a standing grant, and it onboards no new server so it can't expand the agent's reach.) Provisioning a server is *not* among these tools — see **gate** above and the `sshgate` CLI below; it is deliberately human-only.
 
 **sshgate CLI** (`sshgate`) — the human-only provisioning tool, installed to `~/go/bin/sshgate` by `make install-local`. Onboarding a new server is the control plane (it defines which machines the agent can reach), so it is kept off the agent/MCP surface entirely: the agent can never expand its own reach by adding a machine. `sshgate pubkey` prints SSHGate's dedicated public-key line; you paste it into the target's `~/.ssh/authorized_keys` by hand; `sshgate add <alias> <user@host> [--read-only]` then connects with that key, installs the gate, and rewrites the pasted line into the locked forced-command entry.
 
@@ -180,6 +180,69 @@ go build -o bin/gate-redteam ./cmd/gate-redteam
 
 Full threat model, verdict schema, and agent-operator prompt:
 [`internal/redteam/README.md`](internal/redteam/README.md).
+
+---
+
+## Verified release channel — approving a gate update
+
+`sshgate.update_gate(<alias>)` replaces a server's gate binary in place with a
+single signed Telegram tap, instead of a full re-provision. The agent supplies
+only the alias; the MCP hashes the operator's locally-staged gate binary and the
+approval banner commits to that exact SHA-256, so the installed bytes can never
+differ from what was approved (the gate re-hashes and refuses on mismatch).
+
+That guarantees *what is installed == what was approved*. It does **not** by
+itself guarantee *what was approved == the real, audited gate* — the staged
+binary lives in the agent user's own home, so a compromised agent could swap its
+bytes before they are hashed. The **verified release channel** closes that by
+moving the trust anchor **off the machine**:
+
+- Every gate build is committed to this repo at
+  [`dist/gate/sshgate-gate-linux-amd64`](dist/gate/) alongside its published
+  `.sha256`, versioned by the top-level [`VERSION`](VERSION) file.
+- The `verify-gate` CI check reproducibly rebuilds the gate from source on every
+  push/PR with the pinned toolchain and **fails unless** the freshly-built hash
+  matches the committed one. A green tick certifies the committed binary is
+  exactly what the audited source produces — you cannot change the gate's code
+  without also re-committing (and re-publishing the hash of) the built binary.
+- Before approving, the operator cross-checks the banner hash against the
+  published hash on a **separate trusted device** (github.com). Swapped staging
+  bytes then match nothing published and are denied.
+
+### Approver runbook — do this on your phone before tapping ✓ Approve
+
+When the **⚠️ GATE BINARY UPDATE** banner arrives:
+
+1. Read from the banner: the target `<alias>`, the `New gate SHA-256: <64hex>`,
+   and the `Build:` line.
+2. On a **separate trusted device** (your phone browser, or a different machine —
+   **not** the box running the agent), open this repo on **github.com**.
+3. Confirm the commit shows a **green `verify-gate` tick** — proof the committed
+   binary reproducibly builds from the audited source.
+4. Open `dist/gate/sshgate-gate-linux-amd64.sha256` **at the default-branch HEAD**
+   (`main`) and read the published hash. HEAD is the right default: it is the
+   current audited gate. Looking up an *older* version's hash is a deliberate
+   **downgrade** path — do it only when *you* initiated the downgrade and know
+   why, never as the routine lookup.
+5. Compare the published hash to `New gate SHA-256` in the banner — the **full 64
+   hex characters**, not a prefix (a prefix collision is cheap). They must be
+   identical.
+6. Treat the banner's `Build:` line as **untrusted context, not proof** — it is
+   MCP-constructed, unsigned, and spoofable. The **only** trusted field is the
+   hash. A banner whose hash matches only an *older* commit's `.sha256` and not
+   HEAD's is a downgrade signal a spoofed version line cannot hide.
+7. **Only if** the full hash matches HEAD's published hash **and** CI is green
+   **and** the version is what you expect → tap **Approve**. Otherwise tap
+   **Deny** and investigate: a mismatch means the staged binary is **not** the
+   audited gate — treat it as a compromise signal, not a retry.
+
+### Dev override — `$SSHGATE_GATE_BIN`
+
+`$SSHGATE_GATE_BIN` points the MCP at an arbitrary local gate binary for
+development. Such a build is **by definition** not the published artifact, so its
+banner hash will **not** match any published `.sha256`. That mismatch is
+**expected on a dev box**. On a **production** server a hash mismatch must
+**never** be approved — it is the compromise signal the runbook step 7 describes.
 
 ---
 

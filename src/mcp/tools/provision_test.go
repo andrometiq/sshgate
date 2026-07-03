@@ -435,6 +435,119 @@ func TestProvision_Idempotent(t *testing.T) {
 	}
 }
 
+// TestProvision_ProbeIdempotent_GateAnswers: when the SSHGATE_VERSION probe on
+// the dedicated-key dial is answered by a live gate, Provision must take the
+// idempotent path WITHOUT ever reading authorized_keys — on an already-gated
+// host that read routes through the gate, where its `2>/dev/null` redirect
+// classifies as an unsigned write (exit 77) and the gate's redactor scrubs the
+// key base64 the fallback detection matches on. It must skip install/rewrite,
+// verify, and (re)register the alias with the TOFU fingerprint (a lost
+// servers.json is the main reason a human re-adds).
+func TestProvision_ProbeIdempotent_GateAnswers(t *testing.T) {
+	cfg, _ := provisionMaterials(t)
+
+	sess := &fakeBootstrapSession{
+		// A live gate answers the version probe...
+		versionProbeOut: []byte("SSHGATE_VERSION rev=abc123def456\n"),
+		// ...and the SSHGATE_OK verify re-dial succeeds.
+		probeOut: []byte("SSHGATE_OK\n"),
+		// What a REAL gated host would return for the cat: the redactor has
+		// scrubbed the key base64, so the fallback detection could never match
+		// it. The probe-first path must not even issue the cat.
+		catAuthKeys: []byte(`command="~/.sshgate-gate/gate",no-port-forwarding ssh-ed25519 [SSHGATE_REDACTED key=deadbeef] sshgate-dedicated` + "\n"),
+	}
+	installFakeBootstrapSession(t, sess, "SHA256:probeidem")
+
+	out, err := Provision(context.Background(), cfg, ProvisionInput{
+		Alias: "readd",
+		Host:  "h.example.com",
+		User:  "u",
+	})
+	if err != nil {
+		t.Fatalf("Provision (probe-idempotent): %v", err)
+	}
+	if !out.Idempotent {
+		t.Error("Idempotent = false; want true when a gate answers the version probe")
+	}
+	// The authorized_keys read must NOT have run — through the gate it would
+	// exit 77 (the very failure the probe-first design closes).
+	if sess.ranContaining("cat " + remoteAuthKeys) {
+		t.Error("probe-idempotent path read authorized_keys; the probe must short-circuit it")
+	}
+	// No install/rewrite of any kind.
+	if len(sess.uploads) != 0 {
+		t.Errorf("probe-idempotent re-run uploaded %d file(s); want 0", len(sess.uploads))
+	}
+	if sess.ranContaining("mkdir -p " + remoteGateDir) {
+		t.Error("probe-idempotent re-run ran mkdir; setup must be skipped")
+	}
+	// The alias is registered with the freshly pinned fingerprint, exactly
+	// like a fresh provision would record it.
+	reg, err := registry.New(cfg.ServersPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e, ok := reg.Get("readd"); !ok {
+		t.Error("registry missing alias after probe-idempotent re-run")
+	} else if e.Fingerprint != "SHA256:probeidem" {
+		t.Errorf("registry entry Fingerprint = %q; want the pinned dial fingerprint SHA256:probeidem", e.Fingerprint)
+	}
+	if out.Fingerprint != "SHA256:probeidem" {
+		t.Errorf("output Fingerprint = %q; want SHA256:probeidem", out.Fingerprint)
+	}
+}
+
+// TestProvision_ProbeFails_FreshFlowUnchanged: when the SSHGATE_VERSION probe
+// hard-fails (a plain shell runs it — "command not found", exit 127), Provision
+// must swallow the probe error and proceed with the fresh-provision flow
+// exactly as before: plain-shell authorized_keys read, install, rewrite,
+// verify, register.
+func TestProvision_ProbeFails_FreshFlowUnchanged(t *testing.T) {
+	cfg, pub := provisionMaterials(t)
+
+	sess := &fakeBootstrapSession{
+		// The probe errors like a plain shell's exit 127.
+		failRunSub:  "SSHGATE_VERSION",
+		catAuthKeys: plainPastedLine(t, pub),
+		probeOut:    []byte("SSHGATE_OK\n"),
+	}
+	installFakeBootstrapSession(t, sess, "SHA256:fresh")
+
+	out, err := Provision(context.Background(), cfg, ProvisionInput{
+		Alias: "fresh",
+		Host:  "h.example.com",
+		User:  "u",
+	})
+	if err != nil {
+		t.Fatalf("Provision (probe fails → fresh flow): %v", err)
+	}
+	if out.Idempotent {
+		t.Error("Idempotent = true; want false on a fresh host (probe failed)")
+	}
+	// The fallback authorized_keys read ran on the plain shell.
+	if !sess.ranContaining("cat " + remoteAuthKeys) {
+		t.Error("fresh flow skipped the authorized_keys read; the fallback detection must still run")
+	}
+	// Full install happened: gate uploaded + authorized_keys rewritten.
+	if _, ok := sess.uploadedTo(remoteGateBin); !ok {
+		t.Error("gate binary not uploaded on the fresh flow")
+	}
+	au, ok := sess.uploadedTo(remoteAuthKeys)
+	if !ok {
+		t.Fatal("authorized_keys was not rewritten on the fresh flow")
+	}
+	if !hasRestrictedEntryForKey(au.body, pub, remoteGateBin) {
+		t.Error("rewritten authorized_keys lacks the canonical forced-command entry")
+	}
+	reg, err := registry.New(cfg.ServersPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := reg.Get("fresh"); !ok {
+		t.Error("registry missing alias after fresh provision")
+	}
+}
+
 // ---------------------------------------------------------------------
 // Provision — rollback
 // ---------------------------------------------------------------------

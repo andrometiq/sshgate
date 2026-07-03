@@ -603,7 +603,12 @@ func TestRunAdminCommands(t *testing.T) {
 		}
 	})
 
-	t.Run("signed SSHGATE_UPDATE is not implemented -> exit 1", func(t *testing.T) {
+	t.Run("signed SSHGATE_UPDATE with a malformed hash arg -> exit 65", func(t *testing.T) {
+		// The verb is implemented (see update_test.go for the full matrix);
+		// this pins the run()->handleUpdate integration for a non-hash arg:
+		// "v1.1.0" is not 64 lowercase hex, so it is rejected with EX_DATAERR
+		// and nothing is installed. (runWith sends no stdin, so even a valid
+		// hash would then hit the empty-stdin refusal — also 65.)
 		dir := t.TempDir()
 		pub, priv := genKey(t)
 		seedPub(t, dir, pub, 0o644)
@@ -611,11 +616,11 @@ func TestRunAdminCommands(t *testing.T) {
 
 		line := signedLine(t, priv, freshPayload("SSHGATE_UPDATE v1.1.0"))
 		code, _, stderr := runWith(t, line)
-		if code != exitGeneric {
-			t.Errorf("exit = %d, want %d", code, exitGeneric)
+		if code != exitDataErr {
+			t.Errorf("exit = %d, want %d", code, exitDataErr)
 		}
-		if !strings.Contains(stderr, "not yet implemented") {
-			t.Errorf("stderr = %q, want 'not yet implemented'", stderr)
+		if !strings.Contains(stderr, "malformed hash") {
+			t.Errorf("stderr = %q, want 'malformed hash'", stderr)
 		}
 	})
 

@@ -1,6 +1,35 @@
 .PHONY: all build install-local test test-integration vet clean sshgate-gate-linux \
 	sshgate-mcp-darwin sshgate-signer-telegram-darwin darwin cross sshgate-signer-server \
-	preflight e2e smoke gitleaks
+	preflight e2e smoke gitleaks release-gate verify-dist verify-repro
+
+# ---------------------------------------------------------------------------
+# Verified release channel (spec §11)
+# ---------------------------------------------------------------------------
+# VERSION is the top-level repo/gate version (its own line, e.g. v1.3.0). It
+# becomes the gate's build-injected version marker via -X (§11.2). $(shell cat)
+# strips the trailing newline; release-gate re-validates the file at recipe time.
+VERSION := $(shell cat VERSION 2>/dev/null)
+
+# GATE_BUILD_FLAGS is the SHARED gate build flag set (§11.3, LOW-4): the dev
+# `sshgate-gate-linux` target and the strict `release-gate` target use the SAME
+# flags so their output cannot drift — they differ ONLY in toolchain env and
+# destination. -trimpath strips local paths; -buildid= empties the Go build id;
+# -X injects the version marker (§11.2); -buildvcs=false turns vcs stamping OFF
+# (the binary is committed in a commit whose hash it cannot contain, and vcs.time
+# would break reproducibility, §11.1).
+GATE_BUILD_FLAGS := -trimpath -ldflags '-s -w -buildid= -X main.versionMarker=SSHGATE_GATE_VERSION{$(VERSION)}' -buildvcs=false
+
+# The pinned RELEASE toolchain (§11.1), single-sourced from go.mod's `toolchain`
+# directive so the two pins can never drift. release-gate forces GOTOOLCHAIN to
+# this exact patch so a byte-identical binary comes out on any machine —
+# including one whose LOCAL `go` is a custom build (this repo's dev box runs
+# go1.26.4-X:nodwarf5, a live instance of the MED-2 trap). Go auto-downloads the
+# genuine release toolchain on first use. release-gate asserts the derivation is
+# non-empty before compiling.
+GATE_RELEASE_TOOLCHAIN := $(shell awk '/^toolchain /{print $$2}' go.mod)
+
+DIST_GATE_DIR := dist/gate
+DIST_GATE_BIN := $(DIST_GATE_DIR)/sshgate-gate-linux-amd64
 
 all: vet test build
 
@@ -20,12 +49,52 @@ sshgate-signer-server:
 	mkdir -p bin
 	go build -o bin/sshgate-signer-server ./src/signer-server/cmd/sshgate-signer-server
 
-# Cross-compile sshgate-gate for the remote host (linux/amd64). Static, stripped, reproducible-ish.
+# Cross-compile sshgate-gate for the remote host (linux/amd64) — the DEV build.
+# Fast + unpinned: it uses the LOCAL toolchain and writes to bin/, sharing only
+# the flag set (GATE_BUILD_FLAGS) with release-gate. It NEVER uses the pinned
+# release toolchain env and NEVER writes to dist/ (LOW-4), so a dev build can
+# never dirty the committed, CI-verified artifact.
 sshgate-gate-linux:
 	mkdir -p bin
 	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
-		go build -trimpath -ldflags='-s -w' \
+		go build $(GATE_BUILD_FLAGS) \
 		-o bin/sshgate-gate-linux-amd64 ./src/gate/cmd/sshgate-gate
+
+# release-gate is the STRICT, reproducible gate build (§11.1). It forces the
+# pinned release toolchain + the full deterministic env and writes the committed
+# artifact + its sha256 sidecar into dist/gate/. Run twice from a clean state it
+# MUST produce a byte-identical binary. This is the ONLY target that touches
+# dist/; dev targets (build/preflight/sshgate-gate-linux) never do.
+release-gate:
+	@# LOW-3: VERSION must be a single clean line — a stray CR/space/comment would
+	@# land outside the marker charset and blank every version scan.
+	@if [ ! -f VERSION ]; then echo "release-gate: VERSION file is missing" >&2; exit 1; fi
+	@# grep -c '' counts LINES (including a final partial line); wc -l counts
+	@# newline bytes, which false-rejects a no-trailing-newline single-line file
+	@# and false-accepts "v1.3.0\ngarbage".
+	@if [ "$$(grep -c '' VERSION)" -ne 1 ]; then echo "release-gate: VERSION must be exactly one line" >&2; exit 1; fi
+	@if ! printf '%s' "$$(cat VERSION)" | grep -Eq '^v[0-9A-Za-z._+-]+$$'; then \
+		echo "release-gate: VERSION '$$(cat VERSION)' must match ^v[0-9A-Za-z._+-]+\$$ (no CRLF, spaces, or comments)" >&2; exit 1; fi
+	@# §11.1 single-source guard: the pin is derived from go.mod's `toolchain`
+	@# directive at parse time; an empty derivation means the directive is gone.
+	@if [ -z "$(GATE_RELEASE_TOOLCHAIN)" ]; then \
+		echo "release-gate: GATE_RELEASE_TOOLCHAIN is empty — go.mod must carry a 'toolchain goX.Y.Z' directive (§11.1 single-source pin)" >&2; exit 1; fi
+	@# MED-2: force the genuine release toolchain and ASSERT it before compiling.
+	@# The local go here is go1.26.4-X:nodwarf5 (custom); GOTOOLCHAIN pins the real
+	@# release build, which Go auto-downloads on first use.
+	@have=$$(GOTOOLCHAIN=$(GATE_RELEASE_TOOLCHAIN) go version 2>/dev/null | awk '{print $$3}'); \
+	if [ "$$have" != "$(GATE_RELEASE_TOOLCHAIN)" ]; then \
+		echo "release-gate: toolchain mismatch: need $(GATE_RELEASE_TOOLCHAIN), have '$$have' — install it or check network (Go auto-downloads the release toolchain; do NOT fall back to a local custom toolchain for the dist artifact)" >&2; exit 1; fi
+	mkdir -p $(DIST_GATE_DIR)
+	@# MED-1: export the COMPLETE build env, overriding whatever the shell holds
+	@# (GOAMD64 microarch, GOEXPERIMENT, a stray GOFLAGS all change emitted bytes).
+	GOTOOLCHAIN=$(GATE_RELEASE_TOOLCHAIN) CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOAMD64= GOEXPERIMENT= GOFLAGS=-mod=readonly \
+		go build $(GATE_BUILD_FLAGS) -o $(DIST_GATE_BIN) ./src/gate/cmd/sshgate-gate
+	@# Regenerate the sha256sum-compatible sidecar (basename form so `sha256sum -c`
+	@# passes when run from inside dist/gate/).
+	cd $(DIST_GATE_DIR) && sha256sum sshgate-gate-linux-amd64 > sshgate-gate-linux-amd64.sha256
+	@echo "release-gate: built $(DIST_GATE_BIN) (VERSION=$(VERSION), toolchain=$(GATE_RELEASE_TOOLCHAIN))"
+	@cat $(DIST_GATE_BIN).sha256
 
 # macOS desktop builds (v1.1 Task C — for users running Claude Code on a Mac).
 # sshgate-signer-telegram + sshgate-mcp run on the user's laptop; sshgate-gate is Linux-only
@@ -51,27 +120,28 @@ cross: build darwin
 # and INSTALL.md. It depends on `build`, so ONE `make install-local`
 # produces everything the install needs:
 #   - <clone>/bin/*  (sshgate-mcp, sshgate-signer-telegram, sshgate-gate,
-#                     sshgate (human CLI), sshgate-gate-linux-amd64) for
-#                     scripts/install.sh
+#                     sshgate (human CLI), sshgate-gate-linux-amd64) for dev
 #   - $PATH binaries in $(go env GOPATH)/bin via `go install`
 #                     (.mcp.json now references the bare `sshgate-mcp`)
-#   - sshgate-gate-linux-amd64 staged into the STABLE config location the
-#     MCP's add_server resolver checks (~/.config/sshgate/bin/), decoupled
-#     from the plugin cache that `/plugin install` cannot keep src/ in.
+#   - the COMMITTED, CI-verified gate (dist/gate/sshgate-gate-linux-amd64)
+#     COPIED (never rebuilt, §11.3) into the STABLE config location the MCP
+#     hashes + pushes (~/.config/sshgate/bin/). A local rebuild on a
+#     slightly-different toolchain would hash to something the §11.5 published
+#     check rejects — so the bytes staged for update_gate MUST be the exact
+#     published bytes.
 # Run from the user's clone (it has src/). Honors $XDG_CONFIG_HOME.
 install-local: build
 	go install ./src/mcp/cmd/sshgate-mcp
 	go install ./src/signer/cmd/sshgate-signer-telegram
 	go install ./src/cli/cmd/sshgate
+	@if [ ! -f $(DIST_GATE_BIN) ]; then \
+		echo "install-local: $(DIST_GATE_BIN) is missing — it is committed to the repo; run 'make release-gate' to (re)build it, or fetch it from the clean tree" >&2; exit 1; fi
 	mkdir -p "$${XDG_CONFIG_HOME:-$$HOME/.config}/sshgate/bin"
-	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
-		go build -trimpath -ldflags='-s -w' \
-		-o "$${XDG_CONFIG_HOME:-$$HOME/.config}/sshgate/bin/sshgate-gate-linux-amd64" \
-		./src/gate/cmd/sshgate-gate
+	cp $(DIST_GATE_BIN) "$${XDG_CONFIG_HOME:-$$HOME/.config}/sshgate/bin/sshgate-gate-linux-amd64"
 	@echo "install-local done:"
-	@echo "  <clone>/bin/* (incl. sshgate-gate-linux-amd64) -> for scripts/install.sh"
+	@echo "  <clone>/bin/* -> dev binaries"
 	@echo "  sshgate-mcp, sshgate-signer-telegram, sshgate -> $$(go env GOPATH)/bin (must be on PATH)"
-	@echo "  sshgate-gate-linux-amd64 -> $${XDG_CONFIG_HOME:-$$HOME/.config}/sshgate/bin/"
+	@echo "  COMMITTED $(DIST_GATE_BIN) COPIED -> $${XDG_CONFIG_HOME:-$$HOME/.config}/sshgate/bin/ (the verified bytes update_gate pushes)"
 
 test:
 	go test -race ./...
@@ -104,10 +174,48 @@ clean:
 # ---------------------------------------------------------------------------
 
 # preflight: the standing pre-push gate. Format-adjacent vet, the full race
-# unit suite, a secret scan of the commits about to be pushed, and a clean
-# build. No Docker, so it runs anywhere in well under a minute.
-preflight: vet test gitleaks build
+# unit suite, a secret scan of the commits about to be pushed, a clean build,
+# the CHEAP verified-release-channel checks, and the two-build reproducibility
+# assertion. No Docker, so it runs anywhere in well under a minute.
+preflight: vet test gitleaks build verify-dist verify-repro
 	@echo "preflight: OK — safe to push"
+
+# verify-dist: the FAST verified-release-channel checks (§11). It deliberately
+# does NOT do the reproducible rebuild (that needs the pinned-toolchain download
+# and is CI's job, verify-gate.yml, §11.4) — it only confirms, locally and in
+# milliseconds, that (a) the committed binary still matches its own published
+# .sha256 (binary↔sidecar drift) and (b) VERSION is a single clean line. It
+# scopes its claim honestly: source↔binary drift is caught ONLY by CI (NIT-1).
+verify-dist:
+	@if [ ! -f VERSION ]; then echo "verify-dist: VERSION file is missing" >&2; exit 1; fi
+	@# grep -c '' counts LINES (incl. a final partial line), not newline bytes.
+	@if [ "$$(grep -c '' VERSION)" -ne 1 ]; then echo "verify-dist: VERSION must be exactly one line" >&2; exit 1; fi
+	@if ! printf '%s' "$$(cat VERSION)" | grep -Eq '^v[0-9A-Za-z._+-]+$$'; then \
+		echo "verify-dist: VERSION '$$(cat VERSION)' must match ^v[0-9A-Za-z._+-]+\$$" >&2; exit 1; fi
+	@if [ ! -f $(DIST_GATE_BIN).sha256 ]; then echo "verify-dist: $(DIST_GATE_BIN).sha256 is missing" >&2; exit 1; fi
+	@cd $(DIST_GATE_DIR) && sha256sum -c sshgate-gate-linux-amd64.sha256
+	@echo "verify-dist: OK — committed gate matches its .sha256 (source↔binary is CI's job, §11.4)"
+
+# verify-repro: the STANDING two-build reproducibility assertion (spec §11.8
+# task 14). Builds the gate TWICE with the SHARED flag set (GATE_BUILD_FLAGS)
+# on the LOCAL toolchain into throwaway scratch paths — never bin/, never
+# dist/ — and fails loudly if the two hashes differ. This catches flag-set
+# nondeterminism regressions (a dropped -buildid= / -buildvcs=false, a stray
+# env-sensitive flag) at preflight time, before push; CROSS-MACHINE
+# reproducibility of the COMMITTED artifact (pinned toolchain, rebuild vs
+# committed bytes) stays CI's job (verify-gate.yml, §11.4).
+verify-repro:
+	@tmpdir=$$(mktemp -d) || exit 1; \
+	trap 'rm -rf "$$tmpdir"' EXIT; \
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+		go build $(GATE_BUILD_FLAGS) -o "$$tmpdir/gate-a" ./src/gate/cmd/sshgate-gate || exit 1; \
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+		go build $(GATE_BUILD_FLAGS) -o "$$tmpdir/gate-b" ./src/gate/cmd/sshgate-gate || exit 1; \
+	ha=$$(sha256sum "$$tmpdir/gate-a" | awk '{print $$1}'); \
+	hb=$$(sha256sum "$$tmpdir/gate-b" | awk '{print $$1}'); \
+	if [ "$$ha" != "$$hb" ]; then \
+		echo "verify-repro: FAIL — two identical-flag gate builds hashed differently ($$ha vs $$hb): GATE_BUILD_FLAGS has a nondeterminism regression" >&2; exit 1; fi; \
+	echo "verify-repro: OK — two local gate builds byte-identical ($$ha) (cross-machine repro vs the committed artifact is CI's job, §11.4)"
 
 # gitleaks scans the commits that would be pushed (origin/main..HEAD) for
 # secrets. Skips with a loud note if gitleaks is not installed — CI must have

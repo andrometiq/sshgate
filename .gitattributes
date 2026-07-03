@@ -1,0 +1,8 @@
+# Verified release channel (spec §11). The committed gate artifacts under
+# dist/gate/ are the off-machine trust anchor: the approver cross-checks the
+# Telegram banner hash against dist/gate/sshgate-gate-linux-amd64.sha256 on
+# github.com (§11.5). `binary` (= -text -diff -merge) guarantees git never
+# applies CRLF/EOL normalization or textual diff/merge to these paths, so the
+# committed bytes hash to EXACTLY what `make release-gate` produced and CI
+# re-verifies — a normalization would silently change the published hash.
+dist/gate/* binary

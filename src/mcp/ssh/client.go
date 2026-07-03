@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"net"
 	"os"
@@ -45,6 +46,25 @@ type Client struct {
 // cancelled ctx forcibly closes the connection so a stuck session
 // returns promptly.
 func (c *Client) Run(ctx context.Context, host, user string, port int, cmd string) ([]byte, []byte, int, error) {
+	return c.run(ctx, host, user, port, cmd, nil)
+}
+
+// RunWithStdin is Run plus a single, gated exception: it wires stdin as the
+// SSH session's channel stdin, so a caller can stream bytes to the remote
+// command. It is used ONLY by update_gate, which streams the new gate binary
+// on stdin (SSHGATE_UPDATE) — data the gate authenticates by hash before it
+// installs it, never a program fed to a shell. A nil stdin makes RunWithStdin
+// byte-for-byte identical to Run. All of Run's ctx/deadline/exit-code
+// semantics are preserved (both delegate to the same run).
+func (c *Client) RunWithStdin(ctx context.Context, host, user string, port int, cmd string, stdin io.Reader) ([]byte, []byte, int, error) {
+	return c.run(ctx, host, user, port, cmd, stdin)
+}
+
+// run is the shared implementation behind Run (stdin nil) and RunWithStdin
+// (stdin non-nil). When stdin != nil it is set as the session's channel
+// stdin before sess.Run, which copies it as the command's stdin; when nil the
+// session carries no stdin, exactly as Run always has.
+func (c *Client) run(ctx context.Context, host, user string, port int, cmd string, stdin io.Reader) ([]byte, []byte, int, error) {
 	if c.KeyPath == "" {
 		return nil, nil, 0, errors.New("ssh: KeyPath is empty")
 	}
@@ -131,6 +151,13 @@ func (c *Client) Run(ctx context.Context, host, user string, port int, cmd strin
 	var stdout, stderr bytes.Buffer
 	sess.Stdout = &stdout
 	sess.Stderr = &stderr
+	// Only update_gate uses this: stream the new gate binary on the session's
+	// channel stdin. sess.Run copies stdin into the channel for us, so a plain
+	// bytes.Reader is sufficient — no StdinPipe/goroutine needed. A nil stdin
+	// leaves the session with no stdin, exactly as Run has always behaved.
+	if stdin != nil {
+		sess.Stdin = stdin
+	}
 
 	runErr := sess.Run(cmd)
 	exit := 0

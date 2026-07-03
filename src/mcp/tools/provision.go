@@ -228,7 +228,7 @@ func Provision(ctx context.Context, cfg provisionCfg, in ProvisionInput) (Provis
 
 	// Read local materials before touching the remote so we fail fast.
 	gateBin, err := readLocalFile(cfg.GateBinaryPath, "gate binary",
-		"run `make install-local` to build sshgate-gate-linux-amd64 into ~/.config/sshgate/bin/")
+		"run `make install-local` to install the committed, CI-verified sshgate-gate-linux-amd64 (copied from dist/gate/, never rebuilt) into ~/.config/sshgate/bin/")
 	if err != nil {
 		return ProvisionOutput{}, err
 	}
@@ -283,7 +283,32 @@ func Provision(ctx context.Context, cfg provisionCfg, in ProvisionInput) (Provis
 	}
 	defer bootSess.Close()
 
-	// Idempotency: skip the rewrite ONLY when the canonical restricted entry
+	// Idempotency, probe FIRST: send the unsigned SSHGATE_VERSION verb on the
+	// dedicated-key connection we just authenticated. If a live gate answers,
+	// the host is by construction already provisioned for THIS key — the only
+	// way the verb reaches a gate is through the forced-command line bound to
+	// the key we dialed with — so skip install/rewrite and just verify +
+	// register (a lost servers.json is the main reason a human re-adds).
+	//
+	// Reading authorized_keys THROUGH the gate can never detect this case:
+	// the read's `2>/dev/null` redirect classifies as an unsigned write (gate
+	// exit 77 — the bug this closes), and even as a pure read the gate's
+	// output redactor scrubs the key base64 that hasRestrictedEntryForKey
+	// matches on. "A gate answered on this key" is a strictly stronger signal
+	// than parsing authorized_keys, with no classifier/redactor in the loop.
+	//
+	// A stray PLAIN duplicate of the key cannot hide behind this probe: sshd
+	// uses the FIRST authorized_keys line matching the offered key, so either
+	// the restricted line wins (the plain duplicate is unreachable for this
+	// key) or the plain line wins (a bare shell fails the verb) and the
+	// fallback below forces the rewrite that removes it.
+	idempotent := probeGateAnswers(ctx, bootSess)
+
+	// No gate answered → not already provisioned for this key (plain shell),
+	// or a half-provisioned/broken gate — which deliberately falls through so
+	// the fresh flow surfaces its error unchanged. The authorized_keys read
+	// below runs on a PLAIN shell in the fresh case (no classifier/redactor
+	// in play). Skip the rewrite ONLY when the canonical restricted entry
 	// is present AND there is no stray PLAIN duplicate of the same key. If a
 	// plain line coexists with the restricted one (the human pasted twice, or
 	// a prior partial run left both), treating the host as "already set up"
@@ -291,12 +316,15 @@ func Provision(ctx context.Context, cfg provisionCfg, in ProvisionInput) (Provis
 	// server registers as verified. Forcing the rewrite path in that case
 	// removes ALL lines matching the key (plain and restricted) and re-emits
 	// exactly one restricted line, closing the gap.
-	existing, _, err := bootSess.Run(ctx, "cat "+remoteAuthKeys+" 2>/dev/null || true")
-	if err != nil {
-		return ProvisionOutput{}, fmt.Errorf("read authorized_keys: %w", err)
+	var existing []byte
+	if !idempotent {
+		existing, _, err = bootSess.Run(ctx, "cat "+remoteAuthKeys+" 2>/dev/null || true")
+		if err != nil {
+			return ProvisionOutput{}, fmt.Errorf("read authorized_keys: %w", err)
+		}
+		idempotent = hasRestrictedEntryForKey(existing, sshgatePub, remoteGateBin) &&
+			!hasPlainLineForKey(existing, sshgatePub)
 	}
-	idempotent := hasRestrictedEntryForKey(existing, sshgatePub, remoteGateBin) &&
-		!hasPlainLineForKey(existing, sshgatePub)
 
 	// runAutoSetup / rollback are methods on Runner but touch no Runner
 	// state — a zero Runner is a safe shared host for them.
@@ -371,6 +399,22 @@ func provisionRollback(ctx context.Context, r *Runner, bootSess bootstrapSession
 	return fmt.Errorf(
 		"provisioning failed (%w); the SSHGate key on %s@%s has been rolled back to the PLAIN line you pasted, which grants FULL SHELL — remove that line from %s:~/.ssh/authorized_keys now, or re-run `sshgate add` to complete the lockdown",
 		cause, user, host, host)
+}
+
+// probeGateAnswers sends the unsigned SSHGATE_VERSION verb over the already-
+// dialed dedicated-key session and reports whether a live gate answered — the
+// gate prints "SSHGATE_VERSION rev=<rev>" and exits 0 (the same mechanism
+// probeRunningRev uses in update_gate.go). A plain shell fails the verb
+// ("command not found", exit 127 → bootstrapSession.Run surfaces the non-zero
+// exit as an error) and a broken or pre-verb gate errors or prints no marker;
+// all of those report false, sending Provision down the fresh-provision flow
+// unchanged. Best-effort by design: a probe failure is never surfaced.
+func probeGateAnswers(ctx context.Context, sess bootstrapSession) bool {
+	stdout, _, err := sess.Run(ctx, "SSHGATE_VERSION")
+	if err != nil {
+		return false
+	}
+	return strings.Contains(string(stdout), "SSHGATE_VERSION rev=")
 }
 
 // verifyProvision re-dials the target with the (now gated) SSHGate key and
