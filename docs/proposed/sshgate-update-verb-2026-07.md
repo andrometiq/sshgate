@@ -670,6 +670,21 @@ this and **both** are required:
    distinct valid values → `"unknown"`. (Repeat occurrences of the *same* value
    collapse to one and are fine.)
 
+**The lingering-default carve-out (build finding, empirically confirmed on
+go1.26.4).** `-X` does **not** strip the source default literal from the linked
+binary: a release binary contains **both** `SSHGATE_GATE_VERSION{dev}` (the
+`versionMarker` var's default, lingering in `.rodata`) and `{<VERSION>}` (the
+injected value). Under rule 2 as written those are two distinct valid values →
+every release binary would scan as `"unknown"`, blanking the version display
+exactly where it matters. The scan therefore **skips the exact sentinel token
+`dev`**, which can never be a real VERSION (the file must match
+`^v[0-9A-Za-z._+-]+$`, so it always starts with `v`). Consequence: a
+byte-scan of a *dev* binary (only `{dev}` present) resolves `"unknown"` — the
+conservative cue for "not a verified release" — while the running gate reports
+its **own** compiled-in marker through a single-marker read that does *not*
+skip the sentinel, so a genuine dev build still self-reports `dev`.
+Implemented and documented in `src/gatever/marker.go` (`Scan` vs `Version`).
+
 This is **UX-only.** The security property rides on the SHA-256 alone: a forged
 or stripped marker changes only what the banner *displays*, never what the gate
 *enforces* (R4). Both `stagedBuildInfo` (MCP) and `runningGateVersion` /
