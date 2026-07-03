@@ -6,11 +6,13 @@ description: This skill should be used when the user asks to debug, diagnose, or
 # Debugging remote servers with SSHGate
 
 SSHGate gives you SSH access to the user's registered servers. Your MCP
-tool surface is exactly eight tools — `sshgate.run`, `sshgate.run_batch`,
+tool surface is exactly nine tools — `sshgate.run`, `sshgate.run_batch`,
 `sshgate.list_servers`, `sshgate.status`, `sshgate.revoke_server`,
-`sshgate.request_grant`, `sshgate.revoke_grant`, and `sshgate.list_grants` —
-and debugging mostly uses the first three (the grant tools are for unattended
-write windows; see **Standing grants** below). Read commands run instantly. Write
+`sshgate.request_grant`, `sshgate.revoke_grant`, `sshgate.list_grants`, and
+`sshgate.update_gate` — and debugging mostly uses the first three (the grant
+tools are for unattended write windows, and `update_gate` pushes a signed,
+human-approved update of the gate binary itself — see **Standing grants** and
+**Updating a server's gate** below). Read commands run instantly. Write
 commands need the user to tap a Telegram approval button on their phone.
 Optimise for: fast diagnosis, one approval per fix, no surprises.
 
@@ -84,6 +86,24 @@ returns an error or times out, the grant may still have gone live — the human
 approved, but the response didn't make it back to you. Call `sshgate.list_grants`
 to check the true state *before* re-requesting. Re-requesting blindly would
 prompt the human a second time and risk a double grant.
+
+## Updating a server's gate
+
+When a gate change needs to reach an **already-registered** server (a new
+redaction rule, a classifier fix), you don't re-provision — you request a
+signed, in-place binary update:
+
+- **`sshgate.update_gate(alias)`** pushes a fresh gate binary onto the named
+  server. You supply **only the alias** — never binary bytes or a hash. The MCP
+  hashes the operator's locally-staged gate binary and the user must approve a
+  distinct **"GATE BINARY UPDATE"** Telegram banner bound to that exact SHA-256
+  before it runs.
+- It is **fail-closed**: a hash mismatch, a wrong-architecture binary, or a
+  read-only (Tier-1) server all refuse locally and write nothing — same as any
+  other write. It is signed and audited.
+- It does **not** expand your reach — no new server is onboarded (provisioning
+  stays the human-only `sshgate` CLI), and a **standing grant never auto-signs an
+  update** (any admin verb always forces a fresh human tap).
 
 ## Secret-reveal — the rare "see a value" escape hatch
 

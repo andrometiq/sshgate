@@ -13,10 +13,10 @@ For the security model these items extend, see [design.md](design.md) and
 
 - **Human-only provisioning CLI.** Onboarding a server is a control-plane action
   done with the `sshgate` CLI (`pubkey` → paste → `add [--read-only]`), not an
-  agent tool. The agent surface is exactly eight tools (`run`, `run_batch`,
+  agent tool. The agent surface is exactly nine tools (`run`, `run_batch`,
   `list_servers`, `status`, `revoke_server`, `request_grant`, `revoke_grant`,
-  `list_grants`); there is deliberately no `add_server` tool, so the agent can
-  never expand its own reach.
+  `list_grants`, `update_gate`); there is deliberately no `add_server` tool, so
+  the agent can never expand its own reach.
 - **Read-only (Tier-1) and signed-write (Tier-2) provisioning**, selectable at
   `sshgate add` time.
 - **Inline secret redaction on the read path** in the gate.
@@ -154,12 +154,22 @@ These are the highest-priority forward items.
   Applies to current single-command mode now and to the gated session (#25)
   later, where a write could optionally trigger inline approval.
 
-- **Gate auto-update (`SSHGATE_UPDATE`).** A signed control verb to update the
-  gate binary in place (a stub handler already exists in the gate). Deferred
-  until its security is designed separately: an update path is a code-execution
-  path, so it must be at least as strict as the signing model — signed,
-  versioned, fail-closed, and audited. Until then, a changed gate is redeployed
-  via the `sshgate` CLI (revoke + re-add).
+- **Gate auto-update (`SSHGATE_UPDATE`) — built, deploy pending.** Delivered by
+  the `update_gate` MCP tool (built on branch `feat/update-verb`; triple-review
+  and operator deploy still pending — deploy is the last manual gate redeploy).
+  A signed control verb that updates the gate binary in place on an
+  already-registered server. It meets the bar this item reserved — an update path
+  is a code-execution path, so it is at least as strict as the signing model:
+  **signed** (goes through the master key like any other write), **versioned**
+  (returns the installed SHA-256 + build revision), **fail-closed** (hash
+  mismatch / wrong-arch binary / Tier-1 all refuse and write nothing), and
+  **audited** (gate + signer records). The agent supplies only the alias; the MCP
+  hashes the operator's locally-staged gate binary and the human approves a
+  distinct "GATE BINARY UPDATE" Telegram banner bound to that exact SHA-256. A
+  standing grant never auto-signs it, and it onboards no new server, so it does
+  not expand the agent's reach. Once deployed it replaces the old `sshgate` CLI
+  revoke + re-add redeploy for gate changes. Design:
+  `docs/proposed/sshgate-update-verb-2026-07.md`.
 
 - **Signed-at-rest redactor (deferred).** Strengthen the redaction path's signing
   posture and merge the deferred redactor work.
