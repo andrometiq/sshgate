@@ -29,7 +29,7 @@ func TestFormatApprovalMessage_UpdateBanner(t *testing.T) {
 				Server: "prod-web",
 				Cmd:    "SSHGATE_UPDATE " + updateHashFixture,
 				TTLSec: 300,
-				Reason: "rev abc1234 (2026-07-01) · running rev def5678",
+				Reason: "sshgate-gate-linux-amd64 · version v1.3.0 · running version v1.2.9",
 			},
 		},
 		Submitted: time.Now(),
@@ -56,7 +56,7 @@ func TestFormatApprovalMessage_UpdateBanner(t *testing.T) {
 		t.Errorf("update message missing the raw SHA-256 line:\n%s", got)
 	}
 	// The Build line carries the Reason verbatim.
-	if !strings.Contains(got, "Build: rev abc1234 (2026-07-01) · running rev def5678") {
+	if !strings.Contains(got, "Build: sshgate-gate-linux-amd64 · version v1.3.0 · running version v1.2.9") {
 		t.Errorf("update message missing the Build (reason) line:\n%s", got)
 	}
 	// The usual footer still renders.
@@ -220,7 +220,7 @@ func TestFormatApprovalMessage_UpdateHashRawUnderRealRuleset(t *testing.T) {
 				Server: "prod-web",
 				Cmd:    "SSHGATE_UPDATE " + updateHashFixture,
 				TTLSec: 300,
-				Reason: "rev abc1234",
+				Reason: "sshgate-gate-linux-amd64 · version v1.3.0 · running version v1.2.9",
 			},
 		},
 		Submitted: time.Now(),

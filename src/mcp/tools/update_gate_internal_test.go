@@ -6,58 +6,62 @@ import (
 )
 
 // TestUpdateReason pins the operator-facing Build line update_gate threads into
-// CmdReq.Reason. The exact format must match what the signer's approval banner
-// expects (backend/telegram_update_test.go: "rev abc1234 (2026-07-01) · running
-// rev def5678"), because that string renders verbatim on the "Build:" line.
+// CmdReq.Reason. Shape (spec §5.2/§11.8 task 4):
+// "<staged-basename> · version <staged> · running version <running>" — no
+// "(time)" (vcs stamping is off under the release recipe), always non-empty, and
+// an unknown staged/running version renders "version unknown". This string
+// renders verbatim on the signer banner's "Build:" line
+// (backend/telegram_update_test.go).
 func TestUpdateReason(t *testing.T) {
 	t.Parallel()
+	const basename = "sshgate-gate-linux-amd64"
 	cases := []struct {
 		name       string
-		stagedRev  string
-		stagedTime string
-		runningRev string
+		basename   string
+		stagedVer  string
+		runningVer string
 		want       string
 	}{
 		{
 			name:       "full — matches the telegram Build-line fixture",
-			stagedRev:  "abc1234",
-			stagedTime: "2026-07-01",
-			runningRev: "def5678",
-			want:       "rev abc1234 (2026-07-01) · running rev def5678",
+			basename:   basename,
+			stagedVer:  "v1.3.0",
+			runningVer: "v1.2.9",
+			want:       "sshgate-gate-linux-amd64 · version v1.3.0 · running version v1.2.9",
 		},
 		{
-			name:       "no build time omits the parenthesized part",
-			stagedRev:  "abc1234",
-			stagedTime: "",
-			runningRev: "def5678",
-			want:       "rev abc1234 · running rev def5678",
+			name:       "unknown staged version still shows the running version (downgrade cue survives a stripped marker)",
+			basename:   basename,
+			stagedVer:  "unknown",
+			runningVer: "v1.2.9",
+			want:       "sshgate-gate-linux-amd64 · version unknown · running version v1.2.9",
 		},
 		{
-			name:       "unknown staged rev still shows the running rev (downgrade cue survives stripped buildinfo)",
-			stagedRev:  "unknown",
-			stagedTime: "",
-			runningRev: "def5678",
-			want:       "rev unknown · running rev def5678",
+			name:       "empty staged version renders version unknown",
+			basename:   basename,
+			stagedVer:  "",
+			runningVer: "v1.2.9",
+			want:       "sshgate-gate-linux-amd64 · version unknown · running version v1.2.9",
 		},
 		{
-			name:       "empty staged rev also still shows the running rev",
-			stagedRev:  "",
-			stagedTime: "2026-07-01",
-			runningRev: "def5678",
-			want:       "rev unknown · running rev def5678",
+			name:       "running version unknown still threads through",
+			basename:   basename,
+			stagedVer:  "v1.3.0",
+			runningVer: "unknown",
+			want:       "sshgate-gate-linux-amd64 · version v1.3.0 · running version unknown",
 		},
 		{
-			name:       "running rev unknown still threads through",
-			stagedRev:  "abc1234",
-			stagedTime: "2026-07-01",
-			runningRev: "unknown",
-			want:       "rev abc1234 (2026-07-01) · running rev unknown",
+			name:       "empty running version renders version unknown",
+			basename:   basename,
+			stagedVer:  "v1.3.0",
+			runningVer: "",
+			want:       "sshgate-gate-linux-amd64 · version v1.3.0 · running version unknown",
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := updateReason(tc.stagedRev, tc.stagedTime, tc.runningRev); got != tc.want {
-				t.Errorf("updateReason(%q,%q,%q) = %q; want %q", tc.stagedRev, tc.stagedTime, tc.runningRev, got, tc.want)
+			if got := updateReason(tc.basename, tc.stagedVer, tc.runningVer); got != tc.want {
+				t.Errorf("updateReason(%q,%q,%q) = %q; want %q", tc.basename, tc.stagedVer, tc.runningVer, got, tc.want)
 			}
 		})
 	}

@@ -294,13 +294,17 @@ func TestUpdate_Tier1RefusesBeforeHandler(t *testing.T) {
 }
 
 // TestSSHGateVersion: the unsigned SSHGATE_VERSION probe prints the running
-// gate's build revision and exits 0.
+// gate's build VERSION (from the compiled-in marker, not vcs) and exits 0. The
+// test binary carries no -X override, so it reports the default marker's token
+// "dev" — proving runningGateVersion reads versionMarker (spec §11.2), because
+// the old vcs path would have yielded a git sha or "unknown". The rev= key stays
+// frozen (HIGH-2).
 func TestSSHGateVersion(t *testing.T) {
 	code, out, _ := runWith(t, "SSHGATE_VERSION")
 	if code != exitOK {
 		t.Fatalf("exit = %d; want 0", code)
 	}
-	if !strings.HasPrefix(strings.TrimSpace(out), "SSHGATE_VERSION rev=") {
-		t.Errorf("stdout = %q; want a SSHGATE_VERSION rev= line", out)
+	if got := strings.TrimSpace(out); got != "SSHGATE_VERSION rev=dev" {
+		t.Errorf("stdout = %q; want %q (default marker token, proves the marker is read not vcs)", got, "SSHGATE_VERSION rev=dev")
 	}
 }

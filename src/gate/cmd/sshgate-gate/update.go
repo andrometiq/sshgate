@@ -3,17 +3,29 @@ package main
 import (
 	"bytes"
 	"crypto/sha256"
-	"debug/buildinfo"
 	"debug/elf"
 	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
 	"runtime"
-	"runtime/debug"
 
 	"github.com/karthikeyan5/sshgate/src/gate"
+	"github.com/karthikeyan5/sshgate/src/gatever"
 )
+
+// versionMarker is the build-injected gate version, set at link time by
+//
+//	-ldflags "-X main.versionMarker=SSHGATE_GATE_VERSION{<VERSION>}"
+//
+// (Makefile release-gate / sshgate-gate-linux). A plain `go build` leaves the
+// default below, so a dev gate reports version "dev". The verified-release
+// recipe turns vcs stamping OFF (-buildvcs=false), so this marker — NOT
+// debug/buildinfo — is the sole source of the gate's human-readable version for
+// both the SSHGATE_VERSION probe and the SSHGATE_UPDATED success marker
+// (spec §11.2). The {…} delimiters make the raw-byte scan (gatever.Scan)
+// unambiguous. The token "dev" must stay in lockstep with gatever.devSentinel.
+var versionMarker = "SSHGATE_GATE_VERSION{dev}"
 
 // maxGateBinaryBytes bounds the SSHGATE_UPDATE stdin read. A gate binary is
 // single-digit MB; 64 MiB is generous headroom while capping a hostile or
@@ -202,37 +214,23 @@ func checkGateELF(body []byte) error {
 	return nil
 }
 
-// binaryRevision extracts the vcs.revision (short) from body's Go buildinfo, or
-// "unknown" if body carries none / cannot be parsed. Best-effort: the
-// buildinfo section survives -trimpath -ldflags='-s -w'.
+// binaryRevision extracts the build-injected version marker from body (the
+// incoming replacement gate) for the SSHGATE_UPDATED success marker's rev=
+// field, or "unknown" if body carries no valid marker. It uses the SAFE SCAN
+// (gatever.Scan: runtime-built prefix + all-occurrences acceptance rule, spec
+// §11.2 HIGH-1) — a naive first-match would risk locking onto the scanner's own
+// prefix in .rodata. Best-effort/display-only: the security property is the
+// SHA-256 (R4), never this string.
 func binaryRevision(body []byte) string {
-	bi, err := buildinfo.Read(bytes.NewReader(body))
-	if err != nil {
-		return "unknown"
-	}
-	return shortRevision(bi.Settings)
+	return gatever.Scan(body)
 }
 
-// runningGateVersion reports THIS running gate's build revision for the
-// unsigned SSHGATE_VERSION probe.
+// runningGateVersion reports THIS running gate's build version for the unsigned
+// SSHGATE_VERSION probe. It reads the compiled-in versionMarker (gatever.Version
+// keeps "dev" for a dev build) rather than debug/buildinfo, which is empty under
+// the release recipe's -buildvcs=false. The wire line shape
+// "SSHGATE_VERSION rev=<value>" is FROZEN (spec §11.2 HIGH-2) — only the value
+// changed from a git sha to the injected version; the rev= key stays.
 func runningGateVersion() string {
-	rev := "unknown"
-	if bi, ok := debug.ReadBuildInfo(); ok {
-		rev = shortRevision(bi.Settings)
-	}
-	return "SSHGATE_VERSION rev=" + rev
-}
-
-// shortRevision returns the vcs.revision setting truncated to 12 chars, or
-// "unknown" when absent.
-func shortRevision(settings []debug.BuildSetting) string {
-	for _, s := range settings {
-		if s.Key == "vcs.revision" && s.Value != "" {
-			if len(s.Value) > 12 {
-				return s.Value[:12]
-			}
-			return s.Value
-		}
-	}
-	return "unknown"
+	return "SSHGATE_VERSION rev=" + gatever.Version(versionMarker)
 }

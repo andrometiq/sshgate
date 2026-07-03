@@ -281,9 +281,12 @@ func TestUpdateGate_ReasonShowsRunningRevOnUnknownStaged(t *testing.T) {
 	if len(sign.gotCmds) != 1 {
 		t.Fatalf("sign called with %d cmds; want 1", len(sign.gotCmds))
 	}
-	const wantReason = "rev unknown · running rev abc1234"
+	// The staged fixture is a non-gate text blob with no version marker, so the
+	// staged version scans to "unknown"; the running version comes from the
+	// SSHGATE_VERSION probe fixture (abc1234). The basename is the staged path's.
+	const wantReason = "sshgate-gate-linux-amd64 · version unknown · running version abc1234"
 	if sign.gotCmds[0].Reason != wantReason {
-		t.Errorf("Reason = %q; want %q (running rev must show even when the staged rev is unknown)", sign.gotCmds[0].Reason, wantReason)
+		t.Errorf("Reason = %q; want %q (running version must show even when the staged version is unknown)", sign.gotCmds[0].Reason, wantReason)
 	}
 	if !probe.sawCommand("SSHGATE_VERSION") {
 		t.Error("the pre-sign SSHGATE_VERSION probe was never consulted")

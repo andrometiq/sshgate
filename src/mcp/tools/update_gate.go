@@ -4,15 +4,16 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"debug/buildinfo"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
+	"github.com/karthikeyan5/sshgate/src/gatever"
 	signpkg "github.com/karthikeyan5/sshgate/src/mcp/sign"
 )
 
@@ -68,7 +69,7 @@ const updatedMarkerPrefix = "SSHGATE_UPDATED"
 //  4. Read the staged binary ONCE (bytes + hash from the same buffer, R5 /
 //     Finding 5); absent → actionable "run `make install-local` first".
 //  5. Hash → cmd = "SSHGATE_UPDATE <sha256hex>".
-//  6. Parse the staged build's revision/time (best-effort) for the banner.
+//  6. Scan the staged build's version marker (best-effort) for the banner.
 //  7. Probe the running gate's version (best-effort; an old gate won't answer).
 //  8. Build the Build-line reason (rides in CmdReq.Reason → telegram banner).
 //  9. Sign (ordinary sign path; matchGrant forces a human tap).
@@ -135,21 +136,27 @@ func (r *Runner) UpdateGate(ctx context.Context, in UpdateGateInput) (UpdateGate
 	hexHash := hex.EncodeToString(sum[:])
 	cmd := "SSHGATE_UPDATE " + hexHash
 
-	// Build identity for the approval banner, parsed from the SAME buffer
-	// (best-effort — a non-Go / stripped-of-buildinfo binary yields "unknown").
-	stagedRev, stagedTime := stagedBuildInfo(body)
+	// Build identity for the approval banner, scanned from the SAME buffer via
+	// the safe marker scan (gatever.Scan: runtime-built prefix + all-occurrences
+	// acceptance rule, spec §11.2 HIGH-1 — the identical logic the gate uses in
+	// binaryRevision). Best-effort: a non-gate / marker-stripped binary yields
+	// "unknown". This is the build-injected version marker, NOT debug/buildinfo
+	// vcs stamping (empty under the release recipe's -buildvcs=false).
+	stagedVer := gatever.Scan(body)
 
 	// Probe the running gate's version so the operator sees the staged and
-	// running revisions side by side (downgrade visibility, Finding 4). This is
+	// running versions side by side (downgrade visibility, Finding 4). This is
 	// BEST-EFFORT: an old gate predating SSHGATE_VERSION classifies it as an
 	// unknown write and returns exit 77 — never fail the tool on a probe.
-	runningRev := probeRunningRev(ctx, r.SSH, entry.Host, entry.User, entry.Port)
+	runningVer := probeRunningRev(ctx, r.SSH, entry.Host, entry.User, entry.Port)
 
 	// The reason rides in CmdReq.Reason → the telegram "Build:" line. It is
 	// display-only/unsigned (downgrade visibility), so keep it a single clean
-	// line. Always non-empty and always carries the running rev, so a stripped
-	// staged buildinfo can never hide the downgrade cue (Finding 4).
-	reason := updateReason(stagedRev, stagedTime, runningRev)
+	// line. Always non-empty and always carries the running version, so a
+	// marker-stripped staged binary can never hide the downgrade cue (Finding 4).
+	// The arch-bearing staged basename is included so a future multi-arch
+	// operator checks the right .sha256 (LOW-5).
+	reason := updateReason(filepath.Base(r.StagedGatePath), stagedVer, runningVer)
 
 	reqID, err := newRequestID()
 	if err != nil {
@@ -238,50 +245,29 @@ func (r *Runner) UpdateGate(ctx context.Context, in UpdateGateInput) (UpdateGate
 	}, nil
 }
 
-// stagedBuildInfo parses the staged binary's build revision (short, 7 chars)
-// and build time from its Go buildinfo. Best-effort: a non-Go binary, or one
-// stripped of buildinfo, yields ("unknown", ""). The revision is what the
-// approval banner shows so the operator can recognise an unexpected build.
-func stagedBuildInfo(body []byte) (rev, buildTime string) {
-	info, err := buildinfo.Read(bytes.NewReader(body))
-	if err != nil {
-		return "unknown", ""
-	}
-	rev = "unknown"
-	for _, s := range info.Settings {
-		switch s.Key {
-		case "vcs.revision":
-			if s.Value != "" {
-				if len(s.Value) > 7 {
-					rev = s.Value[:7]
-				} else {
-					rev = s.Value
-				}
-			}
-		case "vcs.time":
-			buildTime = s.Value
-		}
-	}
-	return rev, buildTime
-}
-
 // updateReason builds the operator-facing Build line carried in CmdReq.Reason
 // (→ the telegram banner's "Build:" line). It ALWAYS presents the staged build
-// and the running build side by side so a downgrade is spottable — critically,
-// it shows the running rev even when the staged rev is unknown, because a
-// hostile stager that strips buildinfo would otherwise hide BOTH revs and
-// defeat the downgrade cue (Finding 4) exactly when it matters. The build time
-// is omitted when absent. Format matches the signer banner's expected Reason
-// (backend/telegram_update_test.go): "rev <staged> (<time>) · running rev
-// <running>".
-func updateReason(stagedRev, stagedTime, runningRev string) string {
-	if stagedRev == "" || stagedRev == "unknown" {
-		return fmt.Sprintf("rev unknown · running rev %s", runningRev)
+// version and the running build version side by side so a downgrade is
+// spottable — critically, it shows the running version even when the staged
+// version is unknown, because a hostile stager that strips the marker would
+// otherwise hide BOTH versions and defeat the downgrade cue (Finding 4) exactly
+// when it matters. Shape (spec §5.2, §11.8 task 4):
+//
+//	"<staged-basename> · version <staged> · running version <running>"
+//
+// There is NO "(time)" component — vcs stamping is off under the release recipe
+// (-buildvcs=false, §11.1), so no build time exists. Always non-empty (the
+// basename is always present); an unknown staged/running version renders
+// "version unknown". The basename carries the arch (sshgate-gate-linux-amd64) so
+// a future multi-arch operator checks the right .sha256 (LOW-5).
+func updateReason(basename, stagedVer, runningVer string) string {
+	if stagedVer == "" {
+		stagedVer = gatever.Unknown
 	}
-	if stagedTime == "" {
-		return fmt.Sprintf("rev %s · running rev %s", stagedRev, runningRev)
+	if runningVer == "" {
+		runningVer = gatever.Unknown
 	}
-	return fmt.Sprintf("rev %s (%s) · running rev %s", stagedRev, stagedTime, runningRev)
+	return fmt.Sprintf("%s · version %s · running version %s", basename, stagedVer, runningVer)
 }
 
 // probeRunningRev best-effort reads the running gate's build revision via the
@@ -322,9 +308,10 @@ func probeAlive(ctx context.Context, sshRunner SSHRunner, host, user string, por
 }
 
 // parseUpdatedMarker extracts the sha256, size, and rev from the gate's success
-// marker "SSHGATE_UPDATED sha256=<hex> size=<n> rev=<vcs-or-unknown>". ok is
-// false when the marker is absent or the required sha256/size tokens cannot be
-// parsed. rev defaults to "unknown" when the token is absent.
+// marker "SSHGATE_UPDATED sha256=<hex> size=<n> rev=<version-or-unknown>". The
+// rev= KEY is frozen (spec §11.2 HIGH-2); only its value changed from a git sha
+// to the injected version. ok is false when the marker is absent or the required
+// sha256/size tokens cannot be parsed. rev defaults to "unknown" when absent.
 func parseUpdatedMarker(stdout string) (hash string, size int64, rev string, ok bool) {
 	if !strings.Contains(stdout, updatedMarkerPrefix) {
 		return "", 0, "", false

@@ -2,6 +2,8 @@ module github.com/karthikeyan5/sshgate
 
 go 1.25.0
 
+toolchain go1.26.4
+
 require (
 	github.com/BurntSushi/toml v1.6.0
 	github.com/go-telegram-bot-api/telegram-bot-api/v5 v5.5.1
