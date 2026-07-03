@@ -25,6 +25,16 @@ func run3class(n int) string {
 	return string(b)
 }
 
+// hexRun builds an n-char lowercase-hex run (2-class: digit+lower).
+func hexRun(n int) string {
+	const h = "0123456789abcdef"
+	b := make([]byte, n)
+	for i := range b {
+		b[i] = h[(i*11+2)%16]
+	}
+	return string(b)
+}
+
 // mkTelegramToken builds a bare telegram bot token `<id>:AA<33 base64url>`.
 func mkTelegramToken() string {
 	id := make([]byte, 10)

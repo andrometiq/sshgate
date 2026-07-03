@@ -13,9 +13,9 @@ import (
 
 // makeCorpus builds a 1 MB synthetic log corpus shaped like real
 // command output: log-line noise interspersed with the occasional
-// AWS access key and JWT. Tuned to land roughly one secret per
-// 100 KB so the scanner exercises the keyword pre-filter on the
-// majority of bytes.
+// AWS access key and GitHub PAT. It inserts one secret line per 100
+// benign lines (~1 secret per ~10 KB), so the scanner exercises the
+// keyword pre-filter on the majority of bytes.
 func makeCorpus(size int) []byte {
 	var b bytes.Buffer
 	b.Grow(size)
