@@ -1,0 +1,54 @@
+name: verify-gate
+
+# Verified release channel — reproducible-build gate (spec §11.4).
+#
+# This job rebuilds the committed gate binary from source with the pinned
+# toolchain and FAILS unless it is byte-identical to the committed dist/gate/
+# artifact AND its published .sha256. A green tick therefore certifies that the
+# committed binary is EXACTLY what the audited source produces — which is what
+# lets the approver trust the published hash they cross-check on github.com
+# before tapping "GATE BINARY UPDATE" (§11.5).
+#
+# The forcing function (§11.4): if gate sources change but dist/ is NOT
+# refreshed, the fresh rebuild differs from the stale committed binary, the diff
+# fails, and CI goes red. You cannot change the gate's code without also
+# re-committing (and re-publishing the hash of) the built binary.
+#
+# Triggers are UNFILTERED on purpose: the gate links a transitive import set
+# (src/redact/**, src/classify/**, src/hostkey/**, src/sigwire/**, src/gatever)
+# that is fragile to path-filter — a missed package would false-green the one
+# check that must never false-green. The build is seconds; run it always.
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go (pinned toolchain from go.mod)
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          check-latest: false
+
+      - name: Committed binary matches its own hash file
+        run: cd dist/gate && sha256sum -c sshgate-gate-linux-amd64.sha256
+
+      - name: Reproducible rebuild (regenerates the binary AND its .sha256)
+        run: make release-gate
+
+      - name: Fail on any diff to a tracked dist/gate artifact
+        run: git diff --exit-code -- dist/gate/
+
+      - name: Fail on any untracked or modified dist/gate path (porcelain)
+        # Catches a brand-new UNTRACKED artifact (e.g. a freshly-added arch build
+        # never committed) that `git diff --exit-code` alone would miss (LOW-1).
+        run: test -z "$(git status --porcelain -- dist/gate/)"
