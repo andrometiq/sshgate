@@ -69,8 +69,8 @@ func TestSensitiveAssignmentBoundary(t *testing.T) {
 		{"DESKTOP_SESSION (documented bias)", "DESKTOP_SESSION=gnome", "gnome", true},
 
 		// --- MUST NOT redact (false positives being fixed) ---
-		{"PWD cwd (load-bearing)", "PWD=/home/karthi/arogara/SSHGate", "/home/karthi/arogara/SSHGate", false},
-		{"OLDPWD", "OLDPWD=/home/karthi/arogara", "/home/karthi/arogara", false},
+		{"PWD cwd (load-bearing)", "PWD=/home/user/project", "/home/user/project", false},
+		{"OLDPWD", "OLDPWD=/home/user", "/home/user", false},
 		{"MONKEY", "MONKEY=banana123456", "banana123456", false},
 		{"WHISKEY", "WHISKEY=lagavulin16yr", "lagavulin16yr", false},
 		{"COMPASS", "COMPASS=northbynorth", "northbynorth", false},

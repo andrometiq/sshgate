@@ -45,7 +45,7 @@ func TestRedactStringScrubsCommandSecrets(t *testing.T) {
 		// The known load-bearing false-positive guard: PWD= is the cwd env
 		// var, present in every env dump and many commands; its value must
 		// never be scrubbed (mirrors sensitive_assignment_test.go).
-		{"PWD cwd guard", `env PWD=/home/karthi/arogara/SSHGate ls`, "/home/karthi/arogara/SSHGate", false},
+		{"PWD cwd guard", `env PWD=/home/user/project ls`, "/home/user/project", false},
 	}
 
 	for _, tc := range cases {
