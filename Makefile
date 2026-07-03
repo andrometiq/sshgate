@@ -1,6 +1,6 @@
 .PHONY: all build install-local test test-integration vet clean sshgate-gate-linux \
 	sshgate-mcp-darwin sshgate-signer-telegram-darwin darwin cross sshgate-signer-server \
-	preflight e2e smoke gitleaks release-gate
+	preflight e2e smoke gitleaks release-gate verify-dist
 
 # ---------------------------------------------------------------------------
 # Verified release channel (spec §11)
@@ -165,10 +165,26 @@ clean:
 # ---------------------------------------------------------------------------
 
 # preflight: the standing pre-push gate. Format-adjacent vet, the full race
-# unit suite, a secret scan of the commits about to be pushed, and a clean
-# build. No Docker, so it runs anywhere in well under a minute.
-preflight: vet test gitleaks build
+# unit suite, a secret scan of the commits about to be pushed, a clean build,
+# and the CHEAP verified-release-channel checks. No Docker, so it runs anywhere
+# in well under a minute.
+preflight: vet test gitleaks build verify-dist
 	@echo "preflight: OK — safe to push"
+
+# verify-dist: the FAST verified-release-channel checks (§11). It deliberately
+# does NOT do the reproducible rebuild (that needs the pinned-toolchain download
+# and is CI's job, verify-gate.yml, §11.4) — it only confirms, locally and in
+# milliseconds, that (a) the committed binary still matches its own published
+# .sha256 (binary↔sidecar drift) and (b) VERSION is a single clean line. It
+# scopes its claim honestly: source↔binary drift is caught ONLY by CI (NIT-1).
+verify-dist:
+	@if [ ! -f VERSION ]; then echo "verify-dist: VERSION file is missing" >&2; exit 1; fi
+	@if [ "$$(wc -l < VERSION)" -ne 1 ]; then echo "verify-dist: VERSION must be exactly one line" >&2; exit 1; fi
+	@if ! printf '%s' "$$(cat VERSION)" | grep -Eq '^v[0-9A-Za-z._+-]+$$'; then \
+		echo "verify-dist: VERSION '$$(cat VERSION)' must match ^v[0-9A-Za-z._+-]+\$$" >&2; exit 1; fi
+	@if [ ! -f $(DIST_GATE_BIN).sha256 ]; then echo "verify-dist: $(DIST_GATE_BIN).sha256 is missing" >&2; exit 1; fi
+	@cd $(DIST_GATE_DIR) && sha256sum -c sshgate-gate-linux-amd64.sha256
+	@echo "verify-dist: OK — committed gate matches its .sha256 (source↔binary is CI's job, §11.4)"
 
 # gitleaks scans the commits that would be pushed (origin/main..HEAD) for
 # secrets. Skips with a loud note if gitleaks is not installed — CI must have
