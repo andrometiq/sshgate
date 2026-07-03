@@ -241,9 +241,10 @@ Update rides the **ordinary sign path** (like revoke). Two changes make it safe:
   ```
 
   The "Currently on `<alias>`" line (from a pre-sign `SSHGATE_VERSION` read, §6)
-  makes a downgrade visible at approval time. If the staged build is *older* than
-  what's running, the MCP surfaces that as an explicit extra caution in the tool
-  result too.
+  puts the staged and running build revisions side by side at approval time.
+  (Git revisions are not orderable, so the tool does **not** claim "older/newer";
+  it presents both so the operator can recognise an unexpected or unfamiliar
+  build before tapping — which is what catches an agent-staged downgrade.)
 
 No new signer request kind, and **`sigwire.ProtoVersion` is not touched** — the
 update is a normal `sign` request whose `Cmd` is an admin verb, so the socket
