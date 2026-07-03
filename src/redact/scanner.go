@@ -94,6 +94,15 @@ func (s *scanner) findMatches(buf []byte) []match {
 			if r.MaxLen > 0 && n > r.MaxLen && !r.HighConfidence {
 				continue
 			}
+			// Layer 1 entropy (the conflict-resolution slot reserved
+			// above): a rule that opts in via Rule.Entropy > 0 is a broad
+			// prefix rule (sk-<base62>) that must additionally clear the
+			// shared generic gate — 3-class content + ssh-line veto +
+			// Shannon entropy — so it does not fire on lowercase key-type
+			// markers or prose slugs. See passesSecretGate.
+			if r.Entropy > 0 && !passesSecretGate(buf, matchStart, start, end, r.Entropy) {
+				continue
+			}
 			out = append(out, match{
 				Start:      start,
 				End:        end,
@@ -103,6 +112,13 @@ func (s *scanner) findMatches(buf []byte) []match {
 			})
 		}
 	}
+	// Step 3: the generic default-deny net (scanGenericRuns). It sits
+	// AFTER the len(s.rules)==0 early return above, so the nil-rules
+	// verbatim contract (scrub/pem nil-rules tests) is preserved — a real
+	// Writer always carries the prepended marker-forgery rule, so the net
+	// always runs inside a Writer. dedupMatches merges its output with the
+	// regex matches (earliest-start-wins, tie -> longest).
+	out = append(out, scanGenericRuns(buf)...)
 	return dedupMatches(out)
 }
 
