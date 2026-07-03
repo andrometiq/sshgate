@@ -63,6 +63,49 @@ func TestRunHandlerRedactsCommandInLiveLog(t *testing.T) {
 	}
 }
 
+// TestRunHandlerRedactsTelegramTokenInLiveLog (2026-07 default-deny widening,
+// cross-sink check): a Telegram bot token embedded in a command string — here
+// in the glued `.../bot<id>:<body>/…` API-URL form that no word-boundary regex
+// can match — must be scrubbed by the engine's generic net (digit-suffix peel)
+// before it lands in the MCP live log.
+func TestRunHandlerRedactsTelegramTokenInLiveLog(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "audit-live.log")
+	ll := livelog.New(logPath, 1<<20)
+	r := hookRegistry(t, "web1")
+	runner := &tools.Runner{Servers: r, Sign: &hookFakeSign{}, SSH: &hookFakeSSH{stdout: []byte("ok\n")}}
+	srv := &Server{
+		Runner:      runner,
+		Logger:      log.New(io.Discard, "", 0),
+		LiveLog:     ll,
+		RedactSalt:  mcpRedactSalt,
+		RedactRules: redactrules.Combined(),
+	}
+
+	// Assemble a telegram bot token at runtime (no contiguous literal):
+	// <10-digit id>:AA<33 base64url> = the exact real shape.
+	token := "1234567890:AA" + strings.Repeat("Zk9", 11)
+	cmd := `sh -c "curl https://api.telegram.org/bot` + token + `/sendMessage"`
+	if _, _, err := srv.runHandler(context.Background(), nil, tools.RunInput{Alias: "web1", Command: cmd}); err != nil {
+		t.Fatalf("runHandler: %v", err)
+	}
+
+	recs := liveRecords(t, logPath)
+	if len(recs) != 1 {
+		t.Fatalf("got %d live-log records, want 1", len(recs))
+	}
+	gotCmd, _ := recs[0]["command"].(string)
+	if strings.Contains(gotCmd, token) {
+		t.Errorf("live-log leaked the telegram token: %q", gotCmd)
+	}
+	if !strings.Contains(gotCmd, redact.MarkerPrefix) {
+		t.Errorf("telegram token not redacted in live log: %q", gotCmd)
+	}
+	raw, _ := os.ReadFile(logPath)
+	if strings.Contains(string(raw), token) {
+		t.Errorf("telegram token persisted in live log:\n%s", raw)
+	}
+}
+
 // TestRunBatchHandlerRedactsCommandInLiveLog (F5): the per-result live-log
 // entries in run_batch must redact each command string too.
 func TestRunBatchHandlerRedactsCommandInLiveLog(t *testing.T) {
