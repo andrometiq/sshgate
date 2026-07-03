@@ -84,6 +84,33 @@ func (a *autoApproveBackend) Request(ctx context.Context, req backend.ApprovalRe
 	return ch, nil
 }
 
+// RequestGrant mirrors Request with the same goroutine bookkeeping so the
+// backend satisfies the current backend.Backend interface (it grew RequestGrant
+// with the standing-grants work). No Phase-4/5 test mints a grant through it,
+// but a signer.Daemon will not accept a Backend that lacks this method.
+func (a *autoApproveBackend) RequestGrant(ctx context.Context, req backend.GrantApprovalRequest) (<-chan backend.Result, error) {
+	ch := make(chan backend.Result, 1)
+	a.mu.Lock()
+	if a.closed {
+		a.mu.Unlock()
+		ch <- backend.Result{Status: backend.StatusTimeout}
+		close(ch)
+		return ch, nil
+	}
+	a.wg.Add(1)
+	a.mu.Unlock()
+
+	go func() {
+		defer a.wg.Done()
+		select {
+		case ch <- backend.Result{Status: backend.StatusApproved, ApprovedBy: "auto-approve"}:
+		case <-ctx.Done():
+		case <-a.closeCh:
+		}
+	}()
+	return ch, nil
+}
+
 func (a *autoApproveBackend) Close() {
 	a.mu.Lock()
 	if a.closed {
