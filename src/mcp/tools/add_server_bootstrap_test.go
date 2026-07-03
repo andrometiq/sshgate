@@ -59,6 +59,15 @@ type fakeBootstrapSession struct {
 	// for the success paths; left empty to drive the verify-failure rollback
 	// path.
 	probeOut []byte
+
+	// versionProbeOut is the stdout returned for the unsigned SSHGATE_VERSION
+	// idempotency probe Provision sends FIRST on the dedicated-key dial. Set
+	// to "SSHGATE_VERSION rev=<rev>\n" to model an already-gated host (the
+	// probe-first idempotent path); leave empty to model a fresh/plain-shell
+	// host so Provision falls through to the authorized_keys detection. To
+	// model a plain shell's hard failure ("command not found", exit 127) use
+	// failRunSub: "SSHGATE_VERSION" instead.
+	versionProbeOut []byte
 }
 
 type uploadCall struct {
@@ -72,8 +81,13 @@ func (f *fakeBootstrapSession) Run(_ context.Context, cmd string) ([]byte, []byt
 	if f.failRunSub != "" && strings.Contains(cmd, f.failRunSub) {
 		return nil, []byte("scripted-stderr"), errors.New("scripted run failure")
 	}
-	// The idempotency probe is "cat ~/.ssh/authorized_keys ...". Return
-	// the modelled existing keys for any cat-of-authorized_keys command.
+	// The probe-first idempotency check sends the unsigned SSHGATE_VERSION
+	// verb. Return the modelled gate answer (empty => no gate answered).
+	if cmd == "SSHGATE_VERSION" {
+		return f.versionProbeOut, nil, nil
+	}
+	// The fallback idempotency detection is "cat ~/.ssh/authorized_keys ...".
+	// Return the modelled existing keys for any cat-of-authorized_keys command.
 	if strings.Contains(cmd, "cat "+remoteAuthKeys) {
 		return f.catAuthKeys, nil, nil
 	}
