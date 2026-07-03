@@ -92,10 +92,21 @@ These are the highest-priority forward items.
 
 ## Planned
 
-- **In-place Tier-1 → Tier-2 upgrade (#17).** Today, changing a server from
-  read-only to signed-write means revoking and re-provisioning it. Provide a
-  smoother in-place upgrade, including how the upgrade is surfaced and wired in
-  the setup flow.
+- **Multi-key gates + provisioning exposure window (#17, redefined).** The old
+  "in-place Tier-1 → Tier-2 upgrade" here is **rejected**: any unsigned
+  tier-flip path the CLI could exercise is a path the agent could emulate —
+  read-only is read-only, full stop; re-tiering stays out-of-band re-provision.
+  In its place, two captured directions: (a) **multiple signer keys per gate**
+  (per-agent identity — each agent its own keypair, no shared-key trust),
+  version-aware `sshgate add` (upgrade an older installed gate, defer to a
+  newer one, notify either way), single-vs-multiple gate binaries and signer
+  topology as open design questions; (b) **shrink the plain-key exposure
+  window in `add`** (run add first, it retries while the operator pastes the
+  key out-of-band, gate swap lands within milliseconds; fully-manual install
+  stays available for absolute security). Full capture with all constraints:
+  [docs/proposed/multi-key-gates-and-add-exposure-2026-07.md](proposed/multi-key-gates-and-add-exposure-2026-07.md).
+  Direction recorded 2026-07 — not scheduled; design questions go through the
+  full pipeline before any build.
 
 - **Gated interactive session mode (#25).** A shell-*like* interactive prompt
   (history, `cd`/env that feel normal) where **every** command is still gated.
