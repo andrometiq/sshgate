@@ -132,6 +132,31 @@ These are the highest-priority forward items.
   dist/gate republish) so the probe path can verify the flag it registers;
   until then the tier on that path is taken on faith.
 
+- **Asynchronous approval lifecycle — dispatch-and-continue (owner direction
+  2026-07-04).** Today a write's tool call BLOCKS from request to verdict: one
+  approval in flight, the human must be watching the channel, and the client's
+  wait budget bounds the whole exchange (the known verdict-undelivered /75s
+  issue is a symptom). The end goal: the agent **dispatches N approval
+  requests and goes on with its own work**; the human approves them
+  asynchronously — Telegram today, a web approval surface later (longer
+  cycles, several pending items answered in one sitting) — and the agent
+  collects/gets notified of verdicts when they land, executing only then.
+  Workflow shape identified so far (design questions, not commitments):
+  an async dispatch variant returning a `request_id` immediately;
+  **sign-at-approval, not sign-at-request** (the signer signs when the human
+  decides, so signature TTLs stay short while the *pending request* gets its
+  own longer validity window — a pre-signed long-TTL blob must never sit in a
+  queue); collection via `await_approvals([ids])`/`list_pending_approvals`
+  tools plus an optional local watcher to wake an idle agent (harness-specific;
+  the polling tools stay the portable core); an operator-visible pending
+  queue with cancel/deny-all and single-use nonce-bound verdicts; and batch
+  approval UX that still renders each item for scrutiny (approve-all is a
+  gesture over N displayed items, never a blind blanket). This converges
+  deliberately with the Tier-3 hosted signer (its backend already models a
+  pending approval queue + web auth) and with channel-relay approvals —
+  design once, serve both surfaces. Not scheduled; full design pipeline
+  before any build.
+
 - **Gated interactive session mode (#25).** A shell-*like* interactive prompt
   (history, `cd`/env that feel normal) where **every** command is still gated.
   The safe form is *not* wrapping a live `/bin/sh` — that is the read-only arms
