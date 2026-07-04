@@ -103,6 +103,17 @@ type StdinRunner interface {
 	RunWithStdin(ctx context.Context, host, user string, port int, cmd string, stdin io.Reader) ([]byte, []byte, int, error)
 }
 
+// TransferClient is the subset of sign.Client the transfer tool needs. It is
+// kept SEPARATE from SignClient (rather than adding Transfer there) so the many
+// SignClient fakes in the test tree need no update — the same StdinRunner
+// precedent that avoided touching every SSHRunner fake.
+type TransferClient interface {
+	// Transfer requests a box→box SECRET TRANSFER approval (one human tap →
+	// two signed, host-bound legs). The MCP passes fingerprints from its
+	// trusted registry; the signer sources the pubkeys + mints the xferID.
+	Transfer(ctx context.Context, requestID string, req signpkg.TransferReq) (signpkg.TransferResult, error)
+}
+
 // Runner is the sshgate.run tool implementation. All fields must be
 // non-nil before calling Run; the MCP entry point sets them at
 // startup.
@@ -116,6 +127,12 @@ type Runner struct {
 	// stdin); every other path uses SSH. Production wires the same
 	// *ssh.Client into both fields. A nil SSHStdin disables update_gate.
 	SSHStdin StdinRunner
+
+	// Xfer requests a box→box SECRET TRANSFER approval (one human tap → two
+	// signed, host-bound legs). Used ONLY by the transfer tool. Production
+	// wires the same *signpkg.Client already assigned to Sign. A nil Xfer
+	// disables transfer.
+	Xfer TransferClient
 
 	// StagedGatePath is the absolute path to the operator's locally-staged
 	// gate binary (what `make install-local` writes to

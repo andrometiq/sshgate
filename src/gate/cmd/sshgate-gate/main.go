@@ -48,6 +48,7 @@ import (
 	"github.com/karthikeyan5/sshgate/src/redact"
 	redactrules "github.com/karthikeyan5/sshgate/src/redact/rules"
 	"github.com/karthikeyan5/sshgate/src/sigwire"
+	"github.com/karthikeyan5/sshgate/src/xferwire"
 )
 
 // sessionSalt is the per-process 32 random bytes the redactor uses to
@@ -215,6 +216,12 @@ func run() int {
 			// atomically replaces this binary. It ALWAYS returns — never falls
 			// through to classify/exec.
 			return handleUpdate(audit, innerCmd)
+		}
+		if strings.HasPrefix(innerCmd, xferwire.VerbPrefix) {
+			// Signed box→box transfer leg. Dispatched here, BEFORE classify/exec,
+			// so a SSHGATE_XFER_* line is NEVER handed to /bin/sh. handleXfer
+			// ALWAYS returns — like handleUpdate it never falls through.
+			return handleXfer(audit, innerCmd)
 		}
 	}
 
