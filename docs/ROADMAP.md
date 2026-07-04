@@ -103,7 +103,13 @@ These are the highest-priority forward items.
   topology as open design questions; (b) **shrink the plain-key exposure
   window in `add`** (run add first, it retries while the operator pastes the
   key out-of-band, gate swap lands within milliseconds; fully-manual install
-  stays available for absolute security). Full capture with all constraints:
+  stays available for absolute security). 2026-07-04 additions: combined
+  paste-&&-add one-liner (docs-only, available today); a self-contained
+  provisioning command embedding the pubkey, runnable from any admin machine;
+  a one-shot server-side install that never writes a plain key line at all;
+  and programmatic/web-app-driven enterprise provisioning (pubkey exposed on
+  the agent surface, install stays behind the application's own auth). Full
+  capture with all constraints:
   [docs/proposed/multi-key-gates-and-add-exposure-2026-07.md](proposed/multi-key-gates-and-add-exposure-2026-07.md).
   Direction recorded 2026-07 — not scheduled; design questions go through the
   full pipeline before any build.

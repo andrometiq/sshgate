@@ -104,10 +104,54 @@ Constraints and options the owner named:
   under low threat, the fast-retry flow's few seconds are acceptable; for a
   sensitive host, use the manual path. Both are legitimate; the operator picks.
 
+## 3b. Feature B follow-up — captured options (owner, 2026-07-04)
+
+Further directions the owner named for the same exposure window, from weakest
+to strongest. These are **captured options, not decisions** — pick per the
+trade-offs when this is designed properly.
+
+- **B2 — combined one-liner (available today, docs-only).**
+  `sshgate pubkey | ssh <admin>@<host> 'cat >> ~/.ssh/authorized_keys' && sshgate add <alias> <admin>@<host>`
+  — the plain-key window shrinks to the gap between the append landing and
+  `add`'s rewrite, typically sub-second. No code change; document it as the
+  recommended manual flow.
+
+- **B3 — self-contained provisioning command, runnable from any admin
+  machine.** `sshgate` emits a single copy-pasteable command that **embeds its
+  public key line** as literal text. The operator runs it on *any* machine
+  that has admin SSH access to the target (after cloning and building SSHGate
+  there, per the install docs); it appends the key and immediately runs the
+  gate install in one shot. This decouples the machine holding the master key
+  from the machine with admin access — the master key can live on any laptop,
+  and the emitted command carries everything the admin side needs.
+
+- **B4 — no plain key line, ever (one-shot server-side install).** A
+  provisioning script executed over the operator's **existing** admin access
+  that takes the SSH public key (and the signer public key, for a write-tier
+  install) as inputs, copies the gate binary and `gate.pub` into place, and
+  writes **only** the finished forced-command `authorized_keys` line. An open
+  plain-key line never exists at any instant — the window is zero by
+  construction. Registration back on the key-holding machine then rides the
+  probe-first idempotent `add` path (which makes the tier-verification
+  follow-up — the "reconcile tier on probe-idempotent re-add" roadmap item —
+  a prerequisite for this to register trustworthy state).
+
+- **B5 — programmatic / enterprise provisioning.** The `sshgate` binary is
+  already scriptable; expose only the **public key** on the agent surface (an
+  MCP tool or slash command — the pubkey is public data, so this does not
+  weaken the human-only provisioning boundary). The operator hands that key
+  to a web application; the application authenticates and authorizes the
+  request with its own existing mechanisms, and its backend performs the
+  install (B4-style) against the target. Authentication, authorization, and
+  policy in the middle are deliberately the application's problem — SSHGate
+  provides the primitives and documents this as the native "integrate SSHGate
+  into an enterprise workflow" story. The trust boundary stays human/infra:
+  the agent can fetch a public key, never provision.
+
 ## 4. Status
 
 - Nothing here is scheduled. The owner will decide after the open design
-  questions (single vs multiple gates, signer topology, dedup, retry strategy)
-  are worked out and presented.
+  questions (single vs multiple gates, signer topology, dedup, retry strategy,
+  and now which of B2–B5 to build) are worked out and presented.
 - Roadmap entry #17 now points here; the old in-place-upgrade wording is
   retired.
