@@ -1,6 +1,6 @@
 # Proposal: Standing Grants, Secret-Read, Server-Binding, Audit Trail, Window Tightening
 
-**Status:** proposal — not yet implemented. Awaiting Karthi's ratify, then TDD build + triple review + PII audit before any push.
+**Status:** built and merged to `main` (merge `49a04da`; shipped in v1.3.0). Kept as the design record — §6c carries the as-built notes.
 **Date:** 2026-06-22
 **Driver:** the server-consolidation migration (#27) needs unattended overnight write windows; the discussion surfaced several related gate/signer changes.
 

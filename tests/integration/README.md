@@ -41,5 +41,7 @@ under `fixtures/keys/` and are unaffected.
 - `fixtures/keys/` is empty in git (just a `.gitkeep`). Test setup code in
   Phase 1 generates a fresh `sshgate_ed25519` keypair into it before bringing
   the container up; tear-down deletes the keys.
-- Lifecycle is manual for now. Later tasks will spawn/stop the container from
-  Go test helpers.
+- Lifecycle is automated: the Go test helpers (`helpers_test.go`) spawn and
+  stop the container via `docker compose` themselves (falling back to
+  `docker-compose`, and skipping the suite when neither is available). The
+  manual commands above remain useful for debugging a hung container.

@@ -19,9 +19,34 @@ For the security model these items extend, see [design.md](design.md) and
   the agent can never expand its own reach.
 - **Read-only (Tier-1) and signed-write (Tier-2) provisioning**, selectable at
   `sshgate add` time.
-- **Inline secret redaction on the read path** in the gate.
+- **Inline secret redaction of command output** in the gate (all commands,
+  reads and writes; bypassed only by an approved secret-reveal).
 - **Local Telegram signer** with separate-Unix-user key isolation, one-tap
   approval, and bulk (single-tap, N-command) approval.
+- **Standing grants, secret-reveal, per-server binding, leveled audit trail
+  (v1.3.0).** One signed-payload wire change: signer-issued **standing grants**
+  (scope `all` or an exact command-set, ≤24h, server-bound, revocable) for
+  unattended write windows; an approved **secret-reveal** that bypasses output
+  redaction for a single signed command; **per-server identity** binding each
+  signature to the target's SSH host-key fingerprint (closes cross-server
+  replay); a **two-tier audit trail** — a gate-side append-only authoritative
+  log plus an MCP-side rolling live view; a 60s default signature window; and
+  `servers.json` 0600. Design:
+  [docs/proposed/feature3-grants-reveal-audit-binding.md](proposed/feature3-grants-reveal-audit-binding.md).
+- **Gate auto-update (`update_gate` / `SSHGATE_UPDATE`) + verified release
+  channel (v1.3.0, deployed).** A signed control verb that updates the gate
+  binary in place on an already-registered server — **signed** (through the
+  master key like any other write), **versioned** (returns the installed
+  SHA-256 + build revision), **fail-closed** (hash mismatch / wrong-arch
+  binary / Tier-1 all refuse and write nothing), and **audited**. The agent
+  supplies only the alias; the MCP hashes the operator's locally-staged gate
+  binary and the human approves a distinct "GATE BINARY UPDATE" Telegram
+  banner bound to that exact SHA-256; a standing grant never auto-signs it.
+  The committed `dist/gate/` artifact + the `verify-gate` reproducible-build
+  CI check anchor the approved hash off the machine. Replaces the old
+  revoke + re-add redeploy for gate changes; the operator rollout to
+  existing servers completed 2026-07-04. Design:
+  `docs/proposed/sshgate-update-verb-2026-07.md`.
 
 ---
 
@@ -41,18 +66,6 @@ These are the highest-priority forward items.
   approvals ride the shared layer. Evaluate and decide this **before** investing
   further in the signer's own chat integration — it is the anchoring decision for
   the next SSHGate pass.
-
-- **Standing grants, secret-reveal, per-server binding, audit trail (in progress).**
-  A bundle that all touches the signed payload, so it ships as one wire change:
-  signer-issued **standing grants** (scope `all` or an exact command-set, ≤24h,
-  server-bound, revocable) for unattended write windows; an approved
-  **secret-reveal** that bypasses output redaction for a single signed command;
-  **per-server identity** binding each signature to the target's SSH host-key
-  fingerprint (closes cross-server replay); a **two-tier audit trail** — a
-  gate-side, separate-user, append-only authoritative log plus an MCP-side
-  rolling full-output live view; plus a tighter 60s default signature window and
-  `servers.json` 0600. Design at
-  [docs/proposed/feature3-grants-reveal-audit-binding.md](proposed/feature3-grants-reveal-audit-binding.md).
 
 - **Argv-exec structural classifier fix (#22).** Replace the fail-closed shell
   heuristic on the read path with direct execution from a parsed `argv`
@@ -213,23 +226,6 @@ These are the highest-priority forward items.
   this is the handshake that tells the agent to go get approval and resubmit.
   Applies to current single-command mode now and to the gated session (#25)
   later, where a write could optionally trigger inline approval.
-
-- **Gate auto-update (`SSHGATE_UPDATE`) — built, deploy pending.** Delivered by
-  the `update_gate` MCP tool (built on branch `feat/update-verb`; triple-review
-  and operator deploy still pending — deploy is the last manual gate redeploy).
-  A signed control verb that updates the gate binary in place on an
-  already-registered server. It meets the bar this item reserved — an update path
-  is a code-execution path, so it is at least as strict as the signing model:
-  **signed** (goes through the master key like any other write), **versioned**
-  (returns the installed SHA-256 + build revision), **fail-closed** (hash
-  mismatch / wrong-arch binary / Tier-1 all refuse and write nothing), and
-  **audited** (gate + signer records). The agent supplies only the alias; the MCP
-  hashes the operator's locally-staged gate binary and the human approves a
-  distinct "GATE BINARY UPDATE" Telegram banner bound to that exact SHA-256. A
-  standing grant never auto-signs it, and it onboards no new server, so it does
-  not expand the agent's reach. Once deployed it replaces the old `sshgate` CLI
-  revoke + re-add redeploy for gate changes. Design:
-  `docs/proposed/sshgate-update-verb-2026-07.md`.
 
 - **Signed-at-rest redactor (deferred).** Strengthen the redaction path's signing
   posture and merge the deferred redactor work.

@@ -1,7 +1,8 @@
 # SSHGATE_UPDATE — signed in-place gate self-update (design spec)
 
-Status: **proposed** (2026-07). Build gated by adversarial critique + triple
-review; **deploy gated by the operator** ("build it out, then I deploy").
+Status: **built, merged to `main` (merge `5a4406a`, v1.3.0), and deployed** —
+the operator rollout to existing gates completed 2026-07-04. Kept as the
+design spec of record.
 
 ## 1. Problem & goal
 

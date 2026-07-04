@@ -27,18 +27,25 @@ Runs, in order:
    fake-secret test fixtures on other branches from failing an unrelated push.
    Install gitleaks before pushing; the target warns loudly if it is absent.
 4. `make build` — a clean `go build` of every binary.
+5. `make verify-dist` — the fast verified-release-channel checks: the committed
+   `dist/gate` binary still matches its published `.sha256`, and `VERSION` is a
+   single clean line. (The reproducible source↔binary rebuild is CI's job —
+   `verify-gate.yml`.)
+6. `make verify-repro` — builds the gate twice with the shared flag set into
+   throwaway paths and fails if the two hashes differ, catching flag-set
+   nondeterminism regressions before push.
 
 ## `make e2e` — after a large build / before a release (needs Docker)
 
 Runs everything in `preflight`, then:
 
-5. `make test-integration` — `go test -race -tags=integration ./tests/integration/...`.
+7. `make test-integration` — `go test -race -tags=integration ./tests/integration/...`.
    Boots a real `linuxserver/openssh-server` container and exercises the full
    path: the provisioning logic (`tools.AddServer`, the shared core the human
    `sshgate` CLI drives) deploys the gate over SSH, a read command streams back,
    a write is denied at the gate (read-only / Tier-1), and the signed/Tier-2
    paths where present. This is the load-bearing "it actually works" layer.
-6. `make smoke` — `scripts/smoke-fresh-install.sh`. The headless fresh-user
+8. `make smoke` — `scripts/smoke-fresh-install.sh`. The headless fresh-user
    regression: spawns `sshgate-mcp` with an empty `HOME` (no config, no key)
    and asserts it reaches `ready` instead of hard-exiting. Guards the
    chicken-and-egg bug where the server refused to start before `/sshgate:setup`

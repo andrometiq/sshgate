@@ -94,8 +94,8 @@ the registered servers.
 ### What the gate does per command
 
 1. **Classify** the command as read or write (see *Read/write classification*).
-2. If **read**, execute it directly and return output (with inline secret
-   redaction; see below).
+2. If **read**, execute it directly and return output (streamed through the
+   inline secret redactor; see below).
 3. If **write**, require a valid signature: the command must arrive wrapped in an
    `SSHGATE_SIG` envelope that verifies against the signing public key deployed
    to the host. A valid, unexpired signature whose payload matches the command
@@ -168,13 +168,14 @@ the fail-closed posture and a standing regression corpus are the mitigation.
 
 ---
 
-## Inline secret redaction on reads
+## Inline secret redaction
 
-Read output can contain secret-shaped strings — private keys, tokens, passwords
-in config dumps. The gate redacts these inline as it streams read output back,
-so secrets are scrubbed before they ever reach the agent's context. Redaction
-runs on the read path in the gate itself; it is part of the remote-side trust
-boundary, not a client-side courtesy.
+Command output can contain secret-shaped strings — private keys, tokens,
+passwords in config dumps. The gate redacts these inline as it streams output
+back — for reads and writes alike — so secrets are scrubbed before they ever
+reach the agent's context. The only bypass is a human-approved secret-reveal
+carried in a single signed command. Redaction runs in the gate itself; it is
+part of the remote-side trust boundary, not a client-side courtesy.
 
 ---
 
@@ -304,7 +305,8 @@ your needs and upgrade later without tearing anything down.
   never a shell or arbitrary program — and OpenSSH enforces this server-side.
 - An *unprivileged* rogue agent on the operator's machine cannot read the signing
   key, trace the signer, or impersonate the operator on Telegram.
-- Read output is redacted of secret-shaped strings before it reaches the agent.
+- Command output is redacted of secret-shaped strings before it reaches the
+  agent (reads and writes alike; only an approved secret-reveal bypasses it).
 - A bounded signature validity window caps the lifetime of any approved write.
 
 **Not protected (be honest about it):**

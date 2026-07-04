@@ -36,7 +36,7 @@ The standing gates live in `docs/E2E-TEST-STRATEGY.md`:
 
 | When | Command | Needs Docker |
 | --- | --- | --- |
-| Before every push | `make preflight` (`vet test gitleaks build`) | no |
+| Before every push | `make preflight` (`vet test gitleaks build verify-dist verify-repro`) | no |
 | After a large build / before release | `make e2e` (`preflight test-integration smoke`) | yes |
 
 > Note on `make test`: the Makefile's `test:` target is `go test -race ./...`,
@@ -544,7 +544,7 @@ Makefile targets (and `docs/E2E-TEST-STRATEGY.md`):
 | Target | What it runs | Docker? | When |
 | --- | --- | --- | --- |
 | `make test` | `go test -race ./...` (the unit gate, CGO) | no | always |
-| `make preflight` | `vet test gitleaks build` | no | before every push |
+| `make preflight` | `vet test gitleaks build verify-dist verify-repro` | no | before every push |
 | `make test-integration` | `go test -race -tags=integration ./tests/integration/...` | **yes** | exercising real hosts |
 | `make smoke` | `scripts/smoke-fresh-install.sh` (keyless first-run startup) | no | fresh-user regression |
 | `make e2e` | `preflight test-integration smoke` | **yes** | after a large build / before release |

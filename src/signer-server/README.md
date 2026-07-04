@@ -49,8 +49,8 @@ Full motivation is in `docs/design.md`
 On a fresh VPS (Linux, systemd, Go toolchain installed):
 
 ```bash
-git clone https://github.com/karthikeyan5/sshgate.git
-cd sshgate/src/signer-server
+git clone https://github.com/karthikeyan5/SSHGate.git
+cd SSHGate/src/signer-server
 sudo ./install/deploy.sh
 ```
 
@@ -93,8 +93,8 @@ This is the SCAFFOLD. The following are deliberately deferred to v2.1+:
    approving user per row. Reviewer-count rules ("2 of N must approve")
    are v2.1 schema + handler work.
 4. **Server-side LLM explainer.** v1.1's Telegram-backed explainer runs
-   client-side via the Anthropic API; v2.0 ships no equivalent.
-   v2.1 adds it as a render-time call in the web UI.
+   client-side against an OpenAI-compatible endpoint; v2.0 ships no
+   equivalent. v2.1 adds it as a render-time call in the web UI.
 5. **Per-client API keys.** v2.0 has one shared bearer token for the
    whole deployment. v2.1 introduces a clients table with per-laptop
    keys + rotation.
@@ -135,7 +135,7 @@ their own per-request budget elapses.
 
 ## v2.1 follow-up issues
 
-Tracked as TODOs in the code; condensed list:
+Tracked here (doc-side; there are no TODO markers in the Go source); condensed list:
 
 - WebAuthn registration + login (library: `github.com/go-webauthn/webauthn`)
 - TOTP enrollment + verification (library: `github.com/pquerna/otp`)

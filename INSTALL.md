@@ -61,9 +61,11 @@ cryptographic gate is enforced on each remote server independently.
 3. *(Tier 2 only)* A Telegram bot — your phone-side approval endpoint. Made
    via @BotFather. If you don't have one yet, you'll be walked through it.
 4. `~/.config/sshgate/` and *(Tier 2 only)* `/var/lib/sshgatesigner/` — local
-   config + key + audit-log paths, mode 0700 / 0640.
-5. SSHGate binaries — installed by `make install-local`. `sshgate-mcp` +
-   `sshgate-signer-telegram` are built from your clone onto your `$PATH`;
+   config + key + audit-log paths, mode-tightened (dirs 0700 / 0750; key,
+   token, and audit-log files 0600).
+5. SSHGate binaries — installed by `make install-local`. `sshgate-mcp`,
+   `sshgate-signer-telegram`, and the human-only `sshgate` provisioning CLI
+   are built from your clone onto your `$PATH`;
    the remote `sshgate-gate-linux-amd64` is **copied** from the committed,
    CI-verified `dist/gate/` artifact into `~/.config/sshgate/bin/` — it is
    never rebuilt locally, because a local rebuild would hash to something
@@ -75,10 +77,11 @@ cryptographic gate is enforced on each remote server independently.
 
 - **Tier 1 (read-only):** nothing beyond Go ≥1.25 and one Linux server you
   can SSH into right now. No sudo, no Telegram. ~2 minutes.
-- **Tier 2 (full v1):** sudo access on this machine, a Telegram account, and
-  ~10 minutes. The bot token and your Telegram user-id can be generated
-  mid-flow if you don't have them yet — you'll be pointed at @BotFather and
-  @userinfobot.
+- **Tier 2 (full v1):** sudo access on this machine, `jq` on `$PATH`
+  (`/sshgate:setup` uses it to enumerate registered servers), a Telegram
+  account, and ~10 minutes. The bot token and your Telegram user-id can be
+  generated mid-flow if you don't have them yet — you'll be pointed at
+  @BotFather and @userinfobot.
 
 ### Choose the tier when prompted
 
@@ -130,8 +133,9 @@ Tell the user, in order:
 >        mkdir -p ~/src && cd ~/src && git clone https://github.com/karthikeyan5/SSHGate
 >        cd ~/src/SSHGate && make install-local
 >
->    `make install-local` puts `sshgate-mcp` and `sshgate-signer-telegram` in
->    `~/go/bin` and the remote gate binary in `~/.config/sshgate/bin/`.
+>    `make install-local` puts `sshgate-mcp`, `sshgate-signer-telegram`, and
+>    the human-only `sshgate` provisioning CLI in `~/go/bin`, and the remote
+>    gate binary in `~/.config/sshgate/bin/`.
 >
 > 2. PERSIST `~/go/bin` to your LOGIN profile — not just an interactive rc
 >    file. Claude Code spawns plugin MCP servers with its LAUNCH-time env, and
