@@ -290,3 +290,11 @@ func (b errBackend) Request(_ context.Context, _ backend.ApprovalRequest) (<-cha
 func (b errBackend) RequestGrant(_ context.Context, _ backend.GrantApprovalRequest) (<-chan backend.Result, error) {
 	return nil, b.err
 }
+
+func (b errBackend) RequestTransfer(_ context.Context, _ backend.TransferApprovalRequest) (<-chan backend.Result, error) {
+	return nil, b.err
+}
+
+func (b errBackend) RequestRegisterKey(_ context.Context, _ backend.RegisterApprovalRequest) (<-chan backend.Result, error) {
+	return nil, b.err
+}

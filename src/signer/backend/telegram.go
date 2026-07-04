@@ -648,6 +648,84 @@ func (t *TelegramBackend) RequestGrant(ctx context.Context, req GrantApprovalReq
 	return ch, nil
 }
 
+// RequestTransfer implements Backend's box→box SECRET-TRANSFER approval. Like
+// RequestGrant it is a separate method (not an approve-label switch on Request)
+// with its own distinct, alarming banner: approving it lets the signer mint the
+// two host-bound signed legs under one tap. The banner LABELS come from the
+// signer's registry (carried in req), never the MCP alias, so a lying MCP
+// cannot mislabel the destination.
+func (t *TelegramBackend) RequestTransfer(ctx context.Context, req TransferApprovalRequest) (<-chan Result, error) {
+	text := formatTransferApprovalMessage(req, t.reqTimeout, t.RedactSalt, t.RedactRules)
+	return t.dispatchApproval(ctx, req.RequestID, text, "✓ Approve SECRET TRANSFER")
+}
+
+// RequestRegisterKey implements Backend's XFER-KEY REGISTER approval — the
+// human-only control that populates the signer's transfer trust anchor. Always
+// a prompt; its own distinct banner names the consequence (adding a transfer
+// trust anchor) and shows the exact keys the operator is confirming.
+func (t *TelegramBackend) RequestRegisterKey(ctx context.Context, req RegisterApprovalRequest) (<-chan Result, error) {
+	text := formatRegisterApprovalMessage(req, t.reqTimeout)
+	return t.dispatchApproval(ctx, req.RequestID, text, "✓ Approve XFER-KEY REGISTER")
+}
+
+// dispatchApproval is the shared send-message + register-pending + timer/ctx
+// watcher path for the NEW approval kinds (transfer, register_xfer_key). It
+// mirrors Request/RequestGrant exactly (chatStore load, approve:/deny: callback
+// wiring keyed by RequestID, the same resolve/timeout path) — only the message
+// body and the approve-button label differ, both passed in. Request and
+// RequestGrant predate this helper and are intentionally left untouched.
+func (t *TelegramBackend) dispatchApproval(ctx context.Context, reqID, text, approveLabel string) (<-chan Result, error) {
+	chatID, ok, err := t.chatStore.Load()
+	if err != nil {
+		return nil, fmt.Errorf("chatstore load: %w", err)
+	}
+	if !ok {
+		return nil, errors.New("telegram: no DM chat captured yet — operator must /start the bot")
+	}
+
+	msg := tgbotapi.NewMessage(chatID, text)
+	msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(approveLabel, "approve:"+reqID),
+			tgbotapi.NewInlineKeyboardButtonData("✗ Deny", "deny:"+reqID),
+		),
+	)
+	sent, err := t.bot.Send(msg)
+	if err != nil {
+		// %s + redactToken (not %w): a transport-level send failure is a
+		// *url.Error embedding the token in its URL path. No caller unwraps it.
+		return nil, fmt.Errorf("telegram send: %s", redactToken(err))
+	}
+
+	ch := make(chan Result, 1)
+	done := make(chan struct{})
+	var stopOnce sync.Once
+	stopTimer := func() {
+		stopOnce.Do(func() { close(done) })
+	}
+
+	ps := &pendingState{
+		ch:        ch,
+		chatID:    chatID,
+		messageID: sent.MessageID,
+		stopTimer: stopTimer,
+	}
+	t.pending.Store(reqID, ps)
+
+	go func() {
+		timer := time.NewTimer(t.reqTimeout)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+			t.timeout(reqID, ps)
+		case <-ctx.Done():
+			t.timeout(reqID, ps)
+		case <-done:
+		}
+	}()
+	return ch, nil
+}
+
 // resolve sends r on ps.ch exactly once and tears down the watcher
 // goroutine. Subsequent resolves are silent no-ops (handled by
 // sync.Once).
@@ -1044,6 +1122,128 @@ func formatGrantApprovalMessage(req GrantApprovalRequest, timeout time.Duration,
 	fmt.Fprintf(&b, "Request ID: %s\n", req.RequestID)
 	fmt.Fprintf(&b, "Approval expires in %s\n", timeout)
 	return b.String()
+}
+
+// formatTransferApprovalMessage renders the box→box SECRET-TRANSFER approval
+// body. It is deliberately alarming — approving it MOVES a secret file across
+// hosts — and every factual field is shape-validated BEFORE render so a smuggled
+// newline cannot forge a banner line (the anti-phishing rule, mirroring
+// formatUpdateApprovalMessage's <malformed> collapse). The src/dest LABELS come
+// from the signer's registry (carried in req), NOT the MCP alias, so a lying MCP
+// cannot mislabel the destination. Paths run through redactForDisplay for the
+// display copy only (the request is never mutated). Plain text, no parse-mode.
+func formatTransferApprovalMessage(req TransferApprovalRequest, timeout time.Duration, salt [32]byte, rules []redact.Rule) string {
+	var b strings.Builder
+	b.WriteString("⚠️ SECRET TRANSFER — approving this MOVES a secret file across hosts.\n")
+	b.WriteString("   The value is encrypted end-to-end; the agent only relays ciphertext.\n\n")
+	b.WriteString("🔐 SSHGate SECRET TRANSFER\n")
+	fmt.Fprintf(&b, "   From:  %s  (%s)\n", bannerLabel(req.SrcLabel), truncFP(req.SrcFP))
+	fmt.Fprintf(&b, "          %s\n", bannerField(redactForDisplay(req.SrcPath, salt, rules)))
+	fmt.Fprintf(&b, "   To:    %s  (%s)\n", bannerLabel(req.DestLabel), truncFP(req.DestFP))
+	fmt.Fprintf(&b, "          %s   mode %s\n", bannerField(redactForDisplay(req.DestPath, salt, rules)), bannerMode(req.Mode))
+	fmt.Fprintf(&b, "   Xfer:  %s\n\n", bannerField(req.XferID))
+	fmt.Fprintf(&b, "Request ID: %s\n", req.RequestID)
+	fmt.Fprintf(&b, "Expires in %s\n", timeout)
+	return b.String()
+}
+
+// formatRegisterApprovalMessage renders the XFER-KEY REGISTER approval body:
+// approving it adds a box→box transfer trust anchor. It names that consequence
+// and shows the exact key lines the operator is confirming, each shape-validated
+// so a smuggled newline cannot forge a banner line. The keys are PUBLIC, so they
+// render raw (WYSIWYG) when well-formed. Plain text, no parse-mode.
+func formatRegisterApprovalMessage(req RegisterApprovalRequest, timeout time.Duration) string {
+	var b strings.Builder
+	b.WriteString("⚠️ XFER-KEY REGISTER — approving this ADDS a box→box transfer trust anchor.\n")
+	b.WriteString("   These keys let the signer build transfer legs to/from this host. Only approve keys you provisioned.\n\n")
+	b.WriteString("🔐 SSHGate XFER-KEY REGISTER\n")
+	fmt.Fprintf(&b, "   Host:  %s  (%s)\n", bannerLabel(req.Label), truncFP(req.HostFP))
+	fmt.Fprintf(&b, "   Box:   %s\n", bannerField(req.BoxPub))
+	fmt.Fprintf(&b, "   ID:    %s\n\n", bannerField(req.IDPub))
+	fmt.Fprintf(&b, "Request ID: %s\n", req.RequestID)
+	fmt.Fprintf(&b, "Expires in %s\n", timeout)
+	return b.String()
+}
+
+// bannerField returns s unchanged when it is single-line printable ASCII (no
+// control chars, no newline, no high-bit bytes), else the marker "<malformed>".
+// It is the anti-phishing collapse for a factual banner field (path, fp, mode,
+// xferID, key line): a crafted value that tries to smuggle a newline to inject a
+// fake banner line renders as the marker instead of the raw bytes. Mirrors the
+// update banner's isLower64Hex → <malformed> collapse.
+func bannerField(s string) string {
+	if isSingleLinePrintableASCII(s) {
+		return s
+	}
+	return "<malformed>"
+}
+
+// bannerLabel is the display-name collapse. A label comes from the trusted
+// signer registry (not the MCP), so it may legitimately carry unicode; we only
+// reject a control char / newline that could forge a banner line.
+func bannerLabel(s string) string {
+	if s == "" {
+		return "<none>"
+	}
+	if isSingleLineNoControl(s) {
+		return s
+	}
+	return "<malformed>"
+}
+
+// bannerMode renders mode raw when it is in the P2 allowlist, else the marker.
+func bannerMode(s string) string {
+	if s == "0600" {
+		return s
+	}
+	return "<malformed>"
+}
+
+// truncFP renders a host-key fingerprint truncated for the banner. A malformed
+// fp (not single-line printable ASCII, or not the "SHA256:" shape) collapses to
+// the marker so it cannot forge a banner line.
+func truncFP(fp string) string {
+	if !isSingleLinePrintableASCII(fp) || !strings.HasPrefix(fp, "SHA256:") {
+		return "<malformed>"
+	}
+	const keep = 22
+	if len(fp) <= keep {
+		return fp
+	}
+	return fp[:keep] + "…"
+}
+
+// isSingleLinePrintableASCII reports whether every byte of s is printable ASCII
+// in [0x20, 0x7e]: space through '~'. It REJECTS every control char (incl.
+// newline 0x0a / CR 0x0d), DEL (0x7f), and high-bit bytes — the load-bearing
+// property is "cannot forge a banner line", which a newline would. A SPACE is
+// permitted (a path or key line legitimately contains spaces; a space cannot
+// start a new banner line).
+func isSingleLinePrintableASCII(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c < 0x20 || c >= 0x7f {
+			return false
+		}
+	}
+	return true
+}
+
+// isSingleLineNoControl reports whether s carries no ASCII control char
+// (including newline/CR). It permits spaces and unicode — used for the trusted
+// registry label, where the only property that matters is "cannot forge a
+// banner line."
+func isSingleLineNoControl(s string) bool {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c < 0x20 || c == 0x7f {
+			return false
+		}
+	}
+	return true
 }
 
 // requestHasReveal reports whether any command in the request is a

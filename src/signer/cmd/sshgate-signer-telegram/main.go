@@ -226,12 +226,27 @@ func run(args []string) int {
 		return 1
 	}
 
+	// Box→box transfer registry (the per-server pubkey trust anchor). It lives
+	// beside the master key as <keydir>/xfer-registry.json — the RUNTIME path,
+	// derived from cfg.Paths.Key (initPaths is --init-only and never runs here).
+	// A missing file is an empty registry, so a daemon whose operator has not
+	// registered any transfer peer still starts and simply refuses every
+	// transfer at the lookup step. A present file must be 0600 (LoadXferRegistry
+	// enforces the group/other-bit rejection — it is a trust anchor).
+	xferRegPath := filepath.Join(filepath.Dir(cfg.Paths.Key), "xfer-registry.json")
+	xferReg, err := signer.LoadXferRegistry(xferRegPath)
+	if err != nil {
+		logf("load xfer registry: %v", err)
+		return 1
+	}
+
 	daemon := &signer.Daemon{
-		Key:         priv,
-		Backend:     bk,
-		Audit:       audit,
-		RedactSalt:  redactSalt,
-		RedactRules: redactRules,
+		Key:          priv,
+		Backend:      bk,
+		Audit:        audit,
+		RedactSalt:   redactSalt,
+		RedactRules:  redactRules,
+		XferRegistry: xferReg,
 	}
 	// HandlerTimeout bounds the WHOLE connection (request read + approval
 	// wait + response write) under serveOne's single absolute deadline.

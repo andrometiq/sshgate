@@ -31,3 +31,21 @@ func (StubBackend) RequestGrant(_ context.Context, _ GrantApprovalRequest) (<-ch
 	close(ch)
 	return ch, nil
 }
+
+// RequestTransfer mirrors Request: every box→box transfer is denied, so a
+// daemon shipped against StubBackend signs no transfer legs.
+func (StubBackend) RequestTransfer(_ context.Context, _ TransferApprovalRequest) (<-chan Result, error) {
+	ch := make(chan Result, 1)
+	ch <- Result{Status: StatusDenied}
+	close(ch)
+	return ch, nil
+}
+
+// RequestRegisterKey mirrors Request: every xfer-key registration is denied, so
+// a daemon shipped against StubBackend never populates the transfer registry.
+func (StubBackend) RequestRegisterKey(_ context.Context, _ RegisterApprovalRequest) (<-chan Result, error) {
+	ch := make(chan Result, 1)
+	ch <- Result{Status: StatusDenied}
+	close(ch)
+	return ch, nil
+}

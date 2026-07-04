@@ -19,6 +19,8 @@ import (
 	"github.com/karthikeyan5/sshgate/src/redact"
 	"github.com/karthikeyan5/sshgate/src/signer/backend"
 	"github.com/karthikeyan5/sshgate/src/sigwire"
+	"github.com/karthikeyan5/sshgate/src/xfer"
+	"github.com/karthikeyan5/sshgate/src/xferwire"
 )
 
 // MaxGrantDuration is the hard ceiling on a standing grant's lifetime.
@@ -87,6 +89,83 @@ type Daemon struct {
 	// built without them still works.
 	RedactSalt  [32]byte
 	RedactRules []redact.Rule
+
+	// XferRegistry is the per-server box→box transfer key registry — the trust
+	// anchor for the SECRET-TRANSFER feature. When a transfer is approved the
+	// daemon sources the recipient's box public key and the sender's identity
+	// public key ONLY from here (Lookup), NEVER from the MCP request, which is
+	// the whole anti-MITM guarantee. It is wired by cmd/main from
+	// <keydir>/xfer-registry.json (missing file → empty registry). A Daemon
+	// built without it (tests, legacy config) is nil; handleTransfer /
+	// handleRegisterXferKey fail closed on nil rather than nil-panicking.
+	XferRegistry *XferRegistry
+}
+
+// transferRequest is the wire-format "transfer" request: one human approval
+// mints the two host-bound signed legs of a box→box secret transfer. The MCP
+// sends paths + fingerprints + display aliases ONLY — it never sends the
+// pubkeys and never sends an xferID; the daemon sources both from its own
+// registry and mints the xferID, which is the entire anti-MITM guarantee.
+// Fields disjoint from signRequest, so it has its own DisallowUnknownFields
+// decode (like grantRequest).
+type transferRequest struct {
+	Kind      string `json:"kind"`
+	RequestID string `json:"request_id"`
+	SrcAlias  string `json:"src_alias"` // display only
+	SrcFP     string `json:"src_fp"`    // registry key for id_pub + SEND leg Host + RECV srcID
+	SrcPath   string `json:"src_path"`  // path on the source gate to read
+	DestAlias string `json:"dest_alias"`
+	DestFP    string `json:"dest_fp"`   // registry key for box_pub + RECV leg Host + destID
+	DestPath  string `json:"dest_path"` // path on the destination gate to write
+	Mode      string `json:"mode"`      // octal file mode ("0600" in P2)
+	TTLSec    int64  `json:"ttl_seconds"`
+	// ProtoVersion: see signRequest — known to the strict decoder, checked in
+	// the lenient peek, omitempty preserves the legacy wire shape.
+	ProtoVersion int `json:"proto_version,omitempty"`
+}
+
+// transferLeg is one signed leg {cmd, sig} of a transfer.
+type transferLeg struct {
+	Cmd string `json:"cmd"`
+	Sig string `json:"sig"`
+}
+
+// transferResponse is the wire-format "transfer" response. On approval XferID +
+// both legs are set; AuthMode is always "human" on approval (a standing grant
+// can never cover a transfer). Error is set only on status "error".
+type transferResponse struct {
+	RequestID    string       `json:"request_id"`
+	Status       string       `json:"status"`
+	AuthMode     string       `json:"auth_mode,omitempty"`
+	XferID       string       `json:"xfer_id,omitempty"`
+	Send         *transferLeg `json:"send,omitempty"`
+	Recv         *transferLeg `json:"recv,omitempty"`
+	Error        string       `json:"error,omitempty"`
+	ProtoVersion int          `json:"proto_version,omitempty"`
+}
+
+// registerXferKeyRequest is the wire-format "register_xfer_key" request: a
+// human-only, always-prompt registration of a server's box→box transfer keys
+// into the signer registry. There is NO MCP tool for it (mirrors provisioning);
+// the caller is the human-only sshgate CLI over the signer socket. Fields
+// disjoint from other kinds, its own DisallowUnknownFields decode.
+type registerXferKeyRequest struct {
+	Kind      string `json:"kind"`
+	RequestID string `json:"request_id"`
+	HostFP    string `json:"host_fp"`
+	Label     string `json:"label"`
+	BoxPub    string `json:"box_pub"` // canonical PublicText
+	IDPub     string `json:"id_pub"`  // canonical PublicText
+	// ProtoVersion: see signRequest.
+	ProtoVersion int `json:"proto_version,omitempty"`
+}
+
+// registerXferKeyResponse is the wire-format "register_xfer_key" response.
+type registerXferKeyResponse struct {
+	RequestID    string `json:"request_id"`
+	Status       string `json:"status"`
+	Error        string `json:"error,omitempty"`
+	ProtoVersion int    `json:"proto_version,omitempty"`
 }
 
 // signRequest is the wire-format request sent over the Unix socket.
@@ -337,6 +416,10 @@ func (d *Daemon) HandleSignRequest(ctx context.Context, conn io.ReadWriter) erro
 		return d.handleRevokeGrant(conn, line)
 	case "list_grants":
 		return d.handleListGrants(conn, line)
+	case "transfer":
+		return d.handleTransfer(ctx, conn, line)
+	case "register_xfer_key":
+		return d.handleRegisterXferKey(ctx, conn, line)
 	case "sign", "":
 		// "" falls through to the sign decoder, which rejects it as an
 		// unsupported kind — preserving the existing error wording.
@@ -369,6 +452,21 @@ func (d *Daemon) HandleSignRequest(ctx context.Context, conn io.ReadWriter) erro
 	for i, c := range req.Commands {
 		if c.Cmd == "" {
 			return d.respondError(conn, req.RequestID, fmt.Sprintf("commands[%d].cmd is empty", i))
+		}
+		// Sign-path REJECT of any SSHGATE_XFER_* verb (the load-bearing
+		// confused-deputy guard). A transfer leg names a recipient box key
+		// SOURCED FROM THE SIGNER'S REGISTRY; if a caller could hand-craft
+		// {kind:"sign", commands:[{cmd:"SSHGATE_XFER_SEND <attacker-box-pub> …"}]}
+		// it would get a human tap on an opaque banner and have the master key
+		// sign a leg whose recipient came from the AGENT — exactly the hole this
+		// feature closes. Transfers MUST go through the dedicated "transfer" kind
+		// (handleTransfer), where the signer sources the pubkeys itself. This
+		// check is before matchGrant, so a standing grant can never reach it
+		// either. isAdminVerb already forces a human prompt for these, but that
+		// is not enough — we reject them outright on this path.
+		if isTransferVerb(c.Cmd) {
+			return d.respondError(conn, req.RequestID, fmt.Sprintf(
+				"commands[%d] is a transfer verb; transfers must use the \"transfer\" request kind, not \"sign\"", i))
 		}
 		ttl := c.TTLSec
 		if ttl <= 0 {
@@ -825,6 +923,339 @@ func (d *Daemon) auditRevokeGrant(req revokeGrantRequest, status string) {
 	}
 }
 
+// handleTransfer processes a "transfer" request: validate, source the recipient
+// box key + sender id key FROM THE SIGNER REGISTRY (never the request), mint a
+// fresh xferID, build the two leg Cmd strings, route ONE human approval through
+// the backend's distinct SECRET-TRANSFER UX, and on approval sign both legs —
+// each host-bound to its own gate (SEND=src_fp, RECV=dest_fp). Mirrors
+// handleRequestGrant's shape (no auto path — a standing grant can never cover a
+// transfer). Every request produces exactly one audit row (metadata only).
+func (d *Daemon) handleTransfer(ctx context.Context, conn io.ReadWriter, line []byte) error {
+	var req transferRequest
+	dec := json.NewDecoder(bytes.NewReader(line))
+	dec.DisallowUnknownFields()
+	if jerr := dec.Decode(&req); jerr != nil {
+		return d.respondTransferError(conn, "", fmt.Sprintf("malformed request: %v", jerr))
+	}
+	if req.RequestID == "" {
+		return d.respondTransferError(conn, "", "missing request_id")
+	}
+	// Fail-CLOSED nil-guard: a Daemon built without a registry (tests, legacy
+	// config) has no trust anchor, so it must refuse transfers with a clear
+	// error rather than nil-panic in Lookup below.
+	if d.XferRegistry == nil {
+		return d.respondTransferError(conn, req.RequestID, "transfers unavailable: signer has no transfer registry configured")
+	}
+
+	// Field validation (fail closed, clear errors). Reuse the xferwire field
+	// rules so the daemon's checks and the codec's anchored parse agree.
+	if !xferwire.ValidFingerprint(req.SrcFP) {
+		return d.respondTransferError(conn, req.RequestID, "invalid src_fp")
+	}
+	if !xferwire.ValidFingerprint(req.DestFP) {
+		return d.respondTransferError(conn, req.RequestID, "invalid dest_fp")
+	}
+	if req.SrcFP == req.DestFP {
+		return d.respondTransferError(conn, req.RequestID, "src_fp and dest_fp must differ (no self-transfer)")
+	}
+	if !xferwire.ValidPath(req.SrcPath) {
+		return d.respondTransferError(conn, req.RequestID, "invalid src_path")
+	}
+	if !xferwire.ValidPath(req.DestPath) {
+		return d.respondTransferError(conn, req.RequestID, "invalid dest_path")
+	}
+	if !xferwire.ValidMode(req.Mode) {
+		return d.respondTransferError(conn, req.RequestID, fmt.Sprintf("invalid mode %q (allowed: 0600)", req.Mode))
+	}
+	ttl := req.TTLSec
+	if ttl <= 0 {
+		return d.respondTransferError(conn, req.RequestID, "ttl_seconds must be > 0")
+	}
+	// Compare in int64 SECONDS — never multiply attacker-controlled seconds into
+	// a time.Duration (overflows negative for huge values). The gate re-checks
+	// authoritatively; this is the signer-side cap.
+	if ttl > int64(sigwire.MaxSigValidity/time.Second) {
+		return d.respondTransferError(conn, req.RequestID, fmt.Sprintf("ttl_seconds %d exceeds max %d", ttl, int64(sigwire.MaxSigValidity/time.Second)))
+	}
+
+	// THE anti-MITM invariant: box_pub and id_pub come ONLY from the registry,
+	// keyed by the fingerprints, NEVER from the request. An unregistered fp
+	// fails the lookup; a registered fp yields a HUMAN-registered key.
+	boxPub, _, destLabel, ok := d.XferRegistry.Lookup(req.DestFP) // recipient box key
+	if !ok {
+		return d.respondTransferError(conn, req.RequestID, "dest server not registered for transfer")
+	}
+	_, idPub, srcLabel, ok := d.XferRegistry.Lookup(req.SrcFP) // sender identity key
+	if !ok {
+		return d.respondTransferError(conn, req.RequestID, "src server not registered for transfer")
+	}
+
+	// Mint a fresh signer-side xferID (the agent never supplies it, so it cannot
+	// correlate/replay a stale leg across transfers).
+	xferID, err := newXferID()
+	if err != nil {
+		return d.respondTransferError(conn, req.RequestID, fmt.Sprintf("xfer id: %v", err))
+	}
+
+	// Build both leg Cmd strings (injection-safe codec). The recipient box key
+	// and sender id key are the registry-sourced pubkeys.
+	sendCmd, err := xferwire.EncodeSend(boxPub, xferID, req.DestFP, req.SrcPath)
+	if err != nil {
+		return d.respondTransferError(conn, req.RequestID, fmt.Sprintf("build send leg: %v", err))
+	}
+	recvCmd, err := xferwire.EncodeRecv(idPub, xferID, req.SrcFP, req.DestFP, req.Mode, req.DestPath)
+	if err != nil {
+		return d.respondTransferError(conn, req.RequestID, fmt.Sprintf("build recv leg: %v", err))
+	}
+
+	// One human approval. The banner labels come from the REGISTRY, not the MCP
+	// alias, so a lying MCP cannot mislabel src/dest.
+	resultCh, err := d.Backend.RequestTransfer(ctx, backend.TransferApprovalRequest{
+		RequestID: req.RequestID,
+		XferID:    xferID,
+		SrcLabel:  srcLabel,
+		SrcFP:     req.SrcFP,
+		SrcPath:   req.SrcPath,
+		DestLabel: destLabel,
+		DestFP:    req.DestFP,
+		DestPath:  req.DestPath,
+		Mode:      req.Mode,
+	})
+	if err != nil {
+		return d.respondTransferError(conn, req.RequestID, fmt.Sprintf("backend: %v", err))
+	}
+
+	var result backend.Result
+	select {
+	case r, ok := <-resultCh:
+		if !ok {
+			result = backend.Result{Status: backend.StatusTimeout}
+		} else {
+			result = r
+		}
+	case <-ctx.Done():
+		result = backend.Result{Status: backend.StatusTimeout}
+	}
+
+	if result.Status != backend.StatusApproved {
+		resp := transferResponse{RequestID: req.RequestID, Status: result.Status.String(), ProtoVersion: sigwire.ProtoVersion}
+		if err := writeJSONLine(conn, resp); err != nil {
+			d.auditTransfer(req, xferID, undeliveredStatus(result.Status), result.ApprovedBy)
+			return fmt.Errorf("write transfer response: %w", err)
+		}
+		d.auditTransfer(req, xferID, result.Status.String(), result.ApprovedBy)
+		return nil
+	}
+
+	// Approved: sign both legs, each with its own Host binding.
+	send, recv, err := d.signTransferLegs(sendCmd, req.SrcFP, recvCmd, req.DestFP, ttl)
+	if err != nil {
+		return d.respondTransferError(conn, req.RequestID, fmt.Sprintf("sign: %v", err))
+	}
+	resp := transferResponse{
+		RequestID:    req.RequestID,
+		Status:       "approved",
+		AuthMode:     authMode(true, result.ApprovedBy),
+		XferID:       xferID,
+		Send:         send,
+		Recv:         recv,
+		ProtoVersion: sigwire.ProtoVersion,
+	}
+	if err := writeJSONLine(conn, resp); err != nil {
+		d.auditTransfer(req, xferID, "approved-undelivered", result.ApprovedBy)
+		return fmt.Errorf("write transfer response: %w", err)
+	}
+	d.auditTransfer(req, xferID, "approved", result.ApprovedBy)
+	return nil
+}
+
+// signTransferLegs signs the two transfer legs with d.Key, each host-bound to
+// its own gate (SEND=srcFP, RECV=destFP). It is the per-command host-stamping
+// signAll already does, specialised to exactly two commands under one approval.
+// Reveal is never set. No new SigPayload field — both legs ride inside
+// SigPayload.Cmd like SSHGATE_UPDATE, so payload_golden_test.go stays byte-safe.
+func (d *Daemon) signTransferLegs(sendCmd, sendFP, recvCmd, recvFP string, ttl int64) (send, recv *transferLeg, err error) {
+	now := d.now().Unix()
+	signOne := func(cmd, host string) (*transferLeg, error) {
+		nonce, err := newNonce()
+		if err != nil {
+			return nil, fmt.Errorf("nonce: %w", err)
+		}
+		payload := sigwire.SigPayload{
+			Cmd:   cmd,
+			TS:    now,
+			Exp:   now + ttl,
+			Nonce: nonce,
+			Host:  host,
+		}
+		signedBytes, err := jsonMarshal(payload)
+		if err != nil {
+			return nil, fmt.Errorf("marshal payload: %w", err)
+		}
+		sig := ed25519.Sign(d.Key, signedBytes)
+		wire, err := sigwire.EncodeSigned(sig, payload)
+		if err != nil {
+			return nil, fmt.Errorf("encode: %w", err)
+		}
+		return &transferLeg{Cmd: cmd, Sig: wire}, nil
+	}
+	if send, err = signOne(sendCmd, sendFP); err != nil {
+		return nil, nil, err
+	}
+	if recv, err = signOne(recvCmd, recvFP); err != nil {
+		return nil, nil, err
+	}
+	return send, recv, nil
+}
+
+// respondTransferError writes a transfer "error" response and audits it.
+func (d *Daemon) respondTransferError(conn io.Writer, reqID, reason string) error {
+	resp := transferResponse{RequestID: reqID, Status: "error", Error: reason, ProtoVersion: sigwire.ProtoVersion}
+	if err := writeJSONLine(conn, resp); err != nil {
+		d.auditTransfer(transferRequest{RequestID: reqID}, "", "error", "")
+		return fmt.Errorf("write transfer error response: %w", err)
+	}
+	d.auditTransfer(transferRequest{RequestID: reqID}, "", "error", "")
+	return nil
+}
+
+// auditTransfer writes one audit row for a transfer request. METADATA ONLY —
+// never the plaintext value (which the signer never sees anyway): source/dest
+// fingerprints, the minted xferID, and the mode. The "command" slot carries a
+// synthetic descriptor so a grep over the audit log surfaces transfers.
+func (d *Daemon) auditTransfer(req transferRequest, xferID, status, approvedBy string) {
+	desc := fmt.Sprintf("transfer src=%s dest=%s xfer=%s mode=%s", req.SrcFP, req.DestFP, xferID, req.Mode)
+	var servers []string
+	if req.SrcFP != "" || req.DestFP != "" {
+		servers = []string{req.SrcFP, req.DestFP}
+	}
+	ev := AuditEvent{
+		TS:         d.now().UTC(),
+		RequestID:  req.RequestID,
+		Status:     status,
+		Commands:   []string{desc},
+		Servers:    servers,
+		ApprovedBy: approvedBy,
+		AuthMode:   authMode(strings.HasPrefix(status, "approved"), approvedBy),
+	}
+	if err := d.Audit.Write(ev); err != nil {
+		fmt.Fprintf(os.Stderr, "signer: audit write failed: %v\n", err)
+	}
+}
+
+// handleRegisterXferKey processes a "register_xfer_key" request: the human-only,
+// always-prompt registration of a server's box→box transfer keys. It mirrors
+// handleRequestGrant's STRUCTURAL always-prompt — it unconditionally routes
+// through Backend.RequestRegisterKey (a human tap) and mutates the registry ONLY
+// after StatusApproved. There is no auto path and no MCP tool. One audit row per
+// request (metadata only — key text is public, but we log a compact descriptor).
+func (d *Daemon) handleRegisterXferKey(ctx context.Context, conn io.ReadWriter, line []byte) error {
+	var req registerXferKeyRequest
+	dec := json.NewDecoder(bytes.NewReader(line))
+	dec.DisallowUnknownFields()
+	if jerr := dec.Decode(&req); jerr != nil {
+		return d.respondRegisterXferKeyError(conn, "", fmt.Sprintf("malformed request: %v", jerr))
+	}
+	if req.RequestID == "" {
+		return d.respondRegisterXferKeyError(conn, "", "missing request_id")
+	}
+	if d.XferRegistry == nil {
+		return d.respondRegisterXferKeyError(conn, req.RequestID, "registration unavailable: signer has no transfer registry configured")
+	}
+	if !xferwire.ValidFingerprint(req.HostFP) {
+		return d.respondRegisterXferKeyError(conn, req.RequestID, "invalid host_fp")
+	}
+	// Validate the key material BEFORE prompting so a malformed key never wastes
+	// a human tap (and can never land in the registry).
+	if _, err := xfer.ParseBoxPublicText(req.BoxPub); err != nil {
+		return d.respondRegisterXferKeyError(conn, req.RequestID, "invalid box_pub")
+	}
+	if _, err := xfer.ParseIDPublicText(req.IDPub); err != nil {
+		return d.respondRegisterXferKeyError(conn, req.RequestID, "invalid id_pub")
+	}
+
+	resultCh, err := d.Backend.RequestRegisterKey(ctx, backend.RegisterApprovalRequest{
+		RequestID: req.RequestID,
+		HostFP:    req.HostFP,
+		Label:     req.Label,
+		BoxPub:    req.BoxPub,
+		IDPub:     req.IDPub,
+	})
+	if err != nil {
+		return d.respondRegisterXferKeyError(conn, req.RequestID, fmt.Sprintf("backend: %v", err))
+	}
+
+	var result backend.Result
+	select {
+	case r, ok := <-resultCh:
+		if !ok {
+			result = backend.Result{Status: backend.StatusTimeout}
+		} else {
+			result = r
+		}
+	case <-ctx.Done():
+		result = backend.Result{Status: backend.StatusTimeout}
+	}
+
+	if result.Status != backend.StatusApproved {
+		resp := registerXferKeyResponse{RequestID: req.RequestID, Status: result.Status.String(), ProtoVersion: sigwire.ProtoVersion}
+		if err := writeJSONLine(conn, resp); err != nil {
+			d.auditRegisterXferKey(req, undeliveredStatus(result.Status), result.ApprovedBy)
+			return fmt.Errorf("write register-xfer-key response: %w", err)
+		}
+		d.auditRegisterXferKey(req, result.Status.String(), result.ApprovedBy)
+		return nil
+	}
+
+	// Approved: mutate the registry (persisted atomically at 0600). Overwrite is
+	// an authorised rotation — this write is human-approved.
+	if err := d.XferRegistry.Register(req.HostFP, req.Label, req.BoxPub, req.IDPub); err != nil {
+		return d.respondRegisterXferKeyError(conn, req.RequestID, fmt.Sprintf("register: %v", err))
+	}
+	resp := registerXferKeyResponse{RequestID: req.RequestID, Status: "approved", ProtoVersion: sigwire.ProtoVersion}
+	if err := writeJSONLine(conn, resp); err != nil {
+		d.auditRegisterXferKey(req, "approved-undelivered", result.ApprovedBy)
+		return fmt.Errorf("write register-xfer-key response: %w", err)
+	}
+	d.auditRegisterXferKey(req, "approved", result.ApprovedBy)
+	return nil
+}
+
+// respondRegisterXferKeyError writes a register-xfer-key "error" response and
+// audits it.
+func (d *Daemon) respondRegisterXferKeyError(conn io.Writer, reqID, reason string) error {
+	resp := registerXferKeyResponse{RequestID: reqID, Status: "error", Error: reason, ProtoVersion: sigwire.ProtoVersion}
+	if err := writeJSONLine(conn, resp); err != nil {
+		d.auditRegisterXferKey(registerXferKeyRequest{RequestID: reqID}, "error", "")
+		return fmt.Errorf("write register-xfer-key error response: %w", err)
+	}
+	d.auditRegisterXferKey(registerXferKeyRequest{RequestID: reqID}, "error", "")
+	return nil
+}
+
+// auditRegisterXferKey writes one audit row for a register_xfer_key request. The
+// key text is public; the descriptor records the host fp + label so a grep
+// surfaces trust-anchor changes.
+func (d *Daemon) auditRegisterXferKey(req registerXferKeyRequest, status, approvedBy string) {
+	desc := fmt.Sprintf("register_xfer_key host=%s label=%s", req.HostFP, req.Label)
+	var servers []string
+	if req.HostFP != "" {
+		servers = []string{req.HostFP}
+	}
+	ev := AuditEvent{
+		TS:         d.now().UTC(),
+		RequestID:  req.RequestID,
+		Status:     status,
+		Commands:   []string{desc},
+		Servers:    servers,
+		ApprovedBy: approvedBy,
+		AuthMode:   authMode(strings.HasPrefix(status, "approved"), approvedBy),
+	}
+	if err := d.Audit.Write(ev); err != nil {
+		fmt.Fprintf(os.Stderr, "signer: audit write failed: %v\n", err)
+	}
+}
+
 // matchGrant reports whether EVERY command in cmds is covered by a live
 // standing grant for its alias, returning the matched grant id for the
 // audit trail. It is the auto-approve gate: when ok is true the daemon
@@ -910,6 +1341,16 @@ func (d *Daemon) matchGrant(cmds []signRequestCmd) (id string, ok bool) {
 // (and, for updates, the scary approval banner) is then mandatory.
 func isAdminVerb(cmd string) bool {
 	return strings.HasPrefix(cmd, "SSHGATE_")
+}
+
+// isTransferVerb reports whether cmd is a box→box transfer verb
+// (SSHGATE_XFER_SEND / SSHGATE_XFER_RECV, or any future SSHGATE_XFER_*). These
+// are rejected on the generic sign path (they must go through the dedicated
+// "transfer" kind) and are a strict subset of isAdminVerb (so matchGrant also
+// refuses to auto-sign them). It keys on the shared xferwire.VerbPrefix so the
+// signer and the gate can never disagree on what counts as a transfer verb.
+func isTransferVerb(cmd string) bool {
+	return strings.HasPrefix(cmd, xferwire.VerbPrefix)
 }
 
 // grantCovers reports whether grant g authorises command cmd. scope=="all"
@@ -1057,6 +1498,20 @@ func newGrantID() (string, error) {
 		return "", err
 	}
 	return "g_" + base64.RawURLEncoding.EncodeToString(buf[:]), nil
+}
+
+// newXferID returns a 16-byte (128-bit) URL-safe-base64 random transfer id.
+// It is minted by the SIGNER on every transfer approval — the agent never
+// supplies it — so an old, already-attested envelope cannot be replayed under a
+// fresh approval. Uses the same randRead seam as newNonce so a broken RNG
+// surfaces as an error. The RawURLEncoding alphabet ([A-Za-z0-9_-]) is exactly
+// what xferwire.ValidXferID accepts.
+func newXferID() (string, error) {
+	var buf [16]byte
+	if _, err := randRead(buf[:]); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(buf[:]), nil
 }
 
 // writeJSONLine marshals v and writes it followed by a newline.

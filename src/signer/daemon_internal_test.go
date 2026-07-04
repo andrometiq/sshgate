@@ -81,3 +81,34 @@ type rwBuf struct {
 
 func (r *rwBuf) Read(p []byte) (int, error)  { return r.in.Read(p) }
 func (r *rwBuf) Write(p []byte) (int, error) { return r.out.Write(p) }
+
+// TestVerbClassifiers_TransferVerbsAreAdminVerbs pins the §4a invariant: every
+// SSHGATE_XFER_* verb is BOTH a transfer verb (rejected on the sign path) AND an
+// admin verb (so matchGrant's short-circuit refuses to auto-sign it from a
+// standing grant). isAdminVerb must therefore stay a superset of isTransferVerb.
+func TestVerbClassifiers_TransferVerbsAreAdminVerbs(t *testing.T) {
+	for _, cmd := range []string{
+		"SSHGATE_XFER_SEND a b c d",
+		"SSHGATE_XFER_RECV a b c d e f",
+		"SSHGATE_XFER_FUTURE x",
+	} {
+		if !isTransferVerb(cmd) {
+			t.Errorf("isTransferVerb(%q) = false; want true", cmd)
+		}
+		if !isAdminVerb(cmd) {
+			t.Errorf("isAdminVerb(%q) = false; want true (a grant must never auto-sign a transfer)", cmd)
+		}
+	}
+	// A plain command is neither.
+	if isTransferVerb("systemctl restart nginx") {
+		t.Error("isTransferVerb matched a plain command")
+	}
+	// A non-transfer admin verb (SSHGATE_UPDATE) is an admin verb but NOT a
+	// transfer verb — the sign-path reject must not swallow it.
+	if isTransferVerb("SSHGATE_UPDATE deadbeef") {
+		t.Error("isTransferVerb matched SSHGATE_UPDATE")
+	}
+	if !isAdminVerb("SSHGATE_UPDATE deadbeef") {
+		t.Error("isAdminVerb(SSHGATE_UPDATE) = false; want true")
+	}
+}

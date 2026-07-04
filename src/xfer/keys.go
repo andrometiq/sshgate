@@ -70,10 +70,27 @@ func (k *BoxKey) Public() *[32]byte { return k.pub }
 // an error.
 func (k *BoxKey) Private() *[32]byte { return k.priv }
 
+// BoxPublicText renders the stable single-line text encoding of an X25519 box
+// public half (raw 32 bytes) WITHOUT needing a BoxKey value. It is the single
+// canonical renderer that BoxKey.PublicText delegates to, so the signer's
+// per-server registry (which holds only the raw recipient key it must place on
+// a transfer leg) and the provisioning readback emit byte-identical text. Keep
+// it in lockstep with ParseBoxPublicText.
+func BoxPublicText(pub *[32]byte) string {
+	return boxPubTag + " " + base64.StdEncoding.EncodeToString(pub[:])
+}
+
+// IDPublicText renders the stable single-line text encoding of an ed25519
+// identity public half (raw bytes) WITHOUT needing an IDKey value. Canonical
+// sibling of BoxPublicText; IDKey.PublicText delegates to it.
+func IDPublicText(pub ed25519.PublicKey) string {
+	return idPubTag + " " + base64.StdEncoding.EncodeToString(pub)
+}
+
 // PublicText returns the stable single-line text encoding of the box public
 // half for the provisioning readback.
 func (k *BoxKey) PublicText() string {
-	return boxPubTag + " " + base64.StdEncoding.EncodeToString(k.pub[:])
+	return BoxPublicText(k.pub)
 }
 
 // Public returns the ed25519 identity public half.
@@ -86,7 +103,7 @@ func (k *IDKey) Private() ed25519.PrivateKey { return k.priv }
 // PublicText returns the stable single-line text encoding of the identity
 // public half for the provisioning readback.
 func (k *IDKey) PublicText() string {
-	return idPubTag + " " + base64.StdEncoding.EncodeToString(k.pub)
+	return IDPublicText(k.pub)
 }
 
 // ParseBoxPublicText decodes a box public half produced by
