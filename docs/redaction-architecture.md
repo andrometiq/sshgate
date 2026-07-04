@@ -15,6 +15,17 @@
 > rules. A regex net was measured and rejected (+66–73%/MB vs ~+2% for the
 > linear pass). See spec `docs/proposed/redaction-widening-2026-07.md`.
 
+> **Implementation status (as of v1.3.0).** Shipped and live in the gate:
+> **Layer 1** (named-format rules + the 2026-07 generic default-deny net), the
+> PEM accumulator, per-session HMAC markers, and the signed **secret-reveal**
+> bypass (`reveal=true` on `run`). Designed below but **not yet shipped**:
+> Layer 2 (file-mode heuristic), Layer 3 (`redactlist`/`unredactlist`), the
+> recursive decode pass, the `SSHGATE_CMD` wire-command namespace
+> (`redact.*` / `unredact.*`), and the `thorough` mode (`standard` is the only
+> live behaviour; there is no per-host mode config yet). `src/redact` carries
+> scaffolding for the unshipped layers (e.g. `FormatFileMarker`) by design —
+> see `src/redact/doc.go`.
+
 ## Summary
 
 This document specifies the v1.2 output redactor inside the `gate` binary on every SSHGate-managed host. Bytes flow `child process stdout/stderr → redact.Writer → SSH pipe → MCP → agent`. The redactor runs three detection layers — Layer 1 named-format regex (built-in + vendored gitleaks rules + SSHGate-native rules), Layer 2 file-mode heuristic over the inbound command, Layer 3 operator-curated `redactlist.append-only` — plus a recursive base64/hex/URL decode pass. A sibling `unredactlist.append-only` file holds signed false-positive overrides for the heuristics.
@@ -447,7 +458,7 @@ Surfaced in the README, install banner, and skill.
 1. **Detection has substantial false-positive surface on log-shaped content in `thorough` mode.** Independent benchmarks put gitleaks-class rules at ~46% precision on broad corpora; SSHGate's named-only `standard` mode improves on that but does not eliminate it. Use per-host `unmask:` and unredact entries.
 2. **Multi-line secrets can straddle buffer boundaries.** 4 KiB safe-prefix + PEM accumulator + 64 KiB ring cap. A 6 KB+ non-PEM secret (rare) could in theory split.
 3. **The file-mode heuristic has no published prior art.** It is a SSHGate-original mechanism. The predicate registry will grow; the "Known unhandled bypasses" list above is the honest floor.
-4. **Recursive decode is depth-limited to 3.** A secret base64-wrapped four times will not be caught.
+4. **The recursive decode pass is not yet shipped** (designed depth: 1 in `standard`, 3 in `thorough`). Today an encoded secret is caught only when the encoded run itself trips a named rule or the generic high-entropy net; even once shipped, a secret wrapped beyond the depth limit will not be caught.
 5. **Per-session HMAC key never persists.** The redactor cannot recover plaintext for debugging. `redact.why` returns source rule, not plaintext.
 6. **The gate binary is the trust anchor.** A compromised gate (replaced via non-SSHGate channel) defeats redaction.
 7. **No prior benchmark exists for streaming scanners on command output specifically.** Real-world FPR/FNR on `journalctl`, `env`, `docker inspect` is unknown until shipped and measured.
@@ -544,7 +555,7 @@ LOC ~250 + ~40 fixture files.
 ## Rollout and migration
 
 1. **v1.2.0 ships with `standard` as the default** for both fresh installs and upgrades. There is no `fast` mode to inherit; aggressive optimisation in `standard` should make it acceptable as the universal default.
-2. **`SSHGATE_UPDATE`** (stub handler at `src/gate/cmd/sshgate-gate/main.go:196`) gets implemented in v1.1 (orthogonal to redaction) and is the deployment vehicle. Operators can roll back from v1.2 to v1.1 by signing an `SSHGATE_UPDATE` to the previous binary.
+2. **`SSHGATE_UPDATE`** (shipped in v1.3.0 as the signed `update_gate` verb — orthogonal to redaction) is the deployment vehicle. Operators can roll back to a previous binary by signing an `SSHGATE_UPDATE` to it (the approval banner's hash cross-check makes a downgrade an explicit, deliberate act).
 3. **Backwards compatibility of the redactlist/unredactlist files**: a v1.2 gate refuses to start if either file exists with a schema version it doesn't recognise (daemon guideline 5.5). For v1.2.0 the schema is "v1".
 4. **There is no opt-out flag.** If an operator wants no redaction, they uninstall the v1.2 binary and roll back. Vault's anti-`log_raw` discipline drives this — a redaction-off flag inevitably ships to production by mistake.
 5. **Backwards-compat for `SSHGATE_REVOKE` / `SSHGATE_UPDATE`**: both old wire forms accepted for one release alongside the `SSHGATE_CMD:` envelope; deprecation warning logged.
@@ -576,7 +587,7 @@ Captured here so a later contributor can pick each up with full context.
 
 4. **Cross-session HMAC-key recovery for legitimate audit needs.** Per-session keys are non-persistent by design, which means even legitimate audit needs can't reverse-correlate redacted spans across sessions. A signed admin command that derives a deterministic per-host audit key (separate from the per-session key) and writes audit-only logs under a master-key-only-readable path could unlock this without breaking the threat model. Defer.
 
-5. **`redact.list` UI/CLI on the operator side.** A signed-read of the full ruleset, with pagination, filtering by `kind` / `signed` / `session_fp` / `added_at`. The wire command exists in v1.2; the operator-side UX (a MCP tool plus a Telegram-rendered list view) is deferred.
+5. **`redact.list` UI/CLI on the operator side.** A signed-read of the full ruleset, with pagination, filtering by `kind` / `signed` / `session_fp` / `added_at`. The wire command is part of the unshipped `SSHGATE_CMD` namespace (see status note at top); the operator-side UX (a MCP tool plus a Telegram-rendered list view) is deferred with it.
 
 6. **Open empirical questions**:
    - Real-world FPR/FNR on command output (no public benchmark exists for streaming scanners on `journalctl`, `env`, `docker inspect`, `kubectl describe` outputs). SSHGate will be the first publishable measurement once shipped. Plan to collect anonymised aggregate stats (count of redactions per mode per host) via the existing telemetry channel — never the redacted plaintext itself.

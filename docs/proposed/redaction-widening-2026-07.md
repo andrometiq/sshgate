@@ -1,6 +1,7 @@
 # Redaction widening — default-deny output redactor (P1-B)
 
-Status: **approved design, building**. Synthesized 2026-07-03 from two independent,
+Status: **built and merged to `main`** (merge `8833ce3`; the ROADMAP marks it
+SHIPPED 2026-07-03). Synthesized 2026-07-03 from two independent,
 empirically-grounded proposals (anchored-rules-maximalist vs default-deny-engine);
 every load-bearing choice below is backed by a measured run, not intuition.
 
@@ -382,8 +383,8 @@ names); per-file fixed salts per existing convention.
   the keyword-free common case pays +2–10% (two independent measurements:
   +2–8% and +8–10% on a noisier box — hold the ≤ +10% gate). The
   Aho-Corasick roadmap item is the structural fix.
-- Sink (a) lags on live servers until each remote gate binary is replaced
-  (`SSHGATE_UPDATE` is an unimplemented stub; today's path is
-  `revoke_server` → re-paste pubkey → `sshgate add`). The live acceptance
-  test requires a gate redeploy on at least the migration target box —
-  operator decision on the mechanism.
+- Sink (a) lags on live servers until each remote gate binary is replaced.
+  (At writing time `SSHGATE_UPDATE` was an unimplemented stub and the only
+  path was `revoke_server` → re-paste pubkey → `sshgate add`; the signed
+  `update_gate` verb has since shipped in v1.3.0 and is the redeploy
+  mechanism.)

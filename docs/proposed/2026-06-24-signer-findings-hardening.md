@@ -1,7 +1,6 @@
 # Signer/MCP hardening — 6 findings from the 2026-06-23 migration test run
 
-Status: **spec, approved to build** (Karthi ratified the two design forks 2026-06-24).
-Branch: `fix/signer-hardening-2026-06-24` off `main@5f47a16`. No push until the batch is complete.
+Status: **built and merged to `main`** (merge `01b3ceb`; the two design forks were owner-ratified 2026-06-24). Kept as the design record for the F1–F6 fixes.
 
 Source: a migration test run surfaced 6 findings (F1–F6). Each was code-grounded against the real
 tree by a parallel investigation (one investigator per finding + a protocol cartographer). This spec
