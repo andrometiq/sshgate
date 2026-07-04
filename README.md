@@ -30,7 +30,7 @@ Three lines of logic. The signing key is held by a separate Unix user the agent 
 
 ## Components
 
-**gate** (`sshgate-gate`) — the remote-side Go binary. ~500 LOC. Lives at `~/.sshgate-gate/gate` on each server you register. OpenSSH calls it via `command="..."` forcing in `authorized_keys`, so every connection on the SSHGate key routes through it. gate classifies the command, verifies the `SSHGATE_SIG:` prefix if present, and runs or denies. The classifier is compiled in; gate stores no config.
+**gate** (`sshgate-gate`) — the remote-side Go binary: a ~500-line `main` dispatching into ~1.9k lines of gate library code (executor, signature verification, audit, keystore) plus a ~2k-line compiled-in classifier. Lives at `~/.sshgate-gate/gate` on each server you register. OpenSSH calls it via `command="..."` forcing in `authorized_keys`, so every connection on the SSHGate key routes through it. gate classifies the command, verifies the `SSHGATE_SIG:` prefix if present, and runs or denies. The classifier is compiled in; gate stores no config.
 
 **signer-telegram** (`sshgate-signer-telegram`) — the local approval daemon on your laptop. Runs as a separate Unix user (`sshgatesigner`) so Claude — running as you — cannot read its key file, ptrace its process, or read its Telegram bot token. When a write arrives, signer-telegram DMs you on a dedicated Telegram bot with the command list and Approve/Deny buttons; it signs only after your tap, and only if Telegram's `from.id` matches the allowlisted user.
 
@@ -76,7 +76,7 @@ SSHGate is a Claude Code plugin. Anthropic-marketplace publication is on the roa
 follow https://github.com/karthikeyan5/SSHGate/blob/main/INSTALL.md to install sshgate
 ```
 
-The agent clones the repo, builds the binaries onto your `$PATH`, and walks you through `/sshgate:setup`.
+The agent walks you through it: it hands you the clone/build/PATH commands to run in your terminal, tells you which steps only you can perform (the `/plugin` commands and the quit-and-relaunch), and then drives `/sshgate:setup`.
 
 > **YOU run the plugin commands — not the agent.** Registering and installing the plugin are interactive commands an agent cannot issue. In the Claude Code UI, *you personally* type `/plugin marketplace add <clone>`, then `/plugin install sshgate@sshgate`, and then **quit and relaunch Claude Code**. (`sshgate@sshgate` parses as `<plugin-name>@<marketplace-name>` — both come from `.claude-plugin/marketplace.json`; run `/plugin` first to confirm the marketplace id before installing.) The relaunch is mandatory: `/reload-plugins` activates the slash commands, but the new plugin's stdio MCP server (`sshgate-mcp`) only spawns on a fresh Claude Code start.
 
@@ -86,7 +86,7 @@ You'll be asked for sudo (Tier 2 only) and a Telegram bot token (Tier 2 only). T
 
 `/sshgate:setup` walks you through Tier 1 first (read-only), and offers the Tier 2 upgrade in the same flow when you're ready. It probes on-disk state on every run, so re-running it is safe.
 
-Requirements: Go 1.25+; Linux with systemd (Tier 2 only — Tier 1 needs no systemd), sudo (Tier 2 only), a Telegram account (Tier 2 only). Remote servers must be reachable over SSH and run Linux.
+Requirements: Go 1.25+; Linux with systemd (Tier 2 only — Tier 1 needs no systemd), sudo (Tier 2 only), `jq` (Tier 2 only — `/sshgate:setup` uses it to enumerate registered servers), a Telegram account (Tier 2 only). Remote servers must be reachable over SSH and run Linux.
 
 macOS: cross-compile only for now; a native install path is a future release. See [the install guide](docs/install-step-by-step.md#macos-users) for status.
 
@@ -148,12 +148,37 @@ Tap approve. All four run in order. If any fails, the rest stop.
 
 ## Status
 
-The provisioning CLI (`sshgate pubkey` / `sshgate add`) and the agent MCP surface (`run`, `run_batch`, `list_servers`, `status`, `revoke_server`) are shipped. Both write tiers work: Tier 1 read-only (gate deployed, writes denied locally) and Tier 2 signed-write (local Telegram signer, one phone tap per approval). Inline secret redaction on reads is live. The test gate is clean (race-enabled unit suite plus a Docker-backed integration suite).
+The provisioning CLI (`sshgate pubkey` / `sshgate add`) and the full nine-tool agent MCP surface (`run`, `run_batch`, `list_servers`, `status`, `revoke_server`, `request_grant`, `revoke_grant`, `list_grants`, `update_gate`) are shipped. Both write tiers work: Tier 1 read-only (gate deployed, writes denied locally) and Tier 2 signed-write (local Telegram signer, one phone tap per approval). Inline secret redaction of command output is live (see *Secret redaction* below). The test suites — a race-enabled unit suite plus a Docker-backed integration suite — run locally via `make test` / `make test-integration` (`make preflight` is the pre-push gate); the repo's only CI workflow is `verify-gate`, the reproducible-build check on the committed gate binary.
 
 The hosted Tier-3 signer (a separate machine the agent cannot reach, with WebAuthn/TOTP web auth and multi-operator approval) is deferred. The backend is scaffolded in `src/signer-server/`; what remains is the web UI, the Telegram channel on the hosted signer, and deployment.
 
 - Architecture and threat model: [`docs/design.md`](docs/design.md)
 - Roadmap and deferred work: [`docs/ROADMAP.md`](docs/ROADMAP.md)
+
+---
+
+## Secret redaction
+
+Every command's output — reads and writes alike — streams through an inline
+redactor in the gate before it reaches the agent. A detected secret is replaced
+in place with the marker
+
+```
+[SSHGATE_REDACTED key=<8hex>]
+```
+
+where `<8hex>` is a per-session HMAC of the secret: the same secret gets the
+same key within a session (the agent can recognise "same value as before"
+without learning it), and keys do not correlate across sessions. The redactor
+deliberately errs toward **over**-redaction — high-entropy base64 blobs, PEM
+blocks (including public certificates), SSH public-key bodies, and values
+assigned to `*_KEY=`-style names are known false positives; redacting too much
+is the chosen failure mode. When the raw value is genuinely needed, request a
+reveal: `run(alias, command, reveal=true, reason="…")` runs that one command
+un-redacted. A reveal is single-command only, takes its own distinct Telegram
+approval, and is never auto-signed by a standing grant.
+
+Full design: [`docs/redaction-architecture.md`](docs/redaction-architecture.md).
 
 ---
 

@@ -101,8 +101,9 @@ macOS install is **not yet automated** — `make darwin` produces
 working `sshgate-mcp` and `sshgate-signer-telegram` binaries for
 darwin/amd64 and darwin/arm64, but the install path
 (`scripts/install.sh`, systemd unit, sshgatesigner user provisioning)
-is Linux-only in v1.x. Track v1.2 for a scripted native macOS install
-(launchd plist + `install-darwin.sh`). The rest of this guide assumes
+is Linux-only, so a macOS install is manual today. A scripted native
+macOS install (launchd plist + `install-darwin.sh`) is a deferred
+roadmap item with no committed release. The rest of this guide assumes
 Linux.
 
 ---
@@ -139,8 +140,9 @@ You need 1.25 or newer. If missing, install from https://go.dev/dl/.
 make install-local
 ```
 
-This puts `sshgate-mcp` (and `sshgate-signer-telegram`, unused in Tier 1)
-in `~/go/bin` and the remote gate binary at
+This puts `sshgate-mcp`, the human-only `sshgate` provisioning CLI (used
+in step 4), and `sshgate-signer-telegram` (unused in Tier 1) in `~/go/bin`,
+and the remote gate binary at
 `~/.config/sshgate/bin/sshgate-gate-linux-amd64`. The MCP server is spawned
 from your `$PATH`, so confirm it resolves:
 

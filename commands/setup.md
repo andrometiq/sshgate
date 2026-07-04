@@ -556,7 +556,7 @@ chmod 644 "${HOME}/.config/sshgate/pubkey-distrib/gate.pub"
 Then enumerate the servers in the registry:
 
 ```bash
-jq -r '.servers | keys[]' "${HOME}/.config/sshgate/servers.json" 2>/dev/null || echo "(no servers registered)"
+jq -r 'keys[]' "${HOME}/.config/sshgate/servers.json" 2>/dev/null || echo "(no servers registered)"
 ```
 
 If the list is empty, skip to T2.7 — there's nothing to upgrade.
@@ -641,7 +641,7 @@ test -f "${HOME}/.config/sshgate/ssh/sshgate_ed25519" && stat -c '%a' "${HOME}/.
 Expect `600`.
 
 ```bash
-test -f "${HOME}/.config/sshgate/servers.json" && jq -r '.servers | length' "${HOME}/.config/sshgate/servers.json"
+test -f "${HOME}/.config/sshgate/servers.json" && jq -r 'length' "${HOME}/.config/sshgate/servers.json"
 ```
 
 Reports the count of registered servers.
