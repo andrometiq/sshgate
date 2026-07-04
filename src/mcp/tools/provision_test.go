@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/karthikeyan5/sshgate/src/mcp/registry"
+	"github.com/karthikeyan5/sshgate/src/xfer"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -271,11 +272,34 @@ func TestProvision_ReadOnlyHappyPath(t *testing.T) {
 	}
 }
 
+// genKeysReadbackBlock builds a valid SSHGATE_XFER_PUBKEYS_BEGIN/END readback
+// block (with a leading motd line, to prove the parser tolerates banner noise)
+// from a fresh box+id keypair, returning the block bytes plus the two canonical
+// public lines so a test can assert the parsed ProvisionOutput fields.
+func genKeysReadbackBlock(t *testing.T) (block []byte, boxLine, idLine string) {
+	t.Helper()
+	bk, err := xfer.GenerateBoxKey()
+	if err != nil {
+		t.Fatalf("gen box: %v", err)
+	}
+	ik, err := xfer.GenerateIDKey()
+	if err != nil {
+		t.Fatalf("gen id: %v", err)
+	}
+	boxLine = bk.PublicText()
+	idLine = ik.PublicText()
+	block = []byte("Welcome to the host (motd noise)\n" +
+		"SSHGATE_XFER_PUBKEYS_BEGIN\n" + boxLine + "\n" + idLine + "\n" + "SSHGATE_XFER_PUBKEYS_END\n")
+	return block, boxLine, idLine
+}
+
 // TestProvision_WriteHappyPath drives the tier-2 CLI add: gate.pub IS uploaded
-// and read_only=false.
+// and read_only=false, and the genkeys leg's readback populates the transfer
+// pubkey fields.
 func TestProvision_WriteHappyPath(t *testing.T) {
 	cfg, pub := provisionMaterials(t)
-	sess := &fakeBootstrapSession{catAuthKeys: plainPastedLine(t, pub), probeOut: []byte("SSHGATE_OK\n")}
+	block, wantBox, wantID := genKeysReadbackBlock(t)
+	sess := &fakeBootstrapSession{catAuthKeys: plainPastedLine(t, pub), probeOut: []byte("SSHGATE_OK\n"), genkeysOut: block}
 	installFakeBootstrapSession(t, sess, "SHA256:rw")
 
 	out, err := Provision(context.Background(), cfg, ProvisionInput{
@@ -289,6 +313,18 @@ func TestProvision_WriteHappyPath(t *testing.T) {
 	}
 	if out.ReadOnlyMode {
 		t.Error("ReadOnlyMode = true; want false for tier-2")
+	}
+	// The genkeys readback populated the transfer pubkey fields with the parsed,
+	// validated canonical lines.
+	if out.XferBoxPub != wantBox {
+		t.Errorf("XferBoxPub = %q; want %q", out.XferBoxPub, wantBox)
+	}
+	if out.XferIDPub != wantID {
+		t.Errorf("XferIDPub = %q; want %q", out.XferIDPub, wantID)
+	}
+	// The gate genkeys command actually ran on the plain shell.
+	if !sess.ranContaining(remoteGateBin + " genkeys") {
+		t.Error("genkeys leg did not run on the plain shell for a Tier-2 add")
 	}
 	if u, ok := sess.uploadedTo(remoteGatePub); !ok {
 		t.Error("gate.pub was not uploaded (tier-2 must push it)")
@@ -505,11 +541,13 @@ func TestProvision_ProbeIdempotent_GateAnswers(t *testing.T) {
 func TestProvision_ProbeFails_FreshFlowUnchanged(t *testing.T) {
 	cfg, pub := provisionMaterials(t)
 
+	block, _, _ := genKeysReadbackBlock(t)
 	sess := &fakeBootstrapSession{
 		// The probe errors like a plain shell's exit 127.
 		failRunSub:  "SSHGATE_VERSION",
 		catAuthKeys: plainPastedLine(t, pub),
 		probeOut:    []byte("SSHGATE_OK\n"),
+		genkeysOut:  block,
 	}
 	installFakeBootstrapSession(t, sess, "SHA256:fresh")
 

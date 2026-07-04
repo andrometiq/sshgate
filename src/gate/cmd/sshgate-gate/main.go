@@ -79,6 +79,17 @@ const (
 )
 
 func main() {
+	// Local admin ARGV subcommands (e.g. `gate genkeys`), dispatched BEFORE
+	// run() ever reads SSH_ORIGINAL_COMMAND. Reachable ONLY when the binary is
+	// exec'd directly with arguments — i.e. over a PLAIN shell during
+	// provisioning, never through the forced-command path (OpenSSH's forced
+	// command passes NO arguments and puts the client's command in the env var,
+	// so a gated/agent invocation always has len(os.Args)==1). This is the
+	// human-only key-generation entry point; see genkeys.go. run() stays
+	// byte-for-byte the SSH_ORIGINAL_COMMAND path and is left unchanged.
+	if len(os.Args) > 1 {
+		os.Exit(runLocalSubcommand(os.Args[1:]))
+	}
 	os.Exit(run())
 }
 

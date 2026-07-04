@@ -29,6 +29,13 @@ import (
 // caps every individual signature at sigwire.MaxSigValidity regardless.
 const MaxGrantDuration = 24 * time.Hour
 
+// maxXferLabelLen caps the display label on a register_xfer_key request. It is
+// validated in handleRegisterXferKey BEFORE the human prompt so an oversized
+// label can never reach the approval banner (bannerLabel) or the registry
+// (XferRegistry.Register stores it verbatim). It complements — does not replace
+// — bannerLabel's control-char rejection. The CLI also caps friendlier-side.
+const maxXferLabelLen = 64
+
 // grant is a standing grant: in-memory signer state recorded after ONE
 // human approval that lets matching (alias, command) sign requests
 // auto-approve WITHOUT prompting during the window. It never appears on
@@ -1050,7 +1057,17 @@ func (d *Daemon) handleTransfer(ctx context.Context, conn io.ReadWriter, line []
 	// Approved: sign both legs, each with its own Host binding.
 	send, recv, err := d.signTransferLegs(sendCmd, req.SrcFP, recvCmd, req.DestFP, ttl)
 	if err != nil {
-		return d.respondTransferError(conn, req.RequestID, fmt.Sprintf("sign: %v", err))
+		// Post-approval failure (fold-in b): the human APPROVED but signing the
+		// legs failed, so audit "approved-error" (not the bare "error" that
+		// respondTransferError records) so the F4 auth-mode still records the
+		// human tap, matching the "approved-undelivered" precedent.
+		resp := transferResponse{RequestID: req.RequestID, Status: "error", Error: fmt.Sprintf("sign: %v", err), ProtoVersion: sigwire.ProtoVersion}
+		if werr := writeJSONLine(conn, resp); werr != nil {
+			d.auditTransfer(req, xferID, "approved-error", result.ApprovedBy)
+			return fmt.Errorf("write transfer response: %w", werr)
+		}
+		d.auditTransfer(req, xferID, "approved-error", result.ApprovedBy)
+		return nil
 	}
 	resp := transferResponse{
 		RequestID:    req.RequestID,
@@ -1173,6 +1190,12 @@ func (d *Daemon) handleRegisterXferKey(ctx context.Context, conn io.ReadWriter, 
 	if _, err := xfer.ParseIDPublicText(req.IDPub); err != nil {
 		return d.respondRegisterXferKeyError(conn, req.RequestID, "invalid id_pub")
 	}
+	// Authoritative label-length cap BEFORE the prompt (fold-in a): an oversized
+	// label must never reach the human tap or the registry. Generic error text —
+	// never echo the label back.
+	if len(req.Label) > maxXferLabelLen {
+		return d.respondRegisterXferKeyError(conn, req.RequestID, "invalid label")
+	}
 
 	resultCh, err := d.Backend.RequestRegisterKey(ctx, backend.RegisterApprovalRequest{
 		RequestID: req.RequestID,
@@ -1210,7 +1233,19 @@ func (d *Daemon) handleRegisterXferKey(ctx context.Context, conn io.ReadWriter, 
 	// Approved: mutate the registry (persisted atomically at 0600). Overwrite is
 	// an authorised rotation — this write is human-approved.
 	if err := d.XferRegistry.Register(req.HostFP, req.Label, req.BoxPub, req.IDPub); err != nil {
-		return d.respondRegisterXferKeyError(conn, req.RequestID, fmt.Sprintf("register: %v", err))
+		// Post-approval failure (fold-in b): the human APPROVED but the registry
+		// write failed, so audit "approved-error" (not the bare "error" that
+		// respondRegisterXferKeyError records) — the F4 auth-mode then still
+		// records the human tap, matching the "approved-undelivered" precedent.
+		// respondRegisterXferKeyError hardcodes "error" + empty approvedBy, so we
+		// write the error response inline here.
+		resp := registerXferKeyResponse{RequestID: req.RequestID, Status: "error", Error: fmt.Sprintf("register: %v", err), ProtoVersion: sigwire.ProtoVersion}
+		if werr := writeJSONLine(conn, resp); werr != nil {
+			d.auditRegisterXferKey(req, "approved-error", result.ApprovedBy)
+			return fmt.Errorf("write register-xfer-key response: %w", werr)
+		}
+		d.auditRegisterXferKey(req, "approved-error", result.ApprovedBy)
+		return nil
 	}
 	resp := registerXferKeyResponse{RequestID: req.RequestID, Status: "approved", ProtoVersion: sigwire.ProtoVersion}
 	if err := writeJSONLine(conn, resp); err != nil {

@@ -444,9 +444,9 @@ distinction is pinned in `src/mcp/format_status_permission_test.go` (§9).
 `connectInProcess` (`server_test.go:58`) wires the server over
 `mcpsdk.NewInMemoryTransports()` (line 61) — channel-based JSON-RPC, no socket.
 `connectAllTools` (`server_alltools_test.go:29`) exercises a tool surface through
-the SDK using local shim handlers: the nine agent tools are `list_servers`,
+the SDK using local shim handlers: the ten agent tools are `list_servers`,
 `status`, `revoke_server`, `run`, `run_batch`, `request_grant`, `revoke_grant`,
-`list_grants`, `update_gate` (`mcp.ToolName*`). Provisioning is
+`list_grants`, `update_gate`, `transfer` (`mcp.ToolName*`). Provisioning is
 the human-only `sshgate` CLI and is deliberately not an agent tool. The
 authoritative "exactly these tools are registered" guard drives the real
 `Serve()`: `TestServe_RegistersExactlyAgentTools` (`server_test.go`). goleak runs

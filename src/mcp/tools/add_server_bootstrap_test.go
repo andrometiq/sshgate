@@ -68,6 +68,13 @@ type fakeBootstrapSession struct {
 	// model a plain shell's hard failure ("command not found", exit 127) use
 	// failRunSub: "SSHGATE_VERSION" instead.
 	versionProbeOut []byte
+
+	// genkeysOut is the stdout returned for the `gate genkeys` (or
+	// `gate genkeys --rotate`) readback the Tier-2 fresh add / rotate runs over
+	// the plain shell. Set to a valid SSHGATE_XFER_PUBKEYS_BEGIN/END block (see
+	// genKeysReadbackBlock) for the write happy paths; leave empty to model an
+	// older gate that returns no block (drives the readback-parse failure).
+	genkeysOut []byte
 }
 
 type uploadCall struct {
@@ -85,6 +92,11 @@ func (f *fakeBootstrapSession) Run(_ context.Context, cmd string) ([]byte, []byt
 	// verb. Return the modelled gate answer (empty => no gate answered).
 	if cmd == "SSHGATE_VERSION" {
 		return f.versionProbeOut, nil, nil
+	}
+	// The Tier-2 fresh add / rotate runs `gate genkeys[ --rotate]` over the plain
+	// shell. Return the modelled readback block.
+	if strings.Contains(cmd, "genkeys") {
+		return f.genkeysOut, nil, nil
 	}
 	// The fallback idempotency detection is "cat ~/.ssh/authorized_keys ...".
 	// Return the modelled existing keys for any cat-of-authorized_keys command.

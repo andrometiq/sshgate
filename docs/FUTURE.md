@@ -53,7 +53,7 @@ For the active, sequenced, priority-ordered work, see [`ROADMAP.md`](ROADMAP.md)
 ### `redact.list` operator-side UX
 - **Why:** the `redact.list` wire command is part of the deferred rule-management surface (the 11-subcommand set), and the operator-side rendering — pagination, filtering by `kind` / `signed` / `session_fp` / `added_at`, a Telegram-rendered list view — is deferred alongside it.
 - **Status:** deferred (wire command + UX both part of a future release).
-- **Estimated scope:** small. `sshgate.list_redact_rules` is a deferred wire command, not one of the nine shipped MCP tools; the operator-side work needs a paginated rendering + a Telegram-side compact view.
+- **Estimated scope:** small. `sshgate.list_redact_rules` is a deferred wire command, not one of the ten shipped MCP tools; the operator-side work needs a paginated rendering + a Telegram-side compact view.
 
 ### Telemetry channel for aggregate redaction counts
 - **Why:** to answer the empirical FPR/FNR questions below, SSHGate needs anonymised aggregate stats — count of redactions per mode per host. Never the redacted plaintext.
@@ -73,7 +73,7 @@ For the active, sequenced, priority-ordered work, see [`ROADMAP.md`](ROADMAP.md)
 
 ## Operator-facing limitations (known and documented)
 
-These are honest limitations of the redactor design. **Inline secret redaction of command output is shipped and live** (Layer-1 standard-mode named-format detection plus the 2026-07 generic default-deny net, per-session HMAC markers; it runs on every command's output, reads and writes, bypassed only by an approved secret-reveal). The file-mode heuristic (Layer 2), the operator-curated `redactlist`/`unredactlist` layer (Layer 3), the recursive decode pass, and the `redact.*` wire commands are part of the **designed-but-unshipped** redactor architecture (see [`redaction-architecture.md`](redaction-architecture.md) §Implementation status), **not** a shipped surface; the shipped agent surface is exactly the nine tools (the `redact.*` rule-management commands are not among them). The install banner names the major shipped-side limitations; this list is the exhaustive set across the design.
+These are honest limitations of the redactor design. **Inline secret redaction of command output is shipped and live** (Layer-1 standard-mode named-format detection plus the 2026-07 generic default-deny net, per-session HMAC markers; it runs on every command's output, reads and writes, bypassed only by an approved secret-reveal). The file-mode heuristic (Layer 2), the operator-curated `redactlist`/`unredactlist` layer (Layer 3), the recursive decode pass, and the `redact.*` wire commands are part of the **designed-but-unshipped** redactor architecture (see [`redaction-architecture.md`](redaction-architecture.md) §Implementation status), **not** a shipped surface; the shipped agent surface is exactly the ten tools (the `redact.*` rule-management commands are not among them). The install banner names the major shipped-side limitations; this list is the exhaustive set across the design.
 
 1. **Detection has false-positive surface on log-shaped content.** gitleaks-class rules sit at ~46% precision on broad corpora per independent benchmarks. SSHGate's named-only `standard` mode does better but does not eliminate it. Use per-host `unmask:` and unredact entries.
 2. **Multi-line secrets can straddle buffer boundaries.** 4 KiB safe-prefix + PEM accumulator + 64 KiB ring cap. A 6 KB+ non-PEM secret (rare) could in theory split.
@@ -122,7 +122,7 @@ v2 vision requires a hosted server; a deployment harness (Docker image + compose
 - Real-world FPR/FNR on command output across `journalctl`, `env`, `docker inspect`, `kubectl describe`. No public benchmark exists for streaming scanners on command output; SSHGate will publish the first.
 - Performance under `thorough` mode with entropy enabled on 10 GB+ `journalctl --no-pager` dumps. May warrant runtime auto-downgrade ("output > 100 MB → drop to standard for this command only"); deferred to avoid v1.2 scope creep.
 - HMAC redaction's effect on agent reasoning quality. Does Claude debug effectively when secrets are HMAC tokens? Only operator usage answers.
-- Whether exposing the redactlist as a Claude tool (`sshgate.list_redact_patterns`) gives a hostile model the rule names it would need to craft evasions. `sshgate.list_redact_patterns` is a deferred wire command, not one of the nine shipped MCP tools; the MCP-side tool surface for listing is deferred for this reason.
+- Whether exposing the redactlist as a Claude tool (`sshgate.list_redact_patterns`) gives a hostile model the rule names it would need to craft evasions. `sshgate.list_redact_patterns` is a deferred wire command, not one of the ten shipped MCP tools; the MCP-side tool surface for listing is deferred for this reason.
 - Whether to expose the redactlist as machine-readable audit output (SARIF, CycloneDX) for enterprise consumers. Deferred until a request appears.
 - Per-chunk wall-clock budget (default 50 ms; configurable) as a ReDoS safety net for pathological regexes that pass auto-validation but degrade on adversarial input. v1.2.1 backlog item.
 
