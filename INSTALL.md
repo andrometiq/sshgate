@@ -61,7 +61,8 @@ cryptographic gate is enforced on each remote server independently.
 3. *(Tier 2 only)* A Telegram bot — your phone-side approval endpoint. Made
    via @BotFather. If you don't have one yet, you'll be walked through it.
 4. `~/.config/sshgate/` and *(Tier 2 only)* `/var/lib/sshgatesigner/` — local
-   config + key + audit-log paths, mode 0700 / 0640.
+   config + key + audit-log paths, mode-tightened (dirs 0700 / 0750; key,
+   token, and audit-log files 0600).
 5. SSHGate binaries — installed by `make install-local`. `sshgate-mcp`,
    `sshgate-signer-telegram`, and the human-only `sshgate` provisioning CLI
    are built from your clone onto your `$PATH`;

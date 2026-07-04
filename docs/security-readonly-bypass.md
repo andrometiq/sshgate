@@ -2,6 +2,15 @@
 
 A durable reference surveying the industry pattern of "let SSH through but only execute reads", cataloguing the bypass categories the pattern has historically failed under, then cross-referencing each against SSHGate's `classify.Classify` + gate dispatch.
 
+> **Status update (2026-07):** the findings below reflect the classifier at
+> survey time and are kept as written. The BLOCKERs and most MAJORs have since
+> been closed in the classifier (`sed e`, `find -fprintf`, env-variable
+> smuggling, awk `system()`; multiplexers and wrapper binaries fail closed as
+> non-allowlisted) — see `docs/FUTURE.md` §"Read-only gate hardening" for
+> per-item status. The tracked structural gap that remains is *unlisted* GNU
+> long-option abbreviation, until the argv-exec fix (roadmap #22) retires the
+> shell-parse arms race entirely.
+
 ## Summary
 
 - **Tools surveyed:** 5 top + 5 brief notes (rbash/rzsh, scponly, Cursor "Agent SSH", Hoop.dev session brokers, Sandfly).
