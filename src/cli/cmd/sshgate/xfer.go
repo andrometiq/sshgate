@@ -269,10 +269,10 @@ func runXferRotate(args []string) int {
 	}
 	cfg := provisionConfig(root)
 
+	// No pre-emptive still-locked hint here: RotateXferKeys itself refuses with
+	// the full remediation text when the gate still answers, and printing both
+	// gave the operator two overlapping instruction blocks.
 	fmt.Fprintf(os.Stdout, "Rotating transfer keys for %q.\n", alias)
-	fmt.Fprintln(os.Stdout, "  If the server is still locked, first remove the existing command=\"...\" line")
-	fmt.Fprintln(os.Stdout, "  for the SSHGate key from its ~/.ssh/authorized_keys and paste `sshgate pubkey`'s")
-	fmt.Fprintln(os.Stdout, "  plain line back (this re-opens the brief full-shell window), then re-run this.")
 
 	out, err := tools.RotateXferKeys(context.Background(), cfg, in)
 	if err != nil {

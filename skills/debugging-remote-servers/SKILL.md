@@ -14,7 +14,8 @@ first three (the grant tools are for unattended write windows, `update_gate`
 pushes a signed, human-approved update of the gate binary itself, and
 `sshgate.transfer` moves a secret file between two registered servers end-to-end
 encrypted through the gate under one human approval — the MCP relays only
-ciphertext, so the plaintext never reaches you — see **Standing grants** and
+ciphertext, so the plaintext never reaches you; it needs the local Tier-2
+Telegram signer (the hosted Tier-3 signer fails closed on transfers) — see **Standing grants** and
 **Updating a server's gate** below). Read commands run instantly. Write
 commands need the user to tap a Telegram approval button on their phone.
 Optimise for: fast diagnosis, one approval per fix, no surprises.

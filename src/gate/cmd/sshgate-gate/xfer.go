@@ -54,7 +54,8 @@ var maxXferEnvelopeBytes int64 = maxXferPlaintextBytes*2 + (64 << 10)
 // xferBoxKeyPath resolves this gate's recipient X25519 private key (RECV path:
 // xfer.Open). It lives beside gate.pub in the gate dir, resolved via the
 // gateDirFn seam — NEVER an env var (same forgery-surface rationale as
-// gate.pub, main.go). Provisioning that writes this file is P4, out of scope.
+// gate.pub, main.go). The file is written on the host by `gate genkeys` /
+// `gate genkeys --rotate` during provisioning (see genkeys.go).
 func xferBoxKeyPath() (string, error) {
 	dir, _, err := gateDirFn()
 	if err != nil {
@@ -127,6 +128,14 @@ func handleXferSend(audit *gate.AuditLogger, innerCmd string) int {
 	}
 	plaintext, err := io.ReadAll(io.LimitReader(f, maxXferPlaintextBytes+1))
 	_ = f.Close()
+	// Best-effort scrub of the in-memory plaintext on every exit path after the
+	// read — mirrors handleXferRecv's deferred scrub (defense-in-depth; Go GC
+	// makes this non-guaranteeing, but it shrinks the window symmetrically).
+	defer func() {
+		for i := range plaintext {
+			plaintext[i] = 0
+		}
+	}()
 	if err != nil {
 		logf("xfer send: read source")
 		auditNoExec(audit, innerCmd, "write", "signed", exitSoftware)
