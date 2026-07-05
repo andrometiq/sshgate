@@ -21,9 +21,9 @@ import (
 //
 // Wire dance:
 //
-//   POST /v1/sign           → 202 {request_id, poll_url}
-//   GET  /v1/poll/{request_id} (long-poll)
-//                           → 200 {status, signatures?, approved_by_user?, approved_at?}
+//	POST /v1/sign           → 202 {request_id, poll_url}
+//	GET  /v1/poll/{request_id} (long-poll)
+//	                        → 200 {status, signatures?, approved_by_user?, approved_at?}
 //
 // The handler loops on /v1/poll until status leaves "pending", the
 // per-request Timeout fires, or ctx is cancelled. On approval we
@@ -341,6 +341,24 @@ func (h *HostedServerBackend) pollLoop(parentCtx context.Context, pollURL string
 // carries the grant semantics end-to-end (out of scope here).
 func (h *HostedServerBackend) RequestGrant(_ context.Context, _ GrantApprovalRequest) (<-chan Result, error) {
 	return nil, errors.New("hosted: standing grants are not supported on the hosted (Tier-3) signer backend yet; use the local Telegram signer")
+}
+
+// RequestTransfer fails CLOSED on the hosted (Tier-3) backend. Box→box transfer
+// is Tier-2 (local Telegram signer) only in P2: the hosted server holds no
+// ed25519 key, no per-server transfer registry, and no transfer approval UI, so
+// it can neither source the pinned pubkeys nor render the SECRET-TRANSFER
+// banner. We reject BEFORE any HTTP call, exactly like RequestGrant, so no
+// future build silently ships an un-anchored transfer. (See the P2 spec §2b for
+// the four hosted-server pieces this would need.)
+func (h *HostedServerBackend) RequestTransfer(_ context.Context, _ TransferApprovalRequest) (<-chan Result, error) {
+	return nil, errors.New("hosted: box→box transfer is not supported on the hosted (Tier-3) signer backend yet; use the local Telegram signer")
+}
+
+// RequestRegisterKey fails CLOSED on the hosted (Tier-3) backend for the same
+// reason: there is no server-side transfer registry to populate and no register
+// approval UI. Reject before any HTTP call.
+func (h *HostedServerBackend) RequestRegisterKey(_ context.Context, _ RegisterApprovalRequest) (<-chan Result, error) {
+	return nil, errors.New("hosted: box→box xfer-key registration is not supported on the hosted (Tier-3) signer backend yet; use the local Telegram signer")
 }
 
 // validate returns the first config error, if any.

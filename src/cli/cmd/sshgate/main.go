@@ -53,6 +53,12 @@ func run(args []string) int {
 		return runPubkey(args[1:])
 	case "add":
 		return runAdd(args[1:])
+	case "xfer-register":
+		return runXferRegister(args[1:])
+	case "xfer-rotate":
+		return runXferRotate(args[1:])
+	case "xfer-status":
+		return runXferStatus(args[1:])
 	case "-h", "--help", "help":
 		usage(os.Stdout)
 		return 0
@@ -77,6 +83,19 @@ Usage:
         the pasted key down behind a forced-command entry. Registers <alias>.
         --read-only (--ro): tier-1 install (no signer pubkey; writes denied
         at the gate).
+
+  sshgate xfer-register <alias> --box-pub '<line>' --id-pub '<line>' [--label <s>]
+        (Re)register a server's box→box transfer keys with the signer, under the
+        fingerprint recorded in servers.json. Human-approved (Telegram tap). The
+        recovery/standalone path — no host contact.
+
+  sshgate xfer-rotate <alias> [user@host[:port]]
+        Rotate a provisioned Tier-2 host's transfer keys and re-register them.
+        Requires the plain bootstrap window re-opened first (see the printed hint).
+
+  sshgate xfer-status [<alias>]
+        Show transfer readiness per server: tier, keys-on-host (best-effort),
+        and fingerprint.
 
   sshgate help
         Show this help.
@@ -149,14 +168,7 @@ func runAdd(args []string) int {
 		fmt.Fprintf(os.Stderr, "sshgate: %v\n", err)
 		return 1
 	}
-	cfg := tools.ProvisionConfig{
-		GateBinaryPath: gateBinaryPath(root),
-		GatePubPath:    filepath.Join(root, "pubkey-distrib", "gate.pub"),
-		SSHGateKeyPath: filepath.Join(root, "ssh", "sshgate_ed25519"),
-		SSHGatePubPath: filepath.Join(root, "ssh", "sshgate_ed25519.pub"),
-		KnownHostsPath: filepath.Join(root, "known_hosts"),
-		ServersPath:    filepath.Join(root, "servers.json"),
-	}
+	cfg := provisionConfig(root)
 
 	out, err := tools.Provision(context.Background(), cfg, tools.ProvisionInput{
 		Alias:    alias,
@@ -184,6 +196,36 @@ func runAdd(args []string) int {
 	fmt.Fprintf(os.Stdout, "  mode:        %s\n", mode)
 	if out.Idempotent {
 		fmt.Fprintf(os.Stdout, "  idempotent:  true (restricted entry already present; verify + register only)\n")
+		if !out.ReadOnlyMode {
+			// Spec §2.4: on an idempotent Tier-2 re-add genkeys is deliberately
+			// skipped (no clobber) — tell the operator how to (re)key.
+			fmt.Fprintf(os.Stdout, "  transfer:    keys were NOT (re)generated on the already-gated host; run `sshgate xfer-rotate %s` to (re)key for transfers\n", out.Alias)
+		}
+	}
+
+	// Transfer-key registration leg (Tier-2 fresh add only — XferBoxPub is "" on a
+	// Tier-1 or idempotent add). The keys were generated on the host by genkeys;
+	// register their PUBLIC halves with the signer under the SAME fingerprint the
+	// legs bind to. A denied/timed-out/lost tap must NOT orphan a correctly-added
+	// server — surface an actionable retry and still return 0.
+	if !out.ReadOnlyMode && out.XferBoxPub != "" {
+		fmt.Fprintln(os.Stdout, "transfer keys generated on host; registering with the signer…")
+		fmt.Fprintf(os.Stdout, "  box: %s\n", out.XferBoxPub)
+		fmt.Fprintf(os.Stdout, "  id:  %s\n", out.XferIDPub)
+		// Default label = alias, clamped to the friendly CLI cap so a long alias
+		// can't bounce off the daemon's authoritative 64-byte label check
+		// (mirrors runXferRegister; the label is display-only).
+		label := out.Alias
+		if len(label) > maxXferLabelLen {
+			label = label[:maxXferLabelLen]
+		}
+		if rerr := registerWithSigner(context.Background(), out.Fingerprint, label, out.XferBoxPub, out.XferIDPub); rerr != nil {
+			fmt.Fprintf(os.Stdout, "  transfer:    NOT registered (%s)\n", describeSignerError(rerr))
+			fmt.Fprintln(os.Stdout, "The server is added; to enable transfers, re-run:")
+			fmt.Fprintf(os.Stdout, "  sshgate xfer-register %s --box-pub '%s' --id-pub '%s'\n", out.Alias, out.XferBoxPub, out.XferIDPub)
+			return 0
+		}
+		fmt.Fprintf(os.Stdout, "  transfer:    registered (label %q)\n", label)
 	}
 	return 0
 }

@@ -100,6 +100,13 @@ const ToolNameListGrants = "list_grants"
 // Claude Code's surface name is "mcp__sshgate__update_gate".
 const ToolNameUpdateGate = "update_gate"
 
+// ToolNameTransfer moves a secret file host→host, end-to-end encrypted through
+// the gate: the source gate seals the value, the MCP relays only ciphertext,
+// the destination gate opens it — the plaintext never reaches the agent. It
+// takes ONE human Telegram approval of a distinct "SECRET TRANSFER" banner.
+// Claude Code's surface name is "mcp__sshgate__transfer".
+const ToolNameTransfer = "transfer"
+
 // serverInstructions is the MCP server-level prompt surfaced to the agent
 // at initialize. It teaches the agent how the gate's read/write split
 // behaves so it doesn't accidentally turn cheap inventory reads into
@@ -254,6 +261,20 @@ func (s *Server) Serve(ctx context.Context, in io.Reader, out io.Writer) error {
 			"The gate re-hashes the bytes it receives and refuses on mismatch, so an approval authorizes exactly that one binary. " +
 			"This does not expand your reach — no new server is onboarded (provisioning stays the human-only sshgate CLI). Read-only (Tier-1) servers are refused before any tap.",
 	}, s.updateGateHandler)
+
+	// transfer — moves a secret file host→host, END-TO-END ENCRYPTED through the
+	// gate. The source gate seals the value to the destination's registered key,
+	// the MCP relays ONLY the ciphertext (SEND stdout → RECV stdin), and the
+	// destination gate opens it — the plaintext NEVER reaches the agent. One
+	// human Telegram approval of a distinct "SECRET TRANSFER" banner covers both
+	// signed, host-bound legs; a standing grant can never auto-sign it.
+	mcpsdk.AddTool(server, &mcpsdk.Tool{
+		Name: ToolNameTransfer,
+		Description: "Move a secret file from one registered server to another, END-TO-END ENCRYPTED through the gate. " +
+			"You supply ONLY the source/destination aliases + absolute paths (and an optional octal mode, default 0600) — never keys, fingerprints, or an id. " +
+			"The source gate encrypts the value to the destination's registered key; this tool relays ONLY the ciphertext; the destination gate decrypts and writes it. The secret value NEVER reaches you or any log — you get metadata only (xfer id, byte count). " +
+			"A human MUST approve a distinct \"SECRET TRANSFER\" Telegram banner (both source and destination must be registered for transfer); a standing grant can NEVER auto-sign it. Read-only (Tier-1) servers are refused before any tap.",
+	}, s.transferHandler)
 
 	t := &mcpsdk.IOTransport{
 		Reader: readerCloser{in},
@@ -505,6 +526,42 @@ func (s *Server) updateGateHandler(ctx context.Context, _ *mcpsdk.CallToolReques
 func formatUpdateGateSummary(out tools.UpdateGateOutput) string {
 	return fmt.Sprintf("updated gate on %s: sha256=%s size=%d rev=%s verified_alive=%v",
 		out.Alias, out.NewHash, out.Size, out.Revision, out.VerifiedAlive)
+}
+
+// transferHandler is the typed handler for sshgate.transfer. A sign
+// denial/timeout (a human refused, or the signer was unreachable), an
+// unregistered/read-only alias, an SSH failure, and a marker/xferID mismatch
+// all surface as MCP tool errors (IsError=true) so Claude sees exactly why the
+// transfer did not happen; on success the structured TransferOutput carries
+// METADATA ONLY (xfer id, byte count, mode, auth mode).
+//
+// CONFIDENTIALITY. This handler NEVER calls s.LiveLog.Log (exactly like
+// updateGateHandler — only runHandler/runBatchHandler feed the live log), so
+// neither the envelope (ciphertext) nor any plaintext ever reaches the Tier-6b
+// live log. s.Logger records METADATA ONLY. The guarantee is NOT redaction (an
+// opaque blob has no pattern to scrub) — it is NOT surfacing the envelope or
+// plaintext at all: not in the result, not in RunOutput, not in the live log,
+// not in s.Logger.
+func (s *Server) transferHandler(ctx context.Context, _ *mcpsdk.CallToolRequest, in tools.TransferInput) (*mcpsdk.CallToolResult, tools.TransferOutput, error) {
+	out, err := s.Runner.Transfer(ctx, in)
+	if err != nil {
+		// Metadata only — the aliases are non-secret; the error string never
+		// carries the envelope or plaintext (the tool guarantees it).
+		s.Logger.Printf("transfer src=%s dest=%s err=%v", in.SrcAlias, in.DestAlias, err)
+		return nil, out, err
+	}
+	// METADATA ONLY — never the envelope, never the secret. Mirrors update_gate.
+	s.Logger.Printf("transfer src=%s dest=%s xfer=%s bytes=%d auth=%s", out.SrcAlias, out.DestAlias, out.XferID, out.Bytes, out.AuthMode)
+	return &mcpsdk.CallToolResult{
+		Content: []mcpsdk.Content{&mcpsdk.TextContent{Text: formatTransferSummary(out)}},
+	}, out, nil
+}
+
+// formatTransferSummary renders a short human summary for the fallback
+// TextContent block. METADATA ONLY — no stdout, no envelope, no plaintext.
+func formatTransferSummary(out tools.TransferOutput) string {
+	return fmt.Sprintf("transferred %s:%s → %s:%s (xfer=%s bytes=%d mode=%s auth=%s)",
+		out.SrcAlias, out.SrcPath, out.DestAlias, out.DestPath, out.XferID, out.Bytes, out.Mode, out.AuthMode)
 }
 
 // requestGrantHandler is the typed handler for sshgate.request_grant. A

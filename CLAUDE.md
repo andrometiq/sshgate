@@ -4,9 +4,9 @@ The cross-tool source of truth is `AGENTS.md`. Read it now — Codex and any oth
 
 ## SSHGate-specific notes for Claude Code
 
-This is a Claude Code plugin. The agent (MCP) tool surface is exactly **nine
+This is a Claude Code plugin. The agent (MCP) tool surface is exactly **ten
 tools** — `run`, `run_batch`, `list_servers`, `status`, `revoke_server`,
-`request_grant`, `revoke_grant`, `list_grants`, `update_gate`:
+`request_grant`, `revoke_grant`, `list_grants`, `update_gate`, `transfer`:
 
 - `sshgate.run(alias, command)` — run one command on a registered server
 - `sshgate.run_batch(alias, commands[])` — run several commands; writes bulk-approve in one Telegram tap
@@ -17,6 +17,7 @@ tools** — `run`, `run_batch`, `list_servers`, `status`, `revoke_server`,
 - `sshgate.revoke_grant(alias)` — drop a server's standing grant (de-escalation only — always safe, no approval)
 - `sshgate.list_grants(alias?)` — list the signer's live standing grants (read-only, no approval); use to reconcile after a request_grant timeout
 - `sshgate.update_gate(alias)` — request a signed, in-place update of the gate binary on an already-registered server; the agent supplies only the alias (never binary bytes or a hash), the MCP hashes the operator's locally-staged gate binary, and the operator must approve a distinct "GATE BINARY UPDATE" Telegram banner bound to that exact SHA-256 before it runs. Fail-closed (hash mismatch / wrong-arch binary / Tier-1 all refuse and write nothing), signed, and audited; it does not expand the agent's reach (no new server is onboarded), and a standing grant never auto-signs it
+- `sshgate.transfer(src_alias, src_path, dest_alias, dest_path, mode?)` — move a secret file from one registered server to another, END-TO-END ENCRYPTED through the gate. The agent supplies only aliases + absolute paths (+ optional octal mode, default `0600`) — never keys, fingerprints, or an id. The source gate seals the value to the destination's registered box key, the MCP relays ONLY the ciphertext (SEND stdout → RECV stdin), and the destination gate decrypts and atomically writes it; the plaintext never reaches the agent or any log (you get metadata only: xfer id, byte count). One human "SECRET TRANSFER" Telegram approval covers both signed, host-bound legs; a standing grant can never auto-sign it, and read-only (Tier-1) servers are refused before any tap. Both endpoints must be registered for transfer on the signer. Transfers require the local (Tier-2) Telegram signer — the hosted (Tier-3) signer does not support them yet and fails closed
 
 **Provisioning is NOT an agent tool.** There is deliberately no `add_server`
 on the MCP surface: a new machine is onboarded by a human at a terminal with
@@ -83,6 +84,7 @@ and the error messages below.
 ## When to escalate to the user
 
 - Provisioning is the human-only `sshgate` CLI (see above), not an agent tool — if `sshgate add` fails on the user's side, ask them to check the host's `/var/log/auth.log` and that SSHGate's public-key line was pasted into the target's `~/.ssh/authorized_keys` before they ran `sshgate add`.
+- If `sshgate.transfer` fails with **`src/dest server not registered for transfer`**, that endpoint has no transfer keypair registered on the signer yet. This is enrolled by a human with the `sshgate` CLI (`sshgate xfer-register <alias>`, or `sshgate xfer-rotate <alias>` to re-key an existing host) — there is **no agent tool** for it, exactly like provisioning. Do NOT try to work around it; tell the user to run that CLI step, then retry the transfer. (`sshgate xfer-status <alias>` shows a host's tier / on-host keys / fingerprint.)
 - If a write fails with a **signer-permission** error (`signer socket … is present
   but not accessible (permission denied) — your shell/session is not yet in the
   sshgatesigner group`) → STOP. This is NOT a dead daemon. The user (or the agent

@@ -303,6 +303,7 @@ func TestServe_RegistersExactlyAgentTools(t *testing.T) {
 		mcp.ToolNameRevokeGrant:  true,
 		mcp.ToolNameListGrants:   true,
 		mcp.ToolNameUpdateGate:   true,
+		mcp.ToolNameTransfer:     true,
 	}
 	if len(res.Tools) != len(want) {
 		t.Errorf("registered %d tools; want %d (%v)", len(res.Tools), len(want), got)

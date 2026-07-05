@@ -19,6 +19,7 @@ import (
 
 	"github.com/karthikeyan5/sshgate/src/mcp/registry"
 	sshpkg "github.com/karthikeyan5/sshgate/src/mcp/ssh"
+	"github.com/karthikeyan5/sshgate/src/xfer"
 )
 
 // This file implements the HUMAN-ONLY CLI provisioning path (the `sshgate`
@@ -182,6 +183,14 @@ type ProvisionOutput struct {
 	VerifiedOK   bool
 	Idempotent   bool
 	ReadOnlyMode bool
+	// XferBoxPub / XferIDPub are the canonical box/id transfer PublicText lines
+	// generated on the host by `gate genkeys` during a fresh Tier-2 add (parsed +
+	// validated from the readback). Both are "" on a Tier-1 or idempotent add
+	// (genkeys is skipped there). The CLI reads them off this struct and registers
+	// them with the signer under Fingerprint. Additive fields (keyed literals) —
+	// no breakage.
+	XferBoxPub string
+	XferIDPub  string
 }
 
 // Provision is the human-only CLI add. It dials the target with the SSHGate
@@ -335,6 +344,28 @@ func Provision(ctx context.Context, cfg provisionCfg, in ProvisionInput) (Provis
 		}
 	}
 
+	// On-host transfer-key generation (Tier-2 fresh add only). The gate binary is
+	// now installed and bootSess is STILL the plain shell (authenticated by the
+	// pre-rewrite pasted line — sshd does not re-evaluate authorized_keys
+	// mid-session), so `gate genkeys` reaches the human-only ARGV subcommand. Only
+	// the two PUBLIC lines cross the wire; the private halves are Saved 0600 on the
+	// host and never leave it. Tier-1 skips this (a read-only gate can never run
+	// the signed SEND/RECV legs, so transfer keys would be dead weight); the
+	// idempotent path skips it too (the host is already gated — no plain shell, and
+	// clobbering live keys is wrong; `sshgate xfer-rotate` handles re-keying).
+	var boxPubLine, idPubLine string
+	if !idempotent && !in.ReadOnly {
+		out, _, gerr := bootSess.Run(ctx, remoteGateBin+" genkeys")
+		if gerr != nil {
+			return ProvisionOutput{}, provisionRollback(ctx, &r, bootSess, existing, in.User, in.Host,
+				fmt.Errorf("generate transfer keys: %w", gerr))
+		}
+		boxPubLine, idPubLine, gerr = parseGenKeysReadback(out)
+		if gerr != nil {
+			return ProvisionOutput{}, provisionRollback(ctx, &r, bootSess, existing, in.User, in.Host, gerr)
+		}
+	}
+
 	// Verify by RE-DIALING with the (now gated) SSHGate key. The MCP routes
 	// this through r.SSH; the CLI re-dials via the same seam. An empty cmd
 	// triggers gate's SSHGATE_OK probe path.
@@ -374,7 +405,288 @@ func Provision(ctx context.Context, cfg provisionCfg, in ProvisionInput) (Provis
 		VerifiedOK:   true,
 		Idempotent:   idempotent,
 		ReadOnlyMode: in.ReadOnly,
+		XferBoxPub:   boxPubLine,
+		XferIDPub:    idPubLine,
 	}, nil
+}
+
+// parseGenKeysReadback extracts the two canonical PUBLIC transfer-key lines from
+// a `gate genkeys` stdout readback. It tolerates motd/banner noise BEFORE the
+// BEGIN marker, requires exactly one box line and one id line between the
+// markers, and VALIDATES each through xfer.ParseBoxPublicText/ParseIDPublicText
+// so a malformed line is a hard error (the CLI never registers an unvalidated
+// line). It returns the raw canonical text lines (the signer re-parses them).
+//
+// It lives in tools (next to Provision) so the genkeys bootSess.Run stays private
+// to this package; the CLI reads the parsed lines off ProvisionOutput. It depends
+// only on src/xfer (stdlib + x/crypto), so there is no import cycle.
+func parseGenKeysReadback(stdout []byte) (boxLine, idLine string, err error) {
+	const (
+		beginMarker  = "SSHGATE_XFER_PUBKEYS_BEGIN"
+		endMarker    = "SSHGATE_XFER_PUBKEYS_END"
+		boxTagPrefix = "sshgate-xfer-box-x25519 "
+		idTagPrefix  = "sshgate-xfer-id-ed25519 "
+	)
+	lines := strings.Split(string(stdout), "\n")
+	begin := -1
+	for i, l := range lines {
+		if strings.TrimRight(l, "\r") == beginMarker {
+			begin = i
+			break
+		}
+	}
+	if begin == -1 {
+		return "", "", errors.New("gate did not return transfer pubkeys (is this an older gate?)")
+	}
+	end := -1
+	for i := begin + 1; i < len(lines); i++ {
+		if strings.TrimRight(lines[i], "\r") == endMarker {
+			end = i
+			break
+		}
+	}
+	if end == -1 {
+		return "", "", errors.New("gate did not return transfer pubkeys (is this an older gate?)")
+	}
+	for i := begin + 1; i < end; i++ {
+		line := strings.TrimRight(lines[i], "\r")
+		if line == "" {
+			continue
+		}
+		switch {
+		case strings.HasPrefix(line, boxTagPrefix):
+			if boxLine != "" {
+				return "", "", errors.New("gate returned more than one box transfer pubkey")
+			}
+			boxLine = line
+		case strings.HasPrefix(line, idTagPrefix):
+			if idLine != "" {
+				return "", "", errors.New("gate returned more than one id transfer pubkey")
+			}
+			idLine = line
+		default:
+			return "", "", errors.New("unexpected line in transfer pubkey block")
+		}
+	}
+	if boxLine == "" || idLine == "" {
+		return "", "", errors.New("gate did not return both transfer pubkeys")
+	}
+	// Validate BEFORE returning — never register an unvalidated line.
+	if _, perr := xfer.ParseBoxPublicText(boxLine); perr != nil {
+		return "", "", fmt.Errorf("invalid box transfer pubkey: %w", perr)
+	}
+	if _, perr := xfer.ParseIDPublicText(idLine); perr != nil {
+		return "", "", fmt.Errorf("invalid id transfer pubkey: %w", perr)
+	}
+	return boxLine, idLine, nil
+}
+
+// RotateInput is the parsed `sshgate xfer-rotate` request. Alias is required;
+// User/Host/Port optionally override the registry (empty = use servers.json).
+type RotateInput struct {
+	Alias string
+	User  string
+	Host  string
+	Port  int
+}
+
+// RotateOutput carries the fingerprint the caller must re-register under (the
+// SAME servers.json fingerprint — rotation never changes host identity) and the
+// two freshly-generated PUBLIC transfer lines.
+type RotateOutput struct {
+	Alias       string
+	Fingerprint string
+	XferBoxPub  string
+	XferIDPub   string
+}
+
+// RotateXferKeys rotates an already-provisioned Tier-2 host's box→box transfer
+// keys and returns the two new PUBLIC lines for the CLI to re-register. Because a
+// provisioned host is gated (no plain shell), rotation REQUIRES the operator to
+// have re-opened the plain bootstrap window first (remove the old forced-command
+// line for the SSHGate key and re-paste `sshgate pubkey`'s plain line), exactly
+// like the accepted window of a fresh add. This function refuses to proceed if a
+// gate still answers (the forced command is active → `gate genkeys` argv is
+// unreachable), telling the operator how to open the window — it never silently
+// rotates against a gated shell. It does NOT mutate servers.json (fp unchanged).
+//
+// SECURITY: the captured host fingerprint is asserted equal to the stored one —
+// a mismatch means the host key changed and rotation aborts (never rotate
+// against a new identity). The private halves are Saved 0600 on the host by
+// `gate genkeys --rotate`; only the two PUBLIC lines cross the wire.
+func RotateXferKeys(ctx context.Context, cfg provisionCfg, in RotateInput) (RotateOutput, error) {
+	servers, err := registry.New(cfg.ServersPath)
+	if err != nil {
+		return RotateOutput{}, fmt.Errorf("registry: %w", err)
+	}
+	e, ok := servers.Get(in.Alias)
+	if !ok {
+		return RotateOutput{}, fmt.Errorf("alias %q is not registered", in.Alias)
+	}
+	if e.ReadOnly {
+		return RotateOutput{}, fmt.Errorf("server %q is read-only (Tier-1); it has no transfer keys to rotate", in.Alias)
+	}
+	host := e.Host
+	user := e.User
+	port := e.Port
+	if in.Host != "" {
+		host = in.Host
+	}
+	if in.User != "" {
+		user = in.User
+	}
+	if in.Port != 0 {
+		port = in.Port
+	}
+	if port == 0 {
+		port = 22
+	}
+
+	// Local materials (Tier-2 always needs gate.pub for the re-lock).
+	gateBin, err := readLocalFile(cfg.GateBinaryPath, "gate binary",
+		"run `make install-local` to install the committed sshgate-gate-linux-amd64 into ~/.config/sshgate/bin/")
+	if err != nil {
+		return RotateOutput{}, err
+	}
+	gatePubBytes, err := readLocalFile(cfg.GatePubPath, "gate signing public key",
+		"no signer pubkey found; run /sshgate:setup tier-2 to generate it")
+	if err != nil {
+		return RotateOutput{}, err
+	}
+	sshgatePubBytes, err := readLocalFile(cfg.SSHGatePubPath, "SSHGate dedicated SSH public key",
+		"run `sshgate pubkey` first to generate it")
+	if err != nil {
+		return RotateOutput{}, err
+	}
+	sshgatePub, _, _, _, err := ssh.ParseAuthorizedKey(sshgatePubBytes)
+	if err != nil {
+		return RotateOutput{}, fmt.Errorf("parse %s: %w", cfg.SSHGatePubPath, err)
+	}
+
+	auth, err := bootstrapAuthMethod(AddServerInput{BootstrapKeyPath: cfg.SSHGateKeyPath})
+	if err != nil {
+		return RotateOutput{}, fmt.Errorf("load SSHGate key %s: %w", cfg.SSHGateKeyPath, err)
+	}
+	if cfg.KnownHostsPath == "" {
+		return RotateOutput{}, errors.New("known_hosts path is empty; cannot pin host key")
+	}
+	bootCfg := &ssh.ClientConfig{
+		User:            user,
+		Auth:            []ssh.AuthMethod{auth},
+		HostKeyCallback: sshpkg.TOFU(cfg.KnownHostsPath),
+		Timeout:         bootstrapDialTimeout,
+	}
+	dialCtx, cancel := context.WithTimeout(ctx, bootstrapDialTimeout)
+	defer cancel()
+	bootSess, hostFingerprint, err := newBootstrapSession(dialCtx, host, port, bootCfg)
+	if err != nil {
+		return RotateOutput{}, fmt.Errorf("dial %s@%s:%d with the SSHGate key: %w", user, host, port, err)
+	}
+	defer bootSess.Close()
+
+	// Fail CLOSED on a host-key change — never rotate against a new identity.
+	if hostFingerprint != e.Fingerprint {
+		return RotateOutput{}, fmt.Errorf(
+			"host key for %q changed (registered %s, dialed %s) — aborting rotation; investigate the host before re-provisioning",
+			in.Alias, e.Fingerprint, hostFingerprint)
+	}
+
+	// The rotate window REQUIRES a plain shell. If a gate answers, the forced
+	// command is still active and `gate genkeys` (argv) is unreachable — refuse
+	// with the exact remediation rather than silently doing nothing.
+	if probeGateAnswers(ctx, bootSess) {
+		return RotateOutput{}, fmt.Errorf(
+			"server %q is still locked (its gate answered) — to rotate, remove the existing command=\"...\" line for the SSHGate key from %s:~/.ssh/authorized_keys, paste `sshgate pubkey`'s plain line back (this re-opens the brief full-shell window), then re-run `sshgate xfer-rotate %s`",
+			in.Alias, host, in.Alias)
+	}
+
+	// Plain shell: read authorized_keys so runAutoSetup can back it up + rewrite.
+	existing, _, err := bootSess.Run(ctx, "cat "+remoteAuthKeys+" 2>/dev/null || true")
+	if err != nil {
+		return RotateOutput{}, fmt.Errorf("read authorized_keys: %w", err)
+	}
+
+	// Re-lock: re-upload the gate + rewrite the pasted plain line into the
+	// restricted forced-command line (same path fresh add uses).
+	var r Runner
+	if err := r.runAutoSetup(ctx, bootSess, gateBin, gatePubBytes, sshgatePub, existing); err != nil {
+		return RotateOutput{}, err
+	}
+
+	// Regenerate the transfer keys on the host (overwrite) over the still-plain
+	// shell, then parse + validate the readback.
+	out, _, gerr := bootSess.Run(ctx, remoteGateBin+" genkeys --rotate")
+	if gerr != nil {
+		return RotateOutput{}, provisionRollback(ctx, &r, bootSess, existing, user, host,
+			fmt.Errorf("rotate transfer keys: %w", gerr))
+	}
+	boxPubLine, idPubLine, gerr := parseGenKeysReadback(out)
+	if gerr != nil {
+		return RotateOutput{}, provisionRollback(ctx, &r, bootSess, existing, user, host, gerr)
+	}
+
+	// Verify the re-locked gate answers on a fresh dial.
+	if err := verifyProvision(ctx, host, port, bootCfg); err != nil {
+		return RotateOutput{}, provisionRollback(ctx, &r, bootSess, existing, user, host, err)
+	}
+
+	return RotateOutput{
+		Alias:       in.Alias,
+		Fingerprint: e.Fingerprint,
+		XferBoxPub:  boxPubLine,
+		XferIDPub:   idPubLine,
+	}, nil
+}
+
+// XferKeysOnHost is a best-effort, read-only probe of whether both transfer key
+// files are present in the remote gate dir. It dials the (gated) host with the
+// SSHGate key and runs a plain `ls ~/.sshgate-gate` — which the gate classifies
+// as a READ, so it runs with no approval tap and no new verb. It never writes and
+// never reveals key CONTENT (only filenames). reachable is false when the host
+// cannot be dialed (the caller renders "unknown"); present is true only when both
+// xfer-box.key and xfer-id.key appear in the listing.
+func XferKeysOnHost(ctx context.Context, cfg provisionCfg, alias string) (present, reachable bool) {
+	servers, err := registry.New(cfg.ServersPath)
+	if err != nil {
+		return false, false
+	}
+	e, ok := servers.Get(alias)
+	if !ok {
+		return false, false
+	}
+	auth, err := bootstrapAuthMethod(AddServerInput{BootstrapKeyPath: cfg.SSHGateKeyPath})
+	if err != nil {
+		return false, false
+	}
+	if cfg.KnownHostsPath == "" {
+		return false, false
+	}
+	port := e.Port
+	if port == 0 {
+		port = 22
+	}
+	bootCfg := &ssh.ClientConfig{
+		User:            e.User,
+		Auth:            []ssh.AuthMethod{auth},
+		HostKeyCallback: sshpkg.TOFU(cfg.KnownHostsPath),
+		Timeout:         bootstrapDialTimeout,
+	}
+	dialCtx, cancel := context.WithTimeout(ctx, bootstrapDialTimeout)
+	defer cancel()
+	sess, _, err := newBootstrapSession(dialCtx, e.Host, port, bootCfg)
+	if err != nil {
+		return false, false
+	}
+	defer sess.Close()
+	out, _, err := sess.Run(ctx, "ls "+remoteGateDir)
+	if err != nil {
+		// Reachable, but the listing failed (e.g. the dir is absent) — treat as
+		// "not present" rather than "unknown".
+		return false, true
+	}
+	listing := string(out)
+	present = strings.Contains(listing, "xfer-box.key") && strings.Contains(listing, "xfer-id.key")
+	return present, true
 }
 
 // provisionRollback runs the shared rollback after a Provision failure that

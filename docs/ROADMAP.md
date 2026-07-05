@@ -13,10 +13,10 @@ For the security model these items extend, see [design.md](design.md) and
 
 - **Human-only provisioning CLI.** Onboarding a server is a control-plane action
   done with the `sshgate` CLI (`pubkey` → paste → `add [--read-only]`), not an
-  agent tool. The agent surface is exactly nine tools (`run`, `run_batch`,
+  agent tool. The agent surface is exactly ten tools (`run`, `run_batch`,
   `list_servers`, `status`, `revoke_server`, `request_grant`, `revoke_grant`,
-  `list_grants`, `update_gate`); there is deliberately no `add_server` tool, so
-  the agent can never expand its own reach.
+  `list_grants`, `update_gate`, `transfer`); there is deliberately no `add_server`
+  tool, so the agent can never expand its own reach.
 - **Read-only (Tier-1) and signed-write (Tier-2) provisioning**, selectable at
   `sshgate add` time.
 - **Inline secret redaction of command output** in the gate (all commands,

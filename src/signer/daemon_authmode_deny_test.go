@@ -36,6 +36,18 @@ func (b realDenyBackend) RequestGrant(context.Context, backend.GrantApprovalRequ
 	return ch, nil
 }
 
+func (b realDenyBackend) RequestTransfer(context.Context, backend.TransferApprovalRequest) (<-chan backend.Result, error) {
+	ch := make(chan backend.Result, 1)
+	ch <- b.result
+	return ch, nil
+}
+
+func (b realDenyBackend) RequestRegisterKey(context.Context, backend.RegisterApprovalRequest) (<-chan backend.Result, error) {
+	ch := make(chan backend.Result, 1)
+	ch <- b.result
+	return ch, nil
+}
+
 // failWriteConn reads a request normally but FAILS every Write, so the daemon
 // takes its write-failure branch (which records the "<verdict>-undelivered"
 // audit row). It captures nothing on the wire — only the audit row matters

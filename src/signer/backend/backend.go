@@ -38,6 +38,46 @@ type GrantApprovalRequest struct {
 	Duration  time.Duration
 }
 
+// TransferApprovalRequest is the unit of work submitted to a Backend's
+// RequestTransfer: a request for the human to approve a box→box SECRET
+// TRANSFER. Approving it lets the signer mint the two host-bound signed legs
+// (SEND on the source gate, RECV on the destination gate) under ONE tap — so
+// the backend MUST render it with a distinct, alarming UX naming the
+// consequence (a secret file moving across hosts).
+//
+// SECURITY. SrcLabel/DestLabel come from the SIGNER's registry, NOT the MCP's
+// alias, so a lying MCP cannot mislabel the destination in the banner. The two
+// fingerprints, paths, and mode are the banner's factual content; the backend
+// shape-validates each so a smuggled newline cannot forge a banner line.
+// XferID is the signer-minted transfer id (shown so the operator can
+// cross-reference the audit). No key material is ever carried here.
+type TransferApprovalRequest struct {
+	RequestID string
+	XferID    string
+	SrcLabel  string
+	SrcFP     string
+	SrcPath   string
+	DestLabel string
+	DestFP    string
+	DestPath  string
+	Mode      string
+}
+
+// RegisterApprovalRequest is the unit of work submitted to a Backend's
+// RequestRegisterKey: a request for the human to approve REGISTERING a server's
+// box→box transfer keys into the signer's registry. It is the human-only
+// control that populates the transfer trust anchor; there is deliberately no
+// MCP tool for it, and even this human path always prompts. Label is the
+// display name; BoxPub/IDPub are the canonical PublicText key lines the operator
+// confirms.
+type RegisterApprovalRequest struct {
+	RequestID string
+	HostFP    string
+	Label     string
+	BoxPub    string
+	IDPub     string
+}
+
 // CommandReq is a single command awaiting approval. Server is the human-
 // readable alias from the MCP's registry (e.g. "prod-db"); Cmd is the
 // literal shell command line; TTLSec is the spec's signature validity
@@ -140,4 +180,20 @@ type Backend interface {
 	// MUST fail closed by returning an error (the hosted backend does this
 	// until its web UI carries the grant banner).
 	RequestGrant(ctx context.Context, req GrantApprovalRequest) (<-chan Result, error)
+
+	// RequestTransfer submits a box→box SECRET-TRANSFER approval request and
+	// returns a channel yielding exactly one Result, same contract and
+	// concurrency as Request. The Result's Signatures field is unused (the
+	// daemon mints the two host-bound legs locally on approval). A backend that
+	// cannot render the distinct, alarming transfer banner MUST fail closed by
+	// returning an error (the hosted/Tier-3 backend does — transfers are
+	// Tier-2/local-signer only in P2).
+	RequestTransfer(ctx context.Context, req TransferApprovalRequest) (<-chan Result, error)
+
+	// RequestRegisterKey submits an XFER-KEY REGISTER approval request (populate
+	// the signer's transfer trust anchor) and returns a channel yielding exactly
+	// one Result, same contract and concurrency as Request. It is always a human
+	// prompt — there is no auto path and no MCP tool. A backend that cannot
+	// render the distinct register banner MUST fail closed by returning an error.
+	RequestRegisterKey(ctx context.Context, req RegisterApprovalRequest) (<-chan Result, error)
 }

@@ -48,6 +48,7 @@ import (
 	"github.com/karthikeyan5/sshgate/src/redact"
 	redactrules "github.com/karthikeyan5/sshgate/src/redact/rules"
 	"github.com/karthikeyan5/sshgate/src/sigwire"
+	"github.com/karthikeyan5/sshgate/src/xferwire"
 )
 
 // sessionSalt is the per-process 32 random bytes the redactor uses to
@@ -78,6 +79,17 @@ const (
 )
 
 func main() {
+	// Local admin ARGV subcommands (e.g. `gate genkeys`), dispatched BEFORE
+	// run() ever reads SSH_ORIGINAL_COMMAND. Reachable ONLY when the binary is
+	// exec'd directly with arguments — i.e. over a PLAIN shell during
+	// provisioning, never through the forced-command path (OpenSSH's forced
+	// command passes NO arguments and puts the client's command in the env var,
+	// so a gated/agent invocation always has len(os.Args)==1). This is the
+	// human-only key-generation entry point; see genkeys.go. run() stays
+	// byte-for-byte the SSH_ORIGINAL_COMMAND path and is left unchanged.
+	if len(os.Args) > 1 {
+		os.Exit(runLocalSubcommand(os.Args[1:]))
+	}
 	os.Exit(run())
 }
 
@@ -215,6 +227,12 @@ func run() int {
 			// atomically replaces this binary. It ALWAYS returns — never falls
 			// through to classify/exec.
 			return handleUpdate(audit, innerCmd)
+		}
+		if strings.HasPrefix(innerCmd, xferwire.VerbPrefix) {
+			// Signed box→box transfer leg. Dispatched here, BEFORE classify/exec,
+			// so a SSHGATE_XFER_* line is NEVER handed to /bin/sh. handleXfer
+			// ALWAYS returns — like handleUpdate it never falls through.
+			return handleXfer(audit, innerCmd)
 		}
 	}
 

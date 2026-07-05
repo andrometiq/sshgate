@@ -6,12 +6,16 @@ description: This skill should be used when the user asks to debug, diagnose, or
 # Debugging remote servers with SSHGate
 
 SSHGate gives you SSH access to the user's registered servers. Your MCP
-tool surface is exactly nine tools — `sshgate.run`, `sshgate.run_batch`,
+tool surface is exactly ten tools — `sshgate.run`, `sshgate.run_batch`,
 `sshgate.list_servers`, `sshgate.status`, `sshgate.revoke_server`,
-`sshgate.request_grant`, `sshgate.revoke_grant`, `sshgate.list_grants`, and
-`sshgate.update_gate` — and debugging mostly uses the first three (the grant
-tools are for unattended write windows, and `update_gate` pushes a signed,
-human-approved update of the gate binary itself — see **Standing grants** and
+`sshgate.request_grant`, `sshgate.revoke_grant`, `sshgate.list_grants`,
+`sshgate.update_gate`, and `sshgate.transfer` — and debugging mostly uses the
+first three (the grant tools are for unattended write windows, `update_gate`
+pushes a signed, human-approved update of the gate binary itself, and
+`sshgate.transfer` moves a secret file between two registered servers end-to-end
+encrypted through the gate under one human approval — the MCP relays only
+ciphertext, so the plaintext never reaches you; it needs the local Tier-2
+Telegram signer (the hosted Tier-3 signer fails closed on transfers) — see **Standing grants** and
 **Updating a server's gate** below). Read commands run instantly. Write
 commands need the user to tap a Telegram approval button on their phone.
 Optimise for: fast diagnosis, one approval per fix, no surprises.

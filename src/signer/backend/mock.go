@@ -46,6 +46,20 @@ func (m *MockBackend) RequestGrant(_ context.Context, req GrantApprovalRequest) 
 	return m.requestByID(req.RequestID), nil
 }
 
+// RequestTransfer mirrors Request: it registers (or returns the pre-arranged)
+// pending channel keyed by RequestID, so the same Approve/Deny/Timeout(reqID)
+// calls drive box→box transfer requests. Transfer-specific fields are ignored —
+// tests assert the daemon's transfer bookkeeping, not the mock's.
+func (m *MockBackend) RequestTransfer(_ context.Context, req TransferApprovalRequest) (<-chan Result, error) {
+	return m.requestByID(req.RequestID), nil
+}
+
+// RequestRegisterKey mirrors Request: same Approve/Deny/Timeout(reqID) drive an
+// xfer-key registration approval; the register-specific fields are ignored.
+func (m *MockBackend) RequestRegisterKey(_ context.Context, req RegisterApprovalRequest) (<-chan Result, error) {
+	return m.requestByID(req.RequestID), nil
+}
+
 // requestByID returns the pending channel for reqID, returning a
 // pre-arranged outcome if one was registered before the call, else a
 // fresh channel a later Approve/Deny/Timeout will resolve.

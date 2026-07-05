@@ -932,6 +932,16 @@ func (b *blockingBackend) RequestGrant(context.Context, backend.GrantApprovalReq
 	return nil, fmt.Errorf("blockingBackend: RequestGrant must not be called by list_grants")
 }
 
+func (b *blockingBackend) RequestTransfer(context.Context, backend.TransferApprovalRequest) (<-chan backend.Result, error) {
+	b.mark()
+	return nil, fmt.Errorf("blockingBackend: RequestTransfer must not be called by list_grants")
+}
+
+func (b *blockingBackend) RequestRegisterKey(context.Context, backend.RegisterApprovalRequest) (<-chan backend.Result, error) {
+	b.mark()
+	return nil, fmt.Errorf("blockingBackend: RequestRegisterKey must not be called by list_grants")
+}
+
 // TestListGrants_NoApprovalNoBackend pins that list_grants is purely
 // read-only: against a backend whose every method errors, list_grants
 // still returns ok promptly and never touches the backend.

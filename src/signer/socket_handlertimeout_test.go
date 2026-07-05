@@ -44,6 +44,17 @@ func (b delayedBackend) RequestGrant(ctx context.Context, _ backend.GrantApprova
 	return b.delayedResult(ctx), nil
 }
 
+// RequestTransfer / RequestRegisterKey mirror Request so delayedBackend
+// satisfies the widened Backend interface; the handler-timeout tests only
+// exercise the sign path, but the daemon needs a complete backend.
+func (b delayedBackend) RequestTransfer(ctx context.Context, _ backend.TransferApprovalRequest) (<-chan backend.Result, error) {
+	return b.delayedResult(ctx), nil
+}
+
+func (b delayedBackend) RequestRegisterKey(ctx context.Context, _ backend.RegisterApprovalRequest) (<-chan backend.Result, error) {
+	return b.delayedResult(ctx), nil
+}
+
 func (b delayedBackend) delayedResult(ctx context.Context) <-chan backend.Result {
 	ch := make(chan backend.Result, 1)
 	go func() {

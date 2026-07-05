@@ -158,6 +158,7 @@ func buildServer(cfgRoot, socketPath string, logger *log.Logger) (*mcp.Server, e
 		Sign:           signer,
 		SSH:            sshClient,
 		SSHStdin:       sshClient,
+		Xfer:           signer,
 		StagedGatePath: stagedGatePath(cfgRoot),
 		KeyPath:        keyPath,
 		SignerSockPath: socketPath,
