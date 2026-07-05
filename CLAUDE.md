@@ -84,6 +84,7 @@ and the error messages below.
 ## When to escalate to the user
 
 - Provisioning is the human-only `sshgate` CLI (see above), not an agent tool — if `sshgate add` fails on the user's side, ask them to check the host's `/var/log/auth.log` and that SSHGate's public-key line was pasted into the target's `~/.ssh/authorized_keys` before they ran `sshgate add`.
+- If `sshgate.transfer` fails with **`src/dest server not registered for transfer`**, that endpoint has no transfer keypair registered on the signer yet. This is enrolled by a human with the `sshgate` CLI (`sshgate xfer-register <alias>`, or `sshgate xfer-rotate <alias>` to re-key an existing host) — there is **no agent tool** for it, exactly like provisioning. Do NOT try to work around it; tell the user to run that CLI step, then retry the transfer. (`sshgate xfer-status <alias>` shows a host's tier / on-host keys / fingerprint.)
 - If a write fails with a **signer-permission** error (`signer socket … is present
   but not accessible (permission denied) — your shell/session is not yet in the
   sshgatesigner group`) → STOP. This is NOT a dead daemon. The user (or the agent
