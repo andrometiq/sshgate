@@ -1,11 +1,38 @@
 package redact_test
 
 import (
+	"crypto/ed25519"
+	"crypto/rand"
 	"strings"
 	"testing"
 
+	"golang.org/x/crypto/ssh"
+
 	"github.com/karthikeyan5/sshgate/src/redact"
 )
+
+// sshEd25519Line returns a real authorized_keys ed25519 line
+// (`ssh-ed25519 AAAAC3NzaC1lZDI1NTE5… comment`) and its base64 body. The
+// body is a genuine SSH wire-format blob, so it begins with the ed25519
+// key-type prefix — the shape the twitter-bearer veto must recognise (and a
+// synthetic `AAAA…` run must NOT).
+func sshEd25519Line(t *testing.T) (line, body string) {
+	t.Helper()
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("ed25519.GenerateKey: %v", err)
+	}
+	sshPub, err := ssh.NewPublicKey(pub)
+	if err != nil {
+		t.Fatalf("ssh.NewPublicKey: %v", err)
+	}
+	authorized := strings.TrimRight(string(ssh.MarshalAuthorizedKey(sshPub)), "\n")
+	fields := strings.Fields(authorized)
+	if len(fields) < 2 {
+		t.Fatalf("unexpected authorized_keys form: %q", authorized)
+	}
+	return authorized + " deploy@host", fields[1]
+}
 
 // spec_acceptance_test mirrors the operator's acceptance list for the 2026-07
 // default-deny widening (redaction-widening spec §3.3): the concrete shapes a
@@ -116,21 +143,71 @@ func TestAcceptanceGitRemoteUserinfo(t *testing.T) {
 	}
 }
 
-// TestTwitterBearerRedactsPubkeyBody positively pins the PRE-EXISTING
-// gitleaks-twitter-bearer behaviour that the generic net's ssh-line veto
-// relies on for authorized_keys hygiene: an `AAAA…`-prefixed ed25519/rsa
-// pubkey body is redacted by that rule (so the ssh veto keeping the GENERIC
-// net off the line does not mean the line is marker-free). Pinning it guards
-// against a future change silently dropping that coverage.
-func TestTwitterBearerRedactsPubkeyBody(t *testing.T) {
-	// AAAA + 96 base62 (>= the rule's 64-char floor, 3-class).
-	body := "AAAA" + run3class(96)
-	out := redactString(t, "ssh-ed25519 "+body+" user@host\n")
-	if strings.Contains(out, body) {
-		t.Errorf("twitter-bearer no longer redacts an AAAA pubkey body; out=%q", out)
+// TestTwitterBearerVetoedOnRealPubkeyLine is the W4-9 inversion of the old
+// TestTwitterBearerRedactsPubkeyBody. The scoped ssh-line veto now suppresses
+// gitleaks-twitter-bearer on a GENUINE authorized_keys / known_hosts pubkey
+// line, so `cat authorized_keys` is marker-free — the ed25519 body passes
+// through untouched. (Combined with the generic net's pre-existing veto the
+// whole line is clean.) The veto is scoped: it fires only when an SSH marker
+// precedes the body AND the body carries a real SSH wire-format prefix.
+func TestTwitterBearerVetoedOnRealPubkeyLine(t *testing.T) {
+	line, body := sshEd25519Line(t)
+	out := redactString(t, line+"\n")
+	if !strings.Contains(out, body) {
+		t.Errorf("real ed25519 pubkey body was redacted (veto failed); out=%q", out)
+	}
+	if strings.Contains(out, redact.MarkerPrefix) {
+		t.Errorf("authorized_keys line should be marker-free; out=%q", out)
+	}
+}
+
+// TestTwitterBearerStillRedactsRealBearer is the adversarial still-redacts
+// proof: a real Twitter/X bearer shape (`AAAAAAAAAAAAAAAAAAAAAM…`) on a line
+// with NO SSH context still redacts. It also proves the veto is line-scoped,
+// not a blanket disable of the rule.
+func TestTwitterBearerStillRedactsRealBearer(t *testing.T) {
+	bearer := "AAAAAAAAAAAAAAAAAAAAAM" + run3class(80) // high-entropy bearer body, not a pubkey prefix
+	out := redactString(t, "authorization: Bearer "+bearer+"\n")
+	if strings.Contains(out, bearer) {
+		t.Errorf("real bearer token leaked; out=%q", out)
 	}
 	if !strings.Contains(out, redact.MarkerPrefix) {
-		t.Errorf("no marker on AAAA pubkey body; out=%q", out)
+		t.Errorf("real bearer token: no marker; out=%q", out)
+	}
+}
+
+// TestTwitterBearerNotSpoofedBySSHPrefix is the anti-spoof proof: prefixing a
+// real bearer token with a FAKE `ssh-rsa` marker must NOT smuggle it past
+// redaction. The body does not carry an SSH wire-format prefix, so the veto's
+// body-prefix half fails and the token is still redacted.
+func TestTwitterBearerNotSpoofedBySSHPrefix(t *testing.T) {
+	bearer := "AAAAAAAAAAAAAAAAAAAAAM" + run3class(80)
+	out := redactString(t, "ssh-rsa "+bearer+" attacker@evil\n")
+	if strings.Contains(out, bearer) {
+		t.Errorf("bearer smuggled past redaction via fake ssh- prefix; out=%q", out)
+	}
+	if !strings.Contains(out, redact.MarkerPrefix) {
+		t.Errorf("spoofed line: bearer should still be redacted; out=%q", out)
+	}
+}
+
+// TestAuthorizedKeysKnownHostsMarkerFree is the end-to-end daily-driver check:
+// `cat authorized_keys` and `cat known_hosts` emerge fully marker-free.
+func TestAuthorizedKeysKnownHostsMarkerFree(t *testing.T) {
+	line1, body1 := sshEd25519Line(t)
+	line2, body2 := sshEd25519Line(t)
+
+	authKeys := line1 + "\n" + line2 + "\n"
+	if out := redactString(t, authKeys); strings.Contains(out, redact.MarkerPrefix) ||
+		!strings.Contains(out, body1) || !strings.Contains(out, body2) {
+		t.Errorf("authorized_keys not marker-free / bodies mangled; out=%q", out)
+	}
+
+	// known_hosts form: `<host> ssh-ed25519 AAAA…`.
+	knownHosts := "[github.com]:22 " + line1 + "\n" + "example.com " + line2 + "\n"
+	if out := redactString(t, knownHosts); strings.Contains(out, redact.MarkerPrefix) ||
+		!strings.Contains(out, body1) || !strings.Contains(out, body2) {
+		t.Errorf("known_hosts not marker-free / bodies mangled; out=%q", out)
 	}
 }
 

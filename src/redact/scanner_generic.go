@@ -61,6 +61,40 @@ var sshKeyMarkers = []string{
 	"ssh-rsa", "ssh-ed25519", "ssh-dss", "ecdsa-sha2-", "sk-ssh-", "sk-ecdsa-",
 }
 
+// sshPubkeyBodyPrefixes are the leading base64 characters an SSH public-key
+// blob MUST begin with. The SSH wire format prepends a length-prefixed
+// key-type string, so every real pubkey body starts `AAAA` + a fixed run
+// that encodes its type: ssh-rsa -> AAAAB3NzaC1yc2E, ssh-ed25519 ->
+// AAAAC3NzaC1lZDI1NTE5, ecdsa-sha2-* -> AAAAE2VjZHNhLXNoYTIt, etc. This is
+// the anti-spoof half of the twitter-bearer veto (hasSSHPubkeyBodyPrefix):
+// a real Twitter/X bearer (`AAAAAAAAAAAAAAAAAAAAAM…`) does NOT encode a key
+// type, so it fails this check and is still redacted even on a line that
+// carries a (possibly forged) `ssh-rsa` marker. Case-sensitive: base64 is
+// not case-folded.
+var sshPubkeyBodyPrefixes = []string{
+	"AAAAB3NzaC1yc2E",          // ssh-rsa
+	"AAAAC3NzaC1lZDI1NTE5",     // ssh-ed25519
+	"AAAAB3NzaC1kc3M",          // ssh-dss
+	"AAAAE2VjZHNhLXNoYTIt",     // ecdsa-sha2-nistp{256,384,521}
+	"AAAAGnNrLXNzaC1lZDI1NTE5", // sk-ssh-ed25519@openssh.com
+	"AAAAInNrLWVjZHNhLXNoYTIt", // sk-ecdsa-sha2-*@openssh.com
+}
+
+// hasSSHPubkeyBodyPrefix reports whether b begins with one of the SSH
+// public-key wire-format base64 prefixes — i.e. b genuinely encodes an SSH
+// key-type header, not merely an `AAAA…` run. Used by the scoped
+// twitter-bearer veto (scanner.go) so only a real pubkey body earns the
+// pass; an arbitrary bearer token prefixed with a fake `ssh-` marker does
+// not.
+func hasSSHPubkeyBodyPrefix(b []byte) bool {
+	for _, p := range sshPubkeyBodyPrefixes {
+		if len(b) >= len(p) && string(b[:len(p)]) == p {
+			return true
+		}
+	}
+	return false
+}
+
 // passesEntropyGate is the content-only secret gate: a span is dropped
 // unless it (a) contains upper+lower+digit — kills lowercase hex (git SHAs,
 // docker digests, sha256sums, nix hashes) and caseless identifiers — and

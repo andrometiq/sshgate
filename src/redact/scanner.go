@@ -60,12 +60,43 @@ type match struct {
 }
 
 // findMatches returns all rule matches inside buf, sorted by start
-// offset and de-overlapped (earlier match wins). The result is a
-// fresh slice — caller owns it.
+// offset and de-overlapped (earlier match wins). It is the full R1
+// pipeline: the named regex ruleset PLUS the generic default-deny net.
+// The result is a fresh slice — caller owns it.
 func (s *scanner) findMatches(buf []byte) []match {
 	if len(buf) == 0 || len(s.rules) == 0 {
 		return nil
 	}
+	out := s.namedMatches(buf)
+	// Step 3: the generic default-deny net (scanGenericRuns). It sits
+	// AFTER the len(s.rules)==0 early return above, so the nil-rules
+	// verbatim contract (scrub/pem nil-rules tests) is preserved — a real
+	// Writer always carries the prepended marker-forgery rule, so the net
+	// always runs inside a Writer. dedupMatches merges its output with the
+	// regex matches (earliest-start-wins, tie -> longest).
+	out = append(out, scanGenericRuns(buf)...)
+	return dedupMatches(out)
+}
+
+// findNamedMatches returns matches from the named regex ruleset ONLY —
+// it deliberately SKIPS the generic default-deny net (scanGenericRuns).
+// It backs the completed non-private PEM path (writer.go): a certificate
+// / public-key / CSR body is a benign high-entropy base64 blob — exactly
+// like the SSH pubkey body the generic net already vetoes — so routing it
+// through the generic net would re-redact it and defeat `cat server.crt`.
+// The named rules still run so an embedded NAMED secret (an AWS key, a
+// PAT, a `password=` line in a header comment) inside the block is caught.
+func (s *scanner) findNamedMatches(buf []byte) []match {
+	if len(buf) == 0 || len(s.rules) == 0 {
+		return nil
+	}
+	return dedupMatches(s.namedMatches(buf))
+}
+
+// namedMatches runs the Layer-1 named regex ruleset over buf and returns
+// the raw (un-deduped) matches. It is the shared core of findMatches (which
+// adds the generic net) and findNamedMatches (which does not).
+func (s *scanner) namedMatches(buf []byte) []match {
 	var out []match
 	for _, r := range s.rules {
 		if !r.matchesKeyword(buf) {
@@ -107,6 +138,26 @@ func (s *scanner) findMatches(buf []byte) []match {
 			if r.Entropy > 0 && !passesEntropyGate(buf[start:end], r.Entropy) {
 				continue
 			}
+			// Scoped SSH-pubkey veto (W4-9). ONE rule opts in via
+			// WithSSHLineVeto: gitleaks-twitter-bearer, whose `AAAA…`
+			// pattern also matches the base64 body of an ed25519/rsa
+			// public key in authorized_keys / known_hosts. Drop the match
+			// ONLY when BOTH hold: (a) an SSH key-type marker precedes it
+			// on the same line (sshLineContext — the authorized_keys/
+			// known_hosts context), AND (b) the matched body itself begins
+			// with a recognised SSH-pubkey wire-format prefix (the base64
+			// encoding of an `ssh-ed25519`/`ssh-rsa`/`ecdsa-sha2-…` key
+			// type). Requiring (b) is the anti-spoof: a real Twitter bearer
+			// (`AAAAAAAAAAAAAAAAAAAAAM…`) does NOT encode an SSH key type,
+			// so prefixing it with a fake `ssh-rsa ` token cannot smuggle it
+			// past redaction — it fails (b) and is still redacted. The veto
+			// stays on this rule alone; a blanket named-path veto would let
+			// a keyed secret escape by sharing a line with `ssh-rsa`.
+			if r.VetoOnSSHLine &&
+				sshLineContext(buf, matchStart) &&
+				hasSSHPubkeyBodyPrefix(buf[start:end]) {
+				continue
+			}
 			out = append(out, match{
 				Start:      start,
 				End:        end,
@@ -116,14 +167,7 @@ func (s *scanner) findMatches(buf []byte) []match {
 			})
 		}
 	}
-	// Step 3: the generic default-deny net (scanGenericRuns). It sits
-	// AFTER the len(s.rules)==0 early return above, so the nil-rules
-	// verbatim contract (scrub/pem nil-rules tests) is preserved — a real
-	// Writer always carries the prepended marker-forgery rule, so the net
-	// always runs inside a Writer. dedupMatches merges its output with the
-	// regex matches (earliest-start-wins, tie -> longest).
-	out = append(out, scanGenericRuns(buf)...)
-	return dedupMatches(out)
+	return out
 }
 
 // dedupMatches sorts matches by start and merges overlaps. Same-start

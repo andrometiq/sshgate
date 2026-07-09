@@ -210,11 +210,31 @@ func (w *Writer) feedPEM(chunk []byte) error {
 	switch {
 	case res.Complete:
 		w.pem = nil
-		marker := FormatMarker(w.scanner.salt, res.Buffered)
-		if _, err := w.dst.Write([]byte(marker)); err != nil {
-			return err
+		// Type-check the completed block. A verified `-----END-----`
+		// means we hold a well-formed PEM span, so we can trust its
+		// BEGIN label (W4-8).
+		if isPublicPEMBegin(res.Buffered) {
+			// Known public PEM — certificate / public key / CSR /
+			// parameters. Pass the block through with ONLY the named
+			// secret rules applied so its base64 body survives verbatim
+			// (delivering `cat server.crt`, public keys, CSRs), while an
+			// embedded credential in a header/comment is still caught. The
+			// generic high-entropy net is deliberately skipped: a cert body
+			// is a benign high-entropy blob, exactly like the SSH pubkey
+			// body the generic net already vetoes.
+			if err := w.scanNamedAndEmit(res.Buffered); err != nil {
+				return err
+			}
+		} else {
+			// A `…PRIVATE KEY…` block of any variant, OR an unrecognised
+			// BEGIN label. Redact wholesale — fail closed: if we cannot
+			// prove the type is public, treat the whole span as secret.
+			marker := FormatMarker(w.scanner.salt, res.Buffered)
+			if _, err := w.dst.Write([]byte(marker)); err != nil {
+				return err
+			}
+			w.scanner.redactCount.Add(1)
 		}
-		w.scanner.redactCount.Add(1)
 		// Re-feed tail through normal scan.
 		if len(res.Tail) > 0 {
 			w.buf = append(w.buf, res.Tail...)
@@ -469,6 +489,16 @@ func (w *Writer) emitWithMatches(span []byte, matches []match) error {
 // pre-emit path where there's no need for straddler retention.
 func (w *Writer) scanAndEmit(span []byte) error {
 	matches := w.scanner.findMatches(span)
+	return w.emitWithMatches(span, matches)
+}
+
+// scanNamedAndEmit runs ONLY the named ruleset (no generic default-deny
+// net) over span and emits the scrubbed bytes. Used by the completed
+// non-private PEM path (feedPEM) so a certificate / public-key / CSR base64
+// body passes through verbatim while an embedded NAMED secret is redacted.
+// See scanner.findNamedMatches for why the generic net must be skipped here.
+func (w *Writer) scanNamedAndEmit(span []byte) error {
+	matches := w.scanner.findNamedMatches(span)
 	return w.emitWithMatches(span, matches)
 }
 

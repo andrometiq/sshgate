@@ -108,13 +108,22 @@ func Rules() []redact.Rule {
 		),
 
 		// Twitter Bearer token (long AAAA-prefixed).
+		//
+		// WithSSHLineVeto: the `AAAA…` pattern also matches an SSH
+		// public-key body (the SSH wire format base64-encodes the key type
+		// first: ed25519 -> AAAAC3NzaC1lZDI1NTE5…, rsa -> AAAAB3NzaC1yc2E…).
+		// The veto suppresses the match on a genuine authorized_keys /
+		// known_hosts pubkey line (SSH marker on the line AND an SSH
+		// wire-format body prefix) so `cat authorized_keys` is marker-free,
+		// while a real bearer token — which does not encode an SSH key type
+		// — still redacts even if a fake `ssh-` marker is prepended.
 		redact.CompileRule(
 			"gitleaks-twitter-bearer",
 			"Twitter API bearer token (AAAA-prefixed, ~100 char)",
 			`\b(AAAA[A-Za-z0-9%]{60,200})\b`,
 			[]string{"AAAA"},
 			1, 64, 204,
-		),
+		).WithSSHLineVeto(),
 
 		// Generic private-key-style PKCS8 / RSA — same as above but
 		// the catch-all "PRIVATE KEY" without algorithm prefix.

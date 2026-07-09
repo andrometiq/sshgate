@@ -162,3 +162,70 @@ func isPrivateKeyBegin(buf []byte) bool {
 	}
 	return bytes.Contains(line, []byte("PRIVATE KEY"))
 }
+
+// pemPublicTypes is the allowlist of PEM block types that carry NO secret
+// material — certificates, public keys, CSRs, and public parameters. A
+// COMPLETED block (verified `-----END-----`) whose BEGIN label names one of
+// these is passed through with only the NAMED secret rules scanned over it,
+// so its base64 body survives (`cat server.crt`, `ssh-keygen -y`,
+// `openssl req`) while an embedded credential is still caught.
+//
+// Everything NOT in this set is redacted wholesale on the completed-block
+// path: every `…PRIVATE KEY…` variant (covered by isPrivateKeyBegin too:
+// RSA/EC/DSA/OPENSSH/ENCRYPTED/PGP PRIVATE KEY BLOCK, plain PKCS8) AND every
+// UNRECOGNISED label. That is the fail-closed bias — if we cannot prove a
+// label is a public/cert type, we treat the whole span as secret. Labels
+// are the uppercase text between `-----BEGIN ` and `-----`; matched
+// case-sensitively per RFC 7468.
+var pemPublicTypes = map[string]bool{
+	"CERTIFICATE":             true,
+	"TRUSTED CERTIFICATE":     true,
+	"X509 CRL":                true,
+	"CERTIFICATE REQUEST":     true, // PKCS#10 CSR
+	"NEW CERTIFICATE REQUEST": true, // legacy CSR label
+	"PUBLIC KEY":              true, // SubjectPublicKeyInfo
+	"RSA PUBLIC KEY":          true, // PKCS#1 public
+	"DSA PUBLIC KEY":          true,
+	"DH PARAMETERS":           true,
+	"EC PARAMETERS":           true, // curve identifier only — public
+	"DSA PARAMETERS":          true,
+	"PKCS7":                   true,
+	"CMS":                     true,
+	"ATTRIBUTE CERTIFICATE":   true,
+	"PGP PUBLIC KEY BLOCK":    true,
+	"PGP SIGNATURE":           true,
+	"SSH2 PUBLIC KEY":         true, // RFC 4716
+}
+
+// pemBlockType returns the type label of the first `-----BEGIN <TYPE>-----`
+// line in buf (the text between `-----BEGIN ` and the closing `-----`), or
+// "" when buf does not open with a well-formed BEGIN line. The accumulator
+// seeds its span at the BEGIN, so this reads the block's own header.
+func pemBlockType(buf []byte) string {
+	idx := bytes.Index(buf, []byte(pemBegin))
+	if idx < 0 {
+		return ""
+	}
+	start := idx + len(pemBegin)
+	lineEnd := start
+	for lineEnd < len(buf) && buf[lineEnd] != '\n' {
+		lineEnd++
+	}
+	line := buf[start:lineEnd]
+	trimmed := bytes.TrimRight(line, " \t\r")
+	if !bytes.HasSuffix(trimmed, []byte(pemEndSuffix)) {
+		return ""
+	}
+	typ := bytes.TrimSuffix(trimmed, []byte(pemEndSuffix))
+	return string(bytes.TrimSpace(typ))
+}
+
+// isPublicPEMBegin reports whether buf opens with a well-formed BEGIN line
+// whose type is a known public (non-secret) PEM type — see pemPublicTypes.
+// It is the completed-block discriminator: true -> pass the block through
+// (named-only scan); false -> redact wholesale (private key OR unknown
+// label, fail closed).
+func isPublicPEMBegin(buf []byte) bool {
+	t := pemBlockType(buf)
+	return t != "" && pemPublicTypes[t]
+}

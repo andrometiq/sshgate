@@ -53,6 +53,19 @@ type Rule struct {
 	// markerKeyInputLimit), not the whole span, so an over-long secret
 	// cannot blow up marker derivation.
 	HighConfidence bool
+
+	// VetoOnSSHLine, when set, drops a match that is genuinely an SSH
+	// public-key body on an authorized_keys / known_hosts line. It exists
+	// for the ONE rule (gitleaks-twitter-bearer) whose `AAAA…` pattern
+	// also matches the base64 body of an ed25519/rsa public key. The veto
+	// fires only when an SSH key-type marker precedes the match on the
+	// same line AND the matched body itself begins with a recognised SSH
+	// wire-format prefix (see scanner.go / hasSSHPubkeyBodyPrefix) — so a
+	// real bearer token cannot be smuggled past redaction by prefixing it
+	// with a fake `ssh-` token. Keep it on twitter-bearer alone; a blanket
+	// named-path veto would leak keyed secrets that share a line with an
+	// ssh marker. Set via WithSSHLineVeto.
+	VetoOnSSHLine bool
 }
 
 // WithHighConfidence returns a copy of r marked high-confidence so the
@@ -71,6 +84,17 @@ func (r Rule) WithHighConfidence() Rule {
 // scanner_generic.go. A threshold of 0 leaves the rule ungated.
 func (r Rule) WithEntropy(bitsPerByte float64) Rule {
 	r.Entropy = bitsPerByte
+	return r
+}
+
+// WithSSHLineVeto returns a copy of r whose match is dropped when it is a
+// genuine SSH public-key body on an authorized_keys / known_hosts line —
+// an SSH key-type marker precedes it on the line AND the body carries an
+// SSH wire-format prefix. See Rule.VetoOnSSHLine. Apply ONLY to the
+// twitter-bearer rule (its `AAAA…` pattern collides with ed25519/rsa
+// pubkey bodies); do not generalise it.
+func (r Rule) WithSSHLineVeto() Rule {
+	r.VetoOnSSHLine = true
 	return r
 }
 

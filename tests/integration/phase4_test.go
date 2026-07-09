@@ -111,6 +111,61 @@ func (a *autoApproveBackend) RequestGrant(ctx context.Context, req backend.Grant
 	return ch, nil
 }
 
+// RequestTransfer mirrors Request with the same goroutine bookkeeping so the
+// backend satisfies the current backend.Backend interface (it grew RequestTransfer
+// with the box→box transfer work). No Phase-4/5 test moves a secret through it,
+// but a signer.Daemon will not accept a Backend that lacks this method.
+func (a *autoApproveBackend) RequestTransfer(ctx context.Context, req backend.TransferApprovalRequest) (<-chan backend.Result, error) {
+	ch := make(chan backend.Result, 1)
+	a.mu.Lock()
+	if a.closed {
+		a.mu.Unlock()
+		ch <- backend.Result{Status: backend.StatusTimeout}
+		close(ch)
+		return ch, nil
+	}
+	a.wg.Add(1)
+	a.mu.Unlock()
+
+	go func() {
+		defer a.wg.Done()
+		select {
+		case ch <- backend.Result{Status: backend.StatusApproved, ApprovedBy: "auto-approve"}:
+		case <-ctx.Done():
+		case <-a.closeCh:
+		}
+	}()
+	return ch, nil
+}
+
+// RequestRegisterKey mirrors Request with the same goroutine bookkeeping so the
+// backend satisfies the current backend.Backend interface (it grew
+// RequestRegisterKey with the box→box transfer work). No Phase-4/5 test registers
+// a transfer key through it, but a signer.Daemon will not accept a Backend that
+// lacks this method.
+func (a *autoApproveBackend) RequestRegisterKey(ctx context.Context, req backend.RegisterApprovalRequest) (<-chan backend.Result, error) {
+	ch := make(chan backend.Result, 1)
+	a.mu.Lock()
+	if a.closed {
+		a.mu.Unlock()
+		ch <- backend.Result{Status: backend.StatusTimeout}
+		close(ch)
+		return ch, nil
+	}
+	a.wg.Add(1)
+	a.mu.Unlock()
+
+	go func() {
+		defer a.wg.Done()
+		select {
+		case ch <- backend.Result{Status: backend.StatusApproved, ApprovedBy: "auto-approve"}:
+		case <-ctx.Done():
+		case <-a.closeCh:
+		}
+	}()
+	return ch, nil
+}
+
 func (a *autoApproveBackend) Close() {
 	a.mu.Lock()
 	if a.closed {
