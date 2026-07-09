@@ -49,6 +49,11 @@ type CommandResult struct {
 	// live-log hook treats batch and single-command results uniformly and
 	// stays correct if a batch reveal path is ever (wrongly) added.
 	Revealed bool `json:"revealed,omitempty"`
+	// Reason (#26, W2-4) names WHY this command classified as a write — the
+	// friendlier-denial aid from classify.Explain. Set on write results only;
+	// empty on reads. Advisory MCP-side surfacing (the gate re-classifies with
+	// classify.Classify).
+	Reason string `json:"reason,omitempty"`
 }
 
 // RunBatchOutput is the structured result returned to the MCP client.
@@ -121,13 +126,15 @@ func (r *Runner) RunBatch(ctx context.Context, in RunBatchInput) (RunBatchOutput
 	}
 
 	// Classify all commands up front so we can decide whether to
-	// solicit approval.
+	// solicit approval. Explain also yields the #26 friendlier-denial reason
+	// per command (same Kind as Classify; the gate re-classifies with Classify).
 	kinds := make([]classify.Kind, len(in.Commands))
+	reasons := make([]classify.Reason, len(in.Commands))
 	for i, c := range in.Commands {
 		if strings.TrimSpace(c) == "" {
 			return RunBatchOutput{}, fmt.Errorf("tools: commands[%d] is empty", i)
 		}
-		kinds[i] = classify.Classify(c)
+		kinds[i], reasons[i] = classify.Explain(c)
 	}
 
 	// Build the (compact) list of writes plus their positions in the
@@ -163,7 +170,9 @@ func (r *Runner) RunBatch(ctx context.Context, in RunBatchInput) (RunBatchOutput
 		// approval so we never waste a Telegram tap on a guaranteed
 		// no-op; surface the upgrade path instead.
 		if entry.ReadOnly {
-			return RunBatchOutput{}, readOnlyWriteErr(in.Alias)
+			// Name why the FIRST write classified as a write (#26) so a
+			// misclassified read in the batch gets the rephrase nudge too.
+			return RunBatchOutput{}, readOnlyWriteErr(in.Alias, reasons[writeIdx[0]].String())
 		}
 		// A write before /sshgate:setup cannot succeed (no key, no
 		// signer): surface the same actionable "run /sshgate:setup"
@@ -220,6 +229,9 @@ func (r *Runner) RunBatch(ctx context.Context, in RunBatchInput) (RunBatchOutput
 	for i, cmd := range in.Commands {
 		out.Results[i].Command = cmd
 		out.Results[i].Kind = kindLabel(kinds[i])
+		if kinds[i] == classify.KindWrite {
+			out.Results[i].Reason = reasons[i].String()
+		}
 		if aborted {
 			out.Results[i].Skipped = true
 			continue

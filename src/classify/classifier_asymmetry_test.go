@@ -72,17 +72,18 @@ func TestClassify_LowPriorityAsymmetryPins(t *testing.T) {
 			note: "non-regression: without -C, 'status' is correctly read",
 		},
 
-		// --- 'ls 2>&1': the '>' is a top-level output redirect, so
-		// hasTopLevelRedirect fires before any head lookup -> WRITE. This is the
-		// fail-safe redirect rule; a stderr->stdout dup reads as a write because
-		// the classifier cannot cheaply prove '2>&1' targets no file. ---
+		// --- 'ls 2>&1': the target-aware hasWritingRedirect (§5, W2-3d) carves
+		// out fd-dup/close (2>&1) and the sink devices as NON-writing, so a
+		// stderr->stdout dup now correctly classifies READ. The B1 splitSegments
+		// fix keeps the `&` of `2>&1` from splitting the segment. A real-path
+		// target (2>/tmp/x, >&file) still forces WRITE. ---
 		{
-			name: "stderr redirect 2>&1 (FP -> write)", cmd: "ls 2>&1", want: KindWrite,
-			note: "'>' triggers hasTopLevelRedirect; over-conservative but safe",
+			name: "stderr redirect 2>&1 (now read)", cmd: "ls 2>&1", want: KindRead,
+			note: "2>&1 is an fd dup, not a file write; carved out by hasWritingRedirect + B1 split fix",
 		},
 		{
-			name: "stdout+stderr redirect (FP -> write)", cmd: "cat /etc/hosts 2>&1", want: KindWrite,
-			note: "same redirect FP for a read head 'cat'; pinned",
+			name: "stdout+stderr redirect (now read)", cmd: "cat /etc/hosts 2>&1", want: KindRead,
+			note: "read head 'cat' with a non-writing fd-dup redirect -> read",
 		},
 
 		// --- curl '-XPOST' (no space) and '-X post' (lowercase): both must be

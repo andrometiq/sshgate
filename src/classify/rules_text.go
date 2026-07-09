@@ -144,11 +144,29 @@ func sedScripts(args []string) []string {
 // primitive. Substring scan only — no parsing — so it errs on the side
 // of classifying ambiguous scripts as write.
 func sedScriptIsDangerous(script string) bool {
-	// `s///e` substitution flag: a `/` followed by `e` then a non-letter
-	// terminator. The naive `Contains("/e")` would false-positive on
-	// regex anchors like `\s/e`-shaped patterns, but for typical sed
-	// scripts this substring is a reliable marker.
-	if strings.Contains(script, "/e") || strings.Contains(script, "e}") {
+	// Regex-addressed exec `e` glued to the closing delimiter: `/regex/e`,
+	// `/regex/e cmd`, `/regex/e}`. Flag `/e` ONLY when the `e` sits at a command
+	// boundary (end / space / tab / ; / } / newline) so a regex whose FIRST char
+	// is `e` (`/error/d`, `s/error/warn/`) is NOT false-flagged. This closes the
+	// C1 RCE that a wholesale deletion of the old crude `/e` guard would have
+	// opened (`sed '/./e touch /tmp/x'` runs `touch` unsigned on a Tier-1 gate,
+	// because the command-position scan treats a glued `/` as a regex-OPEN and
+	// sedSCommandExecsOrWrites only handles s///).
+	for i := 0; i+1 < len(script); i++ {
+		if script[i] == '/' && script[i+1] == 'e' {
+			j := i + 2
+			if j >= len(script) || script[j] == ' ' || script[j] == '\t' ||
+				script[j] == ';' || script[j] == '}' || script[j] == '\n' {
+				return true
+			}
+		}
+	}
+	// Custom-delimiter address exec/write: `\cREGEXc<cmd>` where <cmd> is an
+	// exec/write letter (e/w/W/r/R). The /-only and s/// checks miss `\|.|e cmd`,
+	// `\#re#w f` — a pre-existing exec-as-READ (M2). Only an ADDRESS-position
+	// backslash opens a custom delimiter, so a `\/` escape inside an s/// pattern
+	// (`s/a\/b/e/`) is NOT treated as an address.
+	if sedCustomDelimCmdExecsOrWrites(script) {
 		return true
 	}
 	// `w FILE` / `r FILE` / `R FILE` commands. The file-side `w` after
@@ -211,6 +229,74 @@ func sedScriptIsDangerous(script string) bool {
 		// covered by the `/w ` substring check above.)
 		if spaced && p == '/' {
 			return true
+		}
+	}
+	return false
+}
+
+// sedCustomDelimCmdExecsOrWrites detects a GNU sed custom-delimiter regex
+// address `\cREGEXc` whose following command is an exec/write letter
+// (e/w/W/r/R). GNU sed: a backslash followed by any char c (other than
+// backslash/newline) makes c the address delimiter. We only treat a backslash
+// as opening such an address when it is in ADDRESS/COMMAND position — the
+// effective preceding char (skipping spaces/tabs) is start-of-script, `;`,
+// `{`, `}`, `,`, or newline — so an escaped delimiter inside an s/// pattern
+// or replacement is not misread as an address (avoids FP on `s/a\/b/e/`).
+// Fail-safe: any ambiguity classifies WRITE.
+func sedCustomDelimCmdExecsOrWrites(script string) bool {
+	for i := 0; i < len(script); i++ {
+		if script[i] != '\\' {
+			continue
+		}
+		// Require address/command position for the backslash.
+		k := i - 1
+		for k >= 0 && (script[k] == ' ' || script[k] == '\t') {
+			k--
+		}
+		if k >= 0 {
+			p := script[k]
+			if p != ';' && p != '{' && p != '}' && p != ',' && p != '\n' {
+				continue
+			}
+		}
+		if i+1 >= len(script) {
+			continue
+		}
+		d := script[i+1]
+		// A valid custom delimiter is a punctuation byte — not backslash/newline,
+		// not whitespace, and not a letter/digit (those are escapes like \n, \s,
+		// \1 or a word char, never a delimiter).
+		if d == '\\' || d == '\n' || d == ' ' || d == '\t' ||
+			(d >= 'a' && d <= 'z') || (d >= 'A' && d <= 'Z') || (d >= '0' && d <= '9') {
+			continue
+		}
+		// Walk to the next UNescaped delimiter d (closes the address).
+		j := i + 2
+		closed := false
+		for j < len(script) {
+			if script[j] == '\\' {
+				j += 2
+				continue
+			}
+			if script[j] == d {
+				closed = true
+				j++
+				break
+			}
+			j++
+		}
+		if !closed {
+			continue
+		}
+		// Skip optional whitespace and a negation `!` before the command letter.
+		for j < len(script) && (script[j] == ' ' || script[j] == '\t' || script[j] == '!') {
+			j++
+		}
+		if j < len(script) {
+			switch script[j] {
+			case 'e', 'w', 'W', 'r', 'R':
+				return true
+			}
 		}
 	}
 	return false

@@ -48,8 +48,10 @@ func Classify(cmd string) Kind {
 	if containsSubstitution(cmd) {
 		return KindWrite
 	}
-	// Top-level redirects (>, >>) make the command a write regardless of head.
-	if hasTopLevelRedirect(cmd) {
+	// A WRITING top-level redirect (a real path / &>file / >&file target) makes
+	// the command a write regardless of head. Stderr-only fd-dup/close and the
+	// discard/stream sinks are carved out (§5) and do NOT force a write.
+	if hasWritingRedirect(cmd) {
 		return KindWrite
 	}
 	// Split on top-level control operators / pipes; any write segment wins.
@@ -146,7 +148,7 @@ func containsSubstitution(s string) bool {
 			case '<', '>':
 				// Process substitution `<(cmd)` / `>(cmd)` only occurs
 				// unquoted (it does not expand inside quotes). The output
-				// redirect `>` is handled separately by hasTopLevelRedirect;
+				// redirect `>` is handled separately by hasWritingRedirect;
 				// here we only flag the `<(` / `>(` pair.
 				if i+1 < len(s) && s[i+1] == '(' {
 					return true
@@ -157,9 +159,14 @@ func containsSubstitution(s string) bool {
 	return false
 }
 
-// hasTopLevelRedirect reports whether s contains an unquoted output
-// redirect (>, >>). Input redirects (<) are not writes.
-func hasTopLevelRedirect(s string) bool {
+// hasWritingRedirect reports whether s has a top-level (unquoted, unescaped)
+// output redirect whose TARGET writes a file or host stream. NON-writing ONLY
+// for: fd dup/close (>&N, N>&M, N>&-) and the discard/stream sinks /dev/null,
+// /dev/stdout, /dev/stderr. Replaces the old hasTopLevelRedirect (which forced
+// WRITE on ANY '>'); input redirects (<) stay ignored. The narrow carve-out is
+// the whole point of W2-3d — keep it target-exact and fail closed on anything
+// else. Preserves the same quote/backslash handling as before.
+func hasWritingRedirect(s string) bool {
 	var quote byte
 	for i := 0; i < len(s); i++ {
 		c := s[i]
@@ -180,10 +187,60 @@ func hasTopLevelRedirect(s string) bool {
 		case '\'', '"':
 			quote = c
 		case '>':
-			return true
+			j := i + 1
+			if j < len(s) && s[j] == '>' {
+				j++ // append '>>'
+			}
+			// fd dup/close form: '>' immediately followed by '&'.
+			if j < len(s) && s[j] == '&' {
+				tgt := readRedirTarget(s, j+1)
+				if isAllDigits(tgt) || tgt == "-" {
+					continue // >&N dup or >&- close: non-writing
+				}
+				return true // >&file : both streams to a file
+			}
+			// ordinary target: skip spaces, read the target word.
+			k := j
+			for k < len(s) && (s[k] == ' ' || s[k] == '\t') {
+				k++
+			}
+			switch readRedirTarget(s, k) {
+			case "/dev/null", "/dev/stdout", "/dev/stderr":
+				continue // sink: non-writing
+			default:
+				return true // real path (or dangling '>') : write
+			}
 		}
 	}
 	return false
+}
+
+// readRedirTarget reads the redirect target word starting at start, stopping
+// at whitespace or any shell metachar. A quoted or empty target yields a token
+// that will NOT match the digit/sink allowlists → fail closed to WRITE.
+func readRedirTarget(s string, start int) string {
+	i := start
+	for i < len(s) {
+		switch s[i] {
+		case ' ', '\t', '\n', ';', '|', '&', '<', '>', '\'', '"', '(', ')':
+			return s[start:i]
+		}
+		i++
+	}
+	return s[start:]
+}
+
+// isAllDigits reports whether t is a non-empty run of ASCII digits.
+func isAllDigits(t string) bool {
+	if t == "" {
+		return false
+	}
+	for i := 0; i < len(t); i++ {
+		if t[i] < '0' || t[i] > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // splitSegments splits s on top-level (unquoted) pipes and control
@@ -241,6 +298,20 @@ func splitSegments(s string) []string {
 			}
 			start = i
 		case '&':
+			// A `&` that is part of a REDIRECTION operator is NOT a control
+			// operator and must not split the segment — otherwise `2>&1` splits
+			// into ["… 2>", "1"] and the non-writing-redirect carve-out (§5.1)
+			// is undone. Detect it by the adjacent redirect char:
+			//   - fd dup/close `>&`/`<&`  (2>&1, >&2, 2>&-, <&0): preceding `>`/`<`
+			//   - bash redirect-all `&>` / `&>>` (&>/dev/null):    following `>`
+			// Any WRITING redirect target was already caught by hasWritingRedirect
+			// before this function runs, so a redirect `&` reaching here is always
+			// non-writing. A bare `&` (background) or `&&` (and-list) still splits.
+			if (i > 0 && (s[i-1] == '>' || s[i-1] == '<')) ||
+				(i+1 < len(s) && s[i+1] == '>') {
+				i++ // treat as an ordinary char; keep scanning this segment
+				continue
+			}
 			// & or && — both are top-level separators. (Background `&`
 			// alone is not in our corpus but is handled the same way.)
 			flush(i)
@@ -400,13 +471,36 @@ var readAllowlist = map[string]argRule{
 	"uniq":  uniqRule,
 	"diff":  nil,
 	"comm":  nil,
+	// Text filters (print to stdout; no write flag).
+	"jq": nil, "cut": nil, "tr": nil, "column": nil, "zcat": nil, "zgrep": nil,
+	"zdiff": nil, "nl": nil, "tac": nil, "rev": nil,
+	// Hashes (print digests; no write-to-file flag).
+	"md5sum": nil, "sha1sum": nil, "sha256sum": nil, "sha512sum": nil, "cksum": nil, "b2sum": nil,
+	// Path lookup (print; no write).
+	"realpath": nil, "basename": nil, "dirname": nil,
 
 	// System status.
-	"df":          nil,
-	"du":          nil,
-	"free":        nil,
-	"uptime":      nil,
-	"uname":       nil,
+	"df":     nil,
+	"du":     nil,
+	"free":   nil,
+	"uptime": nil,
+	"uname":  nil,
+	// System probes (print; no write).
+	"lscpu": nil, "lsblk": nil, "nproc": nil, "vmstat": nil, "iostat": nil, "mpstat": nil, "getent": nil,
+	// Shell predicates (evaluate only; no side effect).
+	"type": nil, "test": nil, "[": nil,
+	// Probe utilities with a write form (arg-gated; see rules_probe.go).
+	"tree": treeRule, "crontab": crontabRule, "sysctl": sysctlRule, "mount": mountRule,
+	"command": commandRule, "ulimit": ulimitRule, "history": historyRule,
+	// "watch": wired in init() (recursive wrapper, like env).
+	// Interpreter version probe ONLY (razor-narrow; everything else WRITE).
+	"python":      interpreterVersionRule("-V", "--version"),
+	"python2":     interpreterVersionRule("-V", "--version"),
+	"python3":     interpreterVersionRule("-V", "--version"),
+	"node":        interpreterVersionRule("-v", "--version"),
+	"nodejs":      interpreterVersionRule("-v", "--version"),
+	"perl":        interpreterVersionRule("-v", "-V", "--version"),
+	"ruby":        interpreterVersionRule("--version"),
 	"hostname":    hostnameRule,
 	"whoami":      nil,
 	"id":          nil,
@@ -458,6 +552,7 @@ var readAllowlist = map[string]argRule{
 	"service":   serviceRule,
 	"docker":    dockerRule,
 	"git":       gitRule,
+	"kubectl":   kubectlRule,
 
 	// Package managers default to write; only their query subcommands are read.
 	// (Spec lists them under write; corpus has no read-side example for them.)
@@ -468,6 +563,9 @@ func init() {
 	// envRule recursively reads readAllowlist, which would be an
 	// initialization cycle if expressed directly in the literal.
 	readAllowlist["env"] = envRule
+	// watchRule recurses into readAllowlist too (it classifies the wrapped
+	// command), so wire it here for the same reason.
+	readAllowlist["watch"] = watchRule
 }
 
 // firstNonFlag returns the first arg that doesn't start with '-', or "".

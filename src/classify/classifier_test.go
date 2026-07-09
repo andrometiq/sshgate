@@ -125,6 +125,91 @@ func TestClassify_EdgeCases(t *testing.T) {
 	}
 }
 
+// residualByDesign is the EXACT set of read-intent fp-corpus rows that the
+// classifier legitimately routes to WRITE (Appendix B of W2-CLASSIFIER-SPEC-v2):
+// package-manager queries, openssl, cloud CLIs beyond kubectl, and the one
+// command-substitution row. Each is a fail-closed unknown-head / opaque default,
+// individually justified — none is a W2 false positive to fix. It pins the
+// residual set so TestClassify_FPCorpus part (c) can prove no REAL FP was
+// relabeled into the residual and no undocumented residual crept in.
+var residualByDesign = []string{
+	"apt list --installed",
+	"dpkg -l",
+	"rpm -qa",
+	"pip list",
+	"npm ls",
+	"openssl x509 -noout -text -in /etc/ssl/cert.pem",
+	"openssl s_client -connect example.com:443",
+	"helm list",
+	"aws s3 ls",
+	"gcloud compute instances list",
+	"az vm list",
+	"terraform plan",
+	`grep "$(hostname)" /etc/hosts`,
+}
+
+// TestClassify_FPCorpus IS the W2 false-positive measurement instrument. It
+// loads the 161-row read-intent corpus and:
+//
+//	(a) per-row correctness — Classify(row)==row.want for all 161. Catches both
+//	    a regression (a READ row going WRITE) and gaming (a residual WRITE
+//	    relabeled READ without a real classifier fix).
+//	(b) the FP-rate gate — read-intent commands still routed to WRITE must be
+//	    <= 10%. The exact fraction is t.Logf'd EVERY run (before = 96/161 =
+//	    59.6% on the pristine classifier; after = 13/161 = 8.1%).
+//	(c) anti-gaming — the WRITE-labeled set must equal residualByDesign exactly,
+//	    so nobody can hide a real FP in the residual or add an undocumented one.
+func TestClassify_FPCorpus(t *testing.T) {
+	t.Parallel()
+
+	fpPath := filepath.Join("..", "..", "tests", "testdata", "fp-corpus.txt")
+	rows := loadCorpus(t, fpPath)
+	if len(rows) == 0 {
+		t.Fatalf("loadCorpus(%q) returned 0 rows; fp-corpus must be non-empty", fpPath)
+	}
+
+	// (a) Per-row correctness.
+	// (b) is measured from the ACTUAL classification (Classify(row)==KindWrite),
+	// per §1.3 — NOT from the row label — so the logged rate genuinely moves
+	// 59.6% (pristine) -> 8.1% (fixed) and the gate FAILS if a future change
+	// regresses a read-intent row back to WRITE. Counting the label instead
+	// would pin the rate to a constant 8.1% and defeat the measurement.
+	writes := 0
+	for _, r := range rows {
+		got := Classify(r.cmd)
+		if got != r.want {
+			t.Errorf("Classify(%q) = %s; want %s", r.cmd, got, r.want)
+		}
+		if got == KindWrite {
+			writes++
+		}
+	}
+
+	// (b) FP-rate gate. Always log the measured fraction (release-note figure).
+	rate := float64(writes) / float64(len(rows))
+	t.Logf("fp-corpus: %d/%d = %.1f%% residual WRITE (gate <= 10%%)", writes, len(rows), rate*100)
+	if rate > 0.10 {
+		t.Errorf("residual WRITE rate %.1f%% exceeds the 10%% ceiling (%d/%d)", rate*100, writes, len(rows))
+	}
+
+	// (c) Anti-gaming: the WRITE-labeled set must equal residualByDesign exactly.
+	got := map[string]bool{}
+	for _, r := range rows {
+		if r.want == KindWrite {
+			got[r.cmd] = true
+		}
+	}
+	for _, cmd := range residualByDesign {
+		if !got[cmd] {
+			t.Errorf("residual row missing from fixture: %q", cmd)
+		}
+	}
+	if len(got) != len(residualByDesign) {
+		t.Errorf("fixture has %d WRITE rows; residual set has %d — an undocumented residual crept in",
+			len(got), len(residualByDesign))
+	}
+}
+
 func TestKind_String(t *testing.T) {
 	t.Parallel()
 

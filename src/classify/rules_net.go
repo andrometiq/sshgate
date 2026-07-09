@@ -157,6 +157,41 @@ func wgetRule(args []string) Kind {
 				return KindWrite
 			}
 		}
+		// Bundled short-flag run reaching -O (output-document). `-qO-`, `-nvO-`
+		// send the response BODY to stdout (READ-eligible); `-qOfile` names a
+		// file (WRITE). A value-consuming short flag before O swallows the rest
+		// of the bundle as its value, so stop there — an O after it is data, and
+		// the body still downloads to a file (the function's final WRITE
+		// default). Value-taking wget short flags (per wget(1)):
+		// o a i B t T w Q l A R D P e U  (O itself handled by the switch). The
+		// guard a[1] != 'O' avoids double-handling the standalone/glued `-O…`
+		// forms; a[1] != 'o' keeps the lowercase log-file flag out (a[1]=='o'
+		// is in the stop-list so the scan breaks without setting stdoutOutput,
+		// leaving the body downloading to a file → correct WRITE default).
+		if len(a) >= 3 && a[0] == '-' && a[1] != '-' && a[1] != 'O' {
+			for j := 1; j < len(a); j++ {
+				c := a[j]
+				if c == 'O' {
+					val := a[j+1:] // remainder of THIS arg is -O's value
+					switch {
+					case val == "-":
+						stdoutOutput = true // -…O-  → body to stdout (read-eligible)
+					case val != "":
+						return KindWrite // -…O<file> → names a file
+					default: // O is last in the bundle; value is the NEXT arg
+						if i+1 < len(args) && args[i+1] == "-" {
+							stdoutOutput = true
+						} else {
+							return KindWrite
+						}
+					}
+					break
+				}
+				if strings.IndexByte("oaiBtTwQlARDPeU", c) >= 0 {
+					break // value-consuming flag: rest of bundle is its value
+				}
+			}
+		}
 	}
 	if stdoutOutput {
 		return KindRead

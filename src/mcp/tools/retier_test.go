@@ -23,7 +23,7 @@ func TestTier1RefusalStrings_NoCircularRevokeAdvice(t *testing.T) {
 	unreachable := fmt.Errorf("dial failed: %w", signpkg.ErrUnreachable)
 
 	strs := map[string]string{
-		"readOnlyWriteErr":      readOnlyWriteErr("db").Error(),
+		"readOnlyWriteErr":      readOnlyWriteErr("db", "").Error(),
 		"gateDenyNote(77)":      gateDenyNote(77),
 		"retierManualPath":      retierManualPath("db"),
 		"tier1RevokeErr":        tier1RevokeErr("db").Error(),

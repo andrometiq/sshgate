@@ -112,10 +112,10 @@ func (r *Runner) Transfer(ctx context.Context, in TransferInput) (TransferOutput
 	// guaranteed no-op never wastes a human approval — mirrors runWrite /
 	// update_gate. SEND lands on the source; RECV lands on the destination.
 	if srcEntry.ReadOnly {
-		return TransferOutput{}, readOnlyWriteErr(in.SrcAlias)
+		return TransferOutput{}, readOnlyWriteErr(in.SrcAlias, "")
 	}
 	if destEntry.ReadOnly {
-		return TransferOutput{}, readOnlyWriteErr(in.DestAlias)
+		return TransferOutput{}, readOnlyWriteErr(in.DestAlias, "")
 	}
 
 	// A transfer before /sshgate:setup cannot succeed (no key, no signer):

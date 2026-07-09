@@ -74,6 +74,13 @@ type RunOutput struct {
 	// signer that omits it). It is metadata for the MCP live-log's
 	// human-vs-grant distinction, not a secret. Never set on the read path.
 	AuthMode string `json:"auth_mode,omitempty"`
+	// Reason (#26, W2-4) names WHY a command was classified as a write — the
+	// friendlier-denial aid from classify.Explain (e.g. "segment 2 `rm x`:
+	// `rm` is not a recognized read utility"). Set on the write route only;
+	// empty on reads and on the reveal route (a reveal is intentional, not a
+	// misclassification). It is advisory MCP-side surfacing — the gate's
+	// security decision stays on classify.Classify.
+	Reason string `json:"reason,omitempty"`
 }
 
 // SignClient is the subset of sign.Client that Runner needs. It
@@ -240,10 +247,15 @@ func (r *Runner) Run(ctx context.Context, in RunInput) (RunOutput, error) {
 		if strings.TrimSpace(in.Reason) == "" {
 			return RunOutput{}, errors.New("tools: reveal requires a non-empty reason (a SECRET-REVEAL exposes raw secret values to the agent; the human approver needs to know why)")
 		}
-		return r.runWrite(ctx, in.Alias, entry, in.Command, true, in.Reason, cap)
+		// The reveal route is intentional, not a misclassification — no reason.
+		return r.runWrite(ctx, in.Alias, entry, in.Command, true, in.Reason, "", cap)
 	}
 
-	kind := classify.Classify(in.Command)
+	// Explain returns the SAME Kind as Classify plus the first write reason
+	// (#26). The gate's own decision path still runs classify.Classify; this is
+	// an MCP-side surfacing only.
+	kind, reason := classify.Explain(in.Command)
+	rs := reason.String()
 	switch kind {
 	case classify.KindUnknown:
 		// The classifier reports KindUnknown only for empty/whitespace
@@ -252,7 +264,7 @@ func (r *Runner) Run(ctx context.Context, in RunInput) (RunOutput, error) {
 	case classify.KindRead:
 		return r.runRead(ctx, entry, in.Command, cap)
 	case classify.KindWrite:
-		return r.runWrite(ctx, in.Alias, entry, in.Command, false, "", cap)
+		return r.runWrite(ctx, in.Alias, entry, in.Command, false, "", rs, cap)
 	default:
 		return RunOutput{}, fmt.Errorf("tools: unexpected classification %v", kind)
 	}
@@ -292,19 +304,23 @@ func (r *Runner) checkKeyReady() error {
 	return nil
 }
 
-func (r *Runner) runWrite(ctx context.Context, alias string, e registry.Entry, cmd string, reveal bool, reason string, cap int) (RunOutput, error) {
+// runWrite runs a write through the sign path. classifyReason is the
+// friendlier-denial string from classify.Explain (#26): it is threaded onto
+// every RunOutput this returns and into the Tier-1 read-only refusal. Empty on
+// the reveal route (a reveal is intentional, not a misclassification).
+func (r *Runner) runWrite(ctx context.Context, alias string, e registry.Entry, cmd string, reveal bool, reason, classifyReason string, cap int) (RunOutput, error) {
 	// Read-only servers have no signer pubkey on the host, so the gate
 	// rejects every write (exit 77). Soliciting an approval first would
 	// waste a real Telegram tap on a guaranteed no-op — short-circuit
 	// with an actionable upgrade path instead.
 	if e.ReadOnly {
-		return RunOutput{Kind: "write"}, readOnlyWriteErr(alias)
+		return RunOutput{Kind: "write", Reason: classifyReason}, readOnlyWriteErr(alias, classifyReason)
 	}
 	// A write before /sshgate:setup cannot succeed (no key, no signer):
 	// surface the same actionable "run /sshgate:setup" guidance the read
 	// path uses rather than a deeper, opaque failure.
 	if err := r.checkKeyReady(); err != nil {
-		return RunOutput{Kind: "write"}, err
+		return RunOutput{Kind: "write", Reason: classifyReason}, err
 	}
 	ttl := r.WriteTTLSec
 	if ttl <= 0 {
@@ -312,7 +328,7 @@ func (r *Runner) runWrite(ctx context.Context, alias string, e registry.Entry, c
 	}
 	reqID, err := newRequestID()
 	if err != nil {
-		return RunOutput{Kind: "write"}, fmt.Errorf("tools: request id: %w", err)
+		return RunOutput{Kind: "write", Reason: classifyReason}, fmt.Errorf("tools: request id: %w", err)
 	}
 	// Spec defines CmdReq.Server as the registered alias (recorded in
 	// the signer audit log), not the underlying hostname. Passing
@@ -332,10 +348,10 @@ func (r *Runner) runWrite(ctx context.Context, alias string, e registry.Entry, c
 		// Preserve the sentinel for the MCP layer, but enrich the
 		// message with actionable remediation (permission vs Tier-1 vs
 		// dead daemon). r.remediateSignErr keeps errors.Is intact.
-		return RunOutput{Kind: "write"}, r.remediateSignErr(err)
+		return RunOutput{Kind: "write", Reason: classifyReason}, r.remediateSignErr(err)
 	}
 	if len(res.Signed) != 1 {
-		return RunOutput{Kind: "write"}, fmt.Errorf("tools: expected 1 signature; got %d", len(res.Signed))
+		return RunOutput{Kind: "write", Reason: classifyReason}, fmt.Errorf("tools: expected 1 signature; got %d", len(res.Signed))
 	}
 	wireCmd := res.Signed[0].Sig + " " + cmd
 	// authMode (F4) reports HOW the signer authorised this write — "human"
@@ -347,14 +363,14 @@ func (r *Runner) runWrite(ctx context.Context, alias string, e registry.Entry, c
 	outStr, _ := capOutput(string(stdout), cap)
 	errStr, _ := capOutput(string(stderr), cap)
 	if err != nil {
-		return RunOutput{Stdout: outStr, Stderr: errStr, ExitCode: exit, Kind: "write", Approved: true, Revealed: reveal, AuthMode: authMode},
+		return RunOutput{Stdout: outStr, Stderr: errStr, ExitCode: exit, Kind: "write", Approved: true, Revealed: reveal, AuthMode: authMode, Reason: classifyReason},
 			fmt.Errorf("ssh exec: %w", err)
 	}
 	// A gate deny comes back as err=nil with a raw non-zero exit. Annotate
 	// the well-known gate codes so the model gets remediation rather than
 	// a bare "exit 77/65".
 	if note := gateDenyNote(exit); note != "" {
-		return RunOutput{Stdout: outStr, Stderr: errStr, ExitCode: exit, Kind: "write", Approved: true, Revealed: reveal, AuthMode: authMode},
+		return RunOutput{Stdout: outStr, Stderr: errStr, ExitCode: exit, Kind: "write", Approved: true, Revealed: reveal, AuthMode: authMode, Reason: classifyReason},
 			fmt.Errorf("tools: %s", note)
 	}
 	return RunOutput{
@@ -365,15 +381,26 @@ func (r *Runner) runWrite(ctx context.Context, alias string, e registry.Entry, c
 		Approved: true,
 		Revealed: reveal,
 		AuthMode: authMode,
+		Reason:   classifyReason,
 	}, nil
 }
 
 // readOnlyWriteErr is the actionable error for a write aimed at a
-// server registered read-only (tier-1, no signer pubkey on the host).
-func readOnlyWriteErr(alias string) error {
-	return fmt.Errorf(
+// server registered read-only (tier-1, no signer pubkey on the host). When
+// reason is non-empty (#26), it names WHY the command classified as a write and
+// nudges the agent to rephrase a genuine read — so a misclassified read on a
+// Tier-1 host gets the friendlier guidance rather than only the re-provision
+// path. Callers with no classification context pass "".
+func readOnlyWriteErr(alias, reason string) error {
+	base := fmt.Sprintf(
 		"tools: server %q is registered read-only — writes are denied at the gate (no signer pubkey was pushed). %s",
 		alias, retierManualPath(alias))
+	if reason == "" {
+		return fmt.Errorf("%s", base)
+	}
+	return fmt.Errorf(
+		"%s — this command was classified as a write because: %s. If you intended a READ, rephrase (drop the redirect/compound/uncommon tool). For a genuine write, re-provision the server as signed-write (above).",
+		base, reason)
 }
 
 // remediateSignErr enriches a sign-layer error with actionable

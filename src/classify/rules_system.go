@@ -352,10 +352,58 @@ func systemctlRule(args []string) Kind {
 	switch sub {
 	case "status", "is-active", "is-enabled", "is-failed",
 		"list-units", "list-unit-files", "list-sockets", "list-timers",
-		"show", "cat", "get-default":
+		"show", "cat", "get-default",
+		// NEW readers. set-environment / unset-environment / import-environment
+		// are NOT added → they stay WRITE.
+		"show-environment", "list-dependencies", "list-jobs", "is-system-running":
 		return KindRead
 	}
 	return KindWrite
+}
+
+// kubectlRule: only inspection subcommands read; anything that can mutate
+// cluster state writes. FAIL-CLOSED: any unrecognized subcommand → WRITE.
+// Two verbs need second-token guards: `cluster-info dump` writes files, and
+// `config` has write subcommands. `-o go-template`/`jsonpath`/`--format` are
+// Go text/template (sandboxed, no shell exec) — not a hole.
+func kubectlRule(args []string) Kind {
+	sub := firstNonFlag(args)
+	switch sub {
+	case "get", "describe", "logs", "events", "top", "explain",
+		"api-resources", "api-versions", "version":
+		return KindRead
+	case "cluster-info":
+		// bare `cluster-info` prints endpoints (READ); `cluster-info dump`
+		// writes files (WRITE).
+		if secondNonFlag(args) == "" {
+			return KindRead
+		}
+		return KindWrite
+	case "config":
+		switch secondNonFlag(args) {
+		case "view", "current-context", "get-contexts", "get-clusters", "get-users":
+			return KindRead
+		}
+		return KindWrite // set / set-context / use-context / set-credentials / ...
+	}
+	// apply/delete/edit/scale/rollout/exec/cp/patch/create/replace/label/
+	// annotate/drain/cordon/uncordon/taint/run/port-forward/proxy/attach/set/...
+	return KindWrite
+}
+
+// secondNonFlag returns the SECOND non-flag token in args, or "".
+func secondNonFlag(args []string) string {
+	seen := 0
+	for _, a := range args {
+		if a == "" || strings.HasPrefix(a, "-") {
+			continue
+		}
+		seen++
+		if seen == 2 {
+			return a
+		}
+	}
+	return ""
 }
 
 // serviceRule: `service <name> status` is read; everything else is write.
@@ -371,6 +419,10 @@ func serviceRule(args []string) Kind {
 }
 
 // dockerRule: introspection subcommands are read; lifecycle ones are write.
+// Keeps the top-level read verbs and adds two-level parsing for the namespaced
+// management commands. FAIL-CLOSED: any (namespace, verb) pair not explicitly
+// listed READ → WRITE, so a write verb one token deeper (`network rm`,
+// `system prune`, `compose up`) is denied.
 func dockerRule(args []string) Kind {
 	sub := firstNonFlag(args)
 	switch sub {
@@ -378,8 +430,65 @@ func dockerRule(args []string) Kind {
 		"version", "info", "top", "diff", "history",
 		"port", "events", "search":
 		return KindRead
+	case "system", "network", "volume", "image", "container",
+		"node", "service", "compose", "context":
+		// `compose config` renders the merged config to stdout (READ) but
+		// `-o`/`--output FILE` writes a file (M1) — route it through the
+		// flag-check BEFORE the namespaced-read table.
+		if sub == "compose" && secondNonFlag(args) == "config" {
+			return dockerComposeConfigKind(args)
+		}
+		if dockerNamespacedRead(sub, secondNonFlag(args)) {
+			return KindRead
+		}
+		return KindWrite
 	}
 	return KindWrite
+}
+
+// dockerComposeConfigKind: `docker compose config` renders the merged config
+// to stdout (READ) UNLESS -o/--output names a file (WRITE). GNU-style:
+// -o FILE, -o<file>, --output FILE, --output=FILE all write.
+func dockerComposeConfigKind(args []string) Kind {
+	for _, a := range args {
+		if a == "-o" || a == "--output" || matchesAbbrev(a, "output") {
+			return KindWrite
+		}
+		if strings.HasPrefix(a, "-o") && len(a) > 2 && a[1] != '-' { // -o<file>
+			return KindWrite
+		}
+	}
+	return KindRead
+}
+
+// dockerNamespacedRead reports whether `docker <ns> <verb>` only reads.
+func dockerNamespacedRead(ns, verb string) bool {
+	switch ns {
+	case "system":
+		return verb == "df" || verb == "info" || verb == "events"
+	case "network":
+		return verb == "ls" || verb == "inspect"
+	case "volume":
+		return verb == "ls" || verb == "inspect"
+	case "image":
+		return verb == "ls" || verb == "inspect" || verb == "history"
+	case "container":
+		return verb == "ls" || verb == "inspect" || verb == "logs" ||
+			verb == "stats" || verb == "top" || verb == "diff" || verb == "port"
+	case "node":
+		return verb == "ls" || verb == "inspect"
+	case "service":
+		return verb == "ls" || verb == "ps" || verb == "inspect" || verb == "logs"
+	case "compose":
+		// `config` is handled by dockerComposeConfigKind before this table is
+		// consulted (removed here to avoid confusion; leaving it in would be
+		// dead but harmless).
+		return verb == "ps" || verb == "logs" ||
+			verb == "ls" || verb == "top" || verb == "images" || verb == "version"
+	case "context":
+		return verb == "ls" || verb == "inspect" || verb == "show"
+	}
+	return false
 }
 
 // gitRule: read-only porcelain only. Anything that updates refs, the
@@ -408,8 +517,23 @@ func gitRule(args []string) Kind {
 	switch sub {
 	case "status", "log", "diff", "show",
 		"blame", "describe", "remote",
-		"rev-parse", "ls-files", "ls-remote", "shortlog":
+		"rev-parse", "ls-files", "ls-remote", "shortlog",
+		// cat-file --textconv (and pre-existing `git log --ext-diff`) can exec
+		// a REPO-CONFIGURED filter/differ. That requires a pre-existing
+		// malicious repo config on the host (inline `-c` is guarded above; env
+		// vectors are denied by dangerousEnvVars), so it is repo-trust, not
+		// inline command injection — an accepted residual, out of scope for W2
+		// (Mi4). NOTE that `grep` is deliberately NOT in this plain-reader list.
+		"cat-file", "show-ref", "for-each-ref", "count-objects":
 		return KindRead
+	case "grep":
+		return gitGrepKind(args) // C2 — pager/-O exec guard
+	case "tag":
+		return gitTagKind(args)
+	case "worktree":
+		return gitWorktreeKind(args)
+	case "reflog":
+		return gitReflogKind(args)
 	case "branch":
 		return gitBranchKind(args)
 	case "stash":
@@ -418,6 +542,91 @@ func gitRule(args []string) Kind {
 		return gitConfigKind(args)
 	}
 	return KindWrite
+}
+
+// gitGrepKind: `git grep <pattern>` reads, but -O / --open-files-in-pager
+// opens the matching files in a pager/command, executing arbitrary shell
+// (`git grep -O'touch x'`, `--open-files-in-pager='sh -c "…"'`). Even bare -O
+// runs $GIT_PAGER/$PAGER/core.pager. Route ANY -O / --open-files-in-pager form
+// to WRITE; plain git grep stays READ. The existing `git -c`/env guards do NOT
+// cover -O (it is an explicit git-grep flag, not -c/env).
+func gitGrepKind(args []string) Kind {
+	for _, a := range args {
+		if a == "--open-files-in-pager" ||
+			strings.HasPrefix(a, "--open-files-in-pager=") {
+			return KindWrite
+		}
+		// Short-flag bundle: scan for `O` up to the first value-consuming
+		// short flag, whose remainder is that flag's argument, not flags.
+		// git-grep value-taking short flags: -f FILE, -e PATTERN, -m NUM,
+		// -A/-B/-C NUM. An `O` reached before any of those is the pager flag
+		// (bare `-O`, bundled `-nO`, or glued `-O<cmd>`).
+		if len(a) >= 2 && a[0] == '-' && a[1] != '-' {
+			for j := 1; j < len(a); j++ {
+				c := a[j]
+				if c == 'O' {
+					return KindWrite
+				}
+				if c == 'f' || c == 'e' || c == 'm' ||
+					c == 'A' || c == 'B' || c == 'C' {
+					break
+				}
+			}
+		}
+	}
+	return KindRead
+}
+
+// gitTagKind: listing forms READ; create/delete/force WRITE.
+func gitTagKind(args []string) Kind {
+	hasList := false
+	sawTag := false
+	for _, a := range args {
+		if !sawTag {
+			if a == "tag" {
+				sawTag = true
+			}
+			continue
+		}
+		switch a {
+		case "-d", "-D":
+			return KindWrite
+		}
+		if matchesAbbrev(a, "delete", "annotate", "sign", "message", "force", "create-reflog") {
+			return KindWrite // -a/-s/-m create; -f force; --delete
+		}
+		if a == "-l" || (strings.HasPrefix(a, "-n") && a != "--") ||
+			matchesAbbrev(a, "list", "contains", "no-contains", "points-at",
+				"merged", "no-merged", "sort", "format", "column", "omit-empty") {
+			hasList = true
+			continue
+		}
+		if len(a) > 0 && a[0] != '-' {
+			// a bare positional with a list flag present is a PATTERN (READ);
+			// without one it is a NEW TAG NAME (create → WRITE).
+			if !hasList {
+				return KindWrite
+			}
+		}
+	}
+	return KindRead
+}
+
+// gitWorktreeKind: only `worktree list` reads.
+func gitWorktreeKind(args []string) Kind {
+	if secondNonFlag(args) == "list" { // args[0]=="worktree", args[1]=="list"
+		return KindRead
+	}
+	return KindWrite // add/remove/move/prune/lock/unlock/repair, or bare
+}
+
+// gitReflogKind: bare `reflog` and `reflog show` read; expire/delete write.
+func gitReflogKind(args []string) Kind {
+	switch secondNonFlag(args) {
+	case "", "show":
+		return KindRead
+	}
+	return KindWrite // expire / delete
 }
 
 // gitBranchKind classifies `git branch ...`. Listing forms (`git branch`,

@@ -102,7 +102,7 @@ func (r *Runner) UpdateGate(ctx context.Context, in UpdateGateInput) (UpdateGate
 	// command locally (exit 77). Short-circuit BEFORE any Telegram tap so a
 	// guaranteed no-op never wastes a human approval — mirrors runWrite.
 	if entry.ReadOnly {
-		return UpdateGateOutput{Alias: in.Alias}, readOnlyWriteErr(in.Alias)
+		return UpdateGateOutput{Alias: in.Alias}, readOnlyWriteErr(in.Alias, "")
 	}
 	// A write before /sshgate:setup cannot succeed (no key, no signer): surface
 	// the same actionable guidance the read/write paths use.

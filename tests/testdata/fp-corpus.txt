@@ -1,0 +1,190 @@
+# SSHGate W2 false-positive corpus (read-intent commands).
+#
+# Format: <EXPECTED>\t<cmd> — identical to classifier-corpus.txt, so loadCorpus
+# is reused verbatim. `#`/blank lines are ignored; split on the FIRST tab.
+#
+# Every row is a READ-INTENT command by construction. Exactly 13 rows are
+# labeled WRITE — the designated by-design residual (Appendix B of the spec):
+# package-manager queries, openssl, cloud CLIs beyond kubectl, and one
+# command-substitution row. The other 148 are READ. Total = 161.
+# After the §2-§5 fixes land, Classify must match every label => 13/161 = 8.1%.
+
+# --- C-1: sed /e substring FPs (W2-3c) — now READ ---
+READ	sed 's/warn/err/' /var/log/syslog
+READ	sed 's/error/warn/' app.log
+READ	sed -n '/error/p' app.log
+READ	sed '/error/d' app.log
+READ	sed 's/end$//' f
+READ	sed 's|/etc|/opt|' f
+READ	sed 's/a\/e/b/' f
+
+# --- C-2: read tools now allowlisted (W2-3a) — READ ---
+READ	jq -r '.status' response.json
+READ	cut -d: -f1 /etc/passwd
+READ	tr -d '\0'
+READ	column -t /etc/fstab
+READ	zgrep error /var/log/syslog.2.gz
+READ	zcat /var/log/syslog.1.gz
+READ	nl /etc/passwd
+READ	tac /var/log/syslog
+READ	rev /etc/hostname
+READ	md5sum /etc/hosts
+READ	sha256sum /usr/bin/ls
+READ	cksum /etc/hostname
+READ	b2sum /etc/hosts
+READ	realpath /usr/bin/python
+READ	basename /usr/local/bin/foo
+READ	dirname /usr/local/bin/foo
+READ	lscpu
+READ	lsblk
+READ	nproc
+READ	vmstat 1 1
+READ	iostat -x 1 1
+READ	mpstat
+READ	getent passwd root
+READ	sysctl kernel.hostname
+READ	sysctl -n vm.swappiness
+READ	sysctl -a
+READ	mount
+READ	ulimit -a
+READ	crontab -l
+READ	command -v docker
+READ	type ls
+READ	test -f /etc/hosts
+READ	[ -d /var/log ]
+READ	watch -n 5 df -h
+READ	history
+# version probes (READ per decision #1)
+READ	node --version
+READ	node -v
+READ	python3 --version
+READ	python3 -V
+READ	perl -v
+READ	ruby --version
+
+# --- C-2 residual (out of scope) — WRITE by design ---
+WRITE	apt list --installed
+WRITE	dpkg -l
+WRITE	rpm -qa
+WRITE	pip list
+WRITE	npm ls
+WRITE	openssl x509 -noout -text -in /etc/ssl/cert.pem
+WRITE	openssl s_client -connect example.com:443
+
+# --- C-3: kubectl read subcommands (W2-3b) — READ ---
+READ	kubectl get pods
+READ	kubectl describe pod mypod
+READ	kubectl logs mypod
+READ	kubectl events
+READ	kubectl top nodes
+READ	kubectl explain pods
+READ	kubectl api-resources
+READ	kubectl version
+READ	kubectl cluster-info
+READ	kubectl config view
+
+# --- C-3 residual: cloud CLIs beyond kubectl — WRITE by design ---
+WRITE	helm list
+WRITE	aws s3 ls
+WRITE	gcloud compute instances list
+WRITE	az vm list
+WRITE	terraform plan
+
+# --- C-4: docker/git/systemctl widened (W2-3b) — READ ---
+READ	docker system df
+READ	docker network ls
+READ	docker volume ls
+READ	docker image ls
+READ	docker container ls
+READ	docker compose ps
+READ	docker compose logs
+READ	docker compose config
+READ	git tag
+READ	git tag -l
+READ	git grep TODO
+READ	git worktree list
+READ	git cat-file -p HEAD
+READ	git show-ref
+READ	git for-each-ref
+READ	git reflog
+READ	systemctl show-environment
+READ	systemctl list-dependencies nginx
+
+# --- C-5: stderr-only redirects (W2-3d + B1) — READ ---
+READ	ls /nonexistent 2>&1
+READ	find / -name '*.pid' 2>/dev/null
+READ	docker logs app 2>&1
+READ	cat /etc/hosts 2>&-
+READ	journalctl -u nginx 2>/dev/null
+READ	df -h 2>&1
+
+# --- C-6 residual: command substitution — WRITE by design ---
+WRITE	grep "$(hostname)" /etc/hosts
+
+# --- Baseline passing reads (must stay READ) ---
+READ	ls -la /var/log
+READ	cat /etc/hosts
+READ	head -n 50 /etc/passwd
+READ	tail -f /var/log/nginx/access.log
+READ	less /var/log/syslog
+READ	stat /etc/hosts
+READ	file /usr/bin/ls
+READ	wc -l /etc/services
+READ	find /var/log -name '*.gz'
+READ	du -sh /var/log
+READ	df -h
+READ	free -m
+READ	grep -r error /var/log
+READ	ps aux
+READ	top -bn1
+READ	pgrep -f nginx
+READ	lsof -i :80
+READ	ss -tulpn
+READ	netstat -an
+READ	ip addr
+READ	ping -c 3 8.8.8.8
+READ	dig example.com
+READ	nslookup example.com
+READ	traceroute google.com
+READ	curl -s https://example.com
+READ	wget -qO- https://example.com
+READ	journalctl -u nginx
+READ	dmesg
+READ	systemctl status nginx
+READ	systemctl is-active nginx
+READ	docker ps
+READ	docker logs my-container
+READ	docker inspect my-container
+READ	docker stats --no-stream
+READ	git status
+READ	git log --oneline
+READ	git diff HEAD~1
+READ	git show HEAD
+READ	git branch -a
+READ	git blame README.md
+READ	uptime
+READ	uname -a
+READ	whoami
+READ	id
+READ	date
+READ	hostname
+READ	timedatectl
+READ	env
+READ	printenv PATH
+READ	w
+READ	who
+READ	last
+READ	which docker
+READ	whereis ssh
+READ	locate nginx.conf
+READ	readlink /usr/bin/python
+READ	awk '{print $1}' /etc/passwd
+READ	sort /etc/passwd
+READ	uniq /tmp/list
+READ	diff a.txt b.txt
+READ	cat /etc/hosts | grep foo
+READ	ps aux | grep nginx
+READ	ls /tmp | wc -l
+READ	journalctl -u nginx | tail -20
+READ	cat /proc/cpuinfo
+READ	cat /proc/meminfo

@@ -209,6 +209,12 @@ func Corpus(canaryRoot, secretPath string) []Attack {
 		"git -c core.pager='touch "+probe+"' log",
 		"git config --global alias.x '!touch "+probe+"'",
 		"git -C "+canaryRoot+" init",
+		// C2 (M5): git grep -O / --open-files-in-pager runs an arbitrary
+		// command via the pager over the matches. The classifier must route it
+		// to WRITE, so a Tier-1 gate DENIES it (exit 77) before any unsigned
+		// run — the denied verdict is the binding proof even if git/the repo is
+		// absent. If it ever regressed, `touch probe` trips the canary.
+		"git grep -O'touch "+probe+"' TODO",
 	)
 
 	// --- interpreter -c writes --------------------------------------
@@ -268,6 +274,17 @@ func Corpus(canaryRoot, secretPath string) []Attack {
 		"sed 'e touch "+bw("sed_e_pwned")+"' /etc/hostname",
 		"sed 's|x|touch "+bw("sed_se_pwned")+"|e' /etc/hostname",
 		"sed '$w "+bw("sed_w_pwned")+"' /etc/hostname",
+		// C1 (M5): regex-addressed glued exec `/./e cmd` — the boundary-aware
+		// /e detector must catch it. sed is present, so this lands a beacon IF
+		// the gate ever regresses (tripwire proof); denied otherwise.
+		"sed '/./e touch "+bw("sed_slashe_pwned")+"' /etc/hostname",
+		// M2 (M5): custom-delimiter address exec `\|.|e cmd` —
+		// sedCustomDelimCmdExecsOrWrites must catch it.
+		"sed '\\|.|e touch "+bw("sed_customdelim_pwned")+"' /etc/hostname",
+		// M1 (M5): docker compose config -o writes a file. docker is likely
+		// absent in the campaign image; the binding proof is the denied verdict
+		// (classification precedes exec), like the date/ip state-mutation rows.
+		"docker compose config -o "+bw("compose_config_pwned"),
 	)
 	// READ controls for the same tools: these are legitimate diagnostics
 	// the fix must NOT deny — they must come back `executed`, no write.

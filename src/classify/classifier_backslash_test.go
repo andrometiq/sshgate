@@ -4,7 +4,7 @@ import "testing"
 
 // TestClassify_BackslashEscapeBypass pins the CRITICAL read-only-gate bypass
 // found by the 2026-06-14 adversarial review: the quote scanners
-// (tokenize / splitSegments / hasTopLevelRedirect / containsSubstitution)
+// (tokenize / splitSegments / hasWritingRedirect / containsSubstitution)
 // did not honor a backslash before a quote, but /bin/sh treats `\'` and `\"`
 // as LITERAL characters, not quote openers. So a single `\'` after a read
 // head opened a phantom quote in the classifier that swallowed the rest of

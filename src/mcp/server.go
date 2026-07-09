@@ -125,7 +125,8 @@ The gate FAILS CLOSED: a command is treated as a read ONLY when every part of it
 - For inventory/diagnostics, send SEPARATE read calls instead of chaining with &&, ||, ';', or wrapping in test/sh -c — a compound that includes any non-read or unknown segment will be classified a write and need a tap.
 - If a command you intended as a read is refused as a write, simplify it (drop the redirect/compound/uncommon tool) rather than retrying.
 - For genuine writes, batch them into run_batch so all writes in a task share ONE approval tap, and always show the user the planned writes first.
-- Writes to a read-only (Tier-1) server are refused locally before any tap.`
+- Writes to a read-only (Tier-1) server are refused locally before any tap.
+- Every write result now carries a "reason" naming the segment/rule that made it a write. If a command you meant as a read shows a write reason, rephrase per the reason — this now covers sed scripts, uncommon tools, redirects and substitutions, not just the cases listed above.`
 
 // Server is the MCP front-end. It owns a single tool implementation
 // (the Runner) and is configured by main. Logger is the operator-side
@@ -422,6 +423,9 @@ func formatRunSummary(out tools.RunOutput) string {
 	fmt.Fprintf(&b, "%s exit=%d", out.Kind, out.ExitCode)
 	if out.Kind == "write" {
 		fmt.Fprintf(&b, " approved=%v", out.Approved)
+		if out.Reason != "" {
+			fmt.Fprintf(&b, "\nreason: %s", out.Reason)
+		}
 	}
 	if out.Stdout != "" {
 		fmt.Fprintf(&b, "\n--- stdout ---\n%s", truncate(out.Stdout, 2000))
@@ -446,6 +450,11 @@ func formatRunBatchSummary(out tools.RunBatchOutput) string {
 		fmt.Fprintf(&b, "\n[%d] %s exit=%d", i, r.Kind, r.ExitCode)
 		if r.Skipped {
 			fmt.Fprintf(&b, " (skipped)")
+		}
+		// #26: name why a write classified as a write, so a misclassified
+		// read is easy to spot and rephrase.
+		if r.Kind == "write" && r.Reason != "" {
+			fmt.Fprintf(&b, "\n     reason: %s", r.Reason)
 		}
 		// A gate deny (exit 77/65) on a write annotates the result's
 		// Stderr with remediation; echo it into the fallback summary so
