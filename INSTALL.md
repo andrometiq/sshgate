@@ -191,6 +191,13 @@ plugin's stdio MCP server (`sshgate-mcp`) is only spawned on a fresh Claude
 Code start. Until you quit and relaunch, the slash commands appear but the
 `sshgate` MCP tools do not exist.
 
+> **Resume after the relaunch.** The relaunch discards this session, so the
+> agent driving this install loses its context here — this breadcrumb, not
+> agent memory, is what carries the install forward. In the fresh session,
+> continue at step 4 below: run `/mcp` to confirm the `sshgate` server is
+> connected, then `/sshgate:setup` — it re-probes on-disk state, classifies
+> the current tier, and picks up exactly where you left off.
+
 ## 4. Verify the plugin loaded — binary on PATH AND the MCP server live
 
 After the relaunch in step 3, two separate things must hold. Binary-on-PATH
@@ -269,11 +276,14 @@ The setup command walks every step itself. For Tier 2 it will:
   staged at `~/.config/sshgate/bin/sshgate-gate-linux-amd64`.
 - PAUSE for the user to run `sudo scripts/install.sh` from their clone
   (e.g. `sudo ~/src/SSHGate/scripts/install.sh`) in a separate terminal —
-  the plugin cache has no `scripts/`, so the script runs from the clone.
-- Walk the Telegram config (user_id from @userinfobot, bot token from
-  @BotFather, second install.sh pass).
+  the plugin cache has no `scripts/`, so the script runs from the clone. This
+  is a SINGLE interactive pass: it prompts for the Telegram user_id and the
+  bot token in the same run (no hand-editing of the config, no second pass).
+- Have the user_id (from @userinfobot) and a @BotFather bot token ready to
+  paste into that one pass.
 - Capture chat_id from a `/start` Telegram message.
-- (Optional) walk the LLM command-explainer setup at step T2.5b.
+- (Optional) the LLM command-explainer add-on — see
+  `docs/install-step-by-step.md` §4b.
 
 The agent driving this INSTALL.md script does NOT need to duplicate
 `/sshgate:setup`'s logic — just invoke it and let the user respond to its

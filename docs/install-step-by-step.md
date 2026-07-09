@@ -219,8 +219,9 @@ only path — see roadmap #17 (redefined).
 ## Manual path — Tier 2 (local Telegram signer)
 
 Assumes Tier 1 is already in place (binaries built, SSH key + registry
-exist). Three sudo touchpoints (two `install.sh` runs and the token
-paste prompt is folded inside the second one). Every step is
+exist). ONE sudo touchpoint: a single interactive `install.sh` pass that
+prompts for your Telegram user_id and bot token in the same run — no
+hand-editing of the root-owned config, no second pass. Every step is
 idempotent: re-running after a partial failure is safe.
 
 ### 1. Build the binaries
@@ -239,7 +240,19 @@ make install-local
 There is no separate `make build` to run: `install-local` already covers
 it.
 
-### 2. Run the installer (first pass)
+### 2. Run the installer (single pass — user_id + token in one run)
+
+Have two things ready before you run it — the installer prompts for each in
+order:
+
+- **Your numeric Telegram user_id.** Message @userinfobot; it replies with
+  `Id: NNNN`. That number is your `allowed_user_id` — the only account whose
+  taps can approve writes.
+- **A Telegram bot token.** Create the bot via @BotFather: send `/newbot`,
+  choose a name and a username ending in `bot`. BotFather replies with a token
+  shaped like `7123456789:AAH...`. Copy it.
+
+Then run:
 
 ```bash
 sudo ./scripts/install.sh
@@ -258,7 +271,7 @@ One idempotent pass does all of the following:
   read the audit log without sudo is a secondary convenience of the same
   group.) Membership only activates in a NEW login session — `newgrp
   sshgatesigner` in a side terminal does NOT help an already-running Claude
-  Code. You must log out and back in and relaunch Claude Code (see step 6).
+  Code. You must log out and back in and relaunch Claude Code (see step 4).
 - Copies `bin/sshgate-signer-telegram` to `/usr/local/bin/sshgate-signer-telegram` and
   `bin/sshgate-gate-linux-amd64` to `/usr/local/share/sshgate/`.
 - Writes `/etc/systemd/system/sshgate-signer-telegram.service` with hardened
@@ -267,104 +280,71 @@ One idempotent pass does all of the following:
 - Runs `signer --init` (as the `sshgatesigner` user) to generate
   `keys/gate.{key,pub}` and the skeleton `config/config.toml`
   (initial `type = "stub"`).
+- **Configures the Telegram backend in the SAME run.** It prompts:
+
+  ```
+  [install] Telegram user_id (numeric), or press Enter to skip:
+  ```
+
+  Paste your user_id. The installer appends the `[backend.telegram]` block
+  (with the `token_path` / `allowed_user_id` / `chatstore_path` pointers) and
+  flips the backend type from `stub` to `telegram` — the root-owned config
+  edit you previously did by hand is now done for you, idempotently (a re-run
+  does not duplicate the block). Then it prompts:
+
+  ```
+  [install] Paste the BotFather token (input hidden), or press Enter to skip:
+  ```
+
+  Paste the token. Input is hidden (terminal echo disabled) — nothing appears
+  on screen. Press Enter. The installer writes it to
+  `/var/lib/sshgatesigner/tokens/telegram.token` (mode `0600`, owned by
+  `sshgatesigner:sshgatesigner`).
 - `systemctl enable --now sshgate-signer-telegram`.
 
-The script exits non-zero with a clear message if the daemon fails
-to come up. Verify:
+The script exits non-zero with a clear message if the daemon fails to come up.
+Verify the daemon, the config, and the token file:
 
 ```bash
 systemctl is-active sshgate-signer-telegram
 # expect: active
+
+sudo grep -E '^type|allowed_user_id' /var/lib/sshgatesigner/config/config.toml
+# expect: type = "telegram"  and a non-zero numeric allowed_user_id
+
+sudo stat -c '%a %U:%G' /var/lib/sshgatesigner/tokens/telegram.token
+# expect: 600 sshgatesigner:sshgatesigner
 ```
 
-### 3. Configure the Telegram backend
-
-The `--init`-generated config selects the stub backend. To get
-phone-tap approvals you switch it to telegram and add your numeric
-user_id.
-
-Find your Telegram user_id by messaging @userinfobot — it replies
-with `Id: NNNN`. That number is your `allowed_user_id`.
-
-Append the telegram block (replace `NNNN`):
-
-```bash
-sudo tee -a /var/lib/sshgatesigner/config/config.toml >/dev/null <<'EOF'
-
-[backend.telegram]
-token_path      = "/var/lib/sshgatesigner/tokens/telegram.token"
-allowed_user_id = NNNN
-chatstore_path  = "/var/lib/sshgatesigner/config/peer.json"
-# api_base_url  = "https://tg-proxy.example.com"   # optional; see below
-EOF
-```
+If the type is still `stub` or `allowed_user_id = 0`, you pressed Enter past
+the user_id prompt — re-run `sudo ./scripts/install.sh` and enter the id (it's
+idempotent and won't duplicate the block). If the daemon fails after the token
+write, run `journalctl -u sshgate-signer-telegram -n 30 --no-pager`; a common
+cause is a token copy-paste with a stray newline (the installer's regex catches
+this and refuses to write it).
 
 **Optional — `api_base_url` (api.telegram.org bypass).** If `api.telegram.org`
 is IP-blocked from this host (the rest of the internet works, but Telegram's
 IPs time out), route the approval bot through a maintainer-owned **reverse
 proxy** that forwards `<base>/bot<token>/<method>` → `api.telegram.org/bot…`.
-Set `api_base_url` in `[backend.telegram]` (or the env var
-`SSHGATE_TELEGRAM_API_URL`, which overrides the config). It must be `https://`
-(plain `http://` is allowed **only** for a `localhost`/`127.0.0.1` proxy, since
-the bot token transits the URL path). Empty/absent ⇒ `api.telegram.org`
-(default). On startup the daemon logs `telegram: routing Bot-API via custom
-endpoint <base>` so you can confirm the bypass is active. Example nginx:
+Add an `api_base_url` line to the `[backend.telegram]` block the installer
+wrote (or set the env var `SSHGATE_TELEGRAM_API_URL`, which overrides the
+config), then `sudo systemctl restart sshgate-signer-telegram`:
+
+```bash
+# append inside the [backend.telegram] block in
+# /var/lib/sshgatesigner/config/config.toml:
+#   api_base_url = "https://tg-proxy.example.com"
+```
+
+It must be `https://` (plain `http://` is allowed **only** for a
+`localhost`/`127.0.0.1` proxy, since the bot token transits the URL path).
+Empty/absent ⇒ `api.telegram.org` (default). On startup the daemon logs
+`telegram: routing Bot-API via custom endpoint <base>` so you can confirm the
+bypass is active. Example nginx:
 `location / { proxy_pass https://api.telegram.org; proxy_ssl_server_name on; }`.
 
-Flip the backend type:
-
-```bash
-sudo sed -i 's/^type = "stub"$/type = "telegram"/' \
-    /var/lib/sshgatesigner/config/config.toml
-```
-
-Sanity-check with `sudo cat /var/lib/sshgatesigner/config/config.toml`.
-You should see `type = "telegram"` and the three telegram keys, no
-duplicates.
-
-### 4. Run the installer again (token + restart)
-
-Create the Telegram bot first: message @BotFather, send `/newbot`,
-choose a name and a username ending in `bot`. BotFather replies with
-a token shaped like `7123456789:AAH...`. Copy it.
-
-Now re-run the installer:
-
-```bash
-sudo ./scripts/install.sh
-```
-
-It detects `type = "telegram"` and the missing token file, then
-prompts:
-
-```
-[install] Paste the BotFather token (input hidden), or press Enter to skip:
-```
-
-Paste the token. Input is hidden (terminal echo disabled) — nothing
-appears on screen. Press Enter.
-
-The installer writes the token to
-`/var/lib/sshgatesigner/tokens/telegram.token` (mode `0600`, owned by
-`sshgatesigner:sshgatesigner`), restarts the daemon, and asserts it came up.
-
-Verify:
-
-```bash
-sudo stat -c '%a %U:%G' /var/lib/sshgatesigner/tokens/telegram.token
-# expect: 600 sshgatesigner:sshgatesigner
-
-systemctl is-active sshgate-signer-telegram
-# expect: active
-```
-
-If the daemon fails after the token write, run
-`journalctl -u sshgate-signer-telegram -n 30 --no-pager`. Common causes: token
-copy-paste included a stray newline (the installer's regex catches
-this and refuses to write, but check the file mode if it's there),
-or `allowed_user_id = 0` (you forgot to substitute `NNNN`).
-
-### 5. Capture chat_id from `/start` and validate
+### 3. Capture chat_id from `/start` and validate
 
 Open Telegram, find the bot you created (search the username you
 gave to BotFather), and send it `/start`. signer's polling loop
@@ -436,7 +416,7 @@ read-only→write upgrade was considered and rejected for security — any
 unsigned tier-flip the CLI could exercise, the agent could emulate; revoke +
 re-provision stays the only path — see roadmap #17, redefined.)
 
-### 6. Activate the sshgatesigner group, relaunch Claude Code (REQUIRED before writes)
+### 4. Activate the sshgatesigner group, relaunch Claude Code (REQUIRED before writes)
 
 This is a mandatory happy-path step, not troubleshooting. `scripts/install.sh`
 added your account to the `sshgatesigner` group, but a Unix group only
@@ -452,6 +432,10 @@ You must:
 1. **Log out and back in** (or restart your login session) so `sshgatesigner`
    joins your active group set.
 2. **Relaunch Claude Code** from that fresh login session.
+3. **Resume** in the new session: run `/sshgate:status`, then `/sshgate:setup`
+   — it re-probes on-disk state, detects Tier 2, and confirms you're ready for
+   writes. (`scripts/install.sh` prints these same resume steps in its final
+   banner.)
 
 Then confirm the group is active:
 
@@ -462,10 +446,10 @@ id -nG | tr ' ' '\n' | grep -qx sshgatesigner && echo 'group:active' || echo 'gr
 Tier 2 is ready for writes only once this prints `group:active`. Until then,
 reads work but every write returns permission-denied at the signer socket.
 
-### 6b. (Optional) LLM command explainer
+### 4b. (Optional) LLM command explainer
 
 > **You can skip this step.** Tier 2 is fully functional once the
-> `sshgatesigner` group is active (step 6) — the approval messages list every
+> `sshgatesigner` group is active (step 4) — the approval messages list every
 > command verbatim. This step
 > only adds a one-line plain-English gloss beneath each command in
 > the Telegram approval message, drawn from an OpenAI-compatible LLM.

@@ -1,0 +1,62 @@
+name: tests
+
+# Unit test suite — the hermetic half of the verification strategy
+# (docs/E2E-TEST-STRATEGY.md). This runs the checks that need nothing but a Go
+# toolchain, so the repo page can show that the test gate is actually green:
+#
+#   - make vet   (go vet ./...)          — canonical Makefile target; also
+#                confirms the whole module still compiles.
+#   - make test  (go test -race ./...)   — canonical Makefile target; this is
+#                what pins the classifier regression corpus
+#                (tests/testdata/classifier-corpus.txt).
+#
+# DELIBERATELY EXCLUDED (not hermetic — kept out of this job on purpose):
+#   - make test-integration  — Docker-backed, real sshd, build-tagged
+#                              (-tags=integration); `go test ./...` already
+#                              skips the tagged files, so nothing here selects
+#                              them.
+#   - make e2e / make smoke  — need Docker / a privileged fresh-user rig
+#                              (scripts/smoke-fresh-install.sh); not runnable on
+#                              a plain hosted runner.
+#   - make preflight in full — it additionally runs gitleaks + verify-dist +
+#                              verify-repro; the reproducible-build / dist
+#                              checks are the separate verify-gate.yml workflow's
+#                              job (spec §11.4), so we do NOT duplicate them here.
+#   - a `gofmt -l` gate       — deliberately NOT added yet: the tree is not
+#                              currently gofmt-clean (import ordering + comment
+#                              alignment across several files, some under src/).
+#                              A gofmt gate must follow a one-time `gofmt -w`
+#                              sweep, or it would ship red. Tracked as a
+#                              follow-up; add the step below once the tree is
+#                              clean:
+#                                gofmt -l $(git ls-files '*.go')   # must be empty
+#
+# Go toolchain: pinned from go.mod via setup-go's go-version-file (same pattern
+# as verify-gate.yml) so CI matches the repo's declared toolchain with no
+# hardcoded version. The race detector needs cgo/gcc, which ubuntu-latest ships.
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go (pinned toolchain from go.mod)
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          check-latest: false
+
+      - name: go vet
+        run: make vet
+
+      - name: go test (race)
+        run: make test

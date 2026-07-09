@@ -9,9 +9,13 @@
 #   5. Writes the hardened systemd unit (overwrites every run — the unit
 #      is the source of truth).
 #   6. Runs `sshgate-signer-telegram --init` if the signing key is missing.
-#   7. Prompts for the Telegram bot token if the config selects the
-#      telegram backend and no token file exists yet (echo off).
-#   8. Enables + starts the unit and asserts it came up.
+#   7. Configures the Telegram approval backend in the SAME pass: prompts for
+#      the numeric Telegram user_id, appends the [backend.telegram] block, and
+#      flips the backend type from "stub" to "telegram" — so one run reaches
+#      both the user_id and the token prompt (no hand-edit + second pass).
+#   8. Prompts for the Telegram bot token now that the backend is selected
+#      and no token file exists yet (echo off).
+#   9. Enables + starts the unit and asserts it came up.
 #
 # Run from anywhere; the script resolves its repo root from $0. Expects:
 #
@@ -219,6 +223,89 @@ else
     log "signing key already present; skipping --init"
 fi
 
+# Step 7b: configure the Telegram approval backend in this SAME pass
+# (single-pass install). Step 7's `--init` writes a `type = "stub"` config;
+# historically the operator then had to hand-edit this root-owned TOML —
+# append a [backend.telegram] block and flip the type with a separate
+# tee/sed — and run install.sh a SECOND time before the token prompt below
+# would fire. We fold that here: prompt once for the numeric Telegram
+# user_id, append the [backend.telegram] block, and flip the backend type to
+# "telegram", all as root and idempotently. Step 8 then prompts for the bot
+# token in the same run, so ONE `sudo install.sh` reaches both prompts.
+if [ -f "$CONFIG_PATH" ]; then
+    if grep -Eq '^[[:space:]]*type[[:space:]]*=[[:space:]]*"telegram"' "$CONFIG_PATH"; then
+        log "config already selects the telegram backend; skipping backend config"
+    elif grep -Eq '^[[:space:]]*type[[:space:]]*=[[:space:]]*"stub"' "$CONFIG_PATH"; then
+        # Only auto-configure a pristine stub config. A config that is neither
+        # stub nor telegram (e.g. a hand-customised or hosted backend) is left
+        # untouched — we never rewrite an operator's own config.
+        if [ -t 0 ]; then
+            # Idempotence: if a previous partial run already appended a
+            # [backend.telegram] block (block present but type still "stub"),
+            # do NOT append a duplicate — fall through to the type flip below.
+            if grep -Eq '^[[:space:]]*\[backend\.telegram\][[:space:]]*$' "$CONFIG_PATH"; then
+                log "[backend.telegram] block already present; not appending a duplicate"
+            else
+                printf '\n' >&2
+                printf '[install] Configure the Telegram approval backend.\n' >&2
+                printf '[install] Find your numeric Telegram user_id by messaging @userinfobot on\n' >&2
+                printf '[install] Telegram — it replies with an "Id:" line. That number is your\n' >&2
+                printf '[install] allowed_user_id (the only account whose taps can approve writes).\n' >&2
+                TG_USER_ID=""
+                attempt=0
+                while [ "$attempt" -lt 3 ]; do
+                    attempt=$((attempt + 1))
+                    printf '[install] Telegram user_id (numeric), or press Enter to skip: ' >&2
+                    IFS= read -r TG_USER_ID_INPUT || TG_USER_ID_INPUT=""
+                    if [ -z "$TG_USER_ID_INPUT" ]; then
+                        TG_USER_ID=""
+                        break
+                    fi
+                    # Validate shape before writing it into the TOML (mirrors
+                    # setup.md's ^[0-9]+$ check). A bad value never reaches disk.
+                    if printf '%s' "$TG_USER_ID_INPUT" | grep -Eq '^[0-9]+$'; then
+                        TG_USER_ID="$TG_USER_ID_INPUT"
+                        break
+                    fi
+                    printf '[install] not a positive integer; try again.\n' >&2
+                    TG_USER_ID=""
+                done
+                if [ -n "$TG_USER_ID" ]; then
+                    # Append the [backend.telegram] block as root, pointing at
+                    # the token + chatstore paths under the signer home. This is
+                    # exactly the block the old hand-edit produced; the leading
+                    # blank line separates it from the [backend] table above.
+                    cat >>"$CONFIG_PATH" <<TGBLOCK
+
+[backend.telegram]
+token_path      = "$SIGNER_HOME/tokens/telegram.token"
+allowed_user_id = $TG_USER_ID
+chatstore_path  = "$SIGNER_HOME/config/peer.json"
+TGBLOCK
+                    log "appended [backend.telegram] block (allowed_user_id=$TG_USER_ID)"
+                else
+                    log "no user_id entered; leaving backend type = \"stub\" (re-run install.sh to configure telegram)"
+                fi
+            fi
+            # Flip stub -> telegram only once a [backend.telegram] block exists
+            # (either just appended, or recovered from a partial prior run).
+            if grep -Eq '^[[:space:]]*\[backend\.telegram\][[:space:]]*$' "$CONFIG_PATH"; then
+                sed -i 's/^type = "stub"$/type = "telegram"/' "$CONFIG_PATH"
+                log 'set backend type = "telegram"'
+            fi
+        else
+            # Non-TTY: cannot prompt safely. Leave the stub config in place and
+            # print exactly how to configure telegram, then re-run.
+            log "no TTY on stdin; leaving backend type = \"stub\""
+            log "to enable telegram: append a [backend.telegram] block to $CONFIG_PATH"
+            log "  (token_path=$SIGNER_HOME/tokens/telegram.token, allowed_user_id=<your id>,"
+            log "   chatstore_path=$SIGNER_HOME/config/peer.json), flip type to \"telegram\", and re-run"
+        fi
+    else
+        log "backend type is neither stub nor telegram; leaving config untouched"
+    fi
+fi
+
 # Step 8: prompt for the Telegram bot token if the config selects the
 # telegram backend and no token file exists yet. Echo is disabled
 # (read -rs) so the token never lands in shell history or scrollback.
@@ -327,6 +414,10 @@ if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then
     printf '\n' >&2
     printf '    1. LOG OUT and LOG BACK IN  (a new login shell, not `newgrp`)\n' >&2
     printf '    2. RELAUNCH Claude Code\n' >&2
+    printf '    3. RESUME: in the new session run  /sshgate:status  then\n' >&2
+    printf '       /sshgate:setup  — setup re-probes on-disk state, detects the\n' >&2
+    printf '       tier, and continues from here (this is the durable breadcrumb;\n' >&2
+    printf '       an agent driving the install loses its context on the relaunch).\n' >&2
     printf '\n' >&2
     printf '  Why: %s was added to the sshgatesigner group, but the\n' "$SUDO_USER" >&2
     printf '  currently-running shell and Claude Code (and its MCP server) still\n' >&2

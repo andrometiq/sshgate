@@ -194,7 +194,16 @@ verify-dist:
 		echo "verify-dist: VERSION '$$(cat VERSION)' must match ^v[0-9A-Za-z._+-]+\$$" >&2; exit 1; fi
 	@if [ ! -f $(DIST_GATE_BIN).sha256 ]; then echo "verify-dist: $(DIST_GATE_BIN).sha256 is missing" >&2; exit 1; fi
 	@cd $(DIST_GATE_DIR) && sha256sum -c sshgate-gate-linux-amd64.sha256
-	@echo "verify-dist: OK — committed gate matches its .sha256 (source↔binary is CI's job, §11.4)"
+	@# Manifest↔VERSION drift guard: the plugin manifest version MUST equal the
+	@# VERSION file minus its leading 'v'. Nothing else caught this before, so the
+	@# two silently diverged (plugin.json lagged VERSION). No jq dependency — the
+	@# preflight gate runs anywhere.
+	@pv=$$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' .claude-plugin/plugin.json | head -1); \
+	vf=$$(sed 's/^v//' VERSION); \
+	if [ -z "$$pv" ]; then echo "verify-dist: could not read version from .claude-plugin/plugin.json" >&2; exit 1; fi; \
+	if [ "$$pv" != "$$vf" ]; then \
+		echo "verify-dist: plugin.json version '$$pv' != VERSION '$$vf' (manifest must follow VERSION, sans leading v)" >&2; exit 1; fi
+	@echo "verify-dist: OK — committed gate matches its .sha256, plugin.json version matches VERSION (source↔binary is CI's job, §11.4)"
 
 # verify-repro: the STANDING two-build reproducibility assertion (spec §11.8
 # task 14). Builds the gate TWICE with the SHARED flag set (GATE_BUILD_FLAGS)

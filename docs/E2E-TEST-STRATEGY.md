@@ -78,3 +78,12 @@ and confirm the **Tier-1 read-only** path end-to-end:
 The **Tier-2** signer + Telegram-approval path needs the operator's hardware
 (the master key under `sshgatesigner`, a Telegram bot, a real phone tap) and is
 verified with the one-time live checklist, not in CI.
+
+> **Tier-2 install is now a single interactive `scripts/install.sh` pass**
+> (was a three-step dance: first pass → hand-edit the root-owned config →
+> second pass). One run prompts for the Telegram user_id and bot token in the
+> same invocation, appends the `[backend.telegram]` block, and flips the
+> backend type — idempotently. When re-walking the manual Tier-2 check
+> (`docs/install-step-by-step.md` §Manual path — Tier 2 / `commands/setup.md`
+> T2.2), confirm ONE `sudo install.sh` reaches both the `user_id` and the
+> `token` prompts and the daemon comes up `active` afterward.

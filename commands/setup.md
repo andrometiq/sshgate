@@ -43,7 +43,7 @@ and one concrete next step.
   user which dependency is missing and stop; do not try to install
   it yourself.
 - **`sshgate-mcp` cannot read `~/.config/sshgate/servers.json`
-  during T2.6.** Surface the file's perms and ask the user to fix
+  during T2.4.** Surface the file's perms and ask the user to fix
   them; do not chmod-by-yourself.
 
 ## Tier overview (for your own reference; do not narrate verbatim)
@@ -361,11 +361,25 @@ ls -la "$CLONE/bin/sshgate-signer-telegram" "$CLONE/bin/sshgate-gate-linux-amd64
 
 If either is missing (e.g. T1.2 was skipped), run `cd "$CLONE" && make install-local`.
 
-### T2.2 — Run the installer (first pass)
+### T2.2 — Run the installer (single pass — user_id + token in one run)
 
-`scripts/install.sh` is the single entry point for the system-level
-install (sshgatesigner user, /var/lib/sshgatesigner/ skeleton, systemd unit,
---init for the signing keypair).
+`scripts/install.sh` is the single entry point for the system-level install.
+ONE idempotent run does everything: creates the `sshgatesigner` user, the
+`/var/lib/sshgatesigner/` skeleton, the systemd unit, the `--init` signing
+keypair, AND — in the same pass — configures the Telegram backend (prompts for
+your numeric user_id, writes the `[backend.telegram]` block, flips the backend
+type from `stub` to `telegram`) and prompts for the bot token. There is no
+second pass and no hand-editing of the root-owned config.
+
+Have TWO things ready before the user runs it — the script prompts for each in
+order:
+
+1. **Numeric Telegram user_id** — message @userinfobot on Telegram; it replies
+   with an `Id:` line. That number is the `allowed_user_id` (the only account
+   whose taps can approve writes).
+2. **A Telegram bot token** — create the bot via @BotFather
+   (https://t.me/BotFather): send `/newbot`, pick a name, pick a username
+   ending in `bot`. BotFather replies with a token shaped like `7123456789:AAH...`.
 
 **PAUSE** and tell the user verbatim:
 
@@ -375,8 +389,18 @@ install (sshgatesigner user, /var/lib/sshgatesigner/ skeleton, systemd unit,
 >
 > (replace `$CLONE` with the actual path printed below).
 >
-> The script is idempotent — safe to re-run if it fails partway. Tell
-> me when it's done.
+> It runs ONE idempotent pass. When it reaches the Telegram backend it prompts:
+>
+>     [install] Telegram user_id (numeric), or press Enter to skip:
+>
+> Paste your user_id (from @userinfobot). Then it prompts:
+>
+>     [install] Paste the BotFather token (input hidden), or press Enter to skip:
+>
+> Paste the bot token — input is hidden, nothing echoes — and press Enter. The
+> script writes the token (mode 0600, owned by `sshgatesigner`), enables and
+> starts the daemon. It is safe to re-run if it fails partway. Tell me when
+> it's done.
 
 Print the resolved path with:
 
@@ -384,7 +408,7 @@ Print the resolved path with:
 echo "$CLONE/scripts/install.sh"
 ```
 
-After confirmation, verify the daemon:
+After confirmation, verify the daemon, the config, and the token file:
 
 ```bash
 systemctl is-active sshgate-signer-telegram
@@ -398,6 +422,24 @@ journalctl -u sshgate-signer-telegram -n 30 --no-pager
 
 …surface the output and stop.
 
+```bash
+sudo grep -E '^type|allowed_user_id' /var/lib/sshgatesigner/config/config.toml
+```
+
+Expect `type = "telegram"` and a non-zero numeric `allowed_user_id`. If the
+type is still `stub` or `allowed_user_id = 0`, the user pressed Enter past the
+user_id prompt — have them re-run `sudo $CLONE/scripts/install.sh` and enter
+the id when prompted (the script is idempotent and picks up where it left off,
+appending the `[backend.telegram]` block without duplicating it).
+
+```bash
+sudo stat -c '%a %U:%G' /var/lib/sshgatesigner/tokens/telegram.token
+```
+
+Expect `600 sshgatesigner:sshgatesigner`. (If the user skipped the token
+prompt too, this file is absent and the daemon will not start — re-run the
+installer and paste the token.)
+
 `scripts/install.sh` adds the user's account to the `sshgatesigner` group.
 This is load-bearing: the signer's Unix socket is mode `0660`, owned by
 `sshgatesigner`, so the MCP server (which runs as the user) can connect to it
@@ -409,103 +451,9 @@ group.) Group membership only activates in NEW login sessions — `newgrp
 sshgatesigner` in a side terminal does NOT help the already-running Claude
 Code, because the MCP server inherited the group set from the session Claude
 Code was launched in. The user must log out and back in AND relaunch Claude
-Code before writes work (enforced as a mandatory step after T2.7).
+Code before writes work (enforced as a mandatory step in T2.6).
 
-### T2.3 — Tier 2 — Telegram configure
-
-The `--init`-generated config has `type = "stub"`. Switch it to
-`telegram` and add the user_id + chatstore pointers.
-
-**PAUSE** and tell the user:
-
-> Find your numeric Telegram user_id. Easiest way: message @userinfobot
-> on Telegram and copy the `Id:` line.
-
-Use `AskUserQuestion` with:
-`"What is your Telegram user_id? (numeric, e.g. 12345678)"`
-
-Then sanity-check the answer with:
-
-```bash
-printf '%s' "<ANSWER>" | grep -Eq '^[0-9]+$' && echo "ok" || echo "bad: not a positive integer"
-```
-
-If bad, re-ask.
-
-Read the current config so you know what `--init` produced:
-
-```bash
-sudo cat /var/lib/sshgatesigner/config/config.toml
-```
-
-If the file already has `type = "telegram"` AND a `[backend.telegram]`
-block with this user's id, log "config already configured for telegram;
-skipping" and proceed to T2.4.
-
-Otherwise, tell the user to run (substituting their user_id for `NNNN`):
-
-```bash
-sudo tee -a /var/lib/sshgatesigner/config/config.toml >/dev/null <<'EOF'
-
-[backend.telegram]
-token_path        = "/var/lib/sshgatesigner/tokens/telegram.token"
-allowed_user_id   = NNNN
-chatstore_path    = "/var/lib/sshgatesigner/config/peer.json"
-EOF
-```
-
-…and then flip the backend type:
-
-```bash
-sudo sed -i 's/^type = "stub"$/type = "telegram"/' /var/lib/sshgatesigner/config/config.toml
-```
-
-Re-read the file and confirm with the user (`type = "telegram"`, the
-three telegram keys, no duplicates). If duplicates exist, ask the user
-to clean by hand.
-
-### T2.4 — Run the installer again (token + restart)
-
-Now that the config selects telegram, re-running install.sh will
-prompt for the bot token (echoed nothing — `read -rs`) and restart
-the daemon.
-
-**PAUSE** and tell the user:
-
-> First, create a Telegram bot via @BotFather (https://t.me/BotFather):
-> send `/newbot`, pick a name, pick a username ending in `bot`.
-> BotFather replies with a token shaped like `7123456789:AAH...`.
->
-> Then, in your sudo terminal, run:
->
->     sudo $CLONE/scripts/install.sh
->
-> The script will detect the new `type = "telegram"` and prompt:
->
->     [install] Paste the BotFather token (input hidden), or press Enter to skip:
->
-> Paste the token. Input is hidden — nothing echoes. Press Enter.
->
-> The script writes the token to `/var/lib/sshgatesigner/tokens/telegram.token`
-> (mode 0600, owned by `sshgatesigner`) and restarts the daemon. Tell me
-> when it's done.
-
-After confirmation, verify:
-
-```bash
-sudo stat -c '%a %U:%G' /var/lib/sshgatesigner/tokens/telegram.token
-```
-
-Expect `600 sshgatesigner:sshgatesigner`.
-
-```bash
-systemctl is-active sshgate-signer-telegram
-```
-
-Expect `active`. If not, run `journalctl -u sshgate-signer-telegram -n 30 --no-pager`
-and surface the output.
-
-### T2.5 — Capture chat_id from /start
+### T2.3 — Capture chat_id from /start
 
 **PAUSE** and tell the user:
 
@@ -537,7 +485,7 @@ If still not present after 30s, tell the user to double-check they
 sent `/start` to the right bot, then re-poll once. If still nothing,
 stop and surface `journalctl -u sshgate-signer-telegram -n 30 --no-pager`.
 
-### T2.6 — Push gate.pub to all registered servers
+### T2.4 — Push gate.pub to all registered servers
 
 The signer is now live with a new master key. Every server registered
 in tier 1 has gate but NO gate.pub on it — pushing the pubkey
@@ -559,7 +507,7 @@ Then enumerate the servers in the registry:
 jq -r 'keys[]' "${HOME}/.config/sshgate/servers.json" 2>/dev/null || echo "(no servers registered)"
 ```
 
-If the list is empty, skip to T2.7 — there's nothing to upgrade.
+If the list is empty, skip to T2.5 — there's nothing to upgrade.
 
 > ⚠️ **There is no in-place tier-1 → tier-2 upgrade — by design.**
 > Re-running `sshgate add <alias> <user@host>` on an already-registered
@@ -573,7 +521,7 @@ If the list is empty, skip to T2.7 — there's nothing to upgrade.
 > `--read-only` (with the signer already set up), which finds the staged
 > `gate.pub` and deploys signed-write.
 
-### T2.7 — Final summary
+### T2.5 — Final summary
 
 First check whether the `sshgatesigner` group is ACTIVE in the session this
 Claude Code (and thus the MCP server) is running in:
@@ -603,7 +551,7 @@ Print verbatim:
 > Re-run /sshgate:setup any time — it's idempotent and detects the
 > current tier.
 
-### T2.8 — MANDATORY: activate the sshgatesigner group (required before writes)
+### T2.6 — MANDATORY: activate the sshgatesigner group (required before writes)
 
 This is a required happy-path step, not troubleshooting. `scripts/install.sh`
 added your account to the `sshgatesigner` group, but a Unix group only
@@ -618,6 +566,11 @@ Claude Code. You MUST:
 1. **Log out and back in** (or fully restart your login session) so the
    `sshgatesigner` group becomes part of your active group set.
 2. **Relaunch Claude Code** from that fresh login session.
+3. **Resume** in the new session: run `/sshgate:status`, then `/sshgate:setup`
+   — setup re-probes on-disk state, classifies the tier as TIER-2 PRESENT, and
+   confirms you're ready for writes. (The relaunch discards this session's
+   context, so this breadcrumb — not agent memory — is what carries you across
+   the relaunch. `scripts/install.sh` prints the same three steps.)
 
 Then confirm the group is active:
 
@@ -661,4 +614,4 @@ Report each line. Any failure tells the user which tier-2 piece is
 missing and points back at the relevant section. If the last line reports
 `group:INACTIVE`, do NOT declare Tier 2 ready-for-writes: the MCP server
 cannot reach the `0660 sshgatesigner` socket until the user logs out/in and
-relaunches Claude Code (T2.8) so the `sshgatesigner` group is active.
+relaunches Claude Code (T2.6) so the `sshgatesigner` group is active.
