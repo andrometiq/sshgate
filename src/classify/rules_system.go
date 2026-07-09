@@ -516,7 +516,7 @@ func gitRule(args []string) Kind {
 	sub := firstNonFlag(args)
 	switch sub {
 	case "status", "log", "diff", "show",
-		"blame", "describe", "remote",
+		"blame", "describe",
 		"rev-parse", "ls-files", "ls-remote", "shortlog",
 		// cat-file --textconv (and pre-existing `git log --ext-diff`) can exec
 		// a REPO-CONFIGURED filter/differ. That requires a pre-existing
@@ -536,6 +536,8 @@ func gitRule(args []string) Kind {
 		return gitReflogKind(args)
 	case "branch":
 		return gitBranchKind(args)
+	case "remote":
+		return gitRemoteKind(args)
 	case "stash":
 		return gitStashKind(args)
 	case "config":
@@ -629,27 +631,90 @@ func gitReflogKind(args []string) Kind {
 	return KindWrite // expire / delete
 }
 
-// gitBranchKind classifies `git branch ...`. Listing forms (`git branch`,
-// `-a`, `-v`, `--list`, `-r`, ...) are READ, but `-d`/`-D`/`--delete`,
-// `-m`/`-M`/`--move`, and `-c`/`-C`/`--copy` delete/rename/copy a ref — a
-// state mutation that ran unsigned before (2026-06-15 rig hunt). Any of those
-// ref-mutating flags => WRITE; otherwise READ.
+// gitBranchKind classifies `git branch ...` by OPERATION FORM, failing closed.
+//
+// READ is the listing/inspection surface: bare `git branch`, the list/query
+// flags (`-l`/`--list`, `-a`/`--all`, `-r`/`--remotes`, `-v`/`-vv`/`--verbose`,
+// `--show-current`, `--color`, `--column`, `--sort`, `--format`, ...), and the
+// commit-query flags `--contains`/`--no-contains`/`--merged`/`--no-merged`/
+// `--points-at` (whose following operand is a commit/pattern to inspect, NOT a
+// new branch — `git branch --contains HEAD` stays READ).
+//
+// WRITE is any ref mutation:
+//   - a POSITIONAL branch NAME with no listing flag present — this creates a
+//     ref (`git branch newfeature`, `git branch feature main`). This was a
+//     confirmed Tier-1 read-only bypass (2026-07-09): the old rule saw no
+//     mutating *flag* and fell through to READ, so the create ran UNSIGNED.
+//   - `-d`/`-D`/`--delete` (delete), `-m`/`-M`/`--move` (rename),
+//     `-c`/`-C`/`--copy` (copy), `-f`/`--force` (force create/reset),
+//     `-u`/`--set-upstream-to`/`--set-upstream`/`--unset-upstream` (retarget
+//     upstream config), `--edit-description` (edit the branch description) —
+//     and their GNU abbreviations.
+//
+// A positional after a listing flag is a PATTERN, not a name, so it stays READ
+// (`git branch --list 'feat/*'`). The "branch" subcommand token itself is
+// skipped so it is never mistaken for a name.
 func gitBranchKind(args []string) Kind {
+	sawBranch := false
+	listMode := false // a listing/query flag was seen => positional is a pattern
 	for _, a := range args {
+		if !sawBranch {
+			if a == "branch" {
+				sawBranch = true
+			}
+			continue
+		}
+		// Ref-mutating short flags (delete/move/copy, force, set-upstream).
 		switch a {
-		case "-d", "-D", "-m", "-M", "-c", "-C":
+		case "-d", "-D", "-m", "-M", "-c", "-C", "-f", "-u":
 			return KindWrite
 		}
-		// `--delete`/`--move`/`--copy` and their GNU abbreviations (`--del`,
-		// `--mov`, `--cop`) delete/rename/copy a ref. The listing flags
-		// (`--list`, `--all`, `--verbose`, `--color`, `--column`,
-		// `--contains`, `--merged`, `--remotes`, ...) are NOT prefixes of any
-		// of these stems, so they stay READ.
-		if matchesAbbrev(a, "delete", "move", "copy") {
+		// Ref-mutating long flags + GNU abbreviations. `--set-upstream` and
+		// `--set-upstream-to` are both covered; the listing flags below are NOT
+		// prefixes of any of these stems, so they are disjoint.
+		if matchesAbbrev(a, "delete", "move", "copy", "force",
+			"set-upstream", "set-upstream-to", "unset-upstream",
+			"edit-description") {
+			return KindWrite
+		}
+		// Listing / commit-query flags: turn on list mode so a following
+		// positional is read as a pattern/commit operand, not a new branch name.
+		if a == "-l" || matchesAbbrev(a, "list", "contains", "no-contains",
+			"merged", "no-merged", "points-at") {
+			listMode = true
+			continue
+		}
+		// Any other flag (-a/-r/-v, --all/--remotes/--verbose/--show-current,
+		// --color/--column/--sort=/--format=, ...) is a display/query modifier.
+		if len(a) > 0 && a[0] == '-' {
+			continue
+		}
+		// A bare positional: a PATTERN if a listing flag is present (READ),
+		// otherwise a NEW BRANCH NAME to create (WRITE, fail closed).
+		if !listMode {
 			return KindWrite
 		}
 	}
 	return KindRead
+}
+
+// gitRemoteKind classifies `git remote …` by OPERATION FORM, failing closed.
+// The listing/inspection forms READ: bare `git remote` and `git remote -v`
+// (list configured remotes), `git remote show <name>` (query), and
+// `git remote get-url <name>` (query). Every other subcommand mutates
+// `.git/config` and is a WRITE: add / remove / rm / rename / set-url /
+// set-head / set-branches / prune / update. `remote` used to sit in the
+// plain-reader allowlist, so `git remote add o url` (writes a remote) and
+// friends ran UNSIGNED on a read-only server (2026-07-09). Any unrecognized
+// subcommand is WRITE (default-deny).
+func gitRemoteKind(args []string) Kind {
+	// args[0] == "remote"; the next non-flag token (skipping `-v`/`--verbose`)
+	// is the subcommand.
+	switch secondNonFlag(args) {
+	case "", "show", "get-url":
+		return KindRead
+	}
+	return KindWrite
 }
 
 // gitStashKind classifies `git stash <sub>`. Bare `git stash` is
