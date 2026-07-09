@@ -65,8 +65,10 @@ meaning; do not re-interpret it as a command failure:
 - **signer unreachable** (full sentence) — `Reason` is one of two shapes,
   already disambiguated in the text: `no signer configured (Tier-1
   read-only). …` → there is no signer at all; a human runs `/sshgate:setup`,
-  then re-provisions each read-only server via `/sshgate:revoke <alias>` and
-  `sshgate add <alias> <user@host>`. Or `signer socket … is present but not
+  then re-tiers each read-only server by hand (strip its forced `command="..."`
+  line back to `sshgate pubkey`'s plain line on the host, drop the alias from
+  the registry, then `sshgate add <alias> <user@host>` — a Tier-1 gate has no
+  signer pubkey, so `/sshgate:revoke` can't run on it). Or `signer socket … is present but not
   accepting connections — check systemctl status …` → a real Tier-2 daemon
   problem; check `/sshgate:status`,
   `systemctl status sshgate-signer-telegram`, and the journal. After fixing,
@@ -114,9 +116,11 @@ generic command failure:
   remote (read-only / Tier 1), or the write arrived without a signature.
   Check `/sshgate:status`; if the signer is `not configured`, the server is
   read-only — a human runs `/sshgate:setup` to add a signer (if none yet),
-  then `/sshgate:revoke <alias>` and `sshgate add <alias> <user@host>`
-  (without `--read-only`) to push the new `gate.pub`. Re-run the batch after
-  the re-provision.
+  then re-tiers the server by hand — on the host, swap the forced `command="..."`
+  line back to `sshgate pubkey`'s plain line, drop the alias from the registry,
+  then `sshgate add <alias> <user@host>` (without `--read-only`) to push the new
+  `gate.pub`. A Tier-1 gate has no signer pubkey, so `/sshgate:revoke` can't run
+  on it. Re-run the batch after the re-add.
 - **65 — signature rejected.** The signature was present but invalid or
   expired — usually clock skew between laptop and remote, or a stale approval.
   Retry; if it persists, check the clocks on both ends.

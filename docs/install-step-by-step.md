@@ -206,13 +206,15 @@ runs in read-only mode: reads succeed, writes return exit 77 with the
 > yourself if it can't.
 
 To move a tier-1 server to tier-2 later (after you've added a signer),
-**revoke and re-provision** it: run `/sshgate:revoke <alias>` (which keeps
-its Telegram approval), then `sshgate add <alias> <user@host>` **without**
-`--read-only`. The key is already gated, so the tier change is a
-re-provision rather than a re-add. An in-place tier flip was considered
-and rejected for security (any unsigned upgrade path the CLI
-could exercise, the agent could emulate); revoke + re-provision stays the
-only path — see roadmap #17 (redefined).
+**de-provision and re-add** it by hand: on the host, replace SSHGate's forced
+`command="..."` line in `~/.ssh/authorized_keys` with `sshgate pubkey`'s plain
+line, drop the alias from the registry (`~/.config/sshgate/servers.json`), then
+`sshgate add <alias> <user@host>` **without** `--read-only`. A tier-1 gate has
+no signer pubkey, so a signed remote revoke can't run on it — `/sshgate:revoke`
+refuses a read-only host before any tap, which is why the tier change is a
+manual de-provision rather than a `revoke`. An in-place tier flip was also
+considered and rejected for security (any unsigned upgrade path the CLI
+could exercise, the agent could emulate) — see roadmap #17 (redefined).
 
 ---
 
@@ -405,16 +407,18 @@ sudo chown "$USER" ~/.config/sshgate/pubkey-distrib/gate.pub
 chmod 644 ~/.config/sshgate/pubkey-distrib/gate.pub
 ```
 
-Then bring each existing read-only server up to signed-write. Because the
-SSHGate key is already gated on those hosts, the tier change is a
-re-provision, not a re-add: for each registered alias, run
-`/sshgate:revoke <alias>` (its Telegram approval is kept) and then
-`sshgate add <alias> <user@host>` **without** `--read-only`, which now
+Then bring each existing read-only server up to signed-write. A tier-1 gate has
+no signer pubkey, so a signed remote revoke can't run on it — `/sshgate:revoke`
+refuses a read-only host before any tap — so the tier change is a manual
+de-provision + re-add: for each registered alias, on the host replace SSHGate's
+forced `command="..."` line in `~/.ssh/authorized_keys` with `sshgate pubkey`'s
+plain line, drop the alias from the registry (`~/.config/sshgate/servers.json`),
+then run `sshgate add <alias> <user@host>` **without** `--read-only`, which now
 finds the staged `gate.pub` and deploys signed-write. (Servers you
 provision fresh from here on pick up `gate.pub` automatically. An in-place
-read-only→write upgrade was considered and rejected for security — any
-unsigned tier-flip the CLI could exercise, the agent could emulate; revoke +
-re-provision stays the only path — see roadmap #17, redefined.)
+read-only→write upgrade was also considered and rejected for security — any
+unsigned tier-flip the CLI could exercise, the agent could emulate — see roadmap
+#17, redefined.)
 
 ### 4. Activate the sshgatesigner group, relaunch Claude Code (REQUIRED before writes)
 

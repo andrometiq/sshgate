@@ -511,15 +511,18 @@ If the list is empty, skip to T2.5 — there's nothing to upgrade.
 
 > ⚠️ **There is no in-place tier-1 → tier-2 upgrade — by design.**
 > Re-running `sshgate add <alias> <user@host>` on an already-registered
-> alias is **rejected** ("alias already registered; run `sshgate revoke`
+> alias is **rejected** ("alias already registered — de-provision it
 > first") — it does NOT upgrade in place. An in-place tier flip was
 > considered and rejected for security: any unsigned upgrade path the CLI
 > could exercise is a path the agent could emulate — read-only is
 > read-only (see roadmap #17, redefined, in `docs/ROADMAP.md`). Re-tiering
-> is always revoke + re-provision: `/sshgate:revoke <alias>` (its Telegram
-> approval is kept), then `sshgate add <alias> <user@host>` without
-> `--read-only` (with the signer already set up), which finds the staged
-> `gate.pub` and deploys signed-write.
+> is a manual de-provision + re-add: a Tier-1 gate has no signer pubkey, so
+> `/sshgate:revoke` can't run on it — instead, on the host, replace SSHGate's
+> forced `command="..."` line in `~/.ssh/authorized_keys` with `sshgate
+> pubkey`'s plain line, drop the alias from the registry
+> (`~/.config/sshgate/servers.json`), then `sshgate add <alias> <user@host>`
+> without `--read-only` (with the signer already set up), which finds the
+> staged `gate.pub` and deploys signed-write.
 
 ### T2.5 — Final summary
 

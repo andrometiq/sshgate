@@ -211,12 +211,15 @@ gate (no signer pubkey was pushed).
 Do NOT retry. Surface the correct upgrade path to the user and stop:
 making the server signed-write is a **human-only** action — they run
 `/sshgate:setup` to add a Telegram signer (if they don't have one), then
-`/sshgate:revoke prod-db` (its Telegram approval is kept) and re-provision
-with `sshgate add prod-db <user@host>` (no `--read-only`). You have no tool
-to do this, and an in-place upgrade was considered and rejected for security
-(any unsigned tier-flip the CLI could exercise, the agent could emulate);
-revoke + re-provision is the only path — see roadmap #17 (redefined). Reads on
-the same server still work normally — keep diagnosing with `sshgate.run`.
+de-provision the server by hand and re-add it: on the host, replace SSHGate's
+forced `command="..."` line in `~/.ssh/authorized_keys` with `sshgate pubkey`'s
+plain line, drop the alias from the registry (`~/.config/sshgate/servers.json`),
+then `sshgate add prod-db <user@host>` (no `--read-only`). A Tier-1 gate has no
+signer pubkey, so a signed remote revoke can't run — `/sshgate:revoke` refuses a
+read-only host before any tap. You have no tool to do this, and an in-place
+upgrade was also considered and rejected for security (any unsigned tier-flip
+the CLI could exercise, the agent could emulate) — see roadmap #17 (redefined).
+Reads on the same server still work normally — keep diagnosing with `sshgate.run`.
 
 ## Denial, timeout, and signer-access handling
 
@@ -260,9 +263,12 @@ memorise the codes, but:
 
 - **exit 77** — missing signature OR the host has no signer pubkey
   (read-only / Tier-1). Check `sshgate.status`; if the signer is not
-  configured, the user runs `/sshgate:setup`, then revokes and re-provisions
-  the server (`/sshgate:revoke <alias>` + `sshgate add`, no `--read-only`) to
-  upgrade — a human-only step you can't perform.
+  configured, the user runs `/sshgate:setup`, then re-tiers the server by hand
+  (strip its forced `command="..."` line back to `sshgate pubkey`'s plain line
+  on the host, drop the alias from the registry, then `sshgate add`, no
+  `--read-only`) to upgrade — a human-only step you can't perform, and one
+  `/sshgate:revoke` can't do for a Tier-1 host (no signer pubkey to verify a
+  signed revoke).
 - **exit 65** — bad / expired signature: usually clock skew or a stale
   approval. Retry once.
 
