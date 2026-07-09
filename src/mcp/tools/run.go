@@ -41,6 +41,13 @@ type RunInput struct {
 	// Reason is the mandatory human-readable justification shown in the
 	// reveal approval. Required when reveal is true; ignored otherwise.
 	Reason string `json:"reason,omitempty" jsonschema:"why this secret must be revealed (required when reveal=true; shown to the human approver)"`
+	// MaxOutputBytes optionally overrides the per-command output byte cap for
+	// THIS call. Each of stdout and stderr is independently truncated to this
+	// many bytes (a truncation marker naming the dropped/total byte counts is
+	// appended and is NOT counted against the budget). Absent (nil) uses the
+	// server default (256 KiB); 0 disables the cap (unlimited output). Raise
+	// it only when you genuinely need the full output of a large read.
+	MaxOutputBytes *int `json:"max_output_bytes,omitempty" jsonschema:"optional per-command output byte cap; each of stdout/stderr is truncated independently with a marker. Absent uses the server default (262144); 0 = unlimited."`
 }
 
 // RunOutput is the structured result. The MCP server layer also
@@ -166,6 +173,17 @@ type Runner struct {
 	// other tools route through Sign (which carries its own SocketPath).
 	// Production wires the same path into both.
 	SignerSockPath string
+
+	// DefaultMaxOutputBytes is the default per-command output byte cap
+	// applied to the STRUCTURED run/run_batch stdout and stderr (each
+	// stream capped independently) when a call does not override it
+	// (RunInput/RunBatchInput.MaxOutputBytes == nil). The truncation marker
+	// is appended OUTSIDE this budget. Zero means uncapped — the value tests
+	// leave when they do not set it, so their exact-output assertions are
+	// unaffected; production wires DefaultOutputCapBytes. This cap lives in
+	// the tools layer ONLY: it never reaches ssh.Client, so the update_gate
+	// readback and the box→box transfer envelope are never touched.
+	DefaultMaxOutputBytes int
 }
 
 // DefaultWriteTTLSec is the default sig-validity window for writes —
@@ -207,6 +225,10 @@ func (r *Runner) Run(ctx context.Context, in RunInput) (RunOutput, error) {
 		return RunOutput{}, fmt.Errorf("tools: unknown server alias %q (check sshgate.list_servers)", in.Alias)
 	}
 
+	// Resolve the output cap once for this call (explicit override, else the
+	// Runner default). Applied to the STRUCTURED stdout/stderr below.
+	cap := r.effectiveOutputCap(in.MaxOutputBytes)
+
 	// SECRET-REVEAL is signed-only: a reveal must carry a human approval that
 	// the signer turns into a reveal=true signature, so it ALWAYS routes
 	// through the sign path — even when the command classifies as a read (a
@@ -218,7 +240,7 @@ func (r *Runner) Run(ctx context.Context, in RunInput) (RunOutput, error) {
 		if strings.TrimSpace(in.Reason) == "" {
 			return RunOutput{}, errors.New("tools: reveal requires a non-empty reason (a SECRET-REVEAL exposes raw secret values to the agent; the human approver needs to know why)")
 		}
-		return r.runWrite(ctx, in.Alias, entry, in.Command, true, in.Reason)
+		return r.runWrite(ctx, in.Alias, entry, in.Command, true, in.Reason, cap)
 	}
 
 	kind := classify.Classify(in.Command)
@@ -228,26 +250,28 @@ func (r *Runner) Run(ctx context.Context, in RunInput) (RunOutput, error) {
 		// input — already handled above.
 		return RunOutput{}, fmt.Errorf("tools: could not classify command %q", in.Command)
 	case classify.KindRead:
-		return r.runRead(ctx, entry, in.Command)
+		return r.runRead(ctx, entry, in.Command, cap)
 	case classify.KindWrite:
-		return r.runWrite(ctx, in.Alias, entry, in.Command, false, "")
+		return r.runWrite(ctx, in.Alias, entry, in.Command, false, "", cap)
 	default:
 		return RunOutput{}, fmt.Errorf("tools: unexpected classification %v", kind)
 	}
 }
 
-func (r *Runner) runRead(ctx context.Context, e registry.Entry, cmd string) (RunOutput, error) {
+func (r *Runner) runRead(ctx context.Context, e registry.Entry, cmd string, cap int) (RunOutput, error) {
 	if err := r.checkKeyReady(); err != nil {
 		return RunOutput{Kind: "read"}, err
 	}
 	stdout, stderr, exit, err := r.SSH.Run(ctx, e.Host, e.User, e.Port, cmd)
+	outStr, _ := capOutput(string(stdout), cap)
+	errStr, _ := capOutput(string(stderr), cap)
 	if err != nil {
-		return RunOutput{Stdout: string(stdout), Stderr: string(stderr), ExitCode: exit, Kind: "read"},
+		return RunOutput{Stdout: outStr, Stderr: errStr, ExitCode: exit, Kind: "read"},
 			fmt.Errorf("ssh exec: %w", err)
 	}
 	return RunOutput{
-		Stdout:   string(stdout),
-		Stderr:   string(stderr),
+		Stdout:   outStr,
+		Stderr:   errStr,
 		ExitCode: exit,
 		Kind:     "read",
 		Approved: false,
@@ -268,7 +292,7 @@ func (r *Runner) checkKeyReady() error {
 	return nil
 }
 
-func (r *Runner) runWrite(ctx context.Context, alias string, e registry.Entry, cmd string, reveal bool, reason string) (RunOutput, error) {
+func (r *Runner) runWrite(ctx context.Context, alias string, e registry.Entry, cmd string, reveal bool, reason string, cap int) (RunOutput, error) {
 	// Read-only servers have no signer pubkey on the host, so the gate
 	// rejects every write (exit 77). Soliciting an approval first would
 	// waste a real Telegram tap on a guaranteed no-op — short-circuit
@@ -320,20 +344,22 @@ func (r *Runner) runWrite(ctx context.Context, alias string, e registry.Entry, c
 	authMode := res.AuthMode
 
 	stdout, stderr, exit, err := r.SSH.Run(ctx, e.Host, e.User, e.Port, wireCmd)
+	outStr, _ := capOutput(string(stdout), cap)
+	errStr, _ := capOutput(string(stderr), cap)
 	if err != nil {
-		return RunOutput{Stdout: string(stdout), Stderr: string(stderr), ExitCode: exit, Kind: "write", Approved: true, Revealed: reveal, AuthMode: authMode},
+		return RunOutput{Stdout: outStr, Stderr: errStr, ExitCode: exit, Kind: "write", Approved: true, Revealed: reveal, AuthMode: authMode},
 			fmt.Errorf("ssh exec: %w", err)
 	}
 	// A gate deny comes back as err=nil with a raw non-zero exit. Annotate
 	// the well-known gate codes so the model gets remediation rather than
 	// a bare "exit 77/65".
 	if note := gateDenyNote(exit); note != "" {
-		return RunOutput{Stdout: string(stdout), Stderr: string(stderr), ExitCode: exit, Kind: "write", Approved: true, Revealed: reveal, AuthMode: authMode},
+		return RunOutput{Stdout: outStr, Stderr: errStr, ExitCode: exit, Kind: "write", Approved: true, Revealed: reveal, AuthMode: authMode},
 			fmt.Errorf("tools: %s", note)
 	}
 	return RunOutput{
-		Stdout:   string(stdout),
-		Stderr:   string(stderr),
+		Stdout:   outStr,
+		Stderr:   errStr,
 		ExitCode: exit,
 		Kind:     "write",
 		Approved: true,

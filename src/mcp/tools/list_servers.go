@@ -15,6 +15,10 @@ type ListServersInput struct{}
 // ServerInfo is one row in a ListServersOutput. AddedAt and LastSeen
 // are RFC3339 strings (omitted when zero) so the structured output is
 // directly readable by Claude without an extra time-parsing step.
+// ReadOnly surfaces the server's TIER from the registry (true = Tier-1
+// read-only, writes denied at the gate; false/absent = signed-write),
+// so the agent can tell a server's tier before attempting a write
+// (W3-7).
 type ServerInfo struct {
 	Alias    string `json:"alias"`
 	Host     string `json:"host"`
@@ -22,6 +26,7 @@ type ServerInfo struct {
 	User     string `json:"user"`
 	AddedAt  string `json:"added_at"`
 	LastSeen string `json:"last_seen,omitempty"`
+	ReadOnly bool   `json:"read_only,omitempty"`
 }
 
 // ListServersOutput is the structured result of sshgate.list_servers.
@@ -54,11 +59,12 @@ func (r *Runner) ListServers(_ context.Context, _ ListServersInput) (ListServers
 	for _, alias := range aliases {
 		e := raw[alias]
 		out.Servers = append(out.Servers, ServerInfo{
-			Alias:   alias,
-			Host:    e.Host,
-			Port:    e.Port,
-			User:    e.User,
-			AddedAt: e.AddedAt.UTC().Format(time.RFC3339),
+			Alias:    alias,
+			Host:     e.Host,
+			Port:     e.Port,
+			User:     e.User,
+			AddedAt:  e.AddedAt.UTC().Format(time.RFC3339),
+			ReadOnly: e.ReadOnly,
 		})
 	}
 	return out, nil

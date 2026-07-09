@@ -41,12 +41,17 @@ type SignerStatus struct {
 // ServerStatus is one row in StatusOutput.Servers. PingMS is the
 // round-trip in milliseconds on success and omitted on failure;
 // Error carries a short failure summary suitable for surfacing to
-// Claude.
+// Claude. ReadOnly surfaces the server's TIER from the registry
+// (true = Tier-1 read-only, writes denied at the gate; false/absent =
+// signed-write). It is set from the trusted registry entry regardless
+// of reachability — the tier is a property of how the server was
+// provisioned, not of whether it currently answers a probe (W3-7).
 type ServerStatus struct {
 	Alias     string `json:"alias"`
 	Reachable bool   `json:"reachable"`
 	PingMS    int64  `json:"ping_ms,omitempty"`
 	Error     string `json:"error,omitempty"`
+	ReadOnly  bool   `json:"read_only,omitempty"`
 }
 
 // StatusOutput is the structured result of sshgate.status. The
@@ -134,10 +139,11 @@ func (r *Runner) Status(ctx context.Context, _ StatusInput) (StatusOutput, error
 // registryRow pairs an alias with its registry entry — used internally
 // so the status workers do not need to take r.Servers's lock per probe.
 type registryRow struct {
-	alias string
-	host  string
-	user  string
-	port  int
+	alias    string
+	host     string
+	user     string
+	port     int
+	readOnly bool
 }
 
 // snapshotRegistry returns the registry contents sorted alphabetically
@@ -146,7 +152,7 @@ func (r *Runner) snapshotRegistry() []registryRow {
 	raw := r.Servers.List()
 	rows := make([]registryRow, 0, len(raw))
 	for alias, e := range raw {
-		rows = append(rows, registryRow{alias: alias, host: e.Host, user: e.User, port: e.Port})
+		rows = append(rows, registryRow{alias: alias, host: e.Host, user: e.User, port: e.Port, readOnly: e.ReadOnly})
 	}
 	sort.Slice(rows, func(i, j int) bool { return rows[i].alias < rows[j].alias })
 	return rows
@@ -163,7 +169,9 @@ func (r *Runner) probeServer(ctx context.Context, row registryRow) ServerStatus 
 	stdout, _, _, err := r.SSH.Run(probeCtx, row.host, row.user, row.port, "")
 	elapsed := time.Since(start)
 
-	s := ServerStatus{Alias: row.alias}
+	// Tier is a registry property, so it is reported regardless of
+	// reachability (an unreachable server still has a known tier).
+	s := ServerStatus{Alias: row.alias, ReadOnly: row.readOnly}
 	if err != nil {
 		s.Error = err.Error()
 		return s

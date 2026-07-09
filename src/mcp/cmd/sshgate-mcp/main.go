@@ -154,14 +154,15 @@ func buildServer(cfgRoot, socketPath string, logger *log.Logger) (*mcp.Server, e
 	signer := &signpkg.Client{SocketPath: socketPath, Timeout: signTimeout}
 	sshClient := &sshpkg.Client{KeyPath: keyPath, KnownHostsPath: khPath, Timeout: sshTimeout}
 	runner := &tools.Runner{
-		Servers:        servers,
-		Sign:           signer,
-		SSH:            sshClient,
-		SSHStdin:       sshClient,
-		Xfer:           signer,
-		StagedGatePath: stagedGatePath(cfgRoot),
-		KeyPath:        keyPath,
-		SignerSockPath: socketPath,
+		Servers:               servers,
+		Sign:                  signer,
+		SSH:                   sshClient,
+		SSHStdin:              sshClient,
+		Xfer:                  signer,
+		StagedGatePath:        stagedGatePath(cfgRoot),
+		KeyPath:               keyPath,
+		SignerSockPath:        socketPath,
+		DefaultMaxOutputBytes: tools.DefaultOutputCapBytes,
 	}
 
 	// Tier 6b — MCP-side rolling live log (convenience surface). On by

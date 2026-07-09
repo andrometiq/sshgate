@@ -12,13 +12,25 @@ import (
 
 // RunBatchInput is the JSON input to the sshgate.run_batch tool.
 //
-// StopOnError defaults to true (the spec's safe default). A pointer
-// lets the caller distinguish "explicitly false" from "not provided".
-// When nil, the runner treats it as true.
+// StopOnError controls whether the sequence aborts at the first non-zero
+// exit. A pointer lets the caller distinguish "explicitly set" from "not
+// provided". When nil, the default depends on the BATCH CLASS: a batch
+// containing ANY write defaults to true (stop-on-error — write ordering
+// usually matters, so aborting on the first failure is safest), while an
+// ALL-READ batch defaults to false (continue-on-error — reads are
+// independent diagnostics that legitimately exit non-zero, e.g. an absent
+// file or an empty crontab, and one failure should not skip the rest). An
+// explicit caller value always wins, in both directions.
 type RunBatchInput struct {
 	Alias       string   `json:"alias" jsonschema:"registered server alias"`
 	Commands    []string `json:"commands" jsonschema:"shell commands to run on the remote host, in order"`
-	StopOnError *bool    `json:"stop_on_error,omitempty" jsonschema:"abort sequence at first non-zero exit (default true)"`
+	StopOnError *bool    `json:"stop_on_error,omitempty" jsonschema:"abort the sequence at the first non-zero exit. When omitted the default is chosen by batch class: true for a batch containing any write (ordering matters), false (continue) for an all-read batch. Set explicitly to override."`
+	// MaxOutputBytes optionally overrides the per-command output byte cap for
+	// THIS batch. Each command's stdout and stderr is independently truncated
+	// to this many bytes (a truncation marker naming the dropped/total byte
+	// counts is appended and is NOT counted against the budget). Absent (nil)
+	// uses the server default (256 KiB); 0 disables the cap (unlimited).
+	MaxOutputBytes *int `json:"max_output_bytes,omitempty" jsonschema:"optional per-command output byte cap; each command's stdout/stderr is truncated independently with a marker. Absent uses the server default (262144); 0 = unlimited."`
 }
 
 // CommandResult is the per-command outcome inside a RunBatchOutput.
@@ -72,8 +84,11 @@ const BatchWriteTTLSec = 60
 //   - Any writes → ONE sign request covering all writes (reads stay
 //     unsigned). Reads execute in place; writes execute with their
 //     signed wire prefix in the original positional order.
-//   - StopOnError=true (default) aborts at the first non-zero exit
-//     and marks the remainder Skipped=true.
+//   - StopOnError=true aborts at the first non-zero exit and marks the
+//     remainder Skipped=true. When the caller omits it, the default is
+//     chosen by batch class: true for a batch containing any write
+//     (ordering matters), false for an all-read batch (reads are
+//     independent diagnostics). An explicit value always wins.
 //   - StopOnError=false runs every command regardless of prior exits.
 //   - Denial / timeout / unreachable: no writes run; the output has
 //     Denied=true and Reason∈{"denied","timeout","unreachable"}.
@@ -183,12 +198,22 @@ func (r *Runner) RunBatch(ctx context.Context, in RunBatchInput) (RunBatchOutput
 		out.Approved = true
 	}
 
-	// Default StopOnError = true (per spec). The pointer lets a caller
-	// explicitly say "no, run everything."
-	stopOnError := true
+	// Default StopOnError is chosen by batch class: a batch with ANY write
+	// stops on error (write ordering matters); an ALL-READ batch continues
+	// on error (reads are independent diagnostics that legitimately exit
+	// non-zero — an absent file, an empty crontab — so one failure should
+	// not skip the rest). writeCmds is already computed above, so
+	// len(writeCmds)==0 is exactly "all reads". An explicit caller value
+	// always wins, in both directions.
+	stopOnError := len(writeCmds) > 0
 	if in.StopOnError != nil {
 		stopOnError = *in.StopOnError
 	}
+
+	// Resolve the output cap once for the whole batch (explicit override,
+	// else the Runner default). Applied per-command to the structured
+	// stdout/stderr below.
+	cap := r.effectiveOutputCap(in.MaxOutputBytes)
 
 	out.Results = make([]CommandResult, len(in.Commands))
 	aborted := false
@@ -204,8 +229,10 @@ func (r *Runner) RunBatch(ctx context.Context, in RunBatchInput) (RunBatchOutput
 			wireCmd = w
 		}
 		stdout, stderr, exit, err := r.SSH.Run(ctx, entry.Host, entry.User, entry.Port, wireCmd)
-		out.Results[i].Stdout = string(stdout)
-		out.Results[i].Stderr = string(stderr)
+		outStr, _ := capOutput(string(stdout), cap)
+		errStr, _ := capOutput(string(stderr), cap)
+		out.Results[i].Stdout = outStr
+		out.Results[i].Stderr = errStr
 		out.Results[i].ExitCode = exit
 		if err != nil {
 			// SSH transport-layer error: surface as the rest of the

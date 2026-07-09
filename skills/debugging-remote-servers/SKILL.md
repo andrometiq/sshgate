@@ -6,11 +6,14 @@ description: This skill should be used when the user asks to debug, diagnose, or
 # Debugging remote servers with SSHGate
 
 SSHGate gives you SSH access to the user's registered servers. Your MCP
-tool surface is exactly ten tools — `sshgate.run`, `sshgate.run_batch`,
-`sshgate.list_servers`, `sshgate.status`, `sshgate.revoke_server`,
+tool surface is exactly eleven tools — `sshgate.run`, `sshgate.run_batch`,
+`sshgate.list_servers`, `sshgate.status`, `sshgate.ping`, `sshgate.revoke_server`,
 `sshgate.request_grant`, `sshgate.revoke_grant`, `sshgate.list_grants`,
 `sshgate.update_gate`, and `sshgate.transfer` — and debugging mostly uses the
-first three (the grant tools are for unattended write windows, `update_gate`
+first three (`sshgate.ping` is a READ-class reachability probe of ONE named
+server — a short SSHGATE_OK check, no approval and no signer — cheaper than
+`status` when you only need to know if a single box is up; the grant tools are
+for unattended write windows, `update_gate`
 pushes a signed, human-approved update of the gate binary itself, and
 `sshgate.transfer` moves a secret file between two registered servers end-to-end
 encrypted through the gate under one human approval — the MCP relays only
@@ -153,8 +156,11 @@ Approving the prompt on your phone will run them in order. Reply
 ```
 
 Wait for the user to acknowledge. Then call `sshgate.run_batch` with
-the same list, `stop_on_error: true` (the default — abort the
-sequence if any step fails). Surface the per-step output verbatim
+the same list, `stop_on_error: true` (the default for any batch that
+contains a write — abort the sequence if any step fails; an all-read
+batch instead defaults to continue-on-error so one failed diagnostic
+doesn't skip the rest — set `stop_on_error` explicitly to override
+either way). Surface the per-step output verbatim
 when it comes back. After a successful batch, run one more diagnostic
 read (`systemctl status nginx`, `nginx -t`, whatever proves the fix)
 to confirm.
@@ -190,10 +196,12 @@ your session is interrupted — reconnect and `tail` the log.
 
 A server can be provisioned **read-only** (a human ran
 `sshgate add … --read-only`): the gate is installed but no signer pubkey
-was pushed, so it executes reads and denies every write locally. When you
-send a write to such a server, `sshgate.run` / `sshgate.run_batch`
-**refuse it before soliciting any Telegram approval** — no tap is wasted —
-and return an error like:
+was pushed, so it executes reads and denies every write locally. You can
+tell a server's tier BEFORE attempting a write: `sshgate.list_servers`,
+`sshgate.status`, and `sshgate.ping` each report a `read_only` boolean per
+server (`true` = Tier-1 read-only). When you send a write to such a server,
+`sshgate.run` / `sshgate.run_batch` **refuse it before soliciting any
+Telegram approval** — no tap is wasted — and return an error like:
 
 ```
 server "prod-db" is registered read-only — writes are denied at the

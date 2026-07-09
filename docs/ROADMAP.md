@@ -13,8 +13,8 @@ For the security model these items extend, see [design.md](design.md) and
 
 - **Human-only provisioning CLI.** Onboarding a server is a control-plane action
   done with the `sshgate` CLI (`pubkey` → paste → `add [--read-only]`), not an
-  agent tool. The agent surface is exactly ten tools (`run`, `run_batch`,
-  `list_servers`, `status`, `revoke_server`, `request_grant`, `revoke_grant`,
+  agent tool. The agent surface is exactly eleven tools (`run`, `run_batch`,
+  `list_servers`, `status`, `ping`, `revoke_server`, `request_grant`, `revoke_grant`,
   `list_grants`, `update_gate`, `transfer`); there is deliberately no `add_server`
   tool, so the agent can never expand its own reach.
 - **Read-only (Tier-1) and signed-write (Tier-2) provisioning**, selectable at
@@ -340,24 +340,27 @@ anchor above and are marked *(subsumed)*.
   expired/ran/skipped result instead of opaque per-command failures. A standing
   grant already mitigates this (granted commands re-sign fresh).
 
-- **Targeted single-server reachability check (`ping`).** A cheap, short-timeout,
-  single-server up/down check (READ-class, no approval), so probing one box does
-  not cost a full SSH dial timeout or a fan-out across every server. Optionally a
-  **background monitor** that watches reachability continuously and surfaces a
-  notification when a threshold is crossed (consecutive drops / latency spike) —
-  the push-notification path is a natural fit for the shared-messaging anchor
-  above.
+- **Targeted single-server reachability check (`ping`). _(shipped — W5-10)_**
+  The `ping` tool is a cheap, short-timeout, single-server up/down check
+  (READ-class, no approval, no signer), so probing one box does not cost a
+  fan-out across every server. Still open: an optional **background monitor**
+  that watches reachability continuously and surfaces a notification when a
+  threshold is crossed (consecutive drops / latency spike) — the
+  push-notification path is a natural fit for the shared-messaging anchor above.
 
-- **Per-command output cap.** An optional output byte cap with an explicit
+- **Per-command output cap. _(shipped — W5-11)_** run/run_batch cap each
+  command's structured stdout and stderr (independently) with an explicit
   truncation marker, so a single large read (a deep directory walk) cannot
-  exhaust the agent's context. Reads should be safe-by-default against
-  multi-megabyte output.
+  exhaust the agent's context. Default-on at 256 KiB per stream, overridable per
+  call via `max_output_bytes` (0 = unlimited). The cap lives in the tools layer
+  only — it never touches the update_gate readback or the box→box transfer
+  envelope.
 
-- **`stop_on_error` default for read batches.** Read/inventory batches
-  legitimately contain commands that exit non-zero (absent file, empty crontab);
-  aborting the whole batch on the first is the wrong default for reads. Default
-  to continue-on-error for read-classified batches; keep stop-on-error for write
-  batches where ordering matters.
+- **`stop_on_error` default for read batches. _(shipped — W5-12)_** run_batch now
+  defaults to continue-on-error for an all-read batch (reads legitimately exit
+  non-zero — an absent file, an empty crontab — so aborting on the first is the
+  wrong default) and keeps stop-on-error for any batch containing a write (where
+  ordering matters). An explicit `stop_on_error` always wins.
 
 - **Concurrent gated approvals *(subsumed)*.** Firing several gated calls at once
   can cross-reject when the local tool-permission prompt and the approval channel

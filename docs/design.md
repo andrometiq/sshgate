@@ -199,14 +199,15 @@ reach and **operating** within those machines.
   own reach. It only ever operates within boundaries a human established.
 
 - **Operating is the data plane and is the agent's surface.** The MCP exposes
-  exactly ten tools:
+  exactly eleven tools:
 
   | Tool | Purpose |
   |---|---|
   | `run` | Run one command on a registered server. Reads run immediately; writes request approval, then run. |
-  | `run_batch` | Run several commands; writes bulk-approve together in one Telegram tap. |
-  | `list_servers` | List the registered server aliases. |
-  | `status` | Report signer health and per-server reachability. |
+  | `run_batch` | Run several commands; writes bulk-approve together in one Telegram tap. `stop_on_error` defaults to true for a batch containing any write and to continue-on-error for an all-read batch (override explicitly). |
+  | `list_servers` | List the registered server aliases (each with its `read_only` tier). |
+  | `status` | Report signer health and per-server reachability (each with its `read_only` tier). |
+  | `ping` | Probe reachability of ONE named server (short SSHGATE_OK check). READ-class — no approval, no signer, no fan-out across every server. |
   | `revoke_server` | Uninstall the gate from a server (itself an approved action). |
   | `request_grant` | Request a standing grant so matching writes auto-sign for a window (≤ 24h); the human must approve a distinct "STANDING GRANT" Telegram message — the agent can only request, never self-grant. |
   | `revoke_grant` | Drop a server's standing grant so writes prompt again. De-escalation only — always safe, needs no approval. |

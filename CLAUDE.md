@@ -4,14 +4,15 @@ The cross-tool source of truth is `AGENTS.md`. Read it now — Codex and any oth
 
 ## SSHGate-specific notes for Claude Code
 
-This is a Claude Code plugin. The agent (MCP) tool surface is exactly **ten
-tools** — `run`, `run_batch`, `list_servers`, `status`, `revoke_server`,
+This is a Claude Code plugin. The agent (MCP) tool surface is exactly **eleven
+tools** — `run`, `run_batch`, `list_servers`, `status`, `ping`, `revoke_server`,
 `request_grant`, `revoke_grant`, `list_grants`, `update_gate`, `transfer`:
 
 - `sshgate.run(alias, command)` — run one command on a registered server
 - `sshgate.run_batch(alias, commands[])` — run several commands; writes bulk-approve in one Telegram tap
-- `sshgate.list_servers()` — list registered aliases
-- `sshgate.status()` — health of the signer + reachability of each server
+- `sshgate.list_servers()` — list registered aliases (with each server's `read_only` tier)
+- `sshgate.status()` — health of the signer + reachability of each server (with each server's `read_only` tier)
+- `sshgate.ping(alias)` — READ-class single-server reachability probe (short SSHGATE_OK check against one named server; no approval, no signer, no tap — cheaper than `status`, which fans out across every server)
 - `sshgate.revoke_server(alias)` — uninstall gate from a server (requires Telegram approval)
 - `sshgate.request_grant(alias, scope, commands?, duration_hours, reason?)` — request a standing grant so matching writes auto-sign for a window (≤ 24h); needs a distinct human Telegram approval, the agent can only request one
 - `sshgate.revoke_grant(alias)` — drop a server's standing grant (de-escalation only — always safe, no approval)
@@ -59,8 +60,9 @@ See `skills/debugging-remote-servers/SKILL.md` for the full skill.
 A server is provisioned either **read-only (Tier-1)** or **signed-write (Tier-2)**
 (via `sshgate add` / `sshgate add --read-only`). `gate.pub` present on the
 remote = signed-write; absent = read-only.
-`sshgate.list_servers` does not surface the flag directly; check `sshgate.status`
-and the error messages below.
+Both `sshgate.list_servers` and `sshgate.status` (and `sshgate.ping`) surface the
+tier per server as a `read_only` boolean (`true` = Tier-1 read-only, absent/`false`
+= signed-write), and the error messages below also indicate it.
 
 - **Writes to a read-only server are refused locally, BEFORE any Telegram tap.**
   `sshgate.run`/`sshgate.run_batch` return an error like `server "<alias>" is

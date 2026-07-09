@@ -18,7 +18,7 @@ import (
 // connectAllTools mirrors Server.Serve's agent-facing tool registration
 // (the eight tools the agent can call) over the SDK's in-memory
 // transport. The existing connectInProcess helper wires only
-// run/run_batch; this one closes the gap so list_servers, status,
+// run/run_batch; this one closes the gap so list_servers, status, ping,
 // revoke_server, request_grant, revoke_grant, and list_grants are also
 // exercised at the SDK boundary (request → handler → structured result).
 // add_server is intentionally absent: it is no longer an MCP tool —
@@ -57,6 +57,16 @@ func connectAllTools(t *testing.T, server *mcp.Server) (*mcpsdk.ClientSession, f
 		out, err := server.Runner.Status(ctx, in)
 		if err != nil {
 			return nil, tools.StatusOutput{}, err
+		}
+		return nil, out, nil
+	})
+	mcpsdk.AddTool(sdkServer, &mcpsdk.Tool{
+		Name:        mcp.ToolNamePing,
+		Description: "Probe reachability of one named server.",
+	}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, in tools.PingInput) (*mcpsdk.CallToolResult, tools.PingOutput, error) {
+		out, err := server.Runner.Ping(ctx, in)
+		if err != nil {
+			return nil, tools.PingOutput{}, err
 		}
 		return nil, out, nil
 	})
@@ -197,6 +207,32 @@ func TestServer_Status_SDKBoundary(t *testing.T) {
 	}
 	if len(out.Servers) != 1 || !out.Servers[0].Reachable {
 		t.Errorf("server probe = %+v; want one reachable row", out.Servers)
+	}
+}
+
+func TestServer_Ping_SDKBoundary(t *testing.T) {
+	t.Parallel()
+	r := newRegistryWith(t, "h1", registry.Entry{Host: "h", Port: 22, User: "u", AddedAt: time.Now()})
+	// fakeSSH returns SSHGATE_OK so the single-server probe reports reachable.
+	runner := &tools.Runner{Servers: r, Sign: &fakeSign{}, SSH: &fakeSSH{stdout: []byte("SSHGATE_OK\n")}}
+	srv := buildServer(t, runner)
+	cs, stop := connectAllTools(t, srv)
+	defer stop()
+
+	res, err := cs.CallTool(context.Background(), &mcpsdk.CallToolParams{
+		Name:      mcp.ToolNamePing,
+		Arguments: map[string]any{"alias": "h1"},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("IsError=true: %+v", res.Content)
+	}
+	var out tools.PingOutput
+	decodeStructured(t, res, &out)
+	if out.Alias != "h1" || !out.Reachable {
+		t.Errorf("out = %+v; want alias h1 reachable", out)
 	}
 }
 

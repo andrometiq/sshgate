@@ -69,6 +69,11 @@ const ToolNameListServers = "list_servers"
 // Claude Code's surface name is "mcp__sshgate__status".
 const ToolNameStatus = "status"
 
+// ToolNamePing probes reachability of ONE named server (READ-class, no
+// approval, no signer) — a targeted alternative to status's fan-out.
+// Claude Code's surface name is "mcp__sshgate__ping".
+const ToolNamePing = "ping"
+
 // ToolNameRevokeServer tears down a registered server: signs and ships
 // SSHGATE_REVOKE, lets gate strip itself from authorized_keys and
 // remove ~/.sshgate-gate/, then removes the alias from the registry. Claude
@@ -189,7 +194,7 @@ func (s *Server) Serve(ctx context.Context, in io.Reader, out io.Writer) error {
 	// the whole batch of writes (reads stay direct).
 	mcpsdk.AddTool(server, &mcpsdk.Tool{
 		Name:        ToolNameRunBatch,
-		Description: "Run a sequence of shell commands on a registered server. Reads run directly; all writes are bundled into a single approval (one Telegram tap). stop_on_error defaults to true.",
+		Description: "Run a sequence of shell commands on a registered server. Reads run directly; all writes are bundled into a single approval (one Telegram tap). stop_on_error defaults to true for a batch containing any write (ordering matters) and to continue-on-error for an all-read batch; set stop_on_error explicitly to override.",
 	}, s.runBatchHandler)
 
 	// Provisioning is intentionally NOT exposed to the agent: server
@@ -206,8 +211,16 @@ func (s *Server) Serve(ctx context.Context, in io.Reader, out io.Writer) error {
 	// status — health probe of signer and every registered server.
 	mcpsdk.AddTool(server, &mcpsdk.Tool{
 		Name:        ToolNameStatus,
-		Description: "Report signer-socket reachability and per-server SSH reachability (via the SSHGATE_OK probe). Server probes run in parallel with a short timeout.",
+		Description: "Report signer-socket reachability and per-server SSH reachability (via the SSHGATE_OK probe), plus each server's read_only tier. Server probes run in parallel with a short timeout.",
 	}, s.statusHandler)
+
+	// ping — reachability of ONE named server. READ-class by construction
+	// (empty SSHGATE_OK probe, no signer, no approval, no tap); use it to
+	// check a single box without status's fan-out across every server.
+	mcpsdk.AddTool(server, &mcpsdk.Tool{
+		Name:        ToolNamePing,
+		Description: "Check whether ONE registered server is reachable (single SSH dial + SSHGATE_OK probe, short 5s timeout). Read-only: runs immediately, never requests approval and never involves the signer. Unlike status, it probes only the alias you name instead of fanning out across every server. Returns reachability, round-trip ms, and the server's read_only tier.",
+	}, s.pingHandler)
 
 	// revoke_server — signs SSHGATE_REVOKE, ships it, removes the alias
 	// from the registry once gate confirms the on-host teardown.
@@ -676,6 +689,32 @@ func (s *Server) statusHandler(ctx context.Context, _ *mcpsdk.CallToolRequest, i
 	}, out, nil
 }
 
+// pingHandler is the typed handler for sshgate.ping. Only a true
+// configuration error (nil dependency) or an unknown alias surfaces as an
+// MCP tool error; a reachable/unreachable verdict for a known alias is
+// carried in the structured PingOutput. It is READ-class: the handler never
+// engages the signer and never solicits an approval.
+func (s *Server) pingHandler(ctx context.Context, _ *mcpsdk.CallToolRequest, in tools.PingInput) (*mcpsdk.CallToolResult, tools.PingOutput, error) {
+	out, err := s.Runner.Ping(ctx, in)
+	if err != nil {
+		s.Logger.Printf("ping alias=%s err=%v", in.Alias, err)
+		return nil, tools.PingOutput{}, err
+	}
+	s.Logger.Printf("ping alias=%s reachable=%v ping_ms=%d", in.Alias, out.Reachable, out.PingMS)
+	return &mcpsdk.CallToolResult{
+		Content: []mcpsdk.Content{&mcpsdk.TextContent{Text: formatPingSummary(out)}},
+	}, out, nil
+}
+
+// formatPingSummary renders a one-line human summary for the fallback
+// TextContent block. Structured content carries the full PingOutput.
+func formatPingSummary(out tools.PingOutput) string {
+	if out.Reachable {
+		return fmt.Sprintf("%s: ok %dms%s", out.Alias, out.PingMS, tierTag(out.ReadOnly))
+	}
+	return fmt.Sprintf("%s: DOWN %s%s", out.Alias, out.Error, tierTag(out.ReadOnly))
+}
+
 // formatListServersSummary returns a compact human listing for the
 // fallback TextContent block. Structured content carries the full
 // ListServersOutput.
@@ -686,7 +725,7 @@ func formatListServersSummary(out tools.ListServersOutput) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "%d server(s):", out.Total)
 	for _, s := range out.Servers {
-		fmt.Fprintf(&b, "\n  %s  %s@%s:%d", s.Alias, s.User, s.Host, s.Port)
+		fmt.Fprintf(&b, "\n  %s  %s@%s:%d%s", s.Alias, s.User, s.Host, s.Port, tierTag(s.ReadOnly))
 	}
 	return b.String()
 }
@@ -714,12 +753,23 @@ func formatStatusSummary(out tools.StatusOutput) string {
 	}
 	for _, sv := range out.Servers {
 		if sv.Reachable {
-			fmt.Fprintf(&b, "\n  %s: ok %dms", sv.Alias, sv.PingMS)
+			fmt.Fprintf(&b, "\n  %s: ok %dms%s", sv.Alias, sv.PingMS, tierTag(sv.ReadOnly))
 		} else {
-			fmt.Fprintf(&b, "\n  %s: DOWN %s", sv.Alias, sv.Error)
+			fmt.Fprintf(&b, "\n  %s: DOWN %s%s", sv.Alias, sv.Error, tierTag(sv.ReadOnly))
 		}
 	}
 	return b.String()
+}
+
+// tierTag returns " [read-only]" for a Tier-1 server and "" for a
+// signed-write one, so the human-readable fallback summaries surface a
+// server's tier alongside its reachability (W3-7). The structured
+// output carries the same information as the read_only boolean.
+func tierTag(readOnly bool) string {
+	if readOnly {
+		return " [read-only]"
+	}
+	return ""
 }
 
 // readerCloser / writerCloser adapt plain io.Reader / io.Writer to

@@ -249,9 +249,9 @@ func TestServer_CallToolUnknownAliasReturnsToolError(t *testing.T) {
 
 // TestServe_RegistersExactlyAgentTools drives the REAL Serve() over a
 // pair of pipes and asserts the production tool registration is exactly
-// the agent-facing set {run, run_batch, list_servers, status,
-// revoke_server, request_grant, revoke_grant, list_grants, update_gate}
-// — and, critically, that add_server is NOT among them.
+// the agent-facing set {run, run_batch, list_servers, status, ping,
+// revoke_server, request_grant, revoke_grant, list_grants, update_gate,
+// transfer} — and, critically, that add_server is NOT among them.
 // Provisioning was removed from the agent surface (it is now the
 // human-only `sshgate` CLI); this test is the regression guard that the
 // MCP server never re-exposes it.
@@ -298,6 +298,7 @@ func TestServe_RegistersExactlyAgentTools(t *testing.T) {
 		mcp.ToolNameRunBatch:     true,
 		mcp.ToolNameListServers:  true,
 		mcp.ToolNameStatus:       true,
+		mcp.ToolNamePing:         true,
 		mcp.ToolNameRevokeServer: true,
 		mcp.ToolNameRequestGrant: true,
 		mcp.ToolNameRevokeGrant:  true,

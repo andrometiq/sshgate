@@ -369,7 +369,11 @@ func TestRunBatch_WriteUnreachable(t *testing.T) {
 	}
 }
 
-func TestRunBatch_StopOnError_DefaultAbortsSequence(t *testing.T) {
+// TestRunBatch_AllReadDefault_ContinuesOnError pins the W5-12 default: an
+// ALL-READ batch with no explicit stop_on_error CONTINUES past a non-zero
+// exit (reads are independent diagnostics that legitimately fail — an absent
+// file, an empty crontab — so one failure must not skip the rest).
+func TestRunBatch_AllReadDefault_ContinuesOnError(t *testing.T) {
 	t.Parallel()
 	r := newRegistryForBatch(t)
 	sign := &batchSign{}
@@ -384,7 +388,7 @@ func TestRunBatch_StopOnError_DefaultAbortsSequence(t *testing.T) {
 	runner := &tools.Runner{Servers: r, Sign: sign, SSH: ssh}
 
 	// Use only read commands so failure semantics aren't tangled with
-	// approvals.
+	// approvals; leave stop_on_error nil to exercise the read-batch default.
 	out, err := runner.RunBatch(context.Background(), tools.RunBatchInput{
 		Alias:    "h1",
 		Commands: []string{"uptime", "grep -r 'false-cmd' /etc", "df -h"},
@@ -395,17 +399,121 @@ func TestRunBatch_StopOnError_DefaultAbortsSequence(t *testing.T) {
 	if len(out.Results) != 3 {
 		t.Fatalf("Results=%d; want 3", len(out.Results))
 	}
-	if out.Results[0].ExitCode != 0 {
-		t.Errorf("Results[0].ExitCode=%d; want 0", out.Results[0].ExitCode)
-	}
 	if out.Results[1].ExitCode != 1 {
 		t.Errorf("Results[1].ExitCode=%d; want 1 (the failing command)", out.Results[1].ExitCode)
 	}
+	// The KEY assertion: the third read still runs — no skip on an all-read
+	// batch with the default.
+	for i, res := range out.Results {
+		if res.Skipped {
+			t.Errorf("Results[%d].Skipped=true; want false (all-read default is continue-on-error)", i)
+		}
+	}
+	if len(ssh.calls) != 3 {
+		t.Errorf("ssh.calls=%d; want 3 (all reads run on the all-read default)", len(ssh.calls))
+	}
+}
+
+// TestRunBatch_AllReadExplicitStopOnError_Aborts pins that an EXPLICIT
+// stop_on_error=true still aborts an all-read batch (the caller's explicit
+// value always wins over the read-batch default).
+func TestRunBatch_AllReadExplicitStopOnError_Aborts(t *testing.T) {
+	t.Parallel()
+	r := newRegistryForBatch(t)
+	sign := &batchSign{}
+	ssh := &batchSSH{
+		byContains: []sshResponse{
+			{match: "uptime", exit: 0, stdout: "up"},
+			{match: "false-cmd", exit: 1, stderr: "boom"},
+			{match: "df -h", exit: 0, stdout: "ok"},
+		},
+	}
+	runner := &tools.Runner{Servers: r, Sign: sign, SSH: ssh}
+
+	stop := true
+	out, err := runner.RunBatch(context.Background(), tools.RunBatchInput{
+		Alias:       "h1",
+		Commands:    []string{"uptime", "grep -r 'false-cmd' /etc", "df -h"},
+		StopOnError: &stop,
+	})
+	if err != nil {
+		t.Fatalf("RunBatch: %v", err)
+	}
 	if !out.Results[2].Skipped {
-		t.Error("Results[2].Skipped=false; want true on stop_on_error default")
+		t.Error("Results[2].Skipped=false; want true (explicit stop_on_error=true aborts)")
 	}
 	if len(ssh.calls) != 2 {
-		t.Errorf("ssh.calls=%d; want 2 (third should be skipped)", len(ssh.calls))
+		t.Errorf("ssh.calls=%d; want 2 (third skipped on explicit stop)", len(ssh.calls))
+	}
+}
+
+// TestRunBatch_WriteBatchDefault_AbortsOnError pins that a batch containing
+// ANY write keeps the stop-on-error default (write ordering matters): with
+// stop_on_error nil, a non-zero write aborts the remainder.
+func TestRunBatch_WriteBatchDefault_AbortsOnError(t *testing.T) {
+	t.Parallel()
+	r := newRegistryForBatch(t)
+	writes := []string{"rm /tmp/a"}
+	sign := &batchSign{signed: makeSignedFor(t, writes)}
+	// The write exits non-zero; the trailing read must be skipped.
+	ssh := &batchSSH{
+		byContains: []sshResponse{
+			{match: "rm /tmp/a", exit: 1, stderr: "boom"},
+			{match: "df -h", exit: 0, stdout: "ok"},
+		},
+	}
+	runner := &tools.Runner{Servers: r, Sign: sign, SSH: ssh}
+
+	out, err := runner.RunBatch(context.Background(), tools.RunBatchInput{
+		Alias:    "h1",
+		Commands: []string{"rm /tmp/a", "df -h"}, // write + read → default stop
+	})
+	if err != nil {
+		t.Fatalf("RunBatch: %v", err)
+	}
+	if out.Results[0].Kind != "write" {
+		t.Fatalf("Results[0].Kind=%q; want write", out.Results[0].Kind)
+	}
+	if !out.Results[1].Skipped {
+		t.Error("Results[1].Skipped=false; want true (write batch defaults to stop-on-error)")
+	}
+	if len(ssh.calls) != 1 {
+		t.Errorf("ssh.calls=%d; want 1 (read skipped after the failing write)", len(ssh.calls))
+	}
+}
+
+// TestRunBatch_WriteBatchExplicitStopFalse_RunsAll pins that an explicit
+// stop_on_error=false runs a write batch to completion despite a non-zero
+// exit (explicit override wins over the write-batch default).
+func TestRunBatch_WriteBatchExplicitStopFalse_RunsAll(t *testing.T) {
+	t.Parallel()
+	r := newRegistryForBatch(t)
+	writes := []string{"rm /tmp/a"}
+	sign := &batchSign{signed: makeSignedFor(t, writes)}
+	ssh := &batchSSH{
+		byContains: []sshResponse{
+			{match: "rm /tmp/a", exit: 1, stderr: "boom"},
+			{match: "df -h", exit: 0, stdout: "ok"},
+		},
+	}
+	runner := &tools.Runner{Servers: r, Sign: sign, SSH: ssh}
+
+	stop := false
+	out, err := runner.RunBatch(context.Background(), tools.RunBatchInput{
+		Alias:       "h1",
+		Commands:    []string{"rm /tmp/a", "df -h"},
+		StopOnError: &stop,
+	})
+	if err != nil {
+		t.Fatalf("RunBatch: %v", err)
+	}
+	for i, res := range out.Results {
+		if res.Skipped {
+			t.Errorf("Results[%d].Skipped=true; want false (explicit stop_on_error=false runs all)", i)
+		}
+	}
+	if len(ssh.calls) != 2 {
+		t.Errorf("ssh.calls=%d; want 2 (both run despite the failing write)", len(ssh.calls))
 	}
 }
 
