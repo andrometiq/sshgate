@@ -515,7 +515,7 @@ func gitRule(args []string) Kind {
 	}
 	sub := firstNonFlag(args)
 	switch sub {
-	case "status", "log", "diff", "show",
+	case "status",
 		"blame", "describe",
 		"rev-parse", "ls-files", "ls-remote", "shortlog",
 		// cat-file --textconv (and pre-existing `git log --ext-diff`) can exec
@@ -526,6 +526,8 @@ func gitRule(args []string) Kind {
 		// (Mi4). NOTE that `grep` is deliberately NOT in this plain-reader list.
 		"cat-file", "show-ref", "for-each-ref", "count-objects":
 		return KindRead
+	case "log", "diff", "show":
+		return gitDiffKind(args) // SEC-2 — --output writes/clobbers a file
 	case "grep":
 		return gitGrepKind(args) // C2 — pager/-O exec guard
 	case "tag":
@@ -544,6 +546,23 @@ func gitRule(args []string) Kind {
 		return gitConfigKind(args)
 	}
 	return KindWrite
+}
+
+// gitDiffKind: `git diff` / `git show` / `git log` are plain readers, but the
+// long option `--output=FILE` (or `--output FILE`) makes git-diff WRITE the diff
+// to that path — create/truncate/clobber, content substantially repo-controlled.
+// SEC-2 (2026-07-10): these three had no arg rule, so `git diff --output=…`,
+// `git show --output=X`, `git log -p --output=X` classified READ and ran
+// UNSIGNED on a Tier-1 host — an arbitrary-file write/clobber/truncate primitive.
+// Route any `--output`/`--output=` to WRITE; leave `-O`/`-O<file>` alone (that is
+// git-diff's `--orderfile`, a pure read). Everything else stays READ.
+func gitDiffKind(args []string) Kind {
+	for _, a := range args {
+		if a == "--output" || strings.HasPrefix(a, "--output=") {
+			return KindWrite
+		}
+	}
+	return KindRead
 }
 
 // gitGrepKind: `git grep <pattern>` reads, but -O / --open-files-in-pager
@@ -763,12 +782,21 @@ func gitStashKind(args []string) Kind {
 // output modifiers (--show-origin/--show-scope/--name-only/--type/--default)
 // are NOT reads by themselves — they modify whichever operation follows, so
 // they never flip the class in either direction. A VALUE that itself looks like
-// a flag (`git config alias.x '!touch x'`) also cannot flip it: the positional
-// KEY already forces WRITE, and no value can introduce a query flag.
+// a flag (`git config alias.x '!touch x'`) also cannot flip it: the second
+// positional already forces WRITE, and no value can introduce a query flag.
+//
+// C3 (2026-07-10): the get grammar `git config <key>` (exactly ONE positional
+// KEY, no write flag, no mutating verb) PRINTS the value — a read — so it is
+// classified READ rather than taxed with an approval tap. WRITE is retained for
+// `<key> <value>` (2+ positionals), any mutating flag, and — critically — the
+// new-grammar bare subcommand verbs used positionally (`git config edit` opens
+// the editor; `git config set <k> <v>` mutates). Those verbs are matched even
+// bare (no `--`), so relaxing single-KEY get does NOT reopen an exec/mutate path.
+// `git config get <key>` (2 positionals) stays WRITE — fail-closed, acceptable.
 func gitConfigKind(args []string) Kind {
 	seenConfig := false
-	hasRead := false       // an explicit query flag was seen
-	hasPositional := false // a non-flag KEY/VALUE (positional set form)
+	hasRead := false // an explicit query flag was seen
+	positionals := 0 // count of non-flag KEY/VALUE tokens after "config"
 	for _, a := range args {
 		if !seenConfig {
 			// Skip any leading git-level flags (e.g. --no-pager) up to the
@@ -798,18 +826,32 @@ func gitConfigKind(args []string) Kind {
 			hasRead = true
 			continue
 		}
-		// A non-flag token after "config", with no query flag governing it, is
-		// a KEY (or VALUE) of a set — the positional-set WRITE form.
+		// A non-flag token after "config".
 		if a != "" && !strings.HasPrefix(a, "-") {
-			hasPositional = true
+			// New-grammar bare subcommand verbs (git 2.46+): `edit` opens the
+			// editor (exec), `set`/`unset`/`add`/… mutate. We can't know the
+			// remote git version, so any of these used positionally is WRITE —
+			// keeping the single-KEY get relaxation below from reopening a
+			// bypass. (`get`/`list` are pure reads and fall through to the
+			// positional count, so `git config list` stays READ.)
+			switch a {
+			case "set", "unset", "unset-all", "add", "replace-all",
+				"remove-section", "rename-section", "edit":
+				return KindWrite
+			}
+			positionals++
 		}
 	}
 	if hasRead {
 		return KindRead
 	}
-	if hasPositional {
-		return KindWrite // positional KEY / KEY VALUE set — fail closed
+	// The get grammar prints a value: `git config <key>` (exactly one
+	// positional KEY). Two or more positionals (`<key> <value>` set, or
+	// `git config get <key>`) mutate or are ambiguous → fail closed to WRITE.
+	if positionals >= 2 {
+		return KindWrite
 	}
-	// Bare `git config` (usage) or a query-modifier-only form with no key.
+	// Zero positionals (bare `git config` usage / query-modifier-only) or a
+	// single-KEY get — both READ.
 	return KindRead
 }

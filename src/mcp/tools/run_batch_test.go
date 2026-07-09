@@ -517,6 +517,99 @@ func TestRunBatch_WriteBatchExplicitStopFalse_RunsAll(t *testing.T) {
 	}
 }
 
+// TestRunBatch_MixedReadFailsDefault_WriteStillRuns pins the C2 fix: in a
+// write-containing batch under the class-default stop_on_error (nil), a
+// leading READ that exits non-zero (e.g. `test -f` on an absent path — a
+// legitimate diagnostic failure) must NOT abort the sequence, so the
+// already-approved WRITE that follows still runs. Only a WRITE's non-zero
+// exit aborts under the default.
+func TestRunBatch_MixedReadFailsDefault_WriteStillRuns(t *testing.T) {
+	t.Parallel()
+	r := newRegistryForBatch(t)
+	writes := []string{"systemctl restart nginx"}
+	sign := &batchSign{signed: makeSignedFor(t, writes)}
+	// The leading read exits 1 (absent file); the write exits 0.
+	ssh := &batchSSH{
+		byContains: []sshResponse{
+			{match: "test -f", exit: 1, stderr: "No such file or directory"},
+			{match: "systemctl restart", exit: 0, stdout: "restarted"},
+		},
+	}
+	runner := &tools.Runner{Servers: r, Sign: sign, SSH: ssh}
+
+	out, err := runner.RunBatch(context.Background(), tools.RunBatchInput{
+		Alias:    "h1",
+		Commands: []string{"test -f /etc/nginx/nginx.conf", "systemctl restart nginx"},
+		// stop_on_error nil → class-default (write batch = stop-on-error),
+		// but a READ's non-zero exit must not trigger it.
+	})
+	if err != nil {
+		t.Fatalf("RunBatch: %v", err)
+	}
+	if len(out.Results) != 2 {
+		t.Fatalf("Results=%d; want 2", len(out.Results))
+	}
+	if out.Results[0].Kind != "read" || out.Results[0].ExitCode != 1 {
+		t.Errorf("Results[0]=%+v; want a read that exited 1", out.Results[0])
+	}
+	if out.Results[1].Kind != "write" {
+		t.Fatalf("Results[1].Kind=%q; want write", out.Results[1].Kind)
+	}
+	// The KEY assertion: the approved write is NOT skipped by the read's
+	// benign non-zero exit.
+	if out.Results[1].Skipped {
+		t.Error("Results[1].Skipped=true; want false (a read's non-zero exit must not skip the approved write under the default)")
+	}
+	if out.Results[1].Stdout != "restarted" {
+		t.Errorf("Results[1].Stdout=%q; want restarted (the write ran)", out.Results[1].Stdout)
+	}
+	if len(ssh.calls) != 2 {
+		t.Errorf("ssh.calls=%d; want 2 (both the failing read and the write run)", len(ssh.calls))
+	}
+	if !out.Approved {
+		t.Error("Approved=false; want true (the write was approved and ran)")
+	}
+}
+
+// TestRunBatch_MixedReadFailsExplicitStop_Aborts pins the other half of the
+// C2 fix: when the caller EXPLICITLY sets stop_on_error=true, a leading
+// READ's non-zero exit still aborts the batch (explicit wins), so the write
+// is skipped.
+func TestRunBatch_MixedReadFailsExplicitStop_Aborts(t *testing.T) {
+	t.Parallel()
+	r := newRegistryForBatch(t)
+	writes := []string{"systemctl restart nginx"}
+	sign := &batchSign{signed: makeSignedFor(t, writes)}
+	ssh := &batchSSH{
+		byContains: []sshResponse{
+			{match: "test -f", exit: 1, stderr: "No such file or directory"},
+			{match: "systemctl restart", exit: 0, stdout: "restarted"},
+		},
+	}
+	runner := &tools.Runner{Servers: r, Sign: sign, SSH: ssh}
+
+	stop := true
+	out, err := runner.RunBatch(context.Background(), tools.RunBatchInput{
+		Alias:       "h1",
+		Commands:    []string{"test -f /etc/nginx/nginx.conf", "systemctl restart nginx"},
+		StopOnError: &stop,
+	})
+	if err != nil {
+		t.Fatalf("RunBatch: %v", err)
+	}
+	if out.Results[0].ExitCode != 1 {
+		t.Errorf("Results[0].ExitCode=%d; want 1", out.Results[0].ExitCode)
+	}
+	// Explicit stop_on_error=true aborts on ANY non-zero exit, including a
+	// read's — so the write is skipped.
+	if !out.Results[1].Skipped {
+		t.Error("Results[1].Skipped=false; want true (explicit stop_on_error=true aborts on the read's non-zero exit)")
+	}
+	if len(ssh.calls) != 1 {
+		t.Errorf("ssh.calls=%d; want 1 (write skipped after the failing read under explicit stop)", len(ssh.calls))
+	}
+}
+
 func TestRunBatch_StopOnErrorFalse_RunsAll(t *testing.T) {
 	t.Parallel()
 	r := newRegistryForBatch(t)

@@ -85,8 +85,14 @@ repo page trustworthy (CI + honest docs).
   `no-X11-forwarding`, and `no-agent-forwarding`. Without it, a third-party SSH
   client holding the SSHGate key could request a PTY and turn a read-allowlisted
   pager/editor (`less`, `man`, `vi`) interactive for a `!sh` escape that bypasses
-  the gate. New provisions get it for free; already-provisioned hosts get it by
-  re-emitting the `authorized_keys` line.
+  the gate. New provisions get `no-pty` automatically. **Already-provisioned
+  hosts keep their old (PTY-permitting) `authorized_keys` line until they are
+  manually re-provisioned** — a bare `sshgate add` on an already-gated host is
+  idempotent and does NOT rewrite the forced-command line, so it does not apply
+  `no-pty` to an existing host. To harden an existing host, de-provision it by
+  hand (strip SSHGate's forced `command="..."` line from the host's
+  `~/.ssh/authorized_keys` so the gate stops answering, and drop the alias from
+  `~/.config/sshgate/servers.json`), then re-run `sshgate add`.
 
 ## [1.4.0]
 

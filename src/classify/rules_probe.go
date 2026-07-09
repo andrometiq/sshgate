@@ -50,8 +50,12 @@ func crontabRule(args []string) Kind {
 }
 
 // sysctlRule: READ for queries (`sysctl -a`, `sysctl -n key`, `sysctl key`).
-// WRITE for `-w`, `-p`/`--load`, or any `key=value` positional (a bare
-// assignment writes too).
+// WRITE for `-w`, `-p`/`--load`, `--system`/`-S` (re-applies every sysctl
+// config file to the running kernel), `-f FILE` (procps' alias for --load;
+// `-f -` applies stdin), or any `key=value` positional (a bare assignment
+// writes too). SEC-3 (2026-07-10): `sysctl --system`/`-f`/`-S` were missing
+// from the WRITE arm, so they classified READ and ran UNSIGNED on a Tier-1
+// host — a direct tier-boundary bypass. No benign sysctl READ uses these.
 func sysctlRule(args []string) Kind {
 	for _, a := range args {
 		if a == "-w" || matchesAbbrev(a, "write") {
@@ -59,6 +63,9 @@ func sysctlRule(args []string) Kind {
 		}
 		if a == "-p" || matchesAbbrev(a, "load") {
 			return KindWrite
+		}
+		if matchesAbbrev(a, "system") || a == "-S" || a == "-f" {
+			return KindWrite // --system / -S re-apply configs; -f applies a file/stdin
 		}
 		if len(a) > 0 && a[0] != '-' && strings.IndexByte(a, '=') >= 0 {
 			return KindWrite
@@ -91,15 +98,44 @@ func mountRule(args []string) Kind {
 }
 
 // commandRule: the `command` builtin. READ only for the describe probes
-// `-v`/`-V`. Any other form RUNS the wrapped command → WRITE (fail-closed; do
-// NOT recurse — `command` bypasses functions/aliases and `-p` still executes).
+// `command -v NAME` / `command -V NAME`, where `-v`/`-V` is command's OWN
+// option in the LEADING flag run. Any WRAPPED command name (the first non-flag
+// token) means `command` RUNS it → WRITE (fail-closed; do NOT recurse —
+// `command` bypasses functions/aliases and `-p` still executes).
+//
+// SEC-1 (2026-07-10): the old rule scanned ALL args for `-v`/`-V`, so
+// `command rm -v -rf /srv/data`, `command sh -v -c '…'`, `command umount -v
+// /mnt` classified READ — a `-v`/`-V` buried in the WRAPPED command's args was
+// mistaken for command's describe flag, executing arbitrary UNSIGNED commands
+// on a Tier-1 host. Fix: stop scanning at the first non-flag token; a `-v`/`-V`
+// is READ only when it appears BEFORE any wrapped command name.
 func commandRule(args []string) Kind {
 	for _, a := range args {
 		if a == "-v" || a == "-V" {
-			return KindRead
+			return KindRead // command's own describe flag (leading flag run)
+		}
+		if len(a) == 0 || a[0] != '-' {
+			return KindWrite // first non-flag token = wrapped command → runs it
+		}
+		// Some other leading flag (e.g. `-p`, which still EXECUTES with the
+		// default PATH): keep scanning the leading flag run for -v/-V.
+	}
+	return KindWrite // no describe flag and no wrapped command → fail closed
+}
+
+// fileRule: `file PATH` identifies a file's type (READ), but `file -C` /
+// `--compile` COMPILES a magic database to a `<name>.mgc` file on disk (a
+// write). C1 (2026-07-10): `"file": nil` was an always-READ allowlist head, so
+// `file -C` / `file -C -m X` ran UNSIGNED on a Tier-1 host and created/clobbered
+// a `.mgc` file. WRITE when `-C`/`--compile` (or a GNU abbreviation) is present;
+// else READ. Mirrors treeRule/sortRule's `-o` pattern.
+func fileRule(args []string) Kind {
+	for _, a := range args {
+		if a == "-C" || matchesAbbrev(a, "compile") {
+			return KindWrite
 		}
 	}
-	return KindWrite
+	return KindRead
 }
 
 // ulimitRule: READ for query forms (`ulimit -a`, `ulimit -n`); a bare non-flag

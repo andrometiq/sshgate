@@ -19,8 +19,12 @@ import (
 // usually matters, so aborting on the first failure is safest), while an
 // ALL-READ batch defaults to false (continue-on-error — reads are
 // independent diagnostics that legitimately exit non-zero, e.g. an absent
-// file or an empty crontab, and one failure should not skip the rest). An
-// explicit caller value always wins, in both directions.
+// file or an empty crontab, and one failure should not skip the rest).
+// Under the write-batch class-default, that same "reads legitimately fail"
+// logic applies: only a WRITE's non-zero exit aborts; a READ's non-zero exit
+// in a mixed batch does NOT skip the remaining approved writes. An explicit
+// caller value always wins, in both directions (and aborts on ANY non-zero
+// exit when set true).
 type RunBatchInput struct {
 	Alias       string   `json:"alias" jsonschema:"registered server alias"`
 	Commands    []string `json:"commands" jsonschema:"shell commands to run on the remote host, in order"`
@@ -94,6 +98,12 @@ const BatchWriteTTLSec = 60
 //     chosen by batch class: true for a batch containing any write
 //     (ordering matters), false for an all-read batch (reads are
 //     independent diagnostics). An explicit value always wins.
+//   - Under the class-default stop (a write-containing batch, stop_on_error
+//     not caller-set), only a WRITE's non-zero exit aborts the sequence: a
+//     READ inside a mixed batch legitimately exits non-zero (an absent file,
+//     an empty grep, `test -f` on a missing path) and must NOT skip the
+//     remaining, already-approved writes. An EXPLICIT stop_on_error=true
+//     aborts on ANY command's non-zero exit (explicit wins).
 //   - StopOnError=false runs every command regardless of prior exits.
 //   - Denial / timeout / unreachable: no writes run; the output has
 //     Denied=true and Reason∈{"denied","timeout","unreachable"}.
@@ -215,7 +225,8 @@ func (r *Runner) RunBatch(ctx context.Context, in RunBatchInput) (RunBatchOutput
 	// len(writeCmds)==0 is exactly "all reads". An explicit caller value
 	// always wins, in both directions.
 	stopOnError := len(writeCmds) > 0
-	if in.StopOnError != nil {
+	explicitStop := in.StopOnError != nil
+	if explicitStop {
 		stopOnError = *in.StopOnError
 	}
 
@@ -262,7 +273,17 @@ func (r *Runner) RunBatch(ctx context.Context, in RunBatchInput) (RunBatchOutput
 			}
 		}
 		if exit != 0 && stopOnError {
-			aborted = true
+			// When stop_on_error is at its class-default (not caller-set),
+			// only a WRITE's non-zero exit aborts the sequence. A READ inside
+			// a mixed batch legitimately exits non-zero (an absent file, an
+			// empty grep, a `test -f` on a missing path) and must NOT skip the
+			// remaining, already-approved writes — consistent with the all-read
+			// continue-on-error rationale (see the RunBatchInput doc). An
+			// explicit caller-set stop_on_error still applies to ANY non-zero
+			// exit (explicit wins, in both directions).
+			if explicitStop || kinds[i] == classify.KindWrite {
+				aborted = true
+			}
 		}
 	}
 	return out, nil

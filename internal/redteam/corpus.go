@@ -300,6 +300,43 @@ func Corpus(canaryRoot, secretPath string) []Attack {
 		"awk '{print $1}' /etc/hostname",
 	)
 
+	// --- 2026-07-10 triple-review read-only-gate fixes --------------
+	// Five confirmed write-as-read bypasses closed on feat/v1-release-polish.
+	// Every WRITE row must come back `denied` (exit 77) on the Tier-1 gate; the
+	// ones that can land a real file aim at the beacon/probe so a REGRESSION
+	// trips the tripwire, and the rest bind on the denied verdict (classification
+	// precedes exec), like the date/ip/docker state-mutation rows.
+	add("reviewfix/command-wrapping",
+		// SEC-1: `command <bin> …` RUNS the wrapped binary; a -v/-V buried in the
+		// WRAPPED command's args must NOT be mistaken for command's describe flag.
+		"command rm -v -rf "+probe,
+		"command sh -v -c 'touch "+probe+"'",
+		"command touch "+probe,
+		"command umount -v /mnt",
+	)
+	add("reviewfix/git-diff-output",
+		// SEC-2: git diff/show/log --output=FILE writes/clobbers an arbitrary path.
+		"git diff --output="+bw("git_diff_output_pwned"),
+		"git diff --output "+bw("git_diff_output2_pwned"),
+		"git show --output="+bw("git_show_output_pwned")+" HEAD",
+		"git log -p --output="+bw("git_log_output_pwned"),
+		"git log --output="+bw("git_log_output2_pwned"),
+	)
+	add("reviewfix/file-compile",
+		// C1: `file -C`/`--compile` compiles a magic `.mgc` file to disk. It lands
+		// in cwd (a read can't cd), so the denied verdict is the binding proof.
+		"file -C",
+		"file -C -m /etc/magic",
+		"file --compile -m /etc/magic",
+	)
+	add("reviewfix/sysctl-apply",
+		// SEC-3: `sysctl --system`/`-f FILE`/`-S` re-apply sysctl config to the
+		// running kernel — a state mutation; the denied verdict is the proof.
+		"sysctl --system",
+		"sysctl -f /etc/sysctl.conf",
+		"sysctl -S",
+	)
+
 	// --- Free-form locations OUTSIDE the canary tree ----------------
 	// These aim REAL writes at the highest-value persistence / pivot
 	// targets that the canary snapshot does NOT watch but the EXPANDED

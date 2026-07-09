@@ -450,7 +450,7 @@ var readAllowlist = map[string]argRule{
 	"head":     nil,
 	"tail":     nil,
 	"wc":       nil,
-	"file":     nil,
+	"file":     fileRule, // -C/--compile writes a .mgc file (C1)
 	"stat":     nil,
 	"readlink": nil,
 

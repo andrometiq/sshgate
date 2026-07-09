@@ -128,9 +128,12 @@ func TestClassify_LongOptionAbbreviationBypasses(t *testing.T) {
 		{"git config --list read", "git config --list", KindRead},
 		{"git config -l read", "git config -l", KindRead},
 		{"git config --global --get read", "git config --global --get user.name", KindRead},
-		// A lone positional KEY (deprecated get form) is now WRITE: fail-closed
-		// default-deny. Only an explicit --get*/--list form reads a value.
-		{"git config bare positional key is write", "git config user.name", KindWrite},
+		// C3 (2026-07-10): the single-KEY get grammar `git config <key>` PRINTS
+		// the value — a read. `<key> <value>` sets and bare mutating verbs stay
+		// WRITE (see classifier_gitconfig_test.go for the full matrix).
+		{"git config single-KEY get read", "git config user.name", KindRead},
+		{"git config KEY VALUE set stays write", "git config user.name evil", KindWrite},
+		{"git config new-grammar edit stays write", "git config edit", KindWrite},
 
 		// --- git branch ref-mutation abbreviations ---
 		{"git branch --del abbrev delete", "git branch --del foo", KindWrite},

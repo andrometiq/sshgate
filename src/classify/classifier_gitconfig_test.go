@@ -10,9 +10,13 @@ import "testing"
 // later `git <alias>` runs. The old gitConfigKind detected only write *flags*
 // (--unset/--add/…), so the positional-set form fell through to READ and ran
 // UNSIGNED on a Tier-1 read-only server. The fix classifies by form and fails
-// closed: READ only for explicit query forms; WRITE for every set/mutate/unknown
-// form. Every WRITE row below is a set/mutation that MUST require an approval
-// tap; every READ row is a non-regression guard that queries stay tap-free.
+// closed: WRITE for every set/mutate/unknown/exec form. READ is granted to
+// explicit query forms AND (C3, 2026-07-10) the single-KEY get grammar
+// `git config <key>`, which only prints a value — but `<key> <value>` sets,
+// mutating flags, and the new-grammar bare verbs (`edit`/`set`/`unset`/…) all
+// stay WRITE. Every WRITE row below is a set/mutation/exec that MUST require an
+// approval tap; every READ row is a non-regression guard that queries stay
+// tap-free.
 func TestClassify_GitConfigForms(t *testing.T) {
 	cases := []struct {
 		name string
@@ -31,12 +35,18 @@ func TestClassify_GitConfigForms(t *testing.T) {
 		{"global positional set", "git config --global user.email a@b.c", KindWrite},
 		{"file positional set", "git config -f /tmp/cfg k v", KindWrite},
 		// Extra fail-closed guards.
-		{"lone positional key (deprecated get) is write", "git config user.name", KindWrite},
 		{"unset-all", "git config --unset-all core.x", KindWrite},
 		{"rename-section", "git config --rename-section old new", KindWrite},
 		{"value that looks like a flag stays write", "git config alias.x '!touch x'", KindWrite},
 		{"--file long form positional set", "git config --file /tmp/cfg k v", KindWrite},
 		{"system positional set", "git config --system user.name evil", KindWrite},
+		// C3 (2026-07-10): the single-KEY get form is now READ, but every WRITE
+		// must stay WRITE. New-grammar bare subcommand verbs are the sharp edge:
+		{"new-grammar edit opens editor (exec)", "git config edit", KindWrite},
+		{"new-grammar bare set verb", "git config set user.name evil", KindWrite},
+		{"new-grammar bare unset verb", "git config unset user.name", KindWrite},
+		{"new-grammar get KEY (2 positionals) fail-closed", "git config get user.name", KindWrite},
+		{"scoped edit still write", "git config --global edit", KindWrite},
 
 		// --- READ: explicit query forms only ---
 		{"--get", "git config --get user.name", KindRead},
@@ -46,6 +56,11 @@ func TestClassify_GitConfigForms(t *testing.T) {
 		{"--global --get", "git config --global --get user.name", KindRead},
 		{"--get-all", "git config --get-all remote.origin.url", KindRead},
 		{"bare git config", "git config", KindRead},
+		// C3: single-KEY get grammar prints the value — a common daily read.
+		{"single-KEY get user.name", "git config user.name", KindRead},
+		{"single-KEY get user.email", "git config user.email", KindRead},
+		{"scoped single-KEY get", "git config --global user.name", KindRead},
+		{"new-grammar bare list verb read", "git config list", KindRead},
 		// Modifiers on a query stay read.
 		{"--show-origin --get read", "git config --show-origin --get user.name", KindRead},
 		{"--get-urlmatch read", "git config --get-urlmatch http.https://x.y", KindRead},
