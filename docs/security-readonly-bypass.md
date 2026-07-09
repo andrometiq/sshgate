@@ -53,7 +53,7 @@ The single most useful insight from the OpenClaw arxiv paper [3, 4]: "The exec a
 - **Known bypass categories:**
   1. **CVE-2017-8386** — `git-shell` could be coerced to run `git ... --help`, which spawned `man` → `less` → interactive `!sh`. [5, 6] Mitigation: disable PTY in sshd (`no-pty`).
   2. **Argument-injection via `--upload-pack=<cmd>`** in older git clients on the server side (paired vuln).
-- **Lessons for SSHGate:** SSHGate's `authorized_keys` correctly forces `no-pty,no-port-forwarding,no-X11-forwarding,no-agent-forwarding` (per S6 of the existing audit). **Verify `no-pty` is on every key entry** — without it, even `less` of a large file goes interactive and `!sh` opens a shell. The audit S8 mentions `no-port-forwarding,no-X11-forwarding,no-agent-forwarding` but not `no-pty`. Confirm in `src/mcp/tools/add_server.go`.
+- **Lessons for SSHGate:** SSHGate's `authorized_keys` forces `no-pty,no-port-forwarding,no-X11-forwarding,no-agent-forwarding` on every provisioned key — `no-pty` is emitted by `commandForcingFmt` in `src/mcp/tools/authorizedkeys.go`, so a classified-read pager (`less` of a large file, `man`, `git log`) can never allocate a TTY to go interactive and open `!sh`. (The template's option list is golden-pinned by a test so `no-pty` cannot be silently dropped.)
 
 ### Tool: OpenClaw exec policy engine
 - **What it does:** Auto-approve allowlist for LLM-driven shell commands. Same shape as SSHGate's classifier: read-by-default-allowed, write-needs-approval. Production-deployed by ~the entire personal-AI-agent ecosystem in 2026.
@@ -111,7 +111,7 @@ For each row: **status** = COVERED / VULNERABLE / PARTIAL, with the citation in 
     - `GIT_EXTERNAL_DIFF=$'\\x73h\\x20-c\\x20rm /tmp/x' git log -p HEAD` — git's diff machinery forks the value as the diff driver. Classifier sees `git log -p HEAD` (read) → executes; shell honors GIT_EXTERNAL_DIFF → RCE. **No filesystem write needed prior.**
     - `GIT_SSH_COMMAND='sh -c "rm /tmp/x"' git fetch origin` — `git fetch` is currently classified as **WRITE** (not in the gitRule read list), so this path is safe. But `git ls-remote` is **READ** in the classifier (gitRule, line 559). `GIT_SSH_COMMAND='sh -c "id>/tmp/p"' git ls-remote origin` → classifier says read, git forks the SSH command → **RCE.** [Verified by reading classifier.go:556-561.]
     - `PAGER='sh -c "id"' git log` — classifier sees git log = read; git forks PAGER for interactive output, value treated as `sh -c '...'` because git uses `system(3)`. RCE.
-    - `PAGER='sh -c "id"' systemctl status nginx` — same shape; systemctl uses pager if stdout is a tty. With `no-pty` set, stdout is NOT a tty → PAGER not invoked. **`no-pty` is load-bearing for this whole class.** Verify in add_server.go.
+    - `PAGER='sh -c "id"' systemctl status nginx` — same shape; systemctl uses pager if stdout is a tty. With `no-pty` set, stdout is NOT a tty → PAGER not invoked. **`no-pty` is load-bearing for this whole class**, and it is enforced by `commandForcingFmt` in `src/mcp/tools/authorizedkeys.go`.
     - `SYSTEMD_PAGER='sh -c "id"' SYSTEMD_PAGERSECURE=0 journalctl -u nginx` — same shape; systemd recommends "secure mode" but the default depends on `journalctl`'s detection of elevated privileges. journalctl in `no-pty` may also short-circuit, but **the attacker controls both env vars**, so they can force pager invocation if any code path inside journalctl uses it without checking ttyness. [14]
     - `IFS=$'\\n'; cmd` — IFS injection is a parameter-expansion concern, only relevant if classifier-allowed commands have unquoted variable expansions internally. Not a direct vehicle on its own; defer.
 - **Severity:** **BLOCKER for the GIT_EXTERNAL_DIFF / GIT_SSH_COMMAND / PAGER vectors.** These work today against `git log` / `git ls-remote` / any read-allowlisted command that respects pagers. No additional capabilities required beyond what the gate already grants.
@@ -137,12 +137,12 @@ For each row: **status** = COVERED / VULNERABLE / PARTIAL, with the citation in 
 - `<>` — file open for read+write. classifier walks bytes: at `<`, next byte must be `(` for it to trip substitution; `>` follows but `<` already incremented past. Then `>` triggers `hasTopLevelRedirect` → write. **COVERED.**
 
 ### B9 — Editor / pager interactive escapes (`less !sh`, `vim :!sh`, `man → less !sh`, `git log → less !sh`, `journalctl → less !sh`)
-- **Status:** **BLOCKER if PTY is enabled, MITIGATED if `no-pty` is enforced.** SSHGate's `sshgate add` provisioning writes `command="...",no-port-forwarding,no-X11-forwarding,no-agent-forwarding` (audit S8, `commandForcingFmt` in src/mcp/tools/authorizedkeys.go). **The audit does not mention `no-pty`.** Without `no-pty`, every one of these works against the v1 gate:
+- **Status:** **MITIGATED — `no-pty` is enforced.** SSHGate's `sshgate add` provisioning writes `command="...",no-pty,no-port-forwarding,no-X11-forwarding,no-agent-forwarding` (`commandForcingFmt` in src/mcp/tools/authorizedkeys.go), so the interactive-escape class below is short-circuited: no PTY is ever allocated. Were `no-pty` ever dropped from the template, every one of these would work against the gate:
   - `less /var/log/syslog` — classifier returns READ → shell runs less. On a PTY, type `v` → opens `$EDITOR` (default vim) → `:!rm /tmp/x` → RCE. Or `!sh` directly.
   - `git log` — same path, `git` pipes to less.
   - `journalctl -u nginx` — same.
   - `man <foo>` — `man` isn't allowlisted (good), but `less /usr/share/man/...gz` is. NIT.
-- **File:line:** classifier.go:309 (`less` in allowlist), and **src/mcp/tools/add_server.go (the missing `no-pty` setting)**. Need to verify by reading that file.
+- **File:line:** classifier.go:309 (`less` in allowlist), and `commandForcingFmt` in **src/mcp/tools/authorizedkeys.go** (which now emits `no-pty`, closing this class).
 
 ### B10 — Read commands that mutate state (the find / awk / sed / journalctl class)
 This is the highest-yield bypass class — every entry below is a direct, no-clever-shell, single-command path from "classified read" to "writes to disk" or "executes arbitrary command":
@@ -290,10 +290,10 @@ I'm classifying this BLOCKER because the exploit string is one-line, no chaining
 - **Exploit:** Stage a file with `output = /tmp/x`; `curl -K /tmp/config https://example.com` → classifier read; curl writes per config. Requires prior file write but those happen via the same gate.
 - **Fix sketch:** Add `-K`, `--config` to curlRule; require operand to be `-` (stdin) only, else write.
 
-### MINOR-1 — `no-pty` not explicitly documented in authorized_keys writer
-- **File:** `commandForcingFmt` in `src/mcp/tools/authorizedkeys.go` (per existing audit S8).
-- **Exploit:** Without `no-pty`, every classified-read pager (`less`, `more`, `journalctl`, `git log`, `systemctl status`) gains its interactive escape (`!sh`, `v`-to-editor). With `no-pty`, those are short-circuited.
-- **Fix sketch:** Add `no-pty` to the canonical authorized_keys line. Verify by reading the file; flagging for the auditor.
+### MINOR-1 — `no-pty` in the authorized_keys writer — RESOLVED
+- **File:** `commandForcingFmt` in `src/mcp/tools/authorizedkeys.go`.
+- **Exploit (historical):** Without `no-pty`, every classified-read pager (`less`, `more`, `journalctl`, `git log`, `systemctl status`) gained its interactive escape (`!sh`, `v`-to-editor). With `no-pty`, those are short-circuited.
+- **Resolution:** `no-pty` is now part of the canonical forced-command line and is golden-pinned by a test (`TestRewriteAuthorizedKeys_ForcedOptionsGoldenPin`) so it cannot be silently dropped.
 
 ### MINOR-2 — Read-side `find /tmp/* -fprint*` write categories not in corpus
 - **File:line:** `tests/testdata/classifier-corpus.txt`.
@@ -324,7 +324,7 @@ I'm classifying this BLOCKER because the exploit string is one-line, no chaining
 
 1. **Does the gate's `/bin/sh` ever symlink to bash?** On Debian/Ubuntu it's dash; on RHEL it's bash. Bash in `sh` mode honors `ENV=$file` which adds another RCE-via-env vector (covered by BLOCKER-3's fix). Confirm on the install target distro mix.
 2. **Does sshd `AcceptEnv` default block all client env?** Default is empty (block); but the install script doesn't explicitly set it. Verify by reading the install scripts.
-3. **`no-pty` audit**: the follow-up auditor should verify the canonical `command="..."` line in `src/mcp/tools/add_server.go` includes `no-pty` and reject any provisioning flow that writes a line without it. MINOR-1 hinges on this.
+3. **`no-pty` audit** — RESOLVED: the canonical `command="..."` line (`commandForcingFmt` in `src/mcp/tools/authorizedkeys.go`) now includes `no-pty`, golden-pinned by a test so a provisioning flow can never emit a line without it. MINOR-1 closed.
 4. **`sigwire` payload size limits / canonical JSON re-marshaling determinism.** Out-of-scope here but: `json.Marshal(payload)` (verify.go:42) round-trips through Go's encoder. If a future Go version changes encoder behavior (e.g. omitempty handling, map ordering, escape policy), signatures stop verifying. This is unrelated to this research's classifier-bypass scope but worth raising.
 5. **Are there other Linux tools in the allowlist with an "exec on read" hidden feature that I haven't caught?** Candidates to audit: `wc -L --files0-from=...`, `du --files0-from=...`, `find ... -newer`, `dig +sigchase` (DNS exec hooks), `lsof` (none known). The exhaustive sweep needs a per-binary read of GTFOBins + manpage.
 6. **Carriage return + line-continuation inside SSH_ORIGINAL_COMMAND**: did not exhaustively test what happens when the classified line ends with `\` and continues on the next "line" (sshd typically joins to one line, but `tr` and quoting can re-introduce). OpenClaw's line-continuation CVE [3, 4] suggests this surface is non-empty; corpus needs coverage.

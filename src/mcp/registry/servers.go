@@ -35,10 +35,13 @@ type Entry struct {
 	// mode (no gate.pub pushed, no signer). Writes to a ReadOnly
 	// server are denied at the gate, so the run/run_batch paths
 	// short-circuit before soliciting a wasted Telegram approval.
-	// To move a read-only server to signed-write a human revokes it
-	// (/sshgate:revoke) and re-provisions with `sshgate add` (no
-	// --read-only); an in-place upgrade was rejected for security
-	// (roadmap #17, redefined) — re-tiering stays revoke + re-provision.
+	// To move a read-only server to signed-write a human de-provisions
+	// it by hand — on the host, swaps SSHGate's forced command="..." line
+	// back to the plain `sshgate pubkey` line and drops the alias from this
+	// registry — then re-runs `sshgate add` (no --read-only). A Tier-1 gate
+	// has no signer pubkey, so no signed remote revoke can tear it down; and
+	// an in-place read-only→write flip was rejected for security (roadmap
+	// #17, redefined). Re-tiering stays de-provision + re-provision.
 	ReadOnly bool `json:"read_only,omitempty"`
 	// Fingerprint is the target's TOFU-pinned SSH host-key fingerprint
 	// (OpenSSH "SHA256:..." form), recorded by provisioning. The MCP supplies

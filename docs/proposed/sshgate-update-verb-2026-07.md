@@ -717,6 +717,39 @@ withdrawn — `ver=` must never appear. (`updateReason` losing its `(time)`
 component under `-buildvcs=false`, §5.2, is a display-string change, not a
 wire-key change.)
 
+**Additive tier extension (#62, strictly additive to the frozen contract).** The
+`SSHGATE_VERSION` reply gains a trailing `tier=` token so a re-add can reconcile
+the local registry to the gate's actual tier (`gate.pub` presence is what the
+gate enforces; the registry flag is only faith-based). The new line shape is:
+
+```
+SSHGATE_VERSION rev=<value> tier=ro|rw
+```
+
+- `tier=` is **appended after** the frozen `rev=` key — `rev=` stays first and
+  unchanged, so nothing about the frozen key moves.
+- `tier=rw` iff the gate loads a valid signer pubkey (signed-write / Tier-2);
+  `tier=ro` otherwise (read-only / Tier-1, or any `gate.pub` load error — the
+  gate self-reports the conservative tier, fail-safe). The token is derived from
+  `gate.pub` presence at probe time and answered **before** signature-verification
+  setup, so a Tier-1 gate (and even one with a broken `gate.pub`) still replies
+  and still exits 0.
+- **Old gates omit `tier=`** (they predate this). Consumers MUST treat an absent
+  or unrecognised token as "no signal" and keep the current faith-based behavior
+  (the caller's `--read-only` flag stands) — never as an implicit tier.
+- The **`SSHGATE_UPDATED` success marker is unchanged** — `tier=` is added to the
+  `SSHGATE_VERSION` reply ONLY.
+- All three frozen consumers already key on `rev=`/the first token and tolerate
+  trailing tokens (`probeRunningRev` takes the first whitespace token after
+  `rev=`; `probeGateAnswers` matches the `SSHGATE_VERSION rev=` prefix;
+  `parseUpdatedMarker` prefix-matches its known keys and ignores unknown tokens),
+  so the addition is provably backward-compatible. A fourth consumer,
+  `parseProbedTier`, reads the new token on the provisioning idempotent re-add.
+- **Reconcile behavior:** on an idempotent (already-gated) re-add whose probe
+  carried a `tier=` token, provisioning registers the probed tier (host truth)
+  and prints a loud NOTE if the caller's `--read-only` flag disagreed; the gate
+  stays the enforcement point, the registry just follows it.
+
 **Out of scope (NIT-2).** The pre-existing `mcp.Version` (`"0.2.0"`,
 src/mcp/server.go:48) is a **separate identity** — the MCP server's own
 protocol/product version. The top-level `VERSION` here is the **repo/gate** version

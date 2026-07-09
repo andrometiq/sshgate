@@ -14,8 +14,15 @@ import (
 // remote path to the gate binary; the other restrictions are static.
 // Spec §"SSH key management":
 //
-//	command="~/.sshgate-gate/gate",no-port-forwarding,no-X11-forwarding,no-agent-forwarding <key>
-const commandForcingFmt = `command="%s",no-port-forwarding,no-X11-forwarding,no-agent-forwarding `
+//	command="~/.sshgate-gate/gate",no-pty,no-port-forwarding,no-X11-forwarding,no-agent-forwarding <key>
+//
+// no-pty denies PTY allocation: without it a third-party SSH client holding the
+// SSHGate key could request a TTY and turn a classified-read pager (less/man/
+// git log/systemctl status) interactive, escaping the gate via !sh / v-to-editor
+// (docs/security-readonly-bypass.md B9). The gate's own client never asks for a
+// PTY, so this only removes an out-of-band escape surface; it never affects
+// SSHGate's own traffic.
+const commandForcingFmt = `command="%s",no-pty,no-port-forwarding,no-X11-forwarding,no-agent-forwarding `
 
 // rewriteAuthorizedKeys returns the new contents of authorized_keys
 // after:

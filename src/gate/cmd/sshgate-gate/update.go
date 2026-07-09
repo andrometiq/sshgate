@@ -229,8 +229,37 @@ func binaryRevision(body []byte) string {
 // SSHGATE_VERSION probe. It reads the compiled-in versionMarker (gatever.Version
 // keeps "dev" for a dev build) rather than debug/buildinfo, which is empty under
 // the release recipe's -buildvcs=false. The wire line shape
-// "SSHGATE_VERSION rev=<value>" is FROZEN (spec §11.2 HIGH-2) — only the value
-// changed from a git sha to the injected version; the rev= key stays.
+// "SSHGATE_VERSION rev=<value>" is FROZEN (spec §11.2 HIGH-2) — the rev= key
+// stays and only its value changed from a git sha to the injected version.
+//
+// A trailing " tier=ro|rw" token is appended (spec §11.2, strictly ADDITIVE,
+// #62): the gate self-reports its enforcement tier from gate.pub presence so a
+// re-add can reconcile the registry to host truth. Old gates omit it; every
+// frozen consumer keys on rev=/first-token and tolerates trailing tokens, so
+// the addition is backward-compatible.
 func runningGateVersion() string {
-	return "SSHGATE_VERSION rev=" + gatever.Version(versionMarker)
+	return "SSHGATE_VERSION rev=" + gatever.Version(versionMarker) + " tier=" + gateTier()
+}
+
+// gateTier reports THIS gate's enforcement tier from gate.pub presence, for the
+// tier= token appended to the SSHGATE_VERSION reply: "rw" iff a valid signer
+// pubkey is loadable (signed-write / Tier-2), else "ro" (read-only / Tier-1).
+//
+// It is FAIL-SAFE — any resolution/load error (gate dir unresolvable, gate.pub
+// absent, corrupt, or insecure-mode) reports the conservative "ro". So the
+// version probe NEVER fails, a Tier-1 gate still answers (tier=ro, exit 0), and
+// a reconcile consumer follows host truth toward read-only rather than falsely
+// asserting write capability. This mirrors why SSHGATE_VERSION is answered
+// before the main pubkey load in run(): reporting the tier must not depend on a
+// successful signature-verification setup.
+func gateTier() string {
+	pubPath, err := pubKeyPath()
+	if err != nil {
+		return "ro"
+	}
+	pubkey, err := gate.LoadPubKey(pubPath)
+	if err != nil || pubkey == nil {
+		return "ro"
+	}
+	return "rw"
 }

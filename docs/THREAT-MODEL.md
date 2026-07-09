@@ -102,13 +102,12 @@ headers, which currently number the opposite way — see the redline draft).
   (`security-readonly-bypass.md:5-14`, `FUTURE.md:89, 95-104`.) Do not read this
   as "solved"; read it as "default-deny + a standing regression corpus, with one
   known structural hole".
-- **PTY-based escapes at the `authorized_keys` layer.** The forced-command entry
-  pins `no-port-forwarding,no-X11-forwarding,no-agent-forwarding` but **not**
-  `no-pty` today. SSHGate's own client never requests a PTY and the gate runs
-  children with stdin on `/dev/null`, but a third-party SSH client holding the key
-  could request a PTY and turn `less`/`man`/`vim` interactive (`!sh` escape).
-  Treat PTY denial as unenforced at that layer until `no-pty` is added.
-  (`FUTURE.md:90`.)
+- **PTY-based escapes at the `authorized_keys` layer — closed.** The forced-command
+  entry pins `no-pty,no-port-forwarding,no-X11-forwarding,no-agent-forwarding`
+  (`commandForcingFmt` in `src/mcp/tools/authorizedkeys.go`, golden-pinned by a
+  test). A third-party SSH client holding the key can no longer request a PTY, so
+  `less`/`man`/`vim` cannot be turned interactive for an `!sh` escape. PTY denial
+  is enforced at that layer. (`FUTURE.md:90`.)
 - **A compromised gate binary.** The gate is the on-remote trust anchor for both
   signature verification and redaction. A gate replaced through a non-SSHGate
   channel defeats both. The verified release channel (committed `dist/gate/`
@@ -144,4 +143,4 @@ agent's machine entirely.
 - [`security-readonly-bypass.md`](security-readonly-bypass.md) — the read-only
   bypass landscape and per-item CLOSED/open status.
 - [`FUTURE.md`](FUTURE.md) — the honest limitations list and the deferred
-  hardening (argv-exec, Landlock, `no-pty`).
+  hardening (argv-exec, Landlock).

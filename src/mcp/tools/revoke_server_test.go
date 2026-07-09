@@ -56,6 +56,50 @@ func TestRevokeServer_HappyPath(t *testing.T) {
 	}
 }
 
+// TestRevokeServer_Tier1ShortCircuit asserts that revoking a read-only (Tier-1)
+// server is refused BEFORE any sign request: the gate has no signer pubkey, so a
+// signed SSHGATE_REVOKE can never be verified — soliciting the signature first
+// would burn a real human Telegram tap on a guaranteed no-op. The registry must
+// be left intact, Sign must never be called, and the message must NOT tell the
+// user to run /sshgate:revoke (circular).
+func TestRevokeServer_Tier1ShortCircuit(t *testing.T) {
+	t.Parallel()
+	r := newRegistryWith(t, "ro-box", registry.Entry{
+		Host: "1.2.3.4", Port: 22, User: "ops", AddedAt: time.Now(), ReadOnly: true,
+	})
+	sign := &fakeSign{}
+	ssh := &fakeSSH{}
+	runner := &tools.Runner{Servers: r, Sign: sign, SSH: ssh}
+
+	out, err := runner.RevokeServer(context.Background(), tools.RevokeServerInput{Alias: "ro-box"})
+	if err == nil {
+		t.Fatal("expected error revoking a read-only (Tier-1) server, got nil")
+	}
+	if sign.signCalled {
+		t.Error("Sign was called for a Tier-1 revoke; must short-circuit before signing (a wasted Telegram tap)")
+	}
+	if len(ssh.callHistory) != 0 {
+		t.Error("SSH was called for a Tier-1 revoke; nothing should reach the host")
+	}
+	if out.RemoteCleaned || out.RegistryRemoved {
+		t.Errorf("out reports cleanup on a refused Tier-1 revoke: %+v", out)
+	}
+	// Registry must be untouched.
+	if _, ok := r.Get("ro-box"); !ok {
+		t.Error("registry alias removed despite the Tier-1 short-circuit")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "read-only") || !strings.Contains(msg, "ro-box") {
+		t.Errorf("error %q is not the actionable read-only guidance naming the alias", msg)
+	}
+	if strings.Contains(msg, "/sshgate:revoke") {
+		t.Errorf("error %q gives circular /sshgate:revoke advice", msg)
+	}
+	if !strings.Contains(msg, "sshgate add") {
+		t.Errorf("error %q does not describe the manual re-add path", msg)
+	}
+}
+
 func TestRevokeServer_UnknownAlias(t *testing.T) {
 	t.Parallel()
 	r := newRegistryWith(t, "exists", registry.Entry{Host: "h", Port: 22, User: "u", AddedAt: time.Now()})

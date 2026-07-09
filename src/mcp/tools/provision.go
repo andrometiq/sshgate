@@ -191,6 +191,12 @@ type ProvisionOutput struct {
 	// no breakage.
 	XferBoxPub string
 	XferIDPub  string
+	// TierNote is a loud, human-facing NOTE set ONLY on an idempotent re-add
+	// whose --read-only flag disagreed with the gate's self-reported tier (#62):
+	// the registry was reconciled to host truth and the note explains the
+	// override + how to actually change the tier. Empty on every other add
+	// (fresh, or idempotent with matching/absent tier). The CLI prints it.
+	TierNote string
 }
 
 // Provision is the human-only CLI add. It dials the target with the SSHGate
@@ -232,7 +238,7 @@ func Provision(ctx context.Context, cfg provisionCfg, in ProvisionInput) (Provis
 		return ProvisionOutput{}, fmt.Errorf("registry: %w", err)
 	}
 	if _, exists := servers.Get(in.Alias); exists {
-		return ProvisionOutput{}, fmt.Errorf("alias %q already registered; run `sshgate revoke %s` (or revoke via the agent) first", in.Alias, in.Alias)
+		return ProvisionOutput{}, fmt.Errorf("alias %q already registered — de-provision it first: for a signed-write (Tier-2) server the agent can tear it down with /sshgate:revoke %s; a read-only (Tier-1) gate has no signer pubkey so a signed remote revoke cannot run — remove its entry from the local registry (%s) by hand (and strip SSHGate's forced command=\"...\" line from the host's ~/.ssh/authorized_keys) before re-adding", in.Alias, in.Alias, cfg.ServersPath)
 	}
 
 	// Read local materials before touching the remote so we fail fast.
@@ -311,7 +317,7 @@ func Provision(ctx context.Context, cfg provisionCfg, in ProvisionInput) (Provis
 	// the restricted line wins (the plain duplicate is unreachable for this
 	// key) or the plain line wins (a bare shell fails the verb) and the
 	// fallback below forces the rewrite that removes it.
-	idempotent := probeGateAnswers(ctx, bootSess)
+	idempotent, probedTier := probeGateVersion(ctx, bootSess)
 
 	// No gate answered → not already provisioned for this key (plain shell),
 	// or a half-provisioned/broken gate — which deliberately falls through so
@@ -376,6 +382,26 @@ func Provision(ctx context.Context, cfg provisionCfg, in ProvisionInput) (Provis
 		return ProvisionOutput{}, err
 	}
 
+	// #62 tier-reconcile. On an idempotent (already-gated) re-add where the gate
+	// answered SSHGATE_VERSION with a tier= token, the HOST is the source of truth
+	// for the tier: gate.pub presence is what the gate actually enforces, and it
+	// may have been changed out-of-band since the alias was first registered.
+	// Follow it — register the probed tier — and if the caller's --read-only flag
+	// disagreed, carry a loud NOTE (printed by the CLI) that the flag was
+	// overridden. An old gate that omits tier= (probedTier=="") keeps the current
+	// faith-based behavior: the caller's flag stands (backward-compat). A fresh
+	// (non-idempotent) add has no host tier to reconcile against yet, so its flag
+	// also stands.
+	effectiveReadOnly := in.ReadOnly
+	var tierNote string
+	if idempotent && probedTier != "" {
+		hostReadOnly := probedTier == "ro"
+		if hostReadOnly != in.ReadOnly {
+			tierNote = tierReconcileNote(in.Alias, hostReadOnly, in.ReadOnly)
+			effectiveReadOnly = hostReadOnly
+		}
+	}
+
 	if err := servers.Add(in.Alias, registry.Entry{
 		Host:    in.Host,
 		Port:    port,
@@ -386,7 +412,7 @@ func Provision(ctx context.Context, cfg provisionCfg, in ProvisionInput) (Provis
 		// enforces the binding). Sourced here, in provisioning, never from the
 		// agent.
 		Fingerprint: hostFingerprint,
-		ReadOnly:    in.ReadOnly,
+		ReadOnly:    effectiveReadOnly,
 	}); err != nil {
 		if !idempotent {
 			return ProvisionOutput{}, provisionRollback(ctx, &r, bootSess, existing, in.User, in.Host,
@@ -404,10 +430,33 @@ func Provision(ctx context.Context, cfg provisionCfg, in ProvisionInput) (Provis
 		BinaryPath:   remoteGateBin,
 		VerifiedOK:   true,
 		Idempotent:   idempotent,
-		ReadOnlyMode: in.ReadOnly,
+		ReadOnlyMode: effectiveReadOnly,
 		XferBoxPub:   boxPubLine,
 		XferIDPub:    idPubLine,
+		TierNote:     tierNote,
 	}, nil
+}
+
+// tierReconcileNote is the loud NOTE surfaced (and printed by the CLI) on an
+// idempotent re-add whose --read-only flag disagreed with the gate's
+// self-reported tier (#62). The registry follows host truth — gate.pub presence
+// is the enforcement point, not the registry flag — so the note tells the
+// operator the flag was overridden and how to actually change the tier if that
+// was the intent.
+func tierReconcileNote(alias string, hostReadOnly, flagReadOnly bool) string {
+	tierName := func(ro bool) string {
+		if ro {
+			return "read-only (Tier-1)"
+		}
+		return "signed-write (Tier-2)"
+	}
+	flagDesc := "you did not pass --read-only"
+	if flagReadOnly {
+		flagDesc = "you passed --read-only"
+	}
+	return fmt.Sprintf(
+		"NOTE: %q is already provisioned %s on the host, but %s. Registering it as %s to match host truth — the gate (gate.pub presence) is the enforcement point, not the registry flag. %s",
+		alias, tierName(hostReadOnly), flagDesc, tierName(hostReadOnly), retierManualPath(alias))
 }
 
 // parseGenKeysReadback extracts the two canonical PUBLIC transfer-key lines from
@@ -713,20 +762,56 @@ func provisionRollback(ctx context.Context, r *Runner, bootSess bootstrapSession
 		cause, user, host, host)
 }
 
-// probeGateAnswers sends the unsigned SSHGATE_VERSION verb over the already-
+// probeGateAnswers reports whether a live gate answered the unsigned
+// SSHGATE_VERSION verb (a plain shell fails it and reports false). It is the
+// bool-only wrapper over probeGateVersion for callers that don't need the tier
+// (RotateXferKeys).
+func probeGateAnswers(ctx context.Context, sess bootstrapSession) bool {
+	answered, _ := probeGateVersion(ctx, sess)
+	return answered
+}
+
+// probeGateVersion sends the unsigned SSHGATE_VERSION verb over the already-
 // dialed dedicated-key session and reports whether a live gate answered — the
 // gate prints "SSHGATE_VERSION rev=<rev>" and exits 0 (the same mechanism
-// probeRunningRev uses in update_gate.go). A plain shell fails the verb
-// ("command not found", exit 127 → bootstrapSession.Run surfaces the non-zero
-// exit as an error) and a broken or pre-verb gate errors or prints no marker;
-// all of those report false, sending Provision down the fresh-provision flow
-// unchanged. Best-effort by design: a probe failure is never surfaced.
-func probeGateAnswers(ctx context.Context, sess bootstrapSession) bool {
+// probeRunningRev uses in update_gate.go) — plus the gate's self-reported tier
+// when present. A plain shell fails the verb ("command not found", exit 127 →
+// bootstrapSession.Run surfaces the non-zero exit as an error) and a broken or
+// pre-verb gate errors or prints no marker; all of those report answered=false,
+// sending Provision down the fresh-provision flow unchanged. tier is "ro"/"rw"
+// when the reply carries the additive tier= token (#62), or "" for an OLD gate
+// that omits it (the caller then keeps its faith-based tier). Best-effort by
+// design: a probe failure is never surfaced.
+func probeGateVersion(ctx context.Context, sess bootstrapSession) (answered bool, tier string) {
 	stdout, _, err := sess.Run(ctx, "SSHGATE_VERSION")
 	if err != nil {
-		return false
+		return false, ""
 	}
-	return strings.Contains(string(stdout), "SSHGATE_VERSION rev=")
+	s := string(stdout)
+	if !strings.Contains(s, "SSHGATE_VERSION rev=") {
+		return false, ""
+	}
+	return true, parseProbedTier(s)
+}
+
+// parseProbedTier extracts the additive tier= token from a SSHGATE_VERSION reply
+// ("SSHGATE_VERSION rev=<v> tier=ro|rw"). It returns "ro" or "rw" for a
+// recognised value, or "" when the token is absent (old gate) or unrecognised —
+// so a garbled or forward-incompatible value is treated as "no signal" rather
+// than mis-reconciled. Whitespace-split, so it tolerates any surrounding/trailing
+// tokens; it keys on the tier= token independently of the frozen rev= key.
+func parseProbedTier(stdout string) string {
+	for _, f := range strings.Fields(stdout) {
+		if strings.HasPrefix(f, "tier=") {
+			switch strings.TrimPrefix(f, "tier=") {
+			case "ro":
+				return "ro"
+			case "rw":
+				return "rw"
+			}
+		}
+	}
+	return ""
 }
 
 // verifyProvision re-dials the target with the (now gated) SSHGate key and

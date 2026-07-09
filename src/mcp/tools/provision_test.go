@@ -533,6 +533,107 @@ func TestProvision_ProbeIdempotent_GateAnswers(t *testing.T) {
 	}
 }
 
+// TestProvision_ReconcileTierToHost is the #62 tier-reconcile. On an idempotent
+// re-add where the gate self-reports its tier via the additive tier= token, the
+// registry must follow HOST truth (gate.pub presence is the enforcement point),
+// and a --read-only flag that disagreed must be overridden with a loud NOTE. An
+// old gate that omits tier= keeps the caller's flag (faith-based, backward-compat).
+func TestProvision_ReconcileTierToHost(t *testing.T) {
+	cases := []struct {
+		name         string
+		versionOut   string
+		flagReadOnly bool
+		wantReadOnly bool // what should land in the registry / output
+		wantNote     bool
+		noteContains string
+	}{
+		{
+			name:         "host ro overrides absent flag",
+			versionOut:   "SSHGATE_VERSION rev=v1.4.0 tier=ro\n",
+			flagReadOnly: false,
+			wantReadOnly: true,
+			wantNote:     true,
+			noteContains: "read-only (Tier-1)",
+		},
+		{
+			name:         "host rw overrides --read-only",
+			versionOut:   "SSHGATE_VERSION rev=v1.4.0 tier=rw\n",
+			flagReadOnly: true,
+			wantReadOnly: false,
+			wantNote:     true,
+			noteContains: "signed-write (Tier-2)",
+		},
+		{
+			name:         "matching tier: no note, no override",
+			versionOut:   "SSHGATE_VERSION rev=v1.4.0 tier=ro\n",
+			flagReadOnly: true,
+			wantReadOnly: true,
+			wantNote:     false,
+		},
+		{
+			name:         "old gate omits tier=: faith-based, no reconcile",
+			versionOut:   "SSHGATE_VERSION rev=v1.4.0\n",
+			flagReadOnly: false,
+			wantReadOnly: false,
+			wantNote:     false,
+		},
+	}
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			cfg, _ := provisionMaterials(t)
+			sess := &fakeBootstrapSession{
+				versionProbeOut: []byte(c.versionOut),
+				probeOut:        []byte("SSHGATE_OK\n"),
+			}
+			installFakeBootstrapSession(t, sess, "SHA256:reconcile")
+
+			out, err := Provision(context.Background(), cfg, ProvisionInput{
+				Alias:    "recon",
+				Host:     "h.example.com",
+				User:     "u",
+				ReadOnly: c.flagReadOnly,
+			})
+			if err != nil {
+				t.Fatalf("Provision: %v", err)
+			}
+			if !out.Idempotent {
+				t.Fatal("Idempotent = false; want true (gate answered the probe)")
+			}
+			if out.ReadOnlyMode != c.wantReadOnly {
+				t.Errorf("out.ReadOnlyMode = %v; want %v", out.ReadOnlyMode, c.wantReadOnly)
+			}
+			reg, err := registry.New(cfg.ServersPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			e, ok := reg.Get("recon")
+			if !ok {
+				t.Fatal("registry missing alias after reconcile re-add")
+			}
+			if e.ReadOnly != c.wantReadOnly {
+				t.Errorf("registered ReadOnly = %v; want %v (host truth)", e.ReadOnly, c.wantReadOnly)
+			}
+			if c.wantNote {
+				if out.TierNote == "" {
+					t.Fatal("TierNote is empty; want a loud override NOTE")
+				}
+				if !strings.Contains(out.TierNote, "recon") {
+					t.Errorf("TierNote %q does not name the alias", out.TierNote)
+				}
+				if c.noteContains != "" && !strings.Contains(out.TierNote, c.noteContains) {
+					t.Errorf("TierNote %q missing %q", out.TierNote, c.noteContains)
+				}
+				if strings.Contains(out.TierNote, "/sshgate:revoke") {
+					t.Errorf("TierNote %q gives circular /sshgate:revoke advice", out.TierNote)
+				}
+			} else if out.TierNote != "" {
+				t.Errorf("TierNote = %q; want empty (tiers matched or no tier token)", out.TierNote)
+			}
+		})
+	}
+}
+
 // TestProvision_ProbeFails_FreshFlowUnchanged: when the SSHGATE_VERSION probe
 // hard-fails (a plain shell runs it — "command not found", exit 127), Provision
 // must swallow the probe error and proceed with the fresh-provision flow

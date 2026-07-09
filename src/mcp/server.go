@@ -476,7 +476,7 @@ func gateDenyNoteFor(r tools.CommandResult) string {
 	}
 	switch r.ExitCode {
 	case 77:
-		return "gate denied (exit 77): no signer pubkey (read-only / Tier-1) or missing signature — a human upgrades the tier with /sshgate:setup (if needed) then /sshgate:revoke <alias> and `sshgate add <alias> <user@host>` (without --read-only)."
+		return "gate denied (exit 77): no signer pubkey (read-only / Tier-1) or missing signature — check sshgate.status. Re-tiering a read-only server is a manual human step (there is no in-place flip, #17, and no signed remote revoke works on a Tier-1 gate): on the host, swap SSHGate's forced command=\"...\" line back to the plain `sshgate pubkey` line, drop the alias from the registry (~/.config/sshgate/servers.json), then re-run `sshgate add <alias> <user@host>` at the desired tier (run /sshgate:setup first if no signer is configured yet)."
 	case 65:
 		return "gate rejected the signature (exit 65): expired or invalid — usually clock skew or a stale approval; retry."
 	default:

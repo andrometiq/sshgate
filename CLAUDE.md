@@ -67,19 +67,25 @@ tier per server as a `read_only` boolean (`true` = Tier-1 read-only, absent/`fal
 - **Writes to a read-only server are refused locally, BEFORE any Telegram tap.**
   `sshgate.run`/`sshgate.run_batch` return an error like `server "<alias>" is
   registered read-only — writes are denied at the gate (no signer pubkey was
-  pushed)`. Do NOT retry. To change a server's tier today: a human runs
-  `/sshgate:revoke <alias>` (keeps its Telegram approval) and then re-provisions
-  it with `sshgate add` at the desired tier (run `/sshgate:setup` first if no
-  signer is configured yet). An in-place read-only→write flip was considered
-  and rejected for security (any unsigned tier-flip path the CLI could
-  exercise, the agent could emulate — read-only is read-only); re-tiering
-  stays revoke + re-provision — see roadmap #17 (redefined). There is no agent
-  tool for any of this.
+  pushed)`. Do NOT retry. To change a server's tier today: a human **de-provisions
+  it by hand and re-adds it** — on the host, using their own admin access, they
+  replace SSHGate's forced `command="..."` line in `~/.ssh/authorized_keys` with
+  `sshgate pubkey`'s plain line, drop the alias from the registry
+  (`~/.config/sshgate/servers.json`), then re-run `sshgate add <alias> <user@host>`
+  at the desired tier (run `/sshgate:setup` first if no signer is configured yet);
+  full provisioning re-runs once the gate no longer answers. Note there is **no
+  working revoke for a Tier-1 host** — a read-only gate has no signer pubkey, so a
+  signed `SSHGATE_REVOKE` cannot be verified, and `/sshgate:revoke`/`revoke_server`
+  refuse it before any tap. An in-place read-only→write flip was also rejected for
+  security (any unsigned tier-flip path the CLI could exercise, the agent could
+  emulate — read-only is read-only) — see roadmap #17 (redefined). There is no
+  agent tool for any of this.
 - **Gate deny exit codes** come back annotated, not bare:
   - **exit 77** — missing signature OR the host has no signer pubkey
     (read-only / Tier-1). Check `sshgate.status`; if the signer is not
-    configured, the user runs `/sshgate:setup` and re-provisions with
-    `sshgate add` (no `--read-only`) — see the tier note above.
+    configured, the user runs `/sshgate:setup`, then re-tiers the server by the
+    manual de-provision + re-add in the tier note above (a bare re-add of an
+    already-registered alias is refused; a Tier-1 host has no working revoke).
   - **exit 65** — bad/expired signature, usually clock skew or a stale
     approval. Retry once.
 

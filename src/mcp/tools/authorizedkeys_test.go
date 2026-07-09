@@ -39,9 +39,34 @@ func TestRewriteAuthorizedKeys_EmptyFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("rewriteAuthorizedKeys: %v", err)
 	}
-	want := `command="` + cmd + `",no-port-forwarding,no-X11-forwarding,no-agent-forwarding ` + authLine(pub) + "\n"
+	want := `command="` + cmd + `",no-pty,no-port-forwarding,no-X11-forwarding,no-agent-forwarding ` + authLine(pub) + "\n"
 	if string(out) != want {
 		t.Errorf("output mismatch:\ngot:  %q\nwant: %q", string(out), want)
+	}
+}
+
+// TestRewriteAuthorizedKeys_ForcedOptionsGoldenPin locks the EXACT forced-command
+// option list the rewrite emits — including no-pty, which is load-bearing: without
+// it a third-party client holding the SSHGate key could allocate a TTY and turn a
+// classified-read pager interactive to escape the gate (docs/security-readonly-bypass.md
+// B9). Pinning the whole string once means any change to the option list (dropping
+// no-pty, reordering, adding an option) fails here loudly rather than silently
+// weakening every provisioned key.
+func TestRewriteAuthorizedKeys_ForcedOptionsGoldenPin(t *testing.T) {
+	pub := newTestKey(t)
+	cmd := "~/.sshgate-gate/gate"
+
+	out, err := rewriteAuthorizedKeys(nil, pub, cmd)
+	if err != nil {
+		t.Fatalf("rewriteAuthorizedKeys: %v", err)
+	}
+	const wantOpts = `no-pty,no-port-forwarding,no-X11-forwarding,no-agent-forwarding`
+	want := `command="` + cmd + `",` + wantOpts + ` ` + authLine(pub) + "\n"
+	if string(out) != want {
+		t.Errorf("forced-command line drifted:\ngot:  %q\nwant: %q", string(out), want)
+	}
+	if !strings.Contains(string(out), "no-pty") {
+		t.Errorf("emitted line is missing no-pty (PTY escape reopened): %q", string(out))
 	}
 }
 
@@ -111,7 +136,7 @@ func TestRewriteAuthorizedKeys_UnrelatedKeysPreserved(t *testing.T) {
 	if occurrences != 1 {
 		t.Errorf("pubkey appears %d times; want 1", occurrences)
 	}
-	if !strings.Contains(string(out), `command="`+cmd+`"`+",no-port-forwarding,no-X11-forwarding,no-agent-forwarding "+authLine(pub)) {
+	if !strings.Contains(string(out), `command="`+cmd+`"`+",no-pty,no-port-forwarding,no-X11-forwarding,no-agent-forwarding "+authLine(pub)) {
 		t.Errorf("restricted form missing for pub:\nout: %q", string(out))
 	}
 }

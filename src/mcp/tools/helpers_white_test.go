@@ -29,7 +29,7 @@ func TestGateDenyNote(t *testing.T) {
 		{
 			name:         "77 missing-sig / read-only",
 			exit:         77,
-			wantContains: []string{"exit 77", "read-only", "/sshgate:setup", "/sshgate:revoke", "sshgate add"},
+			wantContains: []string{"exit 77", "read-only", "/sshgate:setup", "sshgate add"},
 		},
 		{
 			name:         "65 bad / expired signature",

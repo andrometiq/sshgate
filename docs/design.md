@@ -75,7 +75,7 @@ When a server is provisioned, the SSHGate SSH public key is pinned in the
 remote's `~/.ssh/authorized_keys` as a restricted entry:
 
 ```
-command="~/.sshgate-gate/gate",no-port-forwarding,no-X11-forwarding,no-agent-forwarding ssh-ed25519 AAAA... sshgate
+command="~/.sshgate-gate/gate",no-pty,no-port-forwarding,no-X11-forwarding,no-agent-forwarding ssh-ed25519 AAAA... sshgate
 ```
 
 The `command="..."` clause traps **every** connection made with that key into

@@ -74,6 +74,16 @@ func (r *Runner) RevokeServer(ctx context.Context, in RevokeServerInput) (Revoke
 		return RevokeServerOutput{}, fmt.Errorf("tools: unknown server alias %q", in.Alias)
 	}
 
+	// Tier-1 (read-only) short-circuit: a read-only gate has NO signer pubkey, so
+	// it cannot verify the signed SSHGATE_REVOKE below — the gate denies it (exit
+	// 77) and the alias is never removed, yet Sign would first burn a real human
+	// Telegram tap on a guaranteed no-op. Refuse BEFORE newRequestID/Sign and
+	// point at the manual de-provision that actually works. Mirrors runWrite's
+	// readOnlyWriteErr placement.
+	if entry.ReadOnly {
+		return RevokeServerOutput{Alias: in.Alias}, tier1RevokeErr(in.Alias)
+	}
+
 	reqID, err := newRequestID()
 	if err != nil {
 		return RevokeServerOutput{Alias: in.Alias}, fmt.Errorf("tools: request id: %w", err)

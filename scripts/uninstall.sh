@@ -21,6 +21,49 @@ set -euo pipefail
 
 log() { printf '[uninstall] %s\n' "$*" >&2; }
 
+# operator_servers_json resolves the INVOKING operator's sshgate registry
+# (servers.json), not root's. Under sudo, $HOME is usually root's home while the
+# registry lives under the operator's home, so this prefers, in order: an
+# explicitly-set $XDG_CONFIG_HOME, then $SUDO_USER's home (looked up via getent),
+# then $HOME. Best-effort — a resolution miss just means no fleet warning.
+operator_servers_json() {
+    if [ -n "${XDG_CONFIG_HOME:-}" ]; then
+        printf '%s/sshgate/servers.json' "$XDG_CONFIG_HOME"
+        return 0
+    fi
+    local home=""
+    if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then
+        home=$(getent passwd "$SUDO_USER" 2>/dev/null | cut -d: -f6 || true)
+    fi
+    if [ -z "$home" ]; then
+        home="${HOME:-}"
+    fi
+    printf '%s/.config/sshgate/servers.json' "$home"
+}
+
+# fleet_warn prints an orphan warning to stderr IF the operator's registry lists
+# any servers. Removing /var/lib/sshgatesigner deletes the master signing key
+# those gates trust, so every registered alias would be ORPHANED — its
+# forced-command gate keeps trusting a key that no longer exists, and no future
+# signer can sign for it. Best-effort + warn-only: it never blocks or fails.
+# Top-level JSON keys are the aliases (Go marshals servers.json with 2-space
+# indent, so each alias is a 2-space-indented "key": line).
+fleet_warn() {
+    local f aliases count
+    f=$(operator_servers_json)
+    [ -f "$f" ] || return 0
+    aliases=$(grep -oE '^  "[^"]+"[[:space:]]*:' "$f" 2>/dev/null | sed -E 's/^  "([^"]+)".*/\1/' | sort || true)
+    if [ -z "$aliases" ]; then
+        return 0
+    fi
+    count=$(printf '%s\n' "$aliases" | grep -c . || true)
+    log "WARNING: ${count} SSHGate server(s) are registered in $f:"
+    printf '%s\n' "$aliases" | sed 's/^/[uninstall]   - /' >&2
+    log "Removing /var/lib/sshgatesigner deletes the master signing key those gates trust;"
+    log "each listed server would be ORPHANED (its gate keeps trusting a key that no longer exists)."
+    log "De-provision or revoke each server first (so its gate stops trusting this key) to avoid orphans."
+}
+
 if [ "${EUID:-$(id -u)}" -ne 0 ]; then
     printf '[uninstall] ERROR: must run as root (try: sudo %s)\n' "$0" >&2
     exit 77
@@ -63,6 +106,11 @@ fi
 
 # Step 4: confirm before nuking state.
 if [ -d /var/lib/sshgatesigner ]; then
+    # Fleet-orphan guard (warn-and-proceed). Removing the state dir destroys the
+    # master signing key every registered gate trusts, so warn first. Interactive:
+    # the warning prints just above the y/N prompt so it informs the decision.
+    # --purge: warn to stderr and proceed (its non-interactive contract is kept).
+    fleet_warn
     if [ "$PURGE" -eq 1 ]; then
         ANSWER="y"
     else

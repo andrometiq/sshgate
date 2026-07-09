@@ -203,6 +203,14 @@ func runAdd(args []string) int {
 		}
 	}
 
+	// #62 tier-reconcile: a loud NOTE (to stderr so it stands out and never
+	// contaminates a piped stdout) when the registered tier was reconciled to
+	// the host's self-reported tier because the --read-only flag disagreed.
+	if out.TierNote != "" {
+		fmt.Fprintln(os.Stderr, "")
+		fmt.Fprintln(os.Stderr, out.TierNote)
+	}
+
 	// Transfer-key registration leg (Tier-2 fresh add only — XferBoxPub is "" on a
 	// Tier-1 or idempotent add). The keys were generated on the host by genkeys;
 	// register their PUBLIC halves with the signer under the SAME fingerprint the

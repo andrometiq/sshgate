@@ -370,7 +370,7 @@ while IFS= read -r line; do
     ssh-*) key="$line" ;;
     *) key=$(echo "$line" | sed -E 's/^[^ ]+ +(ssh-[a-z0-9-]+ +)/\1/') ;;
   esac
-  echo 'command="%s/.sshgate-gate/gate",no-port-forwarding,no-X11-forwarding,no-agent-forwarding '"$key" >> "$tmp"
+  echo 'command="%s/.sshgate-gate/gate",no-pty,no-port-forwarding,no-X11-forwarding,no-agent-forwarding '"$key" >> "$tmp"
 done < %s
 mv "$tmp" %s
 chown %s:%s %s

@@ -372,8 +372,8 @@ func (r *Runner) runWrite(ctx context.Context, alias string, e registry.Entry, c
 // server registered read-only (tier-1, no signer pubkey on the host).
 func readOnlyWriteErr(alias string) error {
 	return fmt.Errorf(
-		"tools: server %q is registered read-only — writes are denied at the gate (no signer pubkey was pushed). Provisioning is human-only: a person runs /sshgate:setup (if no signer yet), then /sshgate:revoke %s and `sshgate add %s <user@host>` (without --read-only) to re-provision it as signed-write.",
-		alias, alias, alias)
+		"tools: server %q is registered read-only — writes are denied at the gate (no signer pubkey was pushed). %s",
+		alias, retierManualPath(alias))
 }
 
 // remediateSignErr enriches a sign-layer error with actionable
@@ -403,8 +403,8 @@ func (r *Runner) remediateSignErr(err error) error {
 				r.SignerSockPath, err)
 		}
 		return fmt.Errorf(
-			"tools: no signer configured (Tier-1 read-only). Writes need a Telegram signer: a human runs /sshgate:setup, then re-provisions each read-only server via /sshgate:revoke <alias> and `sshgate add <alias> <user@host>`: %w",
-			err)
+			"tools: no signer configured (Tier-1 read-only). Writes need a Telegram signer — a human runs /sshgate:setup to install one, then re-tiers each read-only server. %s: %w",
+			retierManualPath("<alias>"), err)
 	default:
 		// Denials, timeouts, daemon errors: wrap once, preserve sentinel.
 		return fmt.Errorf("tools: sign: %w", err)
@@ -433,7 +433,7 @@ func (r *Runner) signerSocketPresent() bool {
 func gateDenyNote(exit int) string {
 	switch exit {
 	case 77:
-		return "gate denied this write (exit 77): the server has no signer pubkey (read-only / Tier-1) OR the signature was missing. Check sshgate.status; upgrading the tier is human-only — a person runs /sshgate:setup (if no signer yet), then /sshgate:revoke <alias> and `sshgate add <alias> <user@host>` (without --read-only)."
+		return "gate denied this write (exit 77): the server has no signer pubkey (read-only / Tier-1) OR the signature was missing. Check sshgate.status. " + retierManualPath("<alias>")
 	case 65:
 		return "gate rejected the signature (exit 65): expired or invalid — usually clock skew or a stale approval; retry."
 	default:
