@@ -677,27 +677,74 @@ func gitStashKind(args []string) Kind {
 	return KindWrite
 }
 
-// gitConfigKind classifies `git config ...`. Write subflags
-// (--set/--unset/--add/--replace-all/--remove-section/--rename-section/
-// -e/--edit) mutate; --get/--get-all/--list/-l/--show-origin and bare
-// reads are read.
+// gitConfigKind classifies `git config …` by OPERATION FORM, failing closed.
+//
+// READ is granted ONLY to an explicit query form: --get / --get-all /
+// --get-regexp / --get-urlmatch / --get-color / --get-colorbool, --list / -l,
+// or a bare `git config` with no key or value (prints usage). Those forms only
+// print; their arguments are key names / regexes / files to read, never a set.
+//
+// EVERYTHING ELSE is WRITE:
+//   - an explicit mutating flag: --add / --unset / --unset-all / --replace-all /
+//     --rename-section / --remove-section / --edit / -e (and GNU abbreviations);
+//   - the POSITIONAL set forms `KEY` and `KEY VALUE` — this was a confirmed
+//     Tier-1 read-only bypass (2026-07-09): `git config user.name evil` and
+//     `git config --global alias.x '!touch /tmp/pwned'` both mutate ~/.gitconfig
+//     (the `!`-alias persists a shell-exec vector), yet the old rule saw no
+//     write *flag* and fell through to READ, so they ran UNSIGNED;
+//   - any unrecognized / ambiguous form (default-deny).
+//
+// Scope/file selectors (--global/--system/--local/--worktree/-f/--file) and
+// output modifiers (--show-origin/--show-scope/--name-only/--type/--default)
+// are NOT reads by themselves — they modify whichever operation follows, so
+// they never flip the class in either direction. A VALUE that itself looks like
+// a flag (`git config alias.x '!touch x'`) also cannot flip it: the positional
+// KEY already forces WRITE, and no value can introduce a query flag.
 func gitConfigKind(args []string) Kind {
+	seenConfig := false
+	hasRead := false       // an explicit query flag was seen
+	hasPositional := false // a non-flag KEY/VALUE (positional set form)
 	for _, a := range args {
+		if !seenConfig {
+			// Skip any leading git-level flags (e.g. --no-pager) up to the
+			// "config" subcommand token itself.
+			if a == "config" {
+				seenConfig = true
+			}
+			continue
+		}
+		// Explicit mutating operation → WRITE immediately, fail-closed even if
+		// a query flag is also present in a malformed command.
 		if a == "-e" {
 			return KindWrite
 		}
 		// Write subflags and their GNU abbreviations (`--rep`→replace-all,
 		// `--uns`→unset, `--unset-a`→unset-all, `--rem`→remove-section,
-		// `--ren`→rename-section, `--ed`→edit, ...). The read flags
-		// (`--get*`, `--list`, `--global`, `--system`, `--local`, `--file`,
-		// `--show-origin`) are NOT prefixes of any dangerous stem, so bare
-		// reads and `git config --get x` stay READ. Note `r*` (replace-all/
-		// remove-section/rename-section) is wholly write, so every `--r...`
-		// abbreviation is correctly WRITE.
+		// `--ren`→rename-section, `--ed`→edit, ...). None of the query flags
+		// below are prefixes of any dangerous stem, so they are disjoint.
 		if matchesAbbrev(a, "set", "unset", "unset-all", "add", "replace-all",
 			"remove-section", "rename-section", "edit") {
 			return KindWrite
 		}
+		// Explicit query flag → this is a read.
+		switch a {
+		case "--get", "--get-all", "--get-regexp", "--get-urlmatch",
+			"--get-color", "--get-colorbool", "--list", "-l":
+			hasRead = true
+			continue
+		}
+		// A non-flag token after "config", with no query flag governing it, is
+		// a KEY (or VALUE) of a set — the positional-set WRITE form.
+		if a != "" && !strings.HasPrefix(a, "-") {
+			hasPositional = true
+		}
 	}
+	if hasRead {
+		return KindRead
+	}
+	if hasPositional {
+		return KindWrite // positional KEY / KEY VALUE set — fail closed
+	}
+	// Bare `git config` (usage) or a query-modifier-only form with no key.
 	return KindRead
 }

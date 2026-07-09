@@ -247,13 +247,13 @@ func TestClassify_W2_M5Exploits(t *testing.T) {
 // "0 bypasses" bar. The campaign templates real canary/beacon paths; here we
 // use placeholders (classification is path-independent).
 //
-// NOTE: the whole git-write category is deliberately NOT asserted here. It
-// contains a PRE-EXISTING (not W2) gap — `git config --global alias.x '!touch'`
-// classifies READ because gitConfigKind only detects write-*flags*, missing the
-// modern `git config KEY VALUE` positional-set form. That is a real Tier-1
-// read-only bypass, but it is outside W2's enumerated change set (§3.3 preserves
-// gitConfigKind unchanged); it is called out in the phase report as a finding to
-// fix separately, not silently folded into W2.
+// NOTE: the whole git-write category is not exhaustively asserted here. It once
+// contained a PRE-EXISTING (not W2) gap — `git config --global alias.x '!touch'`
+// classified READ because gitConfigKind only detected write-*flags*, missing the
+// modern `git config KEY VALUE` positional-set form (a real Tier-1 read-only
+// bypass). That gap is now CLOSED: gitConfigKind classifies by operation form
+// and fails closed on any positional set. The adversarial matrix lives in
+// classifier_gitconfig_test.go (TestClassify_GitConfigForms).
 func TestClassify_RedteamWriteToolsAreWrite(t *testing.T) {
 	atk := redteam.Corpus("/canary", "/secret")
 	sawGitGrepO, sawSedSlashE, sawSedCustomDelim, sawComposeO := false, false, false, false

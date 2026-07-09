@@ -128,7 +128,9 @@ func TestClassify_LongOptionAbbreviationBypasses(t *testing.T) {
 		{"git config --list read", "git config --list", KindRead},
 		{"git config -l read", "git config -l", KindRead},
 		{"git config --global --get read", "git config --global --get user.name", KindRead},
-		{"git config bare name read", "git config user.name", KindRead},
+		// A lone positional KEY (deprecated get form) is now WRITE: fail-closed
+		// default-deny. Only an explicit --get*/--list form reads a value.
+		{"git config bare positional key is write", "git config user.name", KindWrite},
 
 		// --- git branch ref-mutation abbreviations ---
 		{"git branch --del abbrev delete", "git branch --del foo", KindWrite},
