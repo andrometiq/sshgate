@@ -67,6 +67,31 @@ These are the highest-priority forward items.
   further in the signer's own chat integration — it is the anchoring decision for
   the next SSHGate pass.
 
+- **Final product shape — component decomposition & packaging (owner direction,
+  filed 2026-07-10).** Before the public release push, pin down the parts a user
+  actually installs and where each management surface lives. The parts as
+  understood today: (a) the **gate** (+ the SSH key line) installed on target
+  servers; (b) the **MCP server** — the agent tool surface that talks to gated
+  servers; (c) **provisioning & key management** — SSH keypair generation,
+  `pubkey`/`add`, transfer enrollment — today the MCP and the `sshgate` CLI ship
+  merged, and the open question is what is managed *inside* the MCP vs *outside*
+  it (the CLI possibly becoming a separate tool); (d) the **Telegram signer** —
+  candidate for refactoring to ride the shared messaging layer (the anchor item
+  above); (e) the **hosted signer as an embeddable library/service** — installable
+  on a customer's server, shipping a default web UI but wireable to their own UI,
+  with a first-class audit surface (every incoming call, every approval, logged
+  for the integrator). Sequencing: settle the shape → verify the stack works with
+  **other agents (Codex, Gemini, …)** → only then decide which artifact is
+  published to which **marketplace** (the shape decision gates the uploads).
+
+- **Bundle DevOps skills with the plugin (owner ask, filed 2026-07-10).**
+  Observed in real use: an agent driving the gate sometimes finds the problem
+  fast, and sometimes just keeps reading — no method. Bootload the plugin with
+  curated skills the agent can freely use — Linux server **debugging**, server
+  **setup**, **installation** — alongside the existing
+  `debugging-remote-servers` skill, so any agent using SSHGate has an efficient,
+  opinionated playbook out of the box.
+
 - **Argv-exec structural classifier fix (#22).** Replace the fail-closed shell
   heuristic on the read path with direct execution from a parsed `argv`
   (`execve`, no intervening `/bin/sh`), so the classifier's view of a command is
@@ -169,6 +194,35 @@ These are the highest-priority forward items.
   pending approval queue + web auth) and with channel-relay approvals —
   design once, serve both surfaces. Not scheduled; full design pipeline
   before any build.
+
+- **LLM approval-assist at the signing surface (owner direction, filed
+  2026-07-10).** The agent requesting a signature supplies the *reason* it wants
+  these commands; the approval surface then runs an LLM pass over
+  (reason, command list) that (a) checks the commands actually match the stated
+  reason, (b) flags anything inappropriate or out of scope, and (c) renders a
+  plain-language summary of what approving would really do — so a human can
+  scrutinize an N-command batch without hand-parsing shell. Native in the hosted
+  signer's web UI (a first-class part of its integration story); the Telegram
+  surface can carry a condensed form. Requires the MCP sign path to carry an
+  agent-supplied reason (`run`/`run_batch` have none today; `request_grant`'s
+  `reason` field is the precedent). Design together with the async approval
+  lifecycle above and the hosted signer, so it is built once for every approval
+  surface. The assist is advisory — the human tap remains the boundary, and a
+  wrong LLM summary must never widen what was actually signed.
+
+- **Per-gate memory subsystem (owner direction, filed 2026-07-10).** Alongside
+  the gate install, give each target server a first-class, centrally-maintained
+  **memory**: an indexed filesystem of markdown/instruction files that an agent
+  can read and update natively through a gate verb (a clean file
+  read/write/edit interface), so operational memory lives *per gate install on
+  the machine itself* and any agent that logs in inherits it instead of
+  carrying its own. Tiering is the open design question: a general memory area
+  writable at Tier-1 (no signature) vs a **sensitive** area updatable only via
+  a signed request; a third read-gated "confidential" level was floated but
+  probably collapses into those two (owner's lean). Whether updates should be
+  gated at all — freely written vs approval-routed — needs deep thought before
+  any build; and the design interacts with multi-key gates / multi-login (#17):
+  per-agent identity may shape per-area permissions.
 
 - **Gated interactive session mode (#25).** A shell-*like* interactive prompt
   (history, `cd`/env that feel normal) where **every** command is still gated.
