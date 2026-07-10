@@ -386,5 +386,5 @@ names); per-file fixed salts per existing convention.
 - Sink (a) lags on live servers until each remote gate binary is replaced.
   (At writing time `SSHGATE_UPDATE` was an unimplemented stub and the only
   path was `revoke_server` → re-paste pubkey → `sshgate add`; the signed
-  `update_gate` verb has since shipped in v1.3.0 and is the redeploy
+  `update_gate` verb has since shipped in v0.1.3 and is the redeploy
   mechanism.)

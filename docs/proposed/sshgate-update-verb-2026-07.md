@@ -1,6 +1,6 @@
 # SSHGATE_UPDATE — signed in-place gate self-update (design spec)
 
-Status: **built, merged to `main` (merge `5a4406a`, v1.3.0), and deployed** —
+Status: **built, merged to `main` (merge `5a4406a`, v0.1.3), and deployed** —
 the operator rollout to existing gates completed 2026-07-04. Kept as the
 design spec of record.
 
@@ -759,7 +759,7 @@ follow-up.
 ### 11.3 Repo layout & Makefile target
 
 ```
-VERSION                                        # top-level, one line (e.g. v1.3.0)
+VERSION                                        # top-level, one line (e.g. v0.1.3)
 dist/gate/sshgate-gate-linux-amd64             # committed, reproducibly-built gate
 dist/gate/sshgate-gate-linux-amd64.sha256      # its hash, sha256sum-compatible
 ```
@@ -914,7 +914,7 @@ mitigation.
 
 ### 11.8 Build tasks (the brief)
 
-1. Add a top-level **`VERSION`** file (one line, e.g. `v1.3.0`).
+1. Add a top-level **`VERSION`** file (one line, e.g. `v0.1.3`).
 2. Add a **`toolchain`** directive to `go.mod` (e.g. `toolchain go1.25.6` —
    illustrative; pin whatever exact patch is actually released/installed at build
    time, §11.1 NIT-4).

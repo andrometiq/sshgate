@@ -23,7 +23,7 @@
 //  4. Opens the audit log in append mode.
 //  5. Builds the configured backend (currently only "stub"; "telegram"
 //     is recognised as a config value but returns "not yet implemented
-//     in v1.4 — landing in 2.1").
+//     in v0.1.4").
 //  6. Runs the Unix-socket server until SIGTERM/SIGINT.
 //
 // SIGHUP is logged as "not supported in v1; restart to apply changes"
@@ -160,7 +160,7 @@ func run(args []string) int {
 		return 1
 	}
 	// Note: assertion that we're running as the `sshgatesigner` user
-	// (production) vs any user (--dev) is omitted from v1.4. The
+	// (production) vs any user (--dev) is omitted from v0.1.4. The
 	// install script creates the sshgatesigner user and the systemd unit
 	// runs under `User=sshgatesigner`; that's the load-bearing layer. If
 	// the operator runs the binary as some other non-root user, the
@@ -650,7 +650,7 @@ func doInitFlow(configPath string, dev bool) error {
 		return fmt.Errorf("stat config: %w", err)
 	}
 
-	body := fmt.Sprintf(`# signer v1.4 configuration
+	body := fmt.Sprintf(`# signer v0.1.4 configuration
 
 [paths]
 key       = %q

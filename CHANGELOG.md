@@ -94,7 +94,7 @@ repo page trustworthy (CI + honest docs).
   `~/.ssh/authorized_keys` so the gate stops answering, and drop the alias from
   `~/.config/sshgate/servers.json`), then re-run `sshgate add`.
 
-## [1.4.0]
+## [0.1.4]
 
 Box→box secret transfer, and the gate binary release that ships it.
 
@@ -114,7 +114,7 @@ Box→box secret transfer, and the gate binary release that ships it.
 
 ### Changed
 
-- **VERSION `1.3.0` → `1.4.0`**, and the gate binary in `dist/gate/` was
+- **VERSION `0.1.3` → `0.1.4`**, and the gate binary in `dist/gate/` was
   regenerated (now carrying the transfer/genkeys code paths) and re-published
   with its `.sha256`, verified reproducible by the `verify-gate` check.
 

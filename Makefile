@@ -5,7 +5,7 @@
 # ---------------------------------------------------------------------------
 # Verified release channel (spec §11)
 # ---------------------------------------------------------------------------
-# VERSION is the top-level repo/gate version (its own line, e.g. v1.3.0). It
+# VERSION is the top-level repo/gate version (its own line, e.g. v0.1.4). It
 # becomes the gate's build-injected version marker via -X (§11.2). $(shell cat)
 # strips the trailing newline; release-gate re-validates the file at recipe time.
 VERSION := $(shell cat VERSION 2>/dev/null)
@@ -71,7 +71,7 @@ release-gate:
 	@if [ ! -f VERSION ]; then echo "release-gate: VERSION file is missing" >&2; exit 1; fi
 	@# grep -c '' counts LINES (including a final partial line); wc -l counts
 	@# newline bytes, which false-rejects a no-trailing-newline single-line file
-	@# and false-accepts "v1.3.0\ngarbage".
+	@# and false-accepts "v0.1.4\ngarbage".
 	@if [ "$$(grep -c '' VERSION)" -ne 1 ]; then echo "release-gate: VERSION must be exactly one line" >&2; exit 1; fi
 	@if ! printf '%s' "$$(cat VERSION)" | grep -Eq '^v[0-9A-Za-z._+-]+$$'; then \
 		echo "release-gate: VERSION '$$(cat VERSION)' must match ^v[0-9A-Za-z._+-]+\$$ (no CRLF, spaces, or comments)" >&2; exit 1; fi

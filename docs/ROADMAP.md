@@ -9,29 +9,35 @@ For the security model these items extend, see [design.md](design.md) and
 
 ---
 
-## V1 release status
+## Release status & versioning
 
-V1 is the active release push, and its scope is already built: everything under
-**Already shipped**, plus the box-to-box encrypted transfer feature and the
-2026-07 release-polish pass (security floor, a large classifier false-positive
-reduction, `ping` / per-command output cap / read-batch ergonomics, a single-pass
-installer, redaction fixes, a CI test suite, THREAT-MODEL.md, a README
-restructure, and a CHANGELOG). All of that is committed and green.
+**SSHGate is pre-1.0 on purpose.** The current code line is **v0.1.4**. Version
+`1.0` is deliberately reserved for the point where SSHGate is a fully stable,
+productized tool that anyone can drop into production and rely on continuously —
+the bar is "as unremarkable to run in production as the OS itself," not "it works
+for us." Until then every release is `v0.x`, and the version number must never
+imply the product is finished.
 
-**The one remaining V1 blocker is #22 — the argv-exec structural classifier fix
-plus kernel confinement.** It was promoted from a post-V1 item to a V1 blocker on
-2026-07-10. The reason: the read/write classifier is a fail-closed *heuristic*,
-and repeated adversarial review keeps surfacing read-as-write bypass classes
-(short-flag bundling, long-option abbreviation, environment-variable program
-injection). On a Tier-1 read-only host the classifier is the only gate, so each
-such gap is a real bypass. #22 replaces the heuristic with execution from a parsed
-`argv` — the classifier's view becomes exactly what executes — plus kernel-level
-confinement, a structural cure rather than another per-tool patch. See
-THREAT-MODEL.md for the honest current posture ("the classifier only routes; it
-is not a proof").
+**The next release is v0.2** — the "daily-usable" milestone. Its scope is already
+built: everything under **Already shipped**, plus the box-to-box encrypted transfer
+feature and the 2026-07 release-polish pass (security floor, a large classifier
+false-positive reduction, `ping` / per-command output cap / read-batch ergonomics,
+a single-pass installer, redaction fixes, a CI test suite, THREAT-MODEL.md, a
+README restructure, and a CHANGELOG). All committed and green.
+
+**The one thing still blocking v0.2 is #22 — the argv-exec structural classifier
+fix plus kernel confinement** (promoted from a later release to a v0.2 blocker on
+2026-07-10). The read/write classifier is a fail-closed *heuristic*, and repeated
+adversarial review keeps surfacing read-as-write bypass classes (short-flag
+bundling, long-option abbreviation, environment-variable program injection). On a
+Tier-1 read-only host the classifier is the only gate, so each such gap is a real
+bypass. #22 replaces the heuristic with execution from a parsed `argv` — the
+classifier's view becomes exactly what executes — plus kernel-level confinement, a
+structural cure rather than another per-tool patch. See THREAT-MODEL.md for the
+honest current posture ("the classifier only routes; it is not a proof").
 
 Everything under **Planned**, **Operational hardening**, and **Deferred** below is
-post-V1 (V1.1 / V2+).
+post-v0.2 (v0.3+). The precise v0.2-vs-v0.3 split is still being decided.
 
 ---
 
@@ -50,7 +56,7 @@ post-V1 (V1.1 / V2+).
 - **Local Telegram signer** with separate-Unix-user key isolation, one-tap
   approval, and bulk (single-tap, N-command) approval.
 - **Standing grants, secret-reveal, per-server binding, leveled audit trail
-  (v1.3.0).** One signed-payload wire change: signer-issued **standing grants**
+  (v0.1.3).** One signed-payload wire change: signer-issued **standing grants**
   (scope `all` or an exact command-set, ≤24h, server-bound, revocable) for
   unattended write windows; an approved **secret-reveal** that bypasses output
   redaction for a single signed command; **per-server identity** binding each
@@ -60,7 +66,7 @@ post-V1 (V1.1 / V2+).
   `servers.json` 0600. Design:
   [docs/proposed/feature3-grants-reveal-audit-binding.md](proposed/feature3-grants-reveal-audit-binding.md).
 - **Gate auto-update (`update_gate` / `SSHGATE_UPDATE`) + verified release
-  channel (v1.3.0, deployed).** A signed control verb that updates the gate
+  channel (v0.1.3, deployed).** A signed control verb that updates the gate
   binary in place on an already-registered server — **signed** (through the
   master key like any other write), **versioned** (returns the installed
   SHA-256 + build revision), **fail-closed** (hash mismatch / wrong-arch
@@ -119,7 +125,7 @@ These are the highest-priority forward items.
   opinionated playbook out of the box.
 
 - **Argv-exec structural classifier fix (#22) — the sole remaining V1 blocker**
-  (promoted 2026-07-10; see *V1 release status* above). Replace the fail-closed
+  (promoted 2026-07-10; see *Release status & versioning* above). Replace the fail-closed
   shell heuristic on the read path with direct execution from a parsed `argv`
   (`execve`, no intervening `/bin/sh`), so the classifier's view of a command is
   exactly the view that executes. This eliminates the entire shell-parse-mismatch
@@ -129,6 +135,20 @@ These are the highest-priority forward items.
   stages without a shell, or are routed through approval. Likely combined with
   kernel-level confinement (read-only mounts + seccomp denying write/exec
   syscalls) for defense in depth.
+
+- **Transparent gated SSH from a normal terminal (owner direction, filed
+  2026-07-10; prioritize right after #22).** Today the gate is reached through the
+  MCP tool surface. Once #22's argv-exec lands, let an operator `ssh` into a gated
+  host from an ordinary terminal using a gate-routed key: read-classified commands
+  pass through transparently, and only a command that needs a signature interrupts
+  the session. The signing UX is the crux — the likely shape is that the gate
+  returns a hash of the command, the operator gets that hash signed out-of-band, and
+  pastes the signature back — and it must be low-friction. The payoff is reach: once
+  the gate is usable from a bare terminal, any terminal-capable agent (not only an
+  MCP client) can use it, so SSHGate becomes a common tool rather than one plugin.
+  Overlaps but is distinct from #25 (a bespoke gate-is-the-shell REPL) and #23
+  (interactive-prompt forwarding): this is transparent passthrough of a real SSH
+  session. Depends on #22.
 
 - **Interactive prompt / confirmation / password forwarding (Feature 1).** A
   remote command can trigger an interactive prompt mid-run — a `sudo`/password
@@ -177,7 +197,26 @@ These are the highest-priority forward items.
   capture with all constraints:
   [docs/proposed/multi-key-gates-and-add-exposure-2026-07.md](proposed/multi-key-gates-and-add-exposure-2026-07.md).
   Direction recorded 2026-07 — not scheduled; design questions go through the
-  full pipeline before any build.
+  full pipeline before any build. Combined with transparent-terminal SSH (in
+  *Next*), multi-key per-agent identity is the foundation for SSHGate as a full
+  Linux login-management & permissions platform — per-identity keys and
+  permissions, gate-enforced. Longer-horizon framing, not current scope.
+
+- **Multiple gate enforcement modes (owner direction, filed 2026-07-10).** The gate
+  today has one behaviour: a binary allow/deny driven by the read/write classifier.
+  Add selectable per-host modes, an analogue to a coding agent's permission modes:
+  (1) **strict allowlist** for high-threat hosts — only an explicit exact command set
+  runs, everything else needs approval; (2) **auto** — today's classifier
+  auto-routing (recognized reads run unsigned, writes/unknowns route to approval),
+  the mode #22 hardens; (3) **ask** — every command routes to approval, with an
+  "always-allow this exact command" setting that permanently allowlists that one
+  command and nothing else. Deliberately NO allow-everything mode (it would make the
+  gate pointless); the existing time-limited approve-all (standing grants) stays as
+  the escape hatch. Allowlist growth has two selectable sub-paths: **sign-to-add** (an
+  approved command joins the allowlist) or **out-of-band only** (the gate can never
+  widen its own allowlist; new entries require editing the allowlist file over a
+  separate full-access SSH key — the highest-assurance posture). Not scheduled;
+  design first.
 
 - **Reconcile tier on the probe-idempotent re-add path.** When `sshgate add`
   re-runs against an already-gated host (the probe-first idempotency that
@@ -308,8 +347,17 @@ These are the highest-priority forward items.
   Applies to current single-command mode now and to the gated session (#25)
   later, where a write could optionally trigger inline approval.
 
-- **Signed-at-rest redactor (deferred).** Strengthen the redaction path's signing
-  posture and merge the deferred redactor work.
+- **Operator redaction control plane (deferred — from `feat/v1.2-redactor`).** An
+  operator-configurable redaction layer that current main does not have: a signed,
+  append-only redactlist/unredactlist with provenance + audit, a signed `SSHGATE_CMD`
+  meta-command envelope + gate dispatcher + sign matrix, a signer `sign-envelope`
+  kind, MCP `redact.*`/`unredact.*` tools, operator anchor literals, and a
+  standard/thorough `redact.mode` switch (plus a depth-1 decode pass). The
+  implementation lives on `feat/v1.2-redactor` but is NOT `git merge`-able — main
+  rewrote the redaction scanner underneath it, so reviving this is a **port of the
+  design onto the current scanner**, reusing the branch's store/envelope/signer
+  pieces and its signing-model design doc. The branch's Layer-2 "filemode" heuristic
+  is likely obsoleted by #22's argv-exec + kernel confinement.
 
 ---
 

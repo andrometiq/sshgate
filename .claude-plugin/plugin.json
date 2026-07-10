@@ -1,6 +1,6 @@
 {
   "name": "sshgate",
-  "version": "1.4.0",
+  "version": "0.1.4",
   "description": "Claude Code plugin that SSHs into your servers; reads run freely, writes need a Telegram tap to approve.",
   "keywords": ["ssh", "remote", "ops", "security", "telegram"]
 }
