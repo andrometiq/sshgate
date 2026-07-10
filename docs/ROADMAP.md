@@ -9,6 +9,32 @@ For the security model these items extend, see [design.md](design.md) and
 
 ---
 
+## V1 release status
+
+V1 is the active release push, and its scope is already built: everything under
+**Already shipped**, plus the box-to-box encrypted transfer feature and the
+2026-07 release-polish pass (security floor, a large classifier false-positive
+reduction, `ping` / per-command output cap / read-batch ergonomics, a single-pass
+installer, redaction fixes, a CI test suite, THREAT-MODEL.md, a README
+restructure, and a CHANGELOG). All of that is committed and green.
+
+**The one remaining V1 blocker is #22 — the argv-exec structural classifier fix
+plus kernel confinement.** It was promoted from a post-V1 item to a V1 blocker on
+2026-07-10. The reason: the read/write classifier is a fail-closed *heuristic*,
+and repeated adversarial review keeps surfacing read-as-write bypass classes
+(short-flag bundling, long-option abbreviation, environment-variable program
+injection). On a Tier-1 read-only host the classifier is the only gate, so each
+such gap is a real bypass. #22 replaces the heuristic with execution from a parsed
+`argv` — the classifier's view becomes exactly what executes — plus kernel-level
+confinement, a structural cure rather than another per-tool patch. See
+THREAT-MODEL.md for the honest current posture ("the classifier only routes; it
+is not a proof").
+
+Everything under **Planned**, **Operational hardening**, and **Deferred** below is
+post-V1 (V1.1 / V2+).
+
+---
+
 ## Already shipped
 
 - **Human-only provisioning CLI.** Onboarding a server is a control-plane action
@@ -92,8 +118,9 @@ These are the highest-priority forward items.
   `debugging-remote-servers` skill, so any agent using SSHGate has an efficient,
   opinionated playbook out of the box.
 
-- **Argv-exec structural classifier fix (#22).** Replace the fail-closed shell
-  heuristic on the read path with direct execution from a parsed `argv`
+- **Argv-exec structural classifier fix (#22) — the sole remaining V1 blocker**
+  (promoted 2026-07-10; see *V1 release status* above). Replace the fail-closed
+  shell heuristic on the read path with direct execution from a parsed `argv`
   (`execve`, no intervening `/bin/sh`), so the classifier's view of a command is
   exactly the view that executes. This eliminates the entire shell-parse-mismatch
   class (escapes, quoting, separators, substitution, redirects) and ends the
