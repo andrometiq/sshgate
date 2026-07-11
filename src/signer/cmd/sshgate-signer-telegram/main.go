@@ -665,7 +665,11 @@ socket    = %q
 type = "stub"
 `, keyPath, pubPath, auditPath, sockPath)
 
-	if err := os.WriteFile(configPath, []byte(body), 0o640); err != nil {
+	// 0600: the daemon runs as sshgatesigner and reads this as the file owner
+	// (systemd User=sshgatesigner; --init runs under `sudo -u sshgatesigner`), so
+	// group-read is never needed. Group traversal on the signer home is for the
+	// audit log / peer.json, not this config; keep the config owner-only.
+	if err := os.WriteFile(configPath, []byte(body), 0o600); err != nil {
 		return fmt.Errorf("write config: %w", err)
 	}
 
