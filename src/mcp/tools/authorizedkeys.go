@@ -14,15 +14,27 @@ import (
 // remote path to the gate binary; the other restrictions are static.
 // Spec §"SSH key management":
 //
-//	command="~/.sshgate-gate/gate",no-pty,no-port-forwarding,no-X11-forwarding,no-agent-forwarding <key>
+//	restrict,command="~/.sshgate-gate/gate",no-pty,no-port-forwarding,no-X11-forwarding,no-agent-forwarding <key>
 //
-// no-pty denies PTY allocation: without it a third-party SSH client holding the
-// SSHGate key could request a TTY and turn a classified-read pager (less/man/
-// git log/systemctl status) interactive, escaping the gate via !sh / v-to-editor
-// (docs/security-readonly-bypass.md B9). The gate's own client never asks for a
-// PTY, so this only removes an out-of-band escape surface; it never affects
-// SSHGate's own traffic.
-const commandForcingFmt = `command="%s",no-pty,no-port-forwarding,no-X11-forwarding,no-agent-forwarding `
+// restrict (OpenSSH ≥ 7.2, 2016) is the deny-all catch-all: it disables PTY
+// allocation, agent/port/X11 forwarding, AND ~/.ssh/rc execution, and
+// auto-includes any future restriction OpenSSH adds. It closes the one gap the
+// explicit list left open — no-user-rc: with a forced command sshd still runs a
+// pre-existing ~/.ssh/rc as a full shell *before* the forced command unless
+// restrict/no-user-rc is set, so an agent that ever lands a write to ~/.ssh/rc
+// would get a shell outside the gate on the next connection. The explicit no-*
+// options are kept as belt-and-braces (redundant under restrict, but greppable
+// and independently golden-pinned). no-pty in particular: without it a
+// third-party SSH client holding the SSHGate key could request a TTY and turn a
+// classified-read pager (less/man/git log/systemctl status) interactive,
+// escaping the gate via !sh / v-to-editor (docs/security-readonly-bypass.md B9).
+// The gate's own client never asks for a PTY, so none of this affects SSHGate's
+// own traffic.
+//
+// NOTE: restrict requires OpenSSH ≥ 7.2 on the target; a pre-7.2 sshd rejects
+// the whole line (the key stops working). SSHGate targets modern hosts, so 7.2
+// is a safe floor.
+const commandForcingFmt = `restrict,command="%s",no-pty,no-port-forwarding,no-X11-forwarding,no-agent-forwarding `
 
 // rewriteAuthorizedKeys returns the new contents of authorized_keys
 // after:

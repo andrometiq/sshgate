@@ -102,12 +102,17 @@ headers, which currently number the opposite way — see the redline draft).
   (`security-readonly-bypass.md:5-14`, `FUTURE.md:89, 95-104`.) Do not read this
   as "solved"; read it as "default-deny + a standing regression corpus, with one
   known structural hole".
-- **PTY-based escapes at the `authorized_keys` layer — closed.** The forced-command
-  entry pins `no-pty,no-port-forwarding,no-X11-forwarding,no-agent-forwarding`
+- **PTY-based escapes and `~/.ssh/rc` execution at the `authorized_keys` layer —
+  closed.** The forced-command entry leads with `restrict` (the OpenSSH ≥ 7.2
+  deny-all catch-all) and additionally pins
+  `no-pty,no-port-forwarding,no-X11-forwarding,no-agent-forwarding`
   (`commandForcingFmt` in `src/mcp/tools/authorizedkeys.go`, golden-pinned by a
-  test). A third-party SSH client holding the key can no longer request a PTY, so
-  `less`/`man`/`vim` cannot be turned interactive for an `!sh` escape. PTY denial
-  is enforced at that layer. (`FUTURE.md:90`.)
+  test). `restrict` also denies `~/.ssh/rc` execution (`no-user-rc`) — so even if
+  an agent ever landed a write to `~/.ssh/rc`, sshd will not run it as a shell
+  before the forced command — and auto-includes any future OpenSSH restriction. A
+  third-party SSH client holding the key can no longer request a PTY, so
+  `less`/`man`/`vim` cannot be turned interactive for an `!sh` escape. Enforced at
+  that layer. (`FUTURE.md:90`.)
 - **A compromised gate binary.** The gate is the on-remote trust anchor for both
   signature verification and redaction. A gate replaced through a non-SSHGate
   channel defeats both. The verified release channel (committed `dist/gate/`

@@ -53,7 +53,7 @@ The single most useful insight from the OpenClaw arxiv paper [3, 4]: "The exec a
 - **Known bypass categories:**
   1. **CVE-2017-8386** — `git-shell` could be coerced to run `git ... --help`, which spawned `man` → `less` → interactive `!sh`. [5, 6] Mitigation: disable PTY in sshd (`no-pty`).
   2. **Argument-injection via `--upload-pack=<cmd>`** in older git clients on the server side (paired vuln).
-- **Lessons for SSHGate:** SSHGate's `authorized_keys` forces `no-pty,no-port-forwarding,no-X11-forwarding,no-agent-forwarding` on every provisioned key — `no-pty` is emitted by `commandForcingFmt` in `src/mcp/tools/authorizedkeys.go`, so a classified-read pager (`less` of a large file, `man`, `git log`) can never allocate a TTY to go interactive and open `!sh`. (The template's option list is golden-pinned by a test so `no-pty` cannot be silently dropped.)
+- **Lessons for SSHGate:** SSHGate's `authorized_keys` forces `restrict,no-pty,no-port-forwarding,no-X11-forwarding,no-agent-forwarding` on every provisioned key — `commandForcingFmt` in `src/mcp/tools/authorizedkeys.go` leads with `restrict` (the OpenSSH ≥ 7.2 deny-all catch-all, which also blocks `~/.ssh/rc` execution and any future capability) and pins `no-pty`, so a classified-read pager (`less` of a large file, `man`, `git log`) can never allocate a TTY to go interactive and open `!sh`. (The template's option list is golden-pinned by a test so `restrict`/`no-pty` cannot be silently dropped.)
 
 ### Tool: OpenClaw exec policy engine
 - **What it does:** Auto-approve allowlist for LLM-driven shell commands. Same shape as SSHGate's classifier: read-by-default-allowed, write-needs-approval. Production-deployed by ~the entire personal-AI-agent ecosystem in 2026.
@@ -137,7 +137,7 @@ For each row: **status** = COVERED / VULNERABLE / PARTIAL, with the citation in 
 - `<>` — file open for read+write. classifier walks bytes: at `<`, next byte must be `(` for it to trip substitution; `>` follows but `<` already incremented past. Then `>` triggers `hasTopLevelRedirect` → write. **COVERED.**
 
 ### B9 — Editor / pager interactive escapes (`less !sh`, `vim :!sh`, `man → less !sh`, `git log → less !sh`, `journalctl → less !sh`)
-- **Status:** **MITIGATED — `no-pty` is enforced.** SSHGate's `sshgate add` provisioning writes `command="...",no-pty,no-port-forwarding,no-X11-forwarding,no-agent-forwarding` (`commandForcingFmt` in src/mcp/tools/authorizedkeys.go), so the interactive-escape class below is short-circuited: no PTY is ever allocated. Were `no-pty` ever dropped from the template, every one of these would work against the gate:
+- **Status:** **MITIGATED — `no-pty` is enforced.** SSHGate's `sshgate add` provisioning writes `restrict,command="...",no-pty,no-port-forwarding,no-X11-forwarding,no-agent-forwarding` (`commandForcingFmt` in src/mcp/tools/authorizedkeys.go; `restrict` also blocks `~/.ssh/rc` execution and future capabilities), so the interactive-escape class below is short-circuited: no PTY is ever allocated. Were `no-pty` ever dropped from the template, every one of these would work against the gate:
   - `less /var/log/syslog` — classifier returns READ → shell runs less. On a PTY, type `v` → opens `$EDITOR` (default vim) → `:!rm /tmp/x` → RCE. Or `!sh` directly.
   - `git log` — same path, `git` pipes to less.
   - `journalctl -u nginx` — same.

@@ -12,7 +12,7 @@ A Claude Code plugin that lets a coding agent SSH into your Linux servers — wh
 
 The security boundary is the **Ed25519 signature plus the OpenSSH forced command, checked on each remote server.** The read/write classifier only *routes*; it is **not the wall.**
 
-- SSHGate's dedicated key is pinned on every remote to a forced command (`command="~/.sshgate-gate/gate"`, plus `no-pty,no-port-forwarding,no-X11-forwarding,no-agent-forwarding`). **OpenSSH enforces this server-side**: that key can only ever invoke the gate — never a shell or an arbitrary program.
+- SSHGate's dedicated key is pinned on every remote to a forced command (`restrict,command="~/.sshgate-gate/gate"`, plus `no-pty,no-port-forwarding,no-X11-forwarding,no-agent-forwarding`; `restrict` also denies `~/.ssh/rc` execution and any future OpenSSH capability). **OpenSSH enforces this server-side**: that key can only ever invoke the gate — never a shell or an arbitrary program.
 - A **write** runs only if it carries a valid Ed25519 signature the gate verifies against the signing pubkey deployed on that host. No pubkey on the host (read-only / Tier 1) ⇒ no write can be signed ⇒ the gate refuses it locally, before any approval channel is even consulted.
 - The signature carries a **bounded validity window** and a **per-host binding** (the target's TOFU-pinned host-key fingerprint), so an approved write cannot be replayed indefinitely or against a different host.
 

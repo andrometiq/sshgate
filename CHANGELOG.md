@@ -80,6 +80,25 @@ repo page trustworthy (CI + honest docs).
 
 ### Security
 
+- **`restrict` forced-command hardening** — the OpenSSH forced-command option
+  template now leads with `restrict` (OpenSSH ≥ 7.2), in addition to the explicit
+  `no-pty,no-port-forwarding,no-X11-forwarding,no-agent-forwarding` list.
+  `restrict` is the deny-all catch-all: it closes the one gap the explicit list
+  left open — **`no-user-rc`** (with a forced command, sshd otherwise runs a
+  pre-existing `~/.ssh/rc` as a full shell *before* the forced command, so an
+  agent that ever landed a write to `~/.ssh/rc` would get a shell outside the
+  gate on the next connection) — and auto-includes any future OpenSSH
+  restriction, so the line is deny-by-default rather than allowlist-by-omission.
+  The gate never asks for a PTY or `~/.ssh/rc`, so this only removes out-of-band
+  escape surfaces and never affects SSHGate's own traffic. Requires OpenSSH ≥ 7.2
+  on the target (2016; a safe floor for modern hosts — a pre-7.2 sshd would
+  reject the line). New provisions get `restrict` automatically. **Already-
+  provisioned hosts keep their old `authorized_keys` line until re-provisioned**
+  (a re-`add` on a registered alias is refused with a de-provision-first error,
+  and the idempotent recovery path never rewrites an already-gated line): to
+  harden an existing host, strip SSHGate's forced `command="..."` line from its
+  `~/.ssh/authorized_keys`, drop the alias from `~/.config/sshgate/servers.json`,
+  then re-run `sshgate add`.
 - **`no-pty` forced-command hardening** — the OpenSSH forced-command option
   template now pins `no-pty` alongside `no-port-forwarding`,
   `no-X11-forwarding`, and `no-agent-forwarding`. Without it, a third-party SSH
