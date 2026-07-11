@@ -36,8 +36,15 @@ classifier's view becomes exactly what executes — plus kernel-level confinemen
 structural cure rather than another per-tool patch. See THREAT-MODEL.md for the
 honest current posture ("the classifier only routes; it is not a proof").
 
-Everything under **Planned**, **Operational hardening**, and **Deferred** below is
-post-v0.2 (v0.3+). The precise v0.2-vs-v0.3 split is still being decided.
+**Scope ruling (owner, 2026-07-11, from the feature-table review):** v0.2 keeps its
+definition — everything built **plus #22** — and is **not tagged until #22 clears the
+safeguard hold**. No interim release is cut. While #22 waits, the safeguard-neutral
+queue (see *Work ordering* below) executes and lands in v0.2 by construction. Two
+scope additions pulled into v0.2 explicitly: (a) the **hosted signer as an embeddable
+library** callable from any web application, and (b) a **simple reference web
+application** as the usable default surface — together a reshaping of the deferred
+Tier-3 hosted-signer ship item. Everything not in the ordered v0.2 queue under
+*Work ordering* is post-v0.2 (v0.3+).
 
 ---
 
@@ -132,10 +139,58 @@ safeguard being cleared, and do everything that does *not* trip it first.
 
 **Consequence for v0.2:** v0.2 was defined as "everything already built **+** #22."
 With #22 deferred to last, that definition now ships last too. The
-**feature-table review** (see *Release status & versioning*) must resolve the central
-question: **re-scope v0.2 to a safeguard-neutral interim milestone** (pull neutral
-items forward) **vs.** keep the definition and let v0.2's ship wait on the safeguard.
-Owner makes the segregation call; this note only fixes the *ordering* constraint.
+**feature-table review** (see *Release status & versioning*) had to resolve the central
+question: re-scope v0.2 to a safeguard-neutral interim milestone, or keep the
+definition and let v0.2's ship wait on the safeguard.
+
+**RESOLVED (owner, 2026-07-11): keep the definition — v0.2 waits on #22; no interim
+tag.** The neutral queue proceeds now, in this order, and everything it lands ships
+in v0.2:
+
+Ordering follows one rule beyond the safeguard split: **nothing that parses,
+executes, or renders classifier internals is built before #22**, because #22
+replaces the parse/exec model and that work would be thrown away (and, for the job
+launcher, would punch a `/bin/sh` hole straight through #22's guarantee). The three
+items that fail that test are split out and moved below #22.
+
+1. **Hardening audit** — forced-command `restrict`/`no-pty`/no-forwarding on the
+   `authorized_keys` line + local-state hygiene (umask 0077, `O_NOFOLLOW`, atomic
+   rename); settle **D2** (Tier-1 de-provision) and **D3** (signer socket group vs ACL)
+   alongside. (SSH-daemon + file-write layer; no overlap with #22's process-level
+   Landlock/seccomp.)
+2. **#74 product shape + the shared-messaging anchor decision** — one design pass; must
+   produce the signer-library embedding API shape (part (e) of #74 is now committed
+   v0.2 scope). The anchor decision must **precede** building any approval-plane item
+   below (#76/#65/signer) so they ride the shared layer, not the bespoke poller.
+3. **#75 bundled DevOps skills.**
+4. **#26 friendlier gate responses — core only** (verdict → clear structured message).
+   The `explain`/`why` dry-run **reason-rendering is deferred to build *with* #22** — it
+   renders classifier internals that #22 replaces.
+5. **#80 multi-mode gate** (strict allowlist / auto / ask; sign-to-add vs out-of-band
+   allowlist growth). The framework delegates to the classifier ("auto" points at
+   whatever it is), so it never rewrites; design the strict/ask allowlist + always-allow
+   key on a representation that survives the string→argv migration (contained #22 refit,
+   not a rewrite).
+6. **Approval plane — converged design once, then build:** signer **library** (revive
+   the `feat/v2-hosted-signer` backend as an embeddable library callable by any web app)
+   → **reference web app** (usable default surface) → **#76 approval-assist**
+   (agent-supplied reason field + LLM check/summary) → **#65 async approval lifecycle**
+   (dispatch-and-continue, sign-at-approval, pending queue). #76's **deterministic
+   risk-annotation** parsing is deferred to build **with #22** (reuse the argv parser,
+   not a throwaway one).
+7. **LAST, gated on the safeguard clearing: #22**, then the items whose parse/exec/render
+   layer #22 must underpin — **background-job verb** (argv-exec + daemonize launcher;
+   building it earlier on `nohup sh -c` is throwaway *and* a `/bin/sh` bypass of #22),
+   the **#26 explain reason-rendering**, and the **#76 risk-annotations** — then **#24**
+   (designed with #22, built after) **→ #81 → #25.** Then v0.2 tags (after the mandatory
+   PII audit).
+
+Post-v0.2 (v0.3+): #17 multi-key identity, per-gate memory subsystem, #82 redactor
+port (sequence after #22 — it likely obsoletes that branch's filemode layer), #23
+interactive-prompt forwarding (design alongside #25/#81), tier-reconcile on the
+re-add probe, redaction scanner perf, background reachability monitor, and the
+DENY/TIMEOUT + concurrent-approvals items (subsumed by the anchor unless the anchor
+is rejected).
 
 ---
 
@@ -196,6 +251,27 @@ These are the highest-priority forward items.
   approvals ride the shared layer. Evaluate and decide this **before** investing
   further in the signer's own chat integration — it is the anchoring decision for
   the next SSHGate pass.
+
+  **Preferred shape — ride the harness/channel *permission* surface, bound to the
+  signature (filed 2026-07-11).** The most natural delivery for the approval tap is
+  the agent harness's own **tool-permission prompt** — every coding-agent harness has
+  one — bridged to an authenticated human channel. The in-house messaging layer
+  already ships exactly that bridge: a **permission-relay** capability that renders a
+  pending tool-use as an Allow/Deny prompt on the operator's phone and honors only an
+  allowlisted operator's tap. Building the tap on that surface, rather than a bespoke
+  poller, is both less code and the right UX for a broader release. **Hard
+  constraint:** the harness/channel grant must *trigger* the isolated signer to sign
+  the exact command (**sign-at-approval**), and the gate must still verify that
+  signature — the cryptographic signature stays the boundary. A bare local-harness
+  permission grant must never *replace* the signature: auto-accept / bypass-permission
+  modes and a rogue on-machine agent can self-grant, so the approving verdict must come
+  from an authenticated **off-machine** human (which the channel permission-relay
+  guarantees). Harness permission mechanisms differ across agents and some expose no
+  clean hook, so the signature is the **portable** boundary and the harness surface is
+  preferred-where-available delivery, never a dependency. Converges with the async
+  approval lifecycle (sign-at-approval) and #76 (approval-assist rendered into the same
+  prompt). Prior in-house-messaging work already probed the harness intercept (the
+  pre-tool-use hook) — build on that probe rather than starting cold.
 
 - **Final product shape — component decomposition & packaging (owner direction,
   filed 2026-07-10).** Before the public release push, pin down the parts a user
@@ -545,7 +621,12 @@ anchor above and are marked *(subsumed)*.
 
 ## Deferred
 
-- **Tier-3 hosted signer (the real boundary).** The headless backend exists — a
+- **Tier-3 hosted signer (the real boundary). — PULLED INTO v0.2 (owner, 2026-07-11),
+  reshaped:** ship as an **embeddable library** callable by any web application plus a
+  **simple reference web app** as the usable default surface; see *Release status &
+  versioning* and *Work ordering* step 6. The remaining-work list below still applies
+  (UI, Telegram channel, HTTPS hostname, deployment), now shaped library-first.
+  The headless backend exists — a
   signing engine, N-of-M approval, WebAuthn/TOTP auth, and a plane-separated API.
   What remains to ship it as a product: the rendered web UI (the backend serves
   JSON only), the Telegram channel on the hosted signer, a stable HTTPS hostname
