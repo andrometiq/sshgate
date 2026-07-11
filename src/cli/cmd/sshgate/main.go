@@ -53,6 +53,8 @@ func run(args []string) int {
 		return runPubkey(args[1:])
 	case "add":
 		return runAdd(args[1:])
+	case "revoke":
+		return runRevoke(args[1:])
 	case "xfer-register":
 		return runXferRegister(args[1:])
 	case "xfer-rotate":
@@ -83,6 +85,16 @@ Usage:
         the pasted key down behind a forced-command entry. Registers <alias>.
         --read-only (--ro): tier-1 install (no signer pubkey; writes denied
         at the gate).
+
+  sshgate revoke <alias>
+        PRINT-ONLY out-of-band de-provision plan for <alias>. Connects to nothing
+        and changes nothing (no remote edit, no registry write, no signer call):
+        it prints the precise, copy-pasteable steps to strip SSHGate's dedicated
+        key from the host's ~/.ssh/authorized_keys over YOUR own admin access
+        (matched on the exact key, so it can't lock you out) and to drop the alias
+        from the local registry. For a Tier-2 alias the signed /sshgate:revoke
+        agent path is preferred and this is the fallback; for Tier-1 it is the only
+        de-provision path.
 
   sshgate xfer-register <alias> --box-pub '<line>' --id-pub '<line>' [--label <s>]
         (Re)register a server's box→box transfer keys with the signer, under the
