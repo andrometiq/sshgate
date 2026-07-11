@@ -73,7 +73,9 @@ tier per server as a `read_only` boolean (`true` = Tier-1 read-only, absent/`fal
   `sshgate pubkey`'s plain line, drop the alias from the registry
   (`~/.config/sshgate/servers.json`), then re-run `sshgate add <alias> <user@host>`
   at the desired tier (run `/sshgate:setup` first if no signer is configured yet);
-  full provisioning re-runs once the gate no longer answers. Note there is **no
+  full provisioning re-runs once the gate no longer answers. For the exact
+  copy-pasteable strip + local-forget commands, run `sshgate revoke <alias>` — it
+  prints them (print-only; it changes nothing). Note there is **no
   working revoke for a Tier-1 host** — a read-only gate has no signer pubkey, so a
   signed `SSHGATE_REVOKE` cannot be verified, and `/sshgate:revoke`/`revoke_server`
   refuse it before any tap. An in-place read-only→write flip was also rejected for

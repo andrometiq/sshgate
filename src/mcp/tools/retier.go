@@ -31,8 +31,8 @@ import "fmt"
 // contexts with no specific server in hand (e.g. the generic exit-77 note).
 func retierManualPath(alias string) string {
 	return fmt.Sprintf(
-		"To change its tier, a human de-provisions it by hand and re-adds it — there is no in-place read-only→write flip (rejected for security, roadmap #17) and no signed remote revoke works on a Tier-1 gate (it has no signer pubkey): on the host, using your own admin access, replace SSHGate's forced command=\"...\" line in ~/.ssh/authorized_keys with `sshgate pubkey`'s plain line, drop the %q entry from the local registry (~/.config/sshgate/servers.json), then re-run `sshgate add %s <user@host>` at the desired tier (run /sshgate:setup first if no signer is configured yet) — full provisioning re-runs once the gate no longer answers.",
-		alias, alias)
+		"To change its tier, a human de-provisions it by hand and re-adds it — there is no in-place read-only→write flip (rejected for security, roadmap #17) and no signed remote revoke works on a Tier-1 gate (it has no signer pubkey): on the host, using your own admin access, replace SSHGate's forced command=\"...\" line in ~/.ssh/authorized_keys with `sshgate pubkey`'s plain line, drop the %q entry from the local registry (~/.config/sshgate/servers.json), then re-run `sshgate add %s <user@host>` at the desired tier (run /sshgate:setup first if no signer is configured yet) — full provisioning re-runs once the gate no longer answers. Run `sshgate revoke %s` for the exact copy-pasteable strip + local-forget steps (print-only; it changes nothing).",
+		alias, alias, alias)
 }
 
 // tier1RevokeErr is the actionable refusal for revoke_server against a server
@@ -45,6 +45,6 @@ func retierManualPath(alias string) string {
 // this very path — circular).
 func tier1RevokeErr(alias string) error {
 	return fmt.Errorf(
-		"tools: server %q is registered read-only (Tier-1) — its gate has no signer pubkey, so a signed SSHGATE_REVOKE cannot be verified and the agent cannot tear a Tier-1 gate down remotely (it would be denied at the gate, exit 77, after burning a Telegram tap). Remove it by hand instead: on the host, using your own admin access, delete SSHGate's forced command=\"...\" line from ~/.ssh/authorized_keys and remove the ~/.sshgate-gate directory, then drop the %q entry from the local registry (~/.config/sshgate/servers.json). To re-add it, re-paste `sshgate pubkey`'s plain line and run `sshgate add %s <user@host>` at the tier you want.",
-		alias, alias, alias)
+		"tools: server %q is registered read-only (Tier-1) — its gate has no signer pubkey, so a signed SSHGATE_REVOKE cannot be verified and the agent cannot tear a Tier-1 gate down remotely (it would be denied at the gate, exit 77, after burning a Telegram tap). Remove it by hand instead: on the host, using your own admin access, delete SSHGate's forced command=\"...\" line from ~/.ssh/authorized_keys and remove the ~/.sshgate-gate directory, then drop the %q entry from the local registry (~/.config/sshgate/servers.json). To re-add it, re-paste `sshgate pubkey`'s plain line and run `sshgate add %s <user@host>` at the tier you want. Run `sshgate revoke %s` for the exact copy-pasteable strip + local-forget steps (print-only; it changes nothing).",
+		alias, alias, alias, alias)
 }

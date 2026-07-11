@@ -87,6 +87,19 @@ func readDedicatedKeyBase64(pubPath string) (string, error) {
 		}
 		return "", fmt.Errorf("read %s: %w", pubPath, err)
 	}
+	// SSHGate's dedicated .pub is ALWAYS exactly one ed25519 line. Refuse a file
+	// with more than one non-empty key line: a bare strings.Fields would silently
+	// take the FIRST key's blob, so the printed strip would anchor on the wrong key
+	// (and could leave a second, unstripped key behind, or miss the real one).
+	var keyLines []string
+	for _, ln := range strings.Split(string(body), "\n") {
+		if strings.TrimSpace(ln) != "" {
+			keyLines = append(keyLines, ln)
+		}
+	}
+	if len(keyLines) > 1 {
+		return "", fmt.Errorf("SSHGate dedicated public key in %s has %d key lines; expected exactly one ed25519 line — refusing rather than guess which key to strip", pubPath, len(keyLines))
+	}
 	fields := strings.Fields(string(body))
 	if len(fields) < 2 || !strings.HasPrefix(fields[0], "ssh-") {
 		return "", fmt.Errorf("malformed SSHGate public key in %s (expected an \"ssh-... <base64>\" line)", pubPath)

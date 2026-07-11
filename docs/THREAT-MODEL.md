@@ -15,8 +15,9 @@ on each remote server. The read/write classifier only *routes*; it is not the
 wall.**
 
 - SSHGate's dedicated key is pinned on every remote to a forced command
-  (`command="~/.sshgate-gate/gate"`, plus `no-pty,no-port-forwarding,no-X11-forwarding,
-  no-agent-forwarding`). **OpenSSH enforces this server-side**: that key can only
+  (`restrict,command="~/.sshgate-gate/gate"`, plus `no-pty,no-port-forwarding,no-X11-forwarding,
+  no-agent-forwarding`; `restrict` also denies `~/.ssh/rc` execution and any future OpenSSH
+  capability). **OpenSSH enforces this server-side**: that key can only
   ever invoke the gate — never a shell or an arbitrary program.
   (`design.md` §"Provisioning", §"What the design protects against".)
 - A **write** runs only if it carries a valid Ed25519 signature the gate verifies

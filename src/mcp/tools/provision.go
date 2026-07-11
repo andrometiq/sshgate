@@ -238,7 +238,7 @@ func Provision(ctx context.Context, cfg provisionCfg, in ProvisionInput) (Provis
 		return ProvisionOutput{}, fmt.Errorf("registry: %w", err)
 	}
 	if _, exists := servers.Get(in.Alias); exists {
-		return ProvisionOutput{}, fmt.Errorf("alias %q already registered — de-provision it first: for a signed-write (Tier-2) server the agent can tear it down with /sshgate:revoke %s; a read-only (Tier-1) gate has no signer pubkey so a signed remote revoke cannot run — remove its entry from the local registry (%s) by hand (and strip SSHGate's forced command=\"...\" line from the host's ~/.ssh/authorized_keys) before re-adding", in.Alias, in.Alias, cfg.ServersPath)
+		return ProvisionOutput{}, fmt.Errorf("alias %q already registered — de-provision it first: for a signed-write (Tier-2) server the agent can tear it down with /sshgate:revoke %s; a read-only (Tier-1) gate has no signer pubkey so a signed remote revoke cannot run — remove its entry from the local registry (%s) by hand (and strip SSHGate's forced command=\"...\" line from the host's ~/.ssh/authorized_keys) before re-adding. Run `sshgate revoke %s` for the exact copy-pasteable strip + local-forget steps (print-only; it changes nothing)", in.Alias, in.Alias, cfg.ServersPath, in.Alias)
 	}
 
 	// Read local materials before touching the remote so we fail fast.

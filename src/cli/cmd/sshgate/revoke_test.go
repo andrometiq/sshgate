@@ -190,6 +190,61 @@ func TestRevoke_MissingPubKey(t *testing.T) {
 	}
 }
 
+// TestReadDedicatedKeyBase64 covers the .pub reader directly: the single-line
+// happy path (with/without a trailing blank line), the malformed refusal, and —
+// the F5 fix — a hard refusal when the file carries more than one key line.
+// SSHGate's dedicated .pub is always a single ed25519 line; a bare strings.Fields
+// would silently anchor the strip on the FIRST key's blob and could leave a second
+// key behind, so a multi-key file must be rejected, not guessed at.
+func TestReadDedicatedKeyBase64(t *testing.T) {
+	write := func(t *testing.T, body string) string {
+		t.Helper()
+		p := filepath.Join(t.TempDir(), "sshgate_ed25519.pub")
+		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+
+	t.Run("single line ok", func(t *testing.T) {
+		p := write(t, "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOnlyKey sshgate\n")
+		b64, err := readDedicatedKeyBase64(p)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if b64 != "AAAAC3NzaC1lZDI1NTE5AAAAIOnlyKey" {
+			t.Errorf("b64 = %q; want the single key blob", b64)
+		}
+	})
+
+	t.Run("trailing blank line tolerated", func(t *testing.T) {
+		p := write(t, "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOnlyKey sshgate\n\n")
+		if _, err := readDedicatedKeyBase64(p); err != nil {
+			t.Fatalf("a lone key + trailing blank line must be accepted: %v", err)
+		}
+	})
+
+	t.Run("multi-key refused", func(t *testing.T) {
+		p := write(t,
+			"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFirstKey sshgate\n"+
+				"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAISecondKey intruder\n")
+		_, err := readDedicatedKeyBase64(p)
+		if err == nil {
+			t.Fatal("readDedicatedKeyBase64 accepted a multi-key .pub; want a refusal")
+		}
+		if !strings.Contains(err.Error(), "key line") {
+			t.Errorf("err = %v; want a multi-key refusal mentioning the extra key lines", err)
+		}
+	})
+
+	t.Run("malformed refused", func(t *testing.T) {
+		p := write(t, "not-a-key\n")
+		if _, err := readDedicatedKeyBase64(p); err == nil {
+			t.Fatal("readDedicatedKeyBase64 accepted a malformed .pub; want a refusal")
+		}
+	})
+}
+
 // TestRevoke_Usage: wrong arity and unknown flags are usage errors (exit 2).
 func TestRevoke_Usage(t *testing.T) {
 	if code := run([]string{"revoke"}); code != 2 {
