@@ -41,6 +41,104 @@ post-v0.2 (v0.3+). The precise v0.2-vs-v0.3 split is still being decided.
 
 ---
 
+## Competitive research (2026-07-11) — findings folded in
+
+A full competitive sweep of the SSHGate-class landscape was run before this freeze
+(code-grounded teardown of every same-class repo + an adversarially-verified web
+sweep of the broader products). Full report, with `file:line` and source citations,
+lives outside the public tree at `local-workspace/release-2026-07-04/
+COMPETITIVE-RESEARCH-2026-07-11.md`.
+
+**Positioning result (informs #74 product shape):** no surveyed tool does true
+*per-command* human approval for SSH — Teleport/StrongDM gate at role/resource/
+session granularity (Teleport issue #12117: per-command SSH restriction "would
+require a code change"); the 2026 MCP-gateway cluster (Airlock, Preloop, Hoop,
+aipermission, McpSshProxy, mcp-ssh) gates at the MCP/tool layer, and the client-side
+ones (pi-permissions) are defeatable by `bash -c "ssh …"`. SSHGate's triad —
+**cryptographic forced-command boundary + per-command read/write classification +
+planned kernel confinement** — is the defensible, differentiated position. Teleport's
+own BPF docs (kernel-level `session.command` argv capture, built because shell-text
+recording is defeated by `base64|sh`/uploaded-scripts/echo-off; and BPF framed as
+"audit, not a substitute for an LSM") independently **validate the #22 argv-exec +
+Landlock/seccomp direction and its ordering** (enforcement is the boundary; argv
+auditing is complementary).
+
+**Borrow-worthy refinements, mapped onto existing items** (no re-prioritization —
+these sharpen items already below; the feature-table review decides scheduling):
+
+- **#22 (argv-exec):** capture the parsed argv as the audit record (classifier view
+  == execution view == audit view), mirroring Teleport BPF `session.command`; add an
+  approval **payload-hash + stale-detection** (aipermission) so a write-approval is
+  bound to the exact argv and auto-invalidates on drift; adopt pi-permissions'
+  **wrapper-unwrapping** (`sudo -u`/`env A=B`/`nice`/`time`) + **AST-walk-every-node**
+  technique and its `bash -c`/`eval`/`xargs`/`python -c`/`base64|sh` **bypass corpus**
+  as acceptance tests (alongside `BYPASS-CATALOGUE.md`); never let a "clean parse"
+  skip the fail-closed fallback.
+- **#17 (multi-key identity):** back per-agent identity with **short-lived per-agent
+  certs** (Teleport Machine ID / `tbot`, OSS-proven); add an **instant key/identity
+  lock** (Teleport Session Locks) independent of grant expiry; consider **client-IP
+  pinning** on the gate channel (Teleport IP-pinning) to blunt credential pivot.
+- **#65 (async approval) / #81 (transparent terminal):** consider backing grant /
+  session windows with **certificate expiry** (`ssh-keygen -V '+5m'`) so the limit is
+  enforced by the credential itself, not only a gate-side timer; add a **restart-safe
+  kill-switch that defaults OFF** so standing grants never silently re-arm
+  (aipermission); a **`complete`/uncertainty flag disabling standing grants** when the
+  classifier can't fully resolve a command (pi-permissions).
+- **#76 (approval-assist):** carry an agent-supplied **per-write rationale** and
+  surface it at the tap (AgentGate/Teleport reason field) — the deterministic
+  companion to the LLM summary; add deterministic **risk annotations** ("deletes
+  files"/"changes firewall"/"may print credentials", aipermission `command_policy`).
+- **#80 (gate modes):** OpenClaw ships a 5-mode superset (deny/allowlist/ask/auto/
+  full) — validates the design; adopt deny/allowlist/ask/auto and keep the
+  no-allow-everything rule (skip "full"); cedws' default-deny hostname/IP/CIDR
+  allowlist is a clean reference for strict mode (**pin resolved IP**, avoiding cedws'
+  client-name DNS bypass); a declarative permit/forbid policy layer (StrongDM Cedar,
+  approval-folded-into-evaluation) is a possible v0.3+ direction, not a v0.2 commit.
+- **#24 (service adapters):** the multi-protocol gateways (Hoop) and aipermission's
+  **bounded per-capability named-action allowlists** (no raw kubectl/psql) validate
+  the adapter direction.
+- **#26 (friendlier responses):** a **`/ssh-policy explain` dry-run** ("why would this
+  auto-approve / why did it need a tap", pi-permissions) is strong classifier-trust UX.
+- **New small hardening/verification task (filed):** audit the forced-command
+  `authorized_keys` line for OpenSSH `restrict` / `no-pty` / no-agent-forwarding /
+  no-port-forwarding / no-user-rc, and confirm local-state writers (grants/keys/
+  session) meet the umask-0077 + symlink-reject (`O_NOFOLLOW`) + atomic-rename bar
+  (jeprecated / pi-permissions hygiene). Cheap, high-assurance.
+
+---
+
+## Work ordering (owner direction, 2026-07-11): safeguard-sensitive work goes last
+
+The #22 argv-exec + kernel-confinement work — and the adversarial classifier
+**bypass corpus** that feeds it — tripped an automated model safeguard on 2026-07-10
+(false positive; a defensive self-test of our own gate — a review request is filed).
+Owner call (2026-07-11): **schedule that exact class of work LAST**, gated on the
+safeguard being cleared, and do everything that does *not* trip it first.
+
+- **Safeguard-sensitive → LAST (do not start until the flag clears):** #22
+  (argv-exec + Landlock/seccomp); the #22-folded classifier refinements (argv-audit
+  capture, approval payload-hash + stale-detection, wrapper-unwrapping + AST-walk +
+  the bypass corpus); **#81** transparent-terminal SSH (depends on #22); **#25**
+  gated interactive session (depends on #22); **#24** SQL service-adapter classifier
+  (design *with* #22 — sequence alongside it).
+- **Safeguard-neutral → can proceed first:** the shared-messaging approval anchor;
+  **#80** multi-mode gate (mode framework/UX); **#76** approval-assist + per-write
+  rationale; **#75** bundled DevOps skills; **#74** product shape/packaging; **#65**
+  async approval lifecycle; **#26** friendlier gate responses; **#17** multi-key
+  identity (per-agent certs / key-lock / IP-pin); **#23** interactive-prompt
+  forwarding; the forced-command `restrict`/no-pty + local-state hygiene audit;
+  the operational-hardening tail; branch revivals **#82** (redactor port) / **#83**
+  (hosted-signer ship).
+
+**Consequence for v0.2:** v0.2 was defined as "everything already built **+** #22."
+With #22 deferred to last, that definition now ships last too. The
+**feature-table review** (see *Release status & versioning*) must resolve the central
+question: **re-scope v0.2 to a safeguard-neutral interim milestone** (pull neutral
+items forward) **vs.** keep the definition and let v0.2's ship wait on the safeguard.
+Owner makes the segregation call; this note only fixes the *ordering* constraint.
+
+---
+
 ## Already shipped
 
 - **Human-only provisioning CLI.** Onboarding a server is a control-plane action
