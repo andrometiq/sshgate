@@ -310,7 +310,17 @@ These are the highest-priority forward items.
   > signing core and the existing local `sshgate-signer-telegram` is refactored to consume it —
   > local + hosted are two thin front-ends over ONE signer codebase, not a fork. Build key
   > custody as `crypto.Signer` (KMS/HSM-able), required audit sink, Lock/RotateTo, from a rebase
-  > spike of `feat/v2-hosted-signer` first. **Q6 marketplace (Karthi):** publish to the top ~10
+  > spike of `feat/v2-hosted-signer` first.
+  >
+  > **Deferred (from the signerkit build, 2026-07-13): gate-side dual-key rotation.**
+  > `signerkit.RotateTo` is an *atomic cut-over* — the gate loads exactly one signer pubkey
+  > (`gate.LoadPubKey`; `VerifySigned` takes one), so a rotation has a brief window where
+  > in-flight envelopes signed with the old key are refused until every gate re-provisions.
+  > Zero-downtime rotation needs the gate to accept an old+new key pair during a rollover
+  > window; that gate-side change is deferred to a future item. Until then, rotation is a
+  > planned-maintenance action, not a live hot-swap.
+  >
+  > **Q6 marketplace (Karthi):** publish to the top ~10
   > agent marketplaces/registries; a separate research pass enumerates per-surface requirements,
   > the easy first win, the repo-readiness checklist, and the submission/email contacts so the
   > ball leaves Karthi's court (deliver as an HTML file). Verification (T1–T7 on Codex/Gemini)
