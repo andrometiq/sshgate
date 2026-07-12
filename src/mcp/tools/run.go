@@ -81,6 +81,13 @@ type RunOutput struct {
 	// misclassification). It is advisory MCP-side surfacing — the gate's
 	// security decision stays on classify.Classify.
 	Reason string `json:"reason,omitempty"`
+	// Denial (#26-core) is the structured, agent-parseable verdict CLASS +
+	// remedy when a command did not run and the agent must act (rephrase,
+	// escalate, stop, retry once, or provide a reason). Nil on success and on
+	// non-verdict infra errors. Additive and migration-neutral — see denial.go.
+	// It is SET on every recognised refusal return; the MCP handler preserves
+	// it even on the Go-error path (server.go runHandler) so it is not lost.
+	Denial *Denial `json:"denial,omitempty"`
 }
 
 // SignClient is the subset of sign.Client that Runner needs. It
@@ -245,7 +252,8 @@ func (r *Runner) Run(ctx context.Context, in RunInput) (RunOutput, error) {
 	// human can weigh.
 	if in.Reveal {
 		if strings.TrimSpace(in.Reason) == "" {
-			return RunOutput{}, errors.New("tools: reveal requires a non-empty reason (a SECRET-REVEAL exposes raw secret values to the agent; the human approver needs to know why)")
+			return RunOutput{Denial: newDenial(VerdictRevealNeedsReason)},
+				errors.New("tools: reveal requires a non-empty reason (a SECRET-REVEAL exposes raw secret values to the agent; the human approver needs to know why)")
 		}
 		// The reveal route is intentional, not a misclassification — no reason.
 		return r.runWrite(ctx, in.Alias, entry, in.Command, true, in.Reason, "", cap)
@@ -314,13 +322,14 @@ func (r *Runner) runWrite(ctx context.Context, alias string, e registry.Entry, c
 	// waste a real Telegram tap on a guaranteed no-op — short-circuit
 	// with an actionable upgrade path instead.
 	if e.ReadOnly {
-		return RunOutput{Kind: "write", Reason: classifyReason}, readOnlyWriteErr(alias, classifyReason)
+		return RunOutput{Kind: "write", Reason: classifyReason, Denial: newDenial(VerdictReadOnlyServer)},
+			readOnlyWriteErr(alias, classifyReason)
 	}
 	// A write before /sshgate:setup cannot succeed (no key, no signer):
 	// surface the same actionable "run /sshgate:setup" guidance the read
 	// path uses rather than a deeper, opaque failure.
 	if err := r.checkKeyReady(); err != nil {
-		return RunOutput{Kind: "write", Reason: classifyReason}, err
+		return RunOutput{Kind: "write", Reason: classifyReason, Denial: newDenial(VerdictNoSignerConfigured)}, err
 	}
 	ttl := r.WriteTTLSec
 	if ttl <= 0 {
@@ -348,7 +357,7 @@ func (r *Runner) runWrite(ctx context.Context, alias string, e registry.Entry, c
 		// Preserve the sentinel for the MCP layer, but enrich the
 		// message with actionable remediation (permission vs Tier-1 vs
 		// dead daemon). r.remediateSignErr keeps errors.Is intact.
-		return RunOutput{Kind: "write", Reason: classifyReason}, r.remediateSignErr(err)
+		return RunOutput{Kind: "write", Reason: classifyReason, Denial: r.denialForSignErr(err)}, r.remediateSignErr(err)
 	}
 	if len(res.Signed) != 1 {
 		return RunOutput{Kind: "write", Reason: classifyReason}, fmt.Errorf("tools: expected 1 signature; got %d", len(res.Signed))
@@ -370,7 +379,7 @@ func (r *Runner) runWrite(ctx context.Context, alias string, e registry.Entry, c
 	// the well-known gate codes so the model gets remediation rather than
 	// a bare "exit 77/65".
 	if note := gateDenyNote(exit); note != "" {
-		return RunOutput{Stdout: outStr, Stderr: errStr, ExitCode: exit, Kind: "write", Approved: true, Revealed: reveal, AuthMode: authMode, Reason: classifyReason},
+		return RunOutput{Stdout: outStr, Stderr: errStr, ExitCode: exit, Kind: "write", Approved: true, Revealed: reveal, AuthMode: authMode, Reason: classifyReason, Denial: denialForGateExit(exit)},
 			fmt.Errorf("tools: %s", note)
 	}
 	return RunOutput{
@@ -435,6 +444,50 @@ func (r *Runner) remediateSignErr(err error) error {
 	default:
 		// Denials, timeouts, daemon errors: wrap once, preserve sentinel.
 		return fmt.Errorf("tools: sign: %w", err)
+	}
+}
+
+// denialForSignErr maps a sign-layer sentinel to its structured Denial
+// (#26-core), parallel to remediateSignErr's prose mapping. It reuses
+// signerSocketPresent to split ErrUnreachable into "daemon down" (socket
+// present) vs "no signer / Tier-1" (socket absent), matching the prose. A
+// non-sentinel (generic daemon) error yields nil — no structured verdict, prose
+// only. Retryable/action live in newDenial: only approval_timeout is retryable
+// among these (approval_denied / verdict_unknown are stop_do_not_retry).
+func (r *Runner) denialForSignErr(err error) *Denial {
+	switch {
+	case errors.Is(err, signpkg.ErrVerdictUnknown):
+		return newDenial(VerdictUnknown)
+	case errors.Is(err, signpkg.ErrSignerPermission):
+		return newDenial(VerdictSignerPermission)
+	case errors.Is(err, signpkg.ErrUnreachable):
+		if r.signerSocketPresent() {
+			return newDenial(VerdictSignerUnreachable)
+		}
+		return newDenial(VerdictNoSignerConfigured)
+	case errors.Is(err, signpkg.ErrDenied):
+		return newDenial(VerdictApprovalDenied)
+	case errors.Is(err, signpkg.ErrTimeout):
+		return newDenial(VerdictApprovalTimeout)
+	default:
+		return nil
+	}
+}
+
+// denialForGateExit maps a well-known gate deny exit code to its structured
+// Denial (#26-core), parallel to gateDenyNote's prose. 77 = missing signature /
+// read-only host (escalate_to_human, NOT retryable — the MCP already signed a
+// Tier-2 write, so 77 means tier mismatch / stripped sig, and re-soliciting a
+// fresh tap would loop); 65 = bad/expired signature (retry once). Any other exit
+// is not a gate deny and yields nil.
+func denialForGateExit(exit int) *Denial {
+	switch exit {
+	case 77:
+		return newDenial(VerdictMissingSignature)
+	case 65:
+		return newDenial(VerdictBadSignature)
+	default:
+		return nil
 	}
 }
 

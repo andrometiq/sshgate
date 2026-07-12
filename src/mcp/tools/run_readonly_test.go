@@ -24,9 +24,22 @@ func TestRun_WriteToReadOnlyServer_NoSign(t *testing.T) {
 	ssh := &fakeSSH{}
 	runner := &tools.Runner{Servers: r, Sign: sign, SSH: ssh}
 
-	_, err := runner.Run(context.Background(), tools.RunInput{Alias: "ro", Command: "rm /tmp/x"})
+	out, err := runner.Run(context.Background(), tools.RunInput{Alias: "ro", Command: "rm /tmp/x"})
 	if err == nil {
 		t.Fatal("expected error writing to a read-only server, got nil")
+	}
+	// #26-core: the structured Denial names the class + remedy.
+	if out.Denial == nil {
+		t.Fatal("out.Denial is nil; want a structured read_only_server denial")
+	}
+	if out.Denial.VerdictClass != tools.VerdictReadOnlyServer {
+		t.Errorf("VerdictClass=%q; want %q", out.Denial.VerdictClass, tools.VerdictReadOnlyServer)
+	}
+	if out.Denial.RequiredAction != tools.ActionRephraseAsRead {
+		t.Errorf("RequiredAction=%q; want %q", out.Denial.RequiredAction, tools.ActionRephraseAsRead)
+	}
+	if out.Denial.Retryable {
+		t.Error("Retryable=true; want false for read_only_server")
 	}
 	if sign.signCalled {
 		t.Error("Sign was called for a write to a read-only server; must short-circuit before signing")
@@ -54,12 +67,16 @@ func TestRunBatch_WriteToReadOnlyServer_NoSign(t *testing.T) {
 	ssh := &batchSSH{}
 	runner := &tools.Runner{Servers: r, Sign: sign, SSH: ssh}
 
-	_, err := runner.RunBatch(context.Background(), tools.RunBatchInput{
+	out, err := runner.RunBatch(context.Background(), tools.RunBatchInput{
 		Alias:    "ro",
 		Commands: []string{"df -h", "rm /tmp/x"},
 	})
 	if err == nil {
 		t.Fatal("expected error: batch with a write to a read-only server, got nil")
+	}
+	// #26-core: batch also carries the structured Denial on the error path.
+	if out.Denial == nil || out.Denial.VerdictClass != tools.VerdictReadOnlyServer {
+		t.Errorf("out.Denial=%+v; want read_only_server", out.Denial)
 	}
 	if sign.calls != 0 {
 		t.Errorf("Sign called %d times for a write to a read-only server; want 0", sign.calls)
@@ -112,12 +129,16 @@ func TestRun_WriteMissingKey_GivesSetupGuidance(t *testing.T) {
 	ssh := &fakeSSH{}
 	runner := &tools.Runner{Servers: r, Sign: sign, SSH: ssh, KeyPath: keyPath}
 
-	_, err := runner.Run(context.Background(), tools.RunInput{Alias: "h1", Command: "rm /tmp/x"})
+	out, err := runner.Run(context.Background(), tools.RunInput{Alias: "h1", Command: "rm /tmp/x"})
 	if err == nil {
 		t.Fatal("expected error when SSH key is missing on a write, got nil")
 	}
 	if !strings.Contains(err.Error(), "setup") {
 		t.Errorf("error %q does not mention setup — not actionable for a fresh user", err.Error())
+	}
+	// #26-core: missing key pre-setup → no_signer_configured / escalate.
+	if out.Denial == nil || out.Denial.VerdictClass != tools.VerdictNoSignerConfigured {
+		t.Errorf("out.Denial=%+v; want no_signer_configured", out.Denial)
 	}
 	if sign.signCalled {
 		t.Error("Sign was solicited before the missing-key check fired")
@@ -136,7 +157,7 @@ func TestRunBatch_WriteMissingKey_GivesSetupGuidance(t *testing.T) {
 	ssh := &batchSSH{}
 	runner := &tools.Runner{Servers: r, Sign: sign, SSH: ssh, KeyPath: keyPath}
 
-	_, err := runner.RunBatch(context.Background(), tools.RunBatchInput{
+	out, err := runner.RunBatch(context.Background(), tools.RunBatchInput{
 		Alias:    "h1",
 		Commands: []string{"rm /tmp/x"},
 	})
@@ -145,6 +166,10 @@ func TestRunBatch_WriteMissingKey_GivesSetupGuidance(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "setup") {
 		t.Errorf("error %q does not mention setup", err.Error())
+	}
+	// #26-core: batch missing key pre-setup → no_signer_configured.
+	if out.Denial == nil || out.Denial.VerdictClass != tools.VerdictNoSignerConfigured {
+		t.Errorf("out.Denial=%+v; want no_signer_configured", out.Denial)
 	}
 	if sign.calls != 0 {
 		t.Error("Sign was solicited before the missing-key check fired")

@@ -25,9 +25,16 @@ func TestRun_WriteVerdictUnknown_FailSafeGuidanceAndSentinel(t *testing.T) {
 	ssh := &fakeSSH{}
 	runner := &tools.Runner{Servers: r, Sign: sign, SSH: ssh}
 
-	_, err := runner.Run(context.Background(), tools.RunInput{Alias: "h1", Command: "rm /tmp/x"})
+	out, err := runner.Run(context.Background(), tools.RunInput{Alias: "h1", Command: "rm /tmp/x"})
 	if err == nil {
 		t.Fatal("expected error on verdict-unknown")
+	}
+	// #26-core: verdict_unknown → stop_do_not_retry, NOT retryable.
+	if out.Denial == nil || out.Denial.VerdictClass != tools.VerdictUnknown {
+		t.Errorf("out.Denial=%+v; want verdict_unknown", out.Denial)
+	}
+	if out.Denial != nil && (out.Denial.RequiredAction != tools.ActionStopDoNotRetry || out.Denial.Retryable) {
+		t.Errorf("verdict_unknown Denial action=%q retryable=%v; want stop_do_not_retry/false", out.Denial.RequiredAction, out.Denial.Retryable)
 	}
 	// Sentinel survives the wrapping so the MCP layer can recognise it.
 	if !errors.Is(err, signpkg.ErrVerdictUnknown) {
@@ -70,6 +77,10 @@ func TestRunBatch_WriteVerdictUnknown_ReasonToken(t *testing.T) {
 	}
 	if !out.Denied {
 		t.Error("Denied=false; want true on verdict-unknown")
+	}
+	// #26-core: batch Denial mirrors the token (stop, not retry).
+	if out.Denial == nil || out.Denial.VerdictClass != tools.VerdictUnknown {
+		t.Errorf("out.Denial=%+v; want verdict_unknown", out.Denial)
 	}
 	// The batch Reason carries the distinct verdict_unknown token (so it is
 	// NOT the generic "error" bucket) plus the fail-safe guidance.

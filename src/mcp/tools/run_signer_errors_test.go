@@ -30,12 +30,19 @@ func TestRun_WritePermission_ActionableAndSentinel(t *testing.T) {
 		SignerSockPath: "/run/sshgatesigner/sign.sock",
 	}
 
-	_, err := runner.Run(context.Background(), tools.RunInput{Alias: "h1", Command: "rm /tmp/x"})
+	out, err := runner.Run(context.Background(), tools.RunInput{Alias: "h1", Command: "rm /tmp/x"})
 	if err == nil {
 		t.Fatal("expected error on signer permission denial")
 	}
 	if !errors.Is(err, signpkg.ErrSignerPermission) {
 		t.Errorf("err = %v; want wrap of ErrSignerPermission", err)
+	}
+	// #26-core: structured Denial mirrors the sentinel (escalate, not retry).
+	if out.Denial == nil || out.Denial.VerdictClass != tools.VerdictSignerPermission {
+		t.Errorf("out.Denial=%+v; want signer_permission", out.Denial)
+	}
+	if out.Denial != nil && out.Denial.RequiredAction != tools.ActionEscalateToHuman {
+		t.Errorf("RequiredAction=%q; want escalate_to_human", out.Denial.RequiredAction)
 	}
 	if !strings.Contains(err.Error(), "sshgatesigner group") || !strings.Contains(err.Error(), "Log out") {
 		t.Errorf("error %q is not the actionable group/relaunch guidance", err.Error())
@@ -64,7 +71,7 @@ func TestRun_WriteUnreachable_SocketPresent_DaemonDownMessage(t *testing.T) {
 	ssh := &fakeSSH{}
 	runner := &tools.Runner{Servers: r, Sign: sign, SSH: ssh, SignerSockPath: sock}
 
-	_, err := runner.Run(context.Background(), tools.RunInput{Alias: "h1", Command: "rm /tmp/x"})
+	out, err := runner.Run(context.Background(), tools.RunInput{Alias: "h1", Command: "rm /tmp/x"})
 	if err == nil {
 		t.Fatal("expected error on unreachable signer")
 	}
@@ -73,6 +80,10 @@ func TestRun_WriteUnreachable_SocketPresent_DaemonDownMessage(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "systemctl status sshgate-signer-telegram") {
 		t.Errorf("error %q should point at the daemon (socket present, unreachable)", err.Error())
+	}
+	// #26-core: socket present + unreachable → signer_unreachable (daemon down).
+	if out.Denial == nil || out.Denial.VerdictClass != tools.VerdictSignerUnreachable {
+		t.Errorf("out.Denial=%+v; want signer_unreachable", out.Denial)
 	}
 	if strings.Contains(err.Error(), "Tier-1") {
 		t.Errorf("error %q should NOT be the Tier-1 message when the socket is present", err.Error())
@@ -93,7 +104,7 @@ func TestRun_WriteUnreachable_SocketAbsent_Tier1Message(t *testing.T) {
 		SignerSockPath: filepath.Join(t.TempDir(), "absent.sock"), // never created
 	}
 
-	_, err := runner.Run(context.Background(), tools.RunInput{Alias: "h1", Command: "rm /tmp/x"})
+	out, err := runner.Run(context.Background(), tools.RunInput{Alias: "h1", Command: "rm /tmp/x"})
 	if err == nil {
 		t.Fatal("expected error on unreachable signer")
 	}
@@ -102,6 +113,10 @@ func TestRun_WriteUnreachable_SocketAbsent_Tier1Message(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "Tier-1") || !strings.Contains(err.Error(), "/sshgate:setup") {
 		t.Errorf("error %q should be the Tier-1 setup guidance when the socket is absent", err.Error())
+	}
+	// #26-core: socket absent + unreachable → no_signer_configured (Tier-1).
+	if out.Denial == nil || out.Denial.VerdictClass != tools.VerdictNoSignerConfigured {
+		t.Errorf("out.Denial=%+v; want no_signer_configured", out.Denial)
 	}
 }
 
@@ -133,6 +148,10 @@ func TestRunBatch_WritePermission_Reason(t *testing.T) {
 	if !strings.Contains(out.Reason, "sshgatesigner group") || !strings.Contains(out.Reason, "Log out") {
 		t.Errorf("Reason=%q; want the actionable group/relaunch guidance", out.Reason)
 	}
+	// #26-core: batch Denial mirrors the Reason token.
+	if out.Denial == nil || out.Denial.VerdictClass != tools.VerdictSignerPermission {
+		t.Errorf("out.Denial=%+v; want signer_permission", out.Denial)
+	}
 	if len(ssh.calls) != 0 {
 		t.Error("SSH was called despite signer permission failure")
 	}
@@ -148,12 +167,21 @@ func TestRun_WriteGateDeny77_Annotated(t *testing.T) {
 	ssh := &fakeSSH{exit: 77} // gate deny: missing sig / read-only
 	runner := &tools.Runner{Servers: r, Sign: sign, SSH: ssh}
 
-	_, err := runner.Run(context.Background(), tools.RunInput{Alias: "h1", Command: "rm /tmp/x"})
+	out, err := runner.Run(context.Background(), tools.RunInput{Alias: "h1", Command: "rm /tmp/x"})
 	if err == nil {
 		t.Fatal("expected an annotated error on gate deny exit 77, got nil")
 	}
 	if !strings.Contains(err.Error(), "exit 77") || !strings.Contains(err.Error(), "/sshgate:setup") {
 		t.Errorf("error %q is not the exit-77 gate-deny remediation", err.Error())
+	}
+	// #26-core M1: exit 77 → missing_signature, escalate_to_human, NOT retryable
+	// (the MCP already signed this Tier-2 write; 77 means tier mismatch /
+	// stripped sig, so re-soliciting a fresh tap would loop).
+	if out.Denial == nil || out.Denial.VerdictClass != tools.VerdictMissingSignature {
+		t.Errorf("out.Denial=%+v; want missing_signature", out.Denial)
+	}
+	if out.Denial != nil && out.Denial.Retryable {
+		t.Error("Retryable=true for exit 77; want false (M1)")
 	}
 }
 
@@ -166,12 +194,19 @@ func TestRun_WriteGateDeny65_Annotated(t *testing.T) {
 	ssh := &fakeSSH{exit: 65} // gate deny: bad/expired signature
 	runner := &tools.Runner{Servers: r, Sign: sign, SSH: ssh}
 
-	_, err := runner.Run(context.Background(), tools.RunInput{Alias: "h1", Command: "rm /tmp/x"})
+	out, err := runner.Run(context.Background(), tools.RunInput{Alias: "h1", Command: "rm /tmp/x"})
 	if err == nil {
 		t.Fatal("expected an annotated error on gate deny exit 65, got nil")
 	}
 	if !strings.Contains(err.Error(), "exit 65") || !strings.Contains(err.Error(), "retry") {
 		t.Errorf("error %q is not the exit-65 gate-deny remediation", err.Error())
+	}
+	// #26-core: exit 65 → bad_signature, retry, retryable=true (retry once).
+	if out.Denial == nil || out.Denial.VerdictClass != tools.VerdictBadSignature {
+		t.Errorf("out.Denial=%+v; want bad_signature", out.Denial)
+	}
+	if out.Denial != nil && (out.Denial.RequiredAction != tools.ActionRetry || !out.Denial.Retryable) {
+		t.Errorf("exit 65 Denial action=%q retryable=%v; want retry/true", out.Denial.RequiredAction, out.Denial.Retryable)
 	}
 }
 
@@ -200,5 +235,13 @@ func TestRunBatch_WriteGateDeny77_AnnotatesStderr(t *testing.T) {
 	}
 	if !strings.Contains(out.Results[0].Stderr, "exit 77") {
 		t.Errorf("Stderr=%q; want the exit-77 gate-deny annotation", out.Results[0].Stderr)
+	}
+	// #26-core N1: a per-command gate deny sets a batch-level Denial while the
+	// batch ran (Denied=false, Results populated).
+	if out.Denied {
+		t.Error("Denied=true; want false — the batch ran, only a per-command gate deny occurred")
+	}
+	if out.Denial == nil || out.Denial.VerdictClass != tools.VerdictMissingSignature {
+		t.Errorf("out.Denial=%+v; want batch-level missing_signature", out.Denial)
 	}
 }

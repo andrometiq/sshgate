@@ -103,7 +103,7 @@ func TestRun_RevealRequiresReason(t *testing.T) {
 	runner := &tools.Runner{Servers: r, Sign: sign, SSH: ssh}
 
 	for _, reason := range []string{"", "   ", "\t\n"} {
-		_, err := runner.Run(context.Background(), tools.RunInput{
+		out, err := runner.Run(context.Background(), tools.RunInput{
 			Alias:   "h1",
 			Command: "cat /etc/secret.env",
 			Reveal:  true,
@@ -114,6 +114,11 @@ func TestRun_RevealRequiresReason(t *testing.T) {
 		}
 		if !strings.Contains(strings.ToLower(err.Error()), "reason") {
 			t.Errorf("reveal with reason %q: error %q should mention the missing reason", reason, err)
+		}
+		// #26-core: structured Denial → reveal_needs_reason / provide_reason.
+		if out.Denial == nil || out.Denial.VerdictClass != tools.VerdictRevealNeedsReason ||
+			out.Denial.RequiredAction != tools.ActionProvideReason {
+			t.Errorf("reveal with reason %q: out.Denial=%+v; want reveal_needs_reason/provide_reason", reason, out.Denial)
 		}
 		if sign.signCalled {
 			t.Errorf("reveal with reason %q: sign must NOT be called when validation fails", reason)

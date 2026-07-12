@@ -314,6 +314,13 @@ func TestRunBatch_WriteDenied_NoSSH(t *testing.T) {
 	if out.Reason != "denied" {
 		t.Errorf("Reason=%q; want denied", out.Reason)
 	}
+	// #26-core: Denial mirrors the Reason token (stop, not retry).
+	if out.Denial == nil || out.Denial.VerdictClass != tools.VerdictApprovalDenied {
+		t.Errorf("out.Denial=%+v; want approval_denied", out.Denial)
+	}
+	if out.Denial != nil && out.Denial.RequiredAction != tools.ActionStopDoNotRetry {
+		t.Errorf("RequiredAction=%q; want stop_do_not_retry", out.Denial.RequiredAction)
+	}
 	if len(out.Results) != 0 {
 		t.Errorf("Results=%d; want 0 on denial", len(out.Results))
 	}
@@ -335,6 +342,10 @@ func TestRunBatch_WriteTimeout(t *testing.T) {
 	}
 	if out.Reason != "timeout" {
 		t.Errorf("Reason=%q; want timeout", out.Reason)
+	}
+	// #26-core: timeout is the one retryable batch denial (retry once).
+	if out.Denial == nil || out.Denial.VerdictClass != tools.VerdictApprovalTimeout || !out.Denial.Retryable {
+		t.Errorf("out.Denial=%+v; want approval_timeout, retryable=true", out.Denial)
 	}
 	if !out.Denied {
 		t.Error("Denied=false; want true on timeout")
@@ -363,6 +374,10 @@ func TestRunBatch_WriteUnreachable(t *testing.T) {
 	}
 	if !strings.Contains(out.Reason, "no signer configured") || !strings.Contains(out.Reason, "/sshgate:setup") {
 		t.Errorf("Reason=%q; want the Tier-1 'no signer configured … /sshgate:setup' guidance", out.Reason)
+	}
+	// #26-core: unreachable + socket absent → no_signer_configured (Tier-1).
+	if out.Denial == nil || out.Denial.VerdictClass != tools.VerdictNoSignerConfigured {
+		t.Errorf("out.Denial=%+v; want no_signer_configured", out.Denial)
 	}
 	if !out.Denied {
 		t.Error("Denied=false; want true on unreachable")

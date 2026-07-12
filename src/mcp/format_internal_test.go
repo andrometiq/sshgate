@@ -150,6 +150,44 @@ func TestGateDenyNoteFor(t *testing.T) {
 	}
 }
 
+// TestFormatSummaries_EchoDenial pins the #26-core one-line denial summary
+// echo appended to the fallback TextContent summaries (for text-only clients).
+// The echo is strictly APPENDED — the existing summary text is unchanged.
+func TestFormatSummaries_EchoDenial(t *testing.T) {
+	t.Parallel()
+
+	// run: a Denial on the RunOutput appends "denial: <summary>".
+	d := &tools.Denial{VerdictClass: tools.VerdictReadOnlyServer, Summary: "ROSUMMARY"}
+	runOut := tools.RunOutput{Kind: "write", ExitCode: 77, Denial: d}
+	if got := formatRunSummary(runOut); !strings.Contains(got, "denial: ROSUMMARY") {
+		t.Errorf("formatRunSummary missing denial echo: %q", got)
+	}
+
+	// run_batch, whole-batch denied path.
+	batchDenied := tools.RunBatchOutput{
+		Server: "h1", Denied: true, Reason: "denied",
+		Denial: &tools.Denial{VerdictClass: tools.VerdictApprovalDenied, Summary: "DENYSUM"},
+	}
+	if got := formatRunBatchSummary(batchDenied); !strings.Contains(got, "denial: DENYSUM") {
+		t.Errorf("formatRunBatchSummary (denied) missing denial echo: %q", got)
+	}
+
+	// run_batch, per-command gate deny (batch ran; Denied=false).
+	batchRan := tools.RunBatchOutput{
+		Server:  "h1",
+		Results: []tools.CommandResult{{Command: "rm x", Kind: "write", ExitCode: 77}},
+		Denial:  &tools.Denial{VerdictClass: tools.VerdictMissingSignature, Summary: "MISSSUM"},
+	}
+	got := formatRunBatchSummary(batchRan)
+	if !strings.Contains(got, "denial: MISSSUM") {
+		t.Errorf("formatRunBatchSummary (per-command deny) missing denial echo: %q", got)
+	}
+	// Appended, not replacing: the existing batch header line is still present.
+	if !strings.Contains(got, "batch on h1") {
+		t.Errorf("existing batch summary text was altered: %q", got)
+	}
+}
+
 // TestTruncate covers the under-limit (untouched), at-limit (untouched),
 // and over-limit (truncated + marker) cases.
 func TestTruncate(t *testing.T) {

@@ -313,6 +313,20 @@ func (s *Server) runHandler(ctx context.Context, _ *mcpsdk.CallToolRequest, in t
 		// the failure; the model gets the structured tool error from
 		// the SDK.
 		s.Logger.Printf("run alias=%s err=%v", in.Alias, err)
+		// #26-core: a RECOGNISED verdict/refusal carries a structured Denial.
+		// Preserve it AND the IsError semantics + prose text: return err=nil so
+		// the SDK does not discard `out` (server.go SetError path drops the 2nd
+		// return on err!=nil); set IsError + the error text on the result
+		// ourselves, and let the SDK marshal `out` (Denial included) into
+		// StructuredContent. True infra errors (out.Denial==nil) keep the
+		// current text-only IsError path.
+		if out.Denial != nil {
+			res := &mcpsdk.CallToolResult{
+				IsError: true,
+				Content: []mcpsdk.Content{&mcpsdk.TextContent{Text: err.Error()}},
+			}
+			return res, out, nil
+		}
 		return nil, tools.RunOutput{}, err
 	}
 	s.Logger.Printf("run alias=%s kind=%s approved=%v exit=%d", in.Alias, out.Kind, out.Approved, out.ExitCode)
@@ -368,6 +382,16 @@ func (s *Server) runBatchHandler(ctx context.Context, _ *mcpsdk.CallToolRequest,
 		// partials — keeping the error path simple is worth more than the
 		// transient convenience view of an aborted batch.
 		s.Logger.Printf("run_batch alias=%s err=%v", in.Alias, err)
+		// #26-core: mirror runHandler — a recognised refusal (read-only host,
+		// missing signer) carries a structured Denial on the Go-error path.
+		// Preserve it while keeping IsError + prose text (see runHandler).
+		if out.Denial != nil {
+			res := &mcpsdk.CallToolResult{
+				IsError: true,
+				Content: []mcpsdk.Content{&mcpsdk.TextContent{Text: err.Error()}},
+			}
+			return res, out, nil
+		}
 		return nil, tools.RunBatchOutput{}, err
 	}
 	s.Logger.Printf("run_batch alias=%s n=%d approved=%v denied=%v reason=%s", in.Alias, len(out.Results), out.Approved, out.Denied, out.Reason)
@@ -433,6 +457,11 @@ func formatRunSummary(out tools.RunOutput) string {
 	if out.Stderr != "" {
 		fmt.Fprintf(&b, "\n--- stderr ---\n%s", truncate(out.Stderr, 2000))
 	}
+	// #26-core: echo the one-line denial summary for text-only clients.
+	// Strictly appended; structured content carries the full Denial object.
+	if out.Denial != nil {
+		fmt.Fprintf(&b, "\ndenial: %s", out.Denial.Summary)
+	}
 	return b.String()
 }
 
@@ -443,6 +472,10 @@ func formatRunBatchSummary(out tools.RunBatchOutput) string {
 	var b strings.Builder
 	if out.Denied {
 		fmt.Fprintf(&b, "batch denied (%s) on %s", out.Reason, out.Server)
+		// #26-core: echo the one-line denial summary (strictly appended).
+		if out.Denial != nil {
+			fmt.Fprintf(&b, "\ndenial: %s", out.Denial.Summary)
+		}
 		return b.String()
 	}
 	fmt.Fprintf(&b, "batch on %s: %d command(s), approved=%v", out.Server, len(out.Results), out.Approved)
@@ -462,6 +495,11 @@ func formatRunBatchSummary(out tools.RunBatchOutput) string {
 		if note := gateDenyNoteFor(r); note != "" {
 			fmt.Fprintf(&b, "\n     %s", note)
 		}
+	}
+	// #26-core: a per-command gate deny sets a batch-level Denial while the
+	// batch otherwise ran (Denied=false, Results populated). Echo its summary.
+	if out.Denial != nil {
+		fmt.Fprintf(&b, "\ndenial: %s", out.Denial.Summary)
 	}
 	return b.String()
 }

@@ -72,6 +72,14 @@ type RunBatchOutput struct {
 	// a short machine-readable string.
 	Denied bool   `json:"denied,omitempty"`
 	Reason string `json:"reason,omitempty"`
+	// Denial (#26-core) is the structured verdict CLASS + remedy mirroring
+	// Reason. It is set both on a whole-batch refusal (Denied=true: readOnly,
+	// no-signer, sign denial/timeout/unreachable/permission/verdict_unknown) AND
+	// on a per-command gate deny where the batch otherwise ran (Denied stays
+	// FALSE and Results is populated — Denial != Denied). Nil when nothing was
+	// refused. Additive and migration-neutral — see denial.go. On the Go-error
+	// refusal paths (readOnly, missing key) the MCP handler preserves it.
+	Denial *Denial `json:"denial,omitempty"`
 	// AuthMode (F4) reports HOW the batch's writes were authorised — "human"
 	// (one real-time tap) or "grant:<id>" (a standing-grant auto-sign); empty
 	// for a read-only batch or an old signer. The ONE sign request covers all
@@ -182,13 +190,14 @@ func (r *Runner) RunBatch(ctx context.Context, in RunBatchInput) (RunBatchOutput
 		if entry.ReadOnly {
 			// Name why the FIRST write classified as a write (#26) so a
 			// misclassified read in the batch gets the rephrase nudge too.
-			return RunBatchOutput{}, readOnlyWriteErr(in.Alias, reasons[writeIdx[0]].String())
+			return RunBatchOutput{Server: in.Alias, Denial: newDenial(VerdictReadOnlyServer)},
+				readOnlyWriteErr(in.Alias, reasons[writeIdx[0]].String())
 		}
 		// A write before /sshgate:setup cannot succeed (no key, no
 		// signer): surface the same actionable "run /sshgate:setup"
 		// guidance the read path uses.
 		if err := r.checkKeyReady(); err != nil {
-			return RunBatchOutput{}, err
+			return RunBatchOutput{Server: in.Alias, Denial: newDenial(VerdictNoSignerConfigured)}, err
 		}
 		reqID, err := newRequestID()
 		if err != nil {
@@ -202,6 +211,7 @@ func (r *Runner) RunBatch(ctx context.Context, in RunBatchInput) (RunBatchOutput
 			// human-facing remediation rides in out.Reason too.
 			out.Reason = r.classifySignErrReason(err)
 			out.Denied = true
+			out.Denial = r.denialForSignErr(err)
 			return out, nil
 		}
 		if len(res.Signed) != len(writeCmds) {
@@ -283,6 +293,19 @@ func (r *Runner) RunBatch(ctx context.Context, in RunBatchInput) (RunBatchOutput
 			// exit (explicit wins, in both directions).
 			if explicitStop || kinds[i] == classify.KindWrite {
 				aborted = true
+			}
+		}
+	}
+	// A per-command gate deny (exit 77/65) on a write also surfaces a
+	// batch-level structured Denial so a structured-content client gets the
+	// verdict class, not only the per-result Stderr note. Denied stays FALSE
+	// and Results is populated here (Denial != Denied): the batch DID run and
+	// carries partial output. Use the first gate-denied write.
+	for i := range out.Results {
+		if out.Results[i].Kind == "write" {
+			if d := denialForGateExit(out.Results[i].ExitCode); d != nil {
+				out.Denial = d
+				break
 			}
 		}
 	}
