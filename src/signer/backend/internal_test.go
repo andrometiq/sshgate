@@ -2,9 +2,8 @@ package backend
 
 // In-package (white-box) tests for unexported helpers that the external
 // backend_test package cannot reach: sanitiseExplainerErr, maskUserID,
-// and runExplainer's panic-recovery. The MockBackend double-resolve
-// safety net lives here too — it asserts a fixture invariant and reads
-// cleanest beside the other internal checks.
+// and runExplainer's panic-recovery. (The MockBackend double-resolve
+// safety net moved to pkg/signerkit with mock.go.)
 
 import (
 	"context"
@@ -161,28 +160,4 @@ func TestRunExplainerNoExplainerIsNoop(t *testing.T) {
 	if tb.PanicsTotal() != 0 {
 		t.Errorf("PanicsTotal = %d; want 0 (no-op paths never invoke Explain)", tb.PanicsTotal())
 	}
-}
-
-// TestMockBackendDoubleResolvePanics asserts the fixture safety net: a
-// second resolution of the same RequestID panics loudly rather than
-// silently dropping the result. This protects every downstream test that
-// relies on MockBackend from a green-but-wrong outcome.
-func TestMockBackendDoubleResolvePanics(t *testing.T) {
-	t.Parallel()
-	m := NewMockBackend()
-	m.Approve("r_dup", "karthi")
-
-	defer func() {
-		r := recover()
-		if r == nil {
-			t.Fatal("second resolve did not panic; the double-resolve safety net is broken")
-		}
-		msg := fmt.Sprintf("%v", r)
-		if !strings.Contains(msg, "double-resolve") || !strings.Contains(msg, "r_dup") {
-			t.Errorf("panic = %q; want it to name 'double-resolve' and the request id 'r_dup'", msg)
-		}
-	}()
-
-	// Second resolution of the same id → panic.
-	m.Deny("r_dup")
 }
