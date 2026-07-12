@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net/http"
 	"net/url"
 	"os"
 	"regexp"
@@ -226,7 +227,31 @@ func NewTelegramBackend(opts TelegramOptions) (*TelegramBackend, error) {
 	if endpoint == "" {
 		endpoint = tgbotapi.APIEndpoint
 	}
-	bot, err := tgbotapi.NewBotAPIWithAPIEndpoint(opts.BotToken, endpoint)
+	poll := opts.PollTimeoutSec
+	if poll == 0 && opts.PollTimeoutSec == 0 {
+		// Production default — 30s long-poll matches the upstream's
+		// own example and keeps QPS low. Tests that want immediate
+		// returns pass a negative sentinel via the helper below; the
+		// zero value here is intentionally the production default.
+		poll = 30
+	}
+	// Bound every Telegram HTTP call with an explicit client timeout.
+	// The library's own constructors ship &http.Client{} with NO
+	// timeout, and the poll loop's cancel-watcher/backoff only run
+	// BETWEEN iterations — an in-flight getUpdates Do() on a
+	// black-holed connection (laptop sleep/resume, NAT/VPN flap) would
+	// otherwise wedge the single poll goroutine for up to the OS
+	// TCP-keepalive interval (~2h), silently costing every pending
+	// approval its 5-minute window. The bound must exceed the
+	// long-poll hold so it never fires on a healthy idle poll; the
+	// hosted and explainer HTTP paths in cmd/main.go already set
+	// explicit client timeouts — this closes the same gap here.
+	httpTimeout := 15 * time.Second
+	if poll > 0 {
+		httpTimeout += time.Duration(poll) * time.Second
+	}
+	bot, err := tgbotapi.NewBotAPIWithClient(opts.BotToken, endpoint,
+		&http.Client{Timeout: httpTimeout})
 	if err != nil {
 		// %s + redactToken (not %w): the underlying *url.Error embeds the
 		// token in its URL path, and this error bubbles to main.go's fatal
@@ -243,14 +268,6 @@ func NewTelegramBackend(opts TelegramOptions) (*TelegramBackend, error) {
 	reqTimeout := opts.RequestTimeout
 	if reqTimeout == 0 {
 		reqTimeout = sigwire.ApprovalWindow
-	}
-	poll := opts.PollTimeoutSec
-	if poll == 0 && opts.PollTimeoutSec == 0 {
-		// Production default — 30s long-poll matches the upstream's
-		// own example and keeps QPS low. Tests that want immediate
-		// returns pass a negative sentinel via the helper below; the
-		// zero value here is intentionally the production default.
-		poll = 30
 	}
 
 	t := &TelegramBackend{
