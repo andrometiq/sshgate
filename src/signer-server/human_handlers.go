@@ -8,7 +8,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/karthikeyan5/sshgate/src/signer-server/store"
+	"github.com/karthikeyan5/sshgate/pkg/signerkit/store"
 )
 
 // human_handlers.go is Phase E: the HUMAN-PLANE HTTP surface — the

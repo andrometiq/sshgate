@@ -7,7 +7,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/karthikeyan5/sshgate/src/signer-server/store"
+	"github.com/karthikeyan5/sshgate/pkg/signerkit/store"
 )
 
 // signRequest is the body shape of POST /v1/sign. It mirrors the
@@ -53,12 +53,12 @@ type signAcceptedResponse struct {
 // signatures is populated only on approved; approved_by/at are
 // populated on approved or denied.
 type pollResponse struct {
-	RequestID    string       `json:"request_id"`
-	Status       string       `json:"status"`
-	Signatures   []signedCmd  `json:"signatures,omitempty"`
-	ApprovedBy   string       `json:"approved_by_user,omitempty"`
-	ApprovedAt   *time.Time   `json:"approved_at,omitempty"`
-	Error        string       `json:"error,omitempty"`
+	RequestID  string      `json:"request_id"`
+	Status     string      `json:"status"`
+	Signatures []signedCmd `json:"signatures,omitempty"`
+	ApprovedBy string      `json:"approved_by_user,omitempty"`
+	ApprovedAt *time.Time  `json:"approved_at,omitempty"`
+	Error      string      `json:"error,omitempty"`
 }
 
 // signedCmd is a single signed command in the poll response. The
@@ -78,12 +78,12 @@ type auditResponse struct {
 // auditEntry mirrors the v1 audit-log row shape: one decision per
 // row, with the original commands and the approving user (if any).
 type auditEntry struct {
-	RequestID  string    `json:"request_id"`
-	Status     string    `json:"status"`
-	ClientID   string    `json:"client_id"`
-	Commands   []string  `json:"commands"`
-	ApprovedBy string    `json:"approved_by_user,omitempty"`
-	CreatedAt  time.Time `json:"created_at"`
+	RequestID  string     `json:"request_id"`
+	Status     string     `json:"status"`
+	ClientID   string     `json:"client_id"`
+	Commands   []string   `json:"commands"`
+	ApprovedBy string     `json:"approved_by_user,omitempty"`
+	CreatedAt  time.Time  `json:"created_at"`
 	ResolvedAt *time.Time `json:"resolved_at,omitempty"`
 }
 

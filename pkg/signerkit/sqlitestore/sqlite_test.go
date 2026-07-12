@@ -1,4 +1,4 @@
-package store_test
+package sqlitestore_test
 
 import (
 	"context"
@@ -8,17 +8,18 @@ import (
 	"testing"
 	"time"
 
-	"github.com/karthikeyan5/sshgate/src/signer-server/store"
+	"github.com/karthikeyan5/sshgate/pkg/signerkit/sqlitestore"
+	"github.com/karthikeyan5/sshgate/pkg/signerkit/store"
 )
 
 // newTestDB returns a fresh SQLite-backed Store in a per-test temp dir.
 // We use a file (not :memory:) because modernc.org/sqlite's in-memory
 // database is per-connection and our DB connection pool would defeat
 // the test if multiple goroutines re-opened the same name.
-func newTestDB(t *testing.T) *store.DB {
+func newTestDB(t *testing.T) *sqlitestore.DB {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "test.db")
-	db, err := store.Open(path)
+	db, err := sqlitestore.Open(path)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -225,10 +226,10 @@ func TestWaitForResolution_AlreadyResolved(t *testing.T) {
 	db := newTestDB(t)
 	ctx := context.Background()
 	r := &store.Request{
-		RequestID: "r_fast",
-		Status:    store.StatusApproved,
-		ClientID:  "c",
-		Commands:  []byte(`[]`),
+		RequestID:  "r_fast",
+		Status:     store.StatusApproved,
+		ClientID:   "c",
+		Commands:   []byte(`[]`),
 		Signatures: []byte(`[]`),
 	}
 	if err := db.Insert(ctx, r); err != nil {

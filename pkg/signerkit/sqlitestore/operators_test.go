@@ -1,4 +1,4 @@
-package store_test
+package sqlitestore_test
 
 import (
 	"context"
@@ -13,7 +13,8 @@ import (
 
 	_ "modernc.org/sqlite"
 
-	"github.com/karthikeyan5/sshgate/src/signer-server/store"
+	"github.com/karthikeyan5/sshgate/pkg/signerkit/sqlitestore"
+	"github.com/karthikeyan5/sshgate/pkg/signerkit/store"
 )
 
 // --- migration runner ---
@@ -26,7 +27,7 @@ func TestMigrations_AppliedAndIdempotent(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "migrate.db")
 
-	db, err := store.Open(path)
+	db, err := sqlitestore.Open(path)
 	if err != nil {
 		t.Fatalf("first Open: %v", err)
 	}
@@ -43,7 +44,7 @@ func TestMigrations_AppliedAndIdempotent(t *testing.T) {
 	_ = db.Close()
 
 	// Re-open: must succeed and not add/duplicate any migration rows.
-	db2, err := store.Open(path)
+	db2, err := sqlitestore.Open(path)
 	if err != nil {
 		t.Fatalf("second Open (idempotent re-run): %v", err)
 	}
@@ -77,7 +78,7 @@ func TestMigrations_DataSurvivesReopen(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "survive.db")
 	ctx := context.Background()
 
-	db, err := store.Open(path)
+	db, err := sqlitestore.Open(path)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -88,7 +89,7 @@ func TestMigrations_DataSurvivesReopen(t *testing.T) {
 	}
 	_ = db.Close()
 
-	db2, err := store.Open(path)
+	db2, err := sqlitestore.Open(path)
 	if err != nil {
 		t.Fatalf("re-Open: %v", err)
 	}
@@ -467,7 +468,7 @@ func TestApprovals_ConcurrentVotesRaceSafe(t *testing.T) {
 	}
 }
 
-func mustUser(t *testing.T, db *store.DB, id, username string) {
+func mustUser(t *testing.T, db *sqlitestore.DB, id, username string) {
 	t.Helper()
 	if err := db.CreateUser(context.Background(), &store.User{ID: id, Username: username, Role: "operator"}); err != nil {
 		t.Fatalf("seed user %s: %v", id, err)

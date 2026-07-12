@@ -1,10 +1,11 @@
-package store
+package sqlitestore
 
 import (
 	"context"
 	"database/sql"
 	"errors"
 	"fmt"
+	"github.com/karthikeyan5/sshgate/pkg/signerkit/store"
 	"time"
 
 	// Register the CGO-free SQLite driver under the name "sqlite".
@@ -85,7 +86,7 @@ func (s *DB) Close() error {
 // Insert implements Store.Insert. The UNIQUE constraint on request_id
 // surfaces a duplicate insert as ErrDuplicateID; other errors wrap
 // the underlying driver message.
-func (s *DB) Insert(ctx context.Context, r *Request) error {
+func (s *DB) Insert(ctx context.Context, r *store.Request) error {
 	if r == nil {
 		return errors.New("store: Insert: nil request")
 	}
@@ -125,7 +126,7 @@ func (s *DB) Insert(ctx context.Context, r *Request) error {
 		// match on the substring rather than the driver-specific
 		// error code so the check survives driver upgrades.
 		if isUniqueConstraintErr(err) {
-			return fmt.Errorf("%w: %s", ErrDuplicateID, r.RequestID)
+			return fmt.Errorf("%w: %s", store.ErrDuplicateID, r.RequestID)
 		}
 		return fmt.Errorf("insert: %w", err)
 	}
@@ -133,7 +134,7 @@ func (s *DB) Insert(ctx context.Context, r *Request) error {
 }
 
 // GetByID implements Store.GetByID.
-func (s *DB) GetByID(ctx context.Context, id string) (*Request, error) {
+func (s *DB) GetByID(ctx context.Context, id string) (*store.Request, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT request_id, status, client_id, commands, signatures, created_at, resolved_at, approved_by, required_approvals
 		FROM requests WHERE request_id = ?
@@ -141,7 +142,7 @@ func (s *DB) GetByID(ctx context.Context, id string) (*Request, error) {
 	r, err := scanRequest(row)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return nil, ErrNotFound
+			return nil, store.ErrNotFound
 		}
 		return nil, fmt.Errorf("get %s: %w", id, err)
 	}
@@ -152,7 +153,7 @@ func (s *DB) GetByID(ctx context.Context, id string) (*Request, error) {
 // the current status is pending; subsequent calls are no-ops (the
 // row simply isn't updated). This is the idempotency hook the
 // timeout path relies on.
-func (s *DB) UpdateStatus(ctx context.Context, id string, status Status, signatures []byte, approvedBy string) error {
+func (s *DB) UpdateStatus(ctx context.Context, id string, status store.Status, signatures []byte, approvedBy string) error {
 	if !status.IsValid() {
 		return fmt.Errorf("store: UpdateStatus: invalid status %q", status)
 	}
@@ -163,7 +164,7 @@ func (s *DB) UpdateStatus(ctx context.Context, id string, status Status, signatu
 		WHERE request_id = ? AND status = ?
 	`,
 		string(status), nullableString(signatures), now,
-		nullableEmpty(approvedBy), id, string(StatusPending),
+		nullableEmpty(approvedBy), id, string(store.StatusPending),
 	)
 	if err != nil {
 		return fmt.Errorf("update %s: %w", id, err)
@@ -177,7 +178,7 @@ func (s *DB) UpdateStatus(ctx context.Context, id string, status Status, signatu
 
 // WaitForResolution implements Store.WaitForResolution. v2.0 uses a
 // polling loop; v2.1 should swap in a per-id channel.
-func (s *DB) WaitForResolution(ctx context.Context, id string, timeout time.Duration) (*Request, error) {
+func (s *DB) WaitForResolution(ctx context.Context, id string, timeout time.Duration) (*store.Request, error) {
 	deadline := time.Now().Add(timeout)
 	// First read: cheap fast path. If the row is already non-pending
 	// we return immediately without entering the sleep loop.
@@ -185,7 +186,7 @@ func (s *DB) WaitForResolution(ctx context.Context, id string, timeout time.Dura
 	if err != nil {
 		return nil, err
 	}
-	if r.Status != StatusPending {
+	if r.Status != store.StatusPending {
 		return r, nil
 	}
 
@@ -200,7 +201,7 @@ func (s *DB) WaitForResolution(ctx context.Context, id string, timeout time.Dura
 			if err != nil {
 				return nil, err
 			}
-			if r.Status != StatusPending {
+			if r.Status != store.StatusPending {
 				return r, nil
 			}
 			if time.Now().After(deadline) {
@@ -213,11 +214,11 @@ func (s *DB) WaitForResolution(ctx context.Context, id string, timeout time.Dura
 }
 
 // ListPending implements Store.ListPending.
-func (s *DB) ListPending(ctx context.Context) ([]*Request, error) {
+func (s *DB) ListPending(ctx context.Context) ([]*store.Request, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT request_id, status, client_id, commands, signatures, created_at, resolved_at, approved_by, required_approvals
 		FROM requests WHERE status = ? ORDER BY created_at ASC
-	`, string(StatusPending))
+	`, string(store.StatusPending))
 	if err != nil {
 		return nil, fmt.Errorf("list pending: %w", err)
 	}
@@ -226,7 +227,7 @@ func (s *DB) ListPending(ctx context.Context) ([]*Request, error) {
 }
 
 // RecentAudit implements Store.RecentAudit.
-func (s *DB) RecentAudit(ctx context.Context, limit int) ([]*Request, error) {
+func (s *DB) RecentAudit(ctx context.Context, limit int) ([]*store.Request, error) {
 	if limit <= 0 {
 		limit = 100
 	}
@@ -247,9 +248,9 @@ type rowScanner interface {
 	Scan(dest ...any) error
 }
 
-func scanRequest(s rowScanner) (*Request, error) {
+func scanRequest(s rowScanner) (*store.Request, error) {
 	var (
-		r            Request
+		r            store.Request
 		statusStr    string
 		signatures   sql.NullString
 		createdUnix  int64
@@ -262,7 +263,7 @@ func scanRequest(s rowScanner) (*Request, error) {
 		return nil, err
 	}
 	r.RequiredApprovals = reqApprovals
-	r.Status = Status(statusStr)
+	r.Status = store.Status(statusStr)
 	r.Commands = []byte(commands)
 	if signatures.Valid {
 		r.Signatures = []byte(signatures.String)
@@ -278,8 +279,8 @@ func scanRequest(s rowScanner) (*Request, error) {
 	return &r, nil
 }
 
-func scanRequests(rows *sql.Rows) ([]*Request, error) {
-	var out []*Request
+func scanRequests(rows *sql.Rows) ([]*store.Request, error) {
+	var out []*store.Request
 	for rows.Next() {
 		r, err := scanRequest(rows)
 		if err != nil {
@@ -369,4 +370,4 @@ func containsCI(haystack, needle string) bool {
 }
 
 // Compile-time interface check.
-var _ Store = (*DB)(nil)
+var _ store.Store = (*DB)(nil)

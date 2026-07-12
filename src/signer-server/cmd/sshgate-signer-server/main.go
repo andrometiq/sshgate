@@ -52,8 +52,8 @@ import (
 	"time"
 
 	"github.com/karthikeyan5/sshgate/pkg/signerkit"
+	"github.com/karthikeyan5/sshgate/pkg/signerkit/sqlitestore"
 	signerserver "github.com/karthikeyan5/sshgate/src/signer-server"
-	"github.com/karthikeyan5/sshgate/src/signer-server/store"
 )
 
 // version is stamped from the single VERSION file at link time via
@@ -136,7 +136,7 @@ func run(args []string) int {
 	// first run; subsequent starts no-op. The file's containing dir
 	// must exist and be writable by the signer-server user
 	// (install/deploy.sh provisions /var/lib/signer-server).
-	db, err := store.Open(*dbPath)
+	db, err := sqlitestore.Open(*dbPath)
 	if err != nil {
 		logf("open store: %v", err)
 		return 1

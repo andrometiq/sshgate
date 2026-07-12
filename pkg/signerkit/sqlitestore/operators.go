@@ -1,10 +1,11 @@
-package store
+package sqlitestore
 
 import (
 	"context"
 	"database/sql"
 	"errors"
 	"fmt"
+	"github.com/karthikeyan5/sshgate/pkg/signerkit/store"
 	"time"
 )
 
@@ -22,7 +23,7 @@ func (s *DB) SetRequiredApprovals(ctx context.Context, requestID string, n int) 
 	res, err := s.db.ExecContext(ctx, `
 		UPDATE requests SET required_approvals = ?
 		WHERE request_id = ? AND status = ?
-	`, n, requestID, string(StatusPending))
+	`, n, requestID, string(store.StatusPending))
 	if err != nil {
 		return fmt.Errorf("set required_approvals %s: %w", requestID, err)
 	}
@@ -41,7 +42,7 @@ func (s *DB) SetRequiredApprovals(ctx context.Context, requestID string, n int) 
 }
 
 // CreateUser implements Store.CreateUser.
-func (s *DB) CreateUser(ctx context.Context, u *User) error {
+func (s *DB) CreateUser(ctx context.Context, u *store.User) error {
 	if u == nil {
 		return errors.New("store: CreateUser: nil user")
 	}
@@ -59,7 +60,7 @@ func (s *DB) CreateUser(ctx context.Context, u *User) error {
 	`, u.ID, u.Username, string(u.Role), u.CreatedAt.Unix())
 	if err != nil {
 		if isUniqueConstraintErr(err) {
-			return fmt.Errorf("%w: user %s/%s", ErrDuplicate, u.ID, u.Username)
+			return fmt.Errorf("%w: user %s/%s", store.ErrDuplicate, u.ID, u.Username)
 		}
 		return fmt.Errorf("create user: %w", err)
 	}
@@ -67,7 +68,7 @@ func (s *DB) CreateUser(ctx context.Context, u *User) error {
 }
 
 // GetUser implements Store.GetUser.
-func (s *DB) GetUser(ctx context.Context, id string) (*User, error) {
+func (s *DB) GetUser(ctx context.Context, id string) (*store.User, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT id, username, role, created_at FROM users WHERE id = ?
 	`, id)
@@ -75,32 +76,32 @@ func (s *DB) GetUser(ctx context.Context, id string) (*User, error) {
 }
 
 // GetUserByName implements Store.GetUserByName.
-func (s *DB) GetUserByName(ctx context.Context, username string) (*User, error) {
+func (s *DB) GetUserByName(ctx context.Context, username string) (*store.User, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT id, username, role, created_at FROM users WHERE username = ?
 	`, username)
 	return scanUser(row, username)
 }
 
-func scanUser(row rowScanner, key string) (*User, error) {
+func scanUser(row rowScanner, key string) (*store.User, error) {
 	var (
-		u           User
+		u           store.User
 		role        string
 		createdUnix int64
 	)
 	if err := row.Scan(&u.ID, &u.Username, &role, &createdUnix); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return nil, ErrNotFound
+			return nil, store.ErrNotFound
 		}
 		return nil, fmt.Errorf("get user %s: %w", key, err)
 	}
-	u.Role = Role(role)
+	u.Role = store.Role(role)
 	u.CreatedAt = time.Unix(createdUnix, 0).UTC()
 	return &u, nil
 }
 
 // AddCredential implements Store.AddCredential.
-func (s *DB) AddCredential(ctx context.Context, c *Credential) error {
+func (s *DB) AddCredential(ctx context.Context, c *store.Credential) error {
 	if c == nil {
 		return errors.New("store: AddCredential: nil credential")
 	}
@@ -122,7 +123,7 @@ func (s *DB) AddCredential(ctx context.Context, c *Credential) error {
 	`, c.UserID, c.CredentialID, c.Blob, c.CreatedAt.Unix())
 	if err != nil {
 		if isUniqueConstraintErr(err) {
-			return fmt.Errorf("%w: credential_id already registered", ErrDuplicate)
+			return fmt.Errorf("%w: credential_id already registered", store.ErrDuplicate)
 		}
 		return fmt.Errorf("add credential: %w", err)
 	}
@@ -133,7 +134,7 @@ func (s *DB) AddCredential(ctx context.Context, c *Credential) error {
 }
 
 // ListCredentials implements Store.ListCredentials.
-func (s *DB) ListCredentials(ctx context.Context, userID string) ([]*Credential, error) {
+func (s *DB) ListCredentials(ctx context.Context, userID string) ([]*store.Credential, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, user_id, credential_id, credential, created_at
 		FROM webauthn_credentials WHERE user_id = ? ORDER BY id ASC
@@ -142,10 +143,10 @@ func (s *DB) ListCredentials(ctx context.Context, userID string) ([]*Credential,
 		return nil, fmt.Errorf("list credentials: %w", err)
 	}
 	defer rows.Close()
-	var out []*Credential
+	var out []*store.Credential
 	for rows.Next() {
 		var (
-			c           Credential
+			c           store.Credential
 			createdUnix int64
 		)
 		if err := rows.Scan(&c.ID, &c.UserID, &c.CredentialID, &c.Blob, &createdUnix); err != nil {
@@ -175,7 +176,7 @@ func (s *DB) UpdateCredential(ctx context.Context, id int64, blob []byte) error 
 	}
 	affected, _ := res.RowsAffected()
 	if affected == 0 {
-		return ErrNotFound
+		return store.ErrNotFound
 	}
 	return nil
 }
@@ -207,7 +208,7 @@ func (s *DB) GetTOTP(ctx context.Context, userID string) (string, error) {
 	`, userID).Scan(&secret)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return "", ErrNotFound
+			return "", store.ErrNotFound
 		}
 		return "", fmt.Errorf("get totp %s: %w", userID, err)
 	}
@@ -215,7 +216,7 @@ func (s *DB) GetTOTP(ctx context.Context, userID string) (string, error) {
 }
 
 // CreateSession implements Store.CreateSession.
-func (s *DB) CreateSession(ctx context.Context, sess *Session) error {
+func (s *DB) CreateSession(ctx context.Context, sess *store.Session) error {
 	if sess == nil {
 		return errors.New("store: CreateSession: nil session")
 	}
@@ -236,7 +237,7 @@ func (s *DB) CreateSession(ctx context.Context, sess *Session) error {
 	`, sess.ID, sess.UserID, sess.CreatedAt.Unix(), sess.ExpiresAt.Unix())
 	if err != nil {
 		if isUniqueConstraintErr(err) {
-			return fmt.Errorf("%w: session %s", ErrDuplicate, sess.ID)
+			return fmt.Errorf("%w: session %s", store.ErrDuplicate, sess.ID)
 		}
 		return fmt.Errorf("create session: %w", err)
 	}
@@ -247,9 +248,9 @@ func (s *DB) CreateSession(ctx context.Context, sess *Session) error {
 // as ErrNotFound: the row may still physically exist (sweeping is a
 // future concern), but it is no longer valid, so callers never receive
 // a session they should reject.
-func (s *DB) GetSession(ctx context.Context, id string) (*Session, error) {
+func (s *DB) GetSession(ctx context.Context, id string) (*store.Session, error) {
 	var (
-		sess        Session
+		sess        store.Session
 		createdUnix int64
 		expiresUnix int64
 	)
@@ -258,7 +259,7 @@ func (s *DB) GetSession(ctx context.Context, id string) (*Session, error) {
 	`, id).Scan(&sess.ID, &sess.UserID, &createdUnix, &expiresUnix)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return nil, ErrNotFound
+			return nil, store.ErrNotFound
 		}
 		return nil, fmt.Errorf("get session %s: %w", id, err)
 	}
@@ -266,7 +267,7 @@ func (s *DB) GetSession(ctx context.Context, id string) (*Session, error) {
 	sess.ExpiresAt = time.Unix(expiresUnix, 0).UTC()
 	if !time.Now().UTC().Before(sess.ExpiresAt) {
 		// now >= expires_at: expired.
-		return nil, ErrNotFound
+		return nil, store.ErrNotFound
 	}
 	return &sess, nil
 }
@@ -287,7 +288,7 @@ func (s *DB) RevokeSession(ctx context.Context, id string) error {
 // The existing vote is left untouched — votes are immutable. This is
 // the store-level half of the append-only / one-vote-per-operator
 // guarantee the state machine relies on.
-func (s *DB) RecordVote(ctx context.Context, v *Vote) error {
+func (s *DB) RecordVote(ctx context.Context, v *store.Vote) error {
 	if v == nil {
 		return errors.New("store: RecordVote: nil vote")
 	}
@@ -310,7 +311,7 @@ func (s *DB) RecordVote(ctx context.Context, v *Vote) error {
 	`, v.RequestID, v.Operator, string(v.Decision), v.AuthnMethod, ts.UTC().Unix())
 	if err != nil {
 		if isUniqueConstraintErr(err) {
-			return fmt.Errorf("%w: %s already voted on %s", ErrDuplicate, v.Operator, v.RequestID)
+			return fmt.Errorf("%w: %s already voted on %s", store.ErrDuplicate, v.Operator, v.RequestID)
 		}
 		return fmt.Errorf("record vote: %w", err)
 	}
@@ -318,7 +319,7 @@ func (s *DB) RecordVote(ctx context.Context, v *Vote) error {
 }
 
 // ListVotes implements Store.ListVotes, oldest first.
-func (s *DB) ListVotes(ctx context.Context, requestID string) ([]*Vote, error) {
+func (s *DB) ListVotes(ctx context.Context, requestID string) ([]*store.Vote, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT request_id, operator, decision, authn_method, ts
 		FROM approvals WHERE request_id = ? ORDER BY ts ASC, operator ASC
@@ -327,17 +328,17 @@ func (s *DB) ListVotes(ctx context.Context, requestID string) ([]*Vote, error) {
 		return nil, fmt.Errorf("list votes: %w", err)
 	}
 	defer rows.Close()
-	var out []*Vote
+	var out []*store.Vote
 	for rows.Next() {
 		var (
-			v        Vote
+			v        store.Vote
 			decision string
 			tsUnix   int64
 		)
 		if err := rows.Scan(&v.RequestID, &v.Operator, &decision, &v.AuthnMethod, &tsUnix); err != nil {
 			return nil, fmt.Errorf("scan vote: %w", err)
 		}
-		v.Decision = Decision(decision)
+		v.Decision = store.Decision(decision)
 		v.TS = time.Unix(tsUnix, 0).UTC()
 		out = append(out, &v)
 	}

@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/karthikeyan5/sshgate/pkg/signerkit"
-	"github.com/karthikeyan5/sshgate/src/signer-server/store"
+	"github.com/karthikeyan5/sshgate/pkg/signerkit/store"
 )
 
 // Server is the hosted signer-server HTTP handler. It owns the route

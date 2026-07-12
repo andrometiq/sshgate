@@ -146,11 +146,27 @@ type Store interface {
 	// row exists.
 	GetByID(ctx context.Context, id string) (*Request, error)
 
-	// UpdateStatus transitions a row from pending to a terminal
-	// status. signatures may be nil for non-approved transitions.
-	// approvedBy is the human identifier (or "" if not applicable).
-	// Calling UpdateStatus on an already-resolved row is a no-op
-	// (idempotent — useful in the WaitForResolution timeout path).
+	// UpdateStatus transitions a row from pending to a terminal status.
+	// signatures may be nil for non-approved transitions. approvedBy is the
+	// human identifier (or "" if not applicable).
+	//
+	// ATOMICITY CONTRACT (C10 — this is the single-sign guarantee, not an
+	// implementation detail): UpdateStatus MUST be an atomic compare-and-set
+	// gated on status='pending'. For a given request, AT MOST ONE transition
+	// out of pending may ever succeed; terminal states are IMMUTABLE (a later
+	// UpdateStatus on an already-resolved row is a no-op that changes nothing —
+	// it does NOT overwrite the signatures or approver of the winning
+	// transition). The SQLite ref impl satisfies this with a single
+	// `UPDATE ... WHERE request_id = ? AND status = 'pending'`.
+	//
+	// A read-then-write implementation (SELECT status; if pending then UPDATE)
+	// is NON-CONFORMANT: two operators casting the final approve concurrently,
+	// or a deny racing an approve, could both observe pending and both write —
+	// corrupting the single-sign guarantee. The approval engine is stateless by
+	// design (a hosted deployment may run multiple replicas against one DB), so
+	// an in-process mutex is INSUFFICIENT; the atomicity must live in the store.
+	// Every Store implementation MUST pass signerkit/storetest's concurrent-flip
+	// conformance hammer.
 	UpdateStatus(ctx context.Context, id string, status Status, signatures []byte, approvedBy string) error
 
 	// WaitForResolution blocks until the row's status is non-pending

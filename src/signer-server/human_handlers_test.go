@@ -20,8 +20,9 @@ import (
 	"github.com/pquerna/otp/totp"
 
 	"github.com/karthikeyan5/sshgate/pkg/signerkit"
+	"github.com/karthikeyan5/sshgate/pkg/signerkit/sqlitestore"
+	"github.com/karthikeyan5/sshgate/pkg/signerkit/store"
 	signerserver "github.com/karthikeyan5/sshgate/src/signer-server"
-	"github.com/karthikeyan5/sshgate/src/signer-server/store"
 )
 
 // humanFixture stands up a full server with BOTH planes wired: the
@@ -30,12 +31,12 @@ import (
 // engine. It returns the httptest server, the bearer key, the store, the
 // auth manager (for seeding TOTP), and the signer's public key (for the
 // gate-valid approve-path proof).
-func humanFixture(t *testing.T) (*httptest.Server, string, *store.DB, *signerserver.AuthManager, ed25519.PublicKey) {
+func humanFixture(t *testing.T) (*httptest.Server, string, *sqlitestore.DB, *signerserver.AuthManager, ed25519.PublicKey) {
 	t.Helper()
 	const apiKey = "test-bearer-key"
 
 	path := filepath.Join(t.TempDir(), "human.db")
-	db, err := store.Open(path)
+	db, err := sqlitestore.Open(path)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -86,7 +87,7 @@ func humanFixture(t *testing.T) (*httptest.Server, string, *store.DB, *signerser
 
 // seedTOTPUser creates a user and enrolls a TOTP secret, returning the
 // user id and secret so a test can log in.
-func seedTOTPUser(t *testing.T, db *store.DB, am *signerserver.AuthManager, username string) (string, string) {
+func seedTOTPUser(t *testing.T, db *sqlitestore.DB, am *signerserver.AuthManager, username string) (string, string) {
 	t.Helper()
 	ctx := context.Background()
 	userID := "u-" + username
@@ -127,7 +128,7 @@ func loginClient(t *testing.T, ts *httptest.Server, username, totpSecret string)
 
 // seedPendingRequest inserts a pending sign request directly via the
 // store, mirroring what /v1/sign persists, and returns its id.
-func seedPendingRequest(t *testing.T, db *store.DB, id string, n int, cmd string, ttl int64) {
+func seedPendingRequest(t *testing.T, db *sqlitestore.DB, id string, n int, cmd string, ttl int64) {
 	t.Helper()
 	blob := mustMarshal(t, []cmdJSON{{Server: "prod", Cmd: cmd, TTLSeconds: ttl, HostKeyFP: testHostFP}})
 	if err := db.Insert(context.Background(), &store.Request{
@@ -470,11 +471,11 @@ func TestHuman_WebAuthnRegisterRoundTripOverHTTP(t *testing.T) {
 
 // humanFixtureWithPolicy is humanFixture but with an explicit
 // HumanAPIConfig (the default fixture uses the inert zero policy).
-func humanFixtureWithPolicy(t *testing.T, cfg signerserver.HumanAPIConfig) (*httptest.Server, string, *store.DB, *signerserver.AuthManager, ed25519.PublicKey) {
+func humanFixtureWithPolicy(t *testing.T, cfg signerserver.HumanAPIConfig) (*httptest.Server, string, *sqlitestore.DB, *signerserver.AuthManager, ed25519.PublicKey) {
 	t.Helper()
 	const apiKey = "test-bearer-key"
 	path := filepath.Join(t.TempDir(), "human.db")
-	db, err := store.Open(path)
+	db, err := sqlitestore.Open(path)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}

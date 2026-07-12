@@ -14,17 +14,18 @@ import (
 	"time"
 
 	"github.com/karthikeyan5/sshgate/pkg/signerkit"
+	"github.com/karthikeyan5/sshgate/pkg/signerkit/sqlitestore"
+	"github.com/karthikeyan5/sshgate/pkg/signerkit/store"
 	"github.com/karthikeyan5/sshgate/src/gate"
 	signerserver "github.com/karthikeyan5/sshgate/src/signer-server"
-	"github.com/karthikeyan5/sshgate/src/signer-server/store"
 )
 
 // engineFixture stands up a real SQLite store, a real Signer, and the
 // engine that wires them, returning the public key for gate verification.
-func engineFixture(t *testing.T) (*signerserver.ApprovalEngine, *store.DB, ed25519.PublicKey) {
+func engineFixture(t *testing.T) (*signerserver.ApprovalEngine, *sqlitestore.DB, ed25519.PublicKey) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "engine.db")
-	db, err := store.Open(path)
+	db, err := sqlitestore.Open(path)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -68,7 +69,7 @@ type cmdJSON struct {
 
 // seedRequest inserts a pending request with the given N and one or more
 // commands (cmd + ttl).
-func seedRequest(t *testing.T, db *store.DB, id string, n int, cmds ...cmdJSON) {
+func seedRequest(t *testing.T, db *sqlitestore.DB, id string, n int, cmds ...cmdJSON) {
 	t.Helper()
 	// Stamp the pinned host FP on any command that did not set one, so every
 	// seeded request mints gate-verifiable (host-bound) signatures.
@@ -450,7 +451,7 @@ func (failingSink) Verdict(context.Context, signerkit.AuditVerdict) error {
 func TestEngine_VerdictFailClosed(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "failclosed.db")
-	db, err := store.Open(path)
+	db, err := sqlitestore.Open(path)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}

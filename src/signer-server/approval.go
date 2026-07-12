@@ -1,6 +1,6 @@
 package signerserver
 
-import "github.com/karthikeyan5/sshgate/src/signer-server/store"
+import "github.com/karthikeyan5/sshgate/pkg/signerkit/store"
 
 // approval.go is the approval state machine: a PURE mechanism that maps
 // (required_approvals N, the vote set, policy flags) to a decision. It

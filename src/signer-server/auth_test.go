@@ -11,17 +11,18 @@ import (
 	virtualwebauthn "github.com/descope/virtualwebauthn"
 	"github.com/pquerna/otp/totp"
 
+	"github.com/karthikeyan5/sshgate/pkg/signerkit/sqlitestore"
+	"github.com/karthikeyan5/sshgate/pkg/signerkit/store"
 	signerserver "github.com/karthikeyan5/sshgate/src/signer-server"
-	"github.com/karthikeyan5/sshgate/src/signer-server/store"
 )
 
 // authFixture stands up a real SQLite store + an AuthManager with a fixed
 // RP config, and seeds one user. Returns the manager, the store, and the
 // seeded user id.
-func authFixture(t *testing.T) (*signerserver.AuthManager, *store.DB, string) {
+func authFixture(t *testing.T) (*signerserver.AuthManager, *sqlitestore.DB, string) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "auth.db")
-	db, err := store.Open(path)
+	db, err := sqlitestore.Open(path)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -55,7 +56,7 @@ func authFixture(t *testing.T) (*signerserver.AuthManager, *store.DB, string) {
 func TestNewAuthManager_RejectsMisconfig(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "x.db")
-	db, err := store.Open(path)
+	db, err := sqlitestore.Open(path)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -315,7 +316,7 @@ func TestSession_IssueValidateRevoke(t *testing.T) {
 func TestSession_Expiry(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "exp.db")
-	db, err := store.Open(path)
+	db, err := sqlitestore.Open(path)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}

@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/karthikeyan5/sshgate/pkg/signerkit/sqlitestore"
 	"github.com/karthikeyan5/sshgate/src/gate"
-	"github.com/karthikeyan5/sshgate/src/signer-server/store"
 	"github.com/karthikeyan5/sshgate/src/signer/backend"
 )
 
@@ -156,7 +156,7 @@ func TestWireFrozen_HealthzUnchanged(t *testing.T) {
 // exists and returns its id. The frozen client's submit creates the row
 // synchronously in the handler, but its Request returns once the 202 is
 // decoded, so a brief wait is robust against scheduling.
-func awaitSinglePending(t *testing.T, db *store.DB) string {
+func awaitSinglePending(t *testing.T, db *sqlitestore.DB) string {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
 	for {

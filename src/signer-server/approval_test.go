@@ -5,7 +5,7 @@ import (
 	"time"
 
 	signerserver "github.com/karthikeyan5/sshgate/src/signer-server"
-	"github.com/karthikeyan5/sshgate/src/signer-server/store"
+	"github.com/karthikeyan5/sshgate/pkg/signerkit/store"
 )
 
 // votes builds a vote slice from compact (operator, decision) pairs.

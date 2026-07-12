@@ -194,8 +194,24 @@ clean:
 # unit suite, a secret scan of the commits about to be pushed, a clean build,
 # the CHEAP verified-release-channel checks, and the two-build reproducibility
 # assertion. No Docker, so it runs anywhere in well under a minute.
-preflight: vet test gitleaks build verify-dist verify-versions verify-repro
+preflight: vet test gitleaks build verify-dist verify-versions verify-repro verify-no-sqlite-local
 	@echo "preflight: OK — safe to push"
+
+# verify-no-sqlite-local proves the SQLite-containment invariant (D10 / spec
+# contract #5): the local Telegram signer binary must NOT link the SQLite
+# driver. The hosted Store's sqlite implementation lives in
+# pkg/signerkit/sqlitestore (imported ONLY by the hosted signer-server front
+# end); the shared signerkit core carries only the driver-free Store interface
+# + types (pkg/signerkit/store). A regression that made signerkit — or the local
+# signer — import sqlitestore would pull modernc.org/sqlite into the local
+# signer's transitive imports, bloating its binary and widening its TCB. This
+# gate fails the build if that ever happens. It is an import-graph check (no
+# build needed): `go list -deps` enumerates every transitive dependency.
+verify-no-sqlite-local:
+	@if go list -deps ./src/signer/cmd/sshgate-signer-telegram/... | grep -q '^modernc.org/sqlite'; then \
+		echo "verify-no-sqlite-local: FAIL — the local signer links modernc.org/sqlite (D10 violation: the sqlite impl must stay contained in pkg/signerkit/sqlitestore)" >&2; exit 1; \
+	fi
+	@echo "verify-no-sqlite-local: OK — local Telegram signer does not link SQLite"
 
 # verify-dist: the FAST verified-release-channel checks (§11). It deliberately
 # does NOT do the reproducible rebuild (that needs the pinned-toolchain download

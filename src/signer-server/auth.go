@@ -13,7 +13,7 @@ import (
 
 	"github.com/go-webauthn/webauthn/protocol"
 	"github.com/go-webauthn/webauthn/webauthn"
-	"github.com/karthikeyan5/sshgate/src/signer-server/store"
+	"github.com/karthikeyan5/sshgate/pkg/signerkit/store"
 	"github.com/pquerna/otp"
 	"github.com/pquerna/otp/totp"
 )

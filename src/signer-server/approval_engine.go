@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/karthikeyan5/sshgate/pkg/signerkit"
-	"github.com/karthikeyan5/sshgate/src/signer-server/store"
+	"github.com/karthikeyan5/sshgate/pkg/signerkit/store"
 )
 
 // approval_engine.go is the impure half of Phase C: it reads the store,
