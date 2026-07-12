@@ -324,8 +324,15 @@ mcpb:
 	@# so the bundle can never disagree with the repo.
 	@vf=$$(sed 's/^v//' VERSION); \
 	jq --arg v "$$vf" '.version = $$v' "$(MCPB_DIR)/manifest.json" > "$(MCPB_STAGE)/manifest.json"
-	@# Reproducible archive: pin every mtime, then zip sorted entries with no
-	@# uid/gid/extra attrs (-X) and no directory entries (-D).
+	@# Reproducible archive: normalize modes (zip records them in the central
+	@# directory, and `go build`/`jq >` output modes follow the builder's umask
+	@# — an 002/077 umask would silently change the bundle hash), pin every
+	@# mtime, then zip sorted entries with no uid/gid/extra attrs (-X) and no
+	@# directory entries (-D). manifest.json 0644; everything under server/ is
+	@# executable (launcher + binaries) → 0755.
+	find "$(MCPB_STAGE)" -type d -exec chmod 0755 {} +
+	chmod 0644 "$(MCPB_STAGE)/manifest.json"
+	find "$(MCPB_STAGE)/server" -type f -exec chmod 0755 {} +
 	find "$(MCPB_STAGE)" -exec touch -h -d "@$(SOURCE_DATE_EPOCH)" {} +
 	rm -f "$(MCPB_BUNDLE)"
 	cd "$(MCPB_STAGE)" && find . -type f | LC_ALL=C sort | sed 's|^\./||' | zip -q -X -D "$(abspath $(MCPB_BUNDLE))" -@

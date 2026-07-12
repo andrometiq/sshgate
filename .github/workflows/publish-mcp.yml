@@ -4,8 +4,11 @@ name: publish-mcp
 # on every v* tag. The registry hosts METADATA only; the actual artifact is the
 # .mcpb bundle attached to the GitHub Release by release.yml. Both workflows fire
 # on the same tag — this job builds the bundle, proves it is byte-identical to the
-# Release asset the registry will validate, injects that asset's SHA-256 into
-# server.json, and publishes via OIDC (no stored secret).
+# published Release asset, injects that asset's SHA-256 into server.json, and
+# publishes via OIDC (no stored secret). Per the registry's package-types doc,
+# the registry itself does NOT validate fileSha256 — MCP clients validate it
+# before installation — which is exactly why this byte-identity proof matters:
+# a wrong hash here would brick every client install, not the publish.
 #
 # The registry's mcpb ownership proof is: the packages[].identifier URL contains
 # the string "mcp" (the sshgate-mcp.mcpb asset satisfies this) AND server.json
@@ -81,11 +84,14 @@ jobs:
           URL="$(jq -r '.packages[0].identifier' server.json)"
           WANT="$(jq -r '.packages[0].fileSha256' server.json)"
           echo "expecting release asset $URL to hash to $WANT"
-          # release.yml fires on the same tag; poll briefly so a slightly-later
-          # asset upload does not race this job.
-          for i in 1 2 3 4 5 6; do
+          # release.yml fires on the same tag but must finish its full test
+          # suite + 12 cross-builds before the Release (and this asset) exists,
+          # so it typically lands MINUTES after this job reaches here. Poll for
+          # up to ~10 minutes rather than failing while release.yml is still
+          # building.
+          for i in $(seq 1 30); do
             if curl -fsSL -o published.mcpb "$URL"; then break; fi
-            echo "asset not up yet (attempt $i) — waiting 20s"; sleep 20
+            echo "asset not up yet (attempt $i/30) — waiting 20s"; sleep 20
           done
           test -f published.mcpb || { echo "::error::release asset $URL is not reachable — did release.yml finish? re-run this job after the Release assets are attached"; exit 1; }
           GOT="$(sha256sum published.mcpb | awk '{print $1}')"
