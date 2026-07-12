@@ -96,6 +96,17 @@ func TestRoutes_TableDriven(t *testing.T) {
 			wantStatus: http.StatusBadRequest,
 		},
 		{
+			// TTL above sigwire.MaxSigValidity (300s) must be refused at
+			// the door, not accepted and left approvable-but-unmintable.
+			name:             "v1/sign ttl over cap -> 400",
+			method:           http.MethodPost,
+			path:             "/v1/sign",
+			auth:             "Bearer " + key,
+			body:             `{"client_id":"x","commands":[{"server":"s","cmd":"echo","ttl_seconds":301}]}`,
+			wantStatus:       http.StatusBadRequest,
+			wantBodyContains: "exceeds max",
+		},
+		{
 			name:             "v1/poll/{id} ok -> 200 with status",
 			method:           http.MethodGet,
 			path:             "/v1/poll/r_abc",

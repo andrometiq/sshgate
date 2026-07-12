@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/karthikeyan5/sshgate/pkg/signerkit/store"
+	"github.com/karthikeyan5/sshgate/src/sigwire"
 )
 
 // signRequest is the body shape of POST /v1/sign. It mirrors the
@@ -125,6 +126,19 @@ func (s *Server) handleSign(w http.ResponseWriter, r *http.Request) {
 		}
 		if c.TTLSeconds <= 0 {
 			writeJSONError(w, http.StatusBadRequest, "commands["+itoa(i)+"].ttl_seconds must be > 0")
+			return
+		}
+		// Cap the requested TTL at the door. The mint-time path
+		// (signerkit.signApproved) already refuses an over-cap TTL, but if
+		// we accept it here the row is inserted as pending, an approver's
+		// vote reaches sign-time, and the mint fails — leaving the row
+		// approvable-but-unmintable, i.e. stuck pending forever. Rejecting
+		// up front (mirroring the local daemon, daemon.go) keeps that
+		// poisoned row from ever being created. The gate re-checks
+		// authoritatively (verify.go); the mint-time cap stays as
+		// defense-in-depth.
+		if c.TTLSeconds > int64(sigwire.MaxSigValidity/time.Second) {
+			writeJSONError(w, http.StatusBadRequest, "commands["+itoa(i)+"].ttl_seconds exceeds max "+itoa(int(sigwire.MaxSigValidity/time.Second)))
 			return
 		}
 	}
