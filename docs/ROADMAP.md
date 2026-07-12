@@ -239,8 +239,24 @@ is rejected).
 
 These are the highest-priority forward items.
 
-- **Route approvals through the shared messaging layer (strategic anchor).** The
-  signer currently embeds its own chat-channel integration — long-poll, backoff,
+> **✅ RESOLVED — the anchor decision (Karthi, 2026-07-12): do NOT route approvals through
+> the shared messaging layer. Drop C3 consumption entirely — "forget it."** The #74 design
+> pass (security judge finding, re-verified against both trees) established that the signer
+> runs as an isolated `sshgatesigner` uid but C3's broker socket (0600, login-user), bot
+> token, and allowlist (`mappings.json`, SIGHUP-reload) all live in the *agent's* uid — so a
+> compromised on-machine agent could edit the allowlist / bind a fake broker and self-approve,
+> making the "off-machine human" verdict a rogue-controlled oracle. That violates the hard
+> constraint below (a grant must never replace the signature; the approver must be an
+> authenticated off-machine human). **Ruling:** the signer keeps its OWN Telegram poller
+> exactly as today — the *stronger*, isolated-domain channel — and C3 is not pursued, not even
+> as a later signer-owned-broker variant. Follow-up task: audit the current poller/signer
+> channel and confirm it needs no improvement; leave it as-is if so. Consequence: the
+> ops-hardening items previously marked "(subsumed)" by this anchor (DENY/TIMEOUT verdict
+> delivery, concurrent approvals, reachability-monitor push) **un-subsume** and fold into the
+> #65 async-approval build. The strike-through item below is kept for history.
+
+- **Route approvals through the shared messaging layer (strategic anchor).** ~~The
+  signer currently embeds its own chat-channel integration — long-poll, backoff,~~
   update ingestion, message formatting. A separate in-house messaging system
   already solves that surface robustly (durable inbound queue, connectivity
   notifications, delivery retries). The direction is to make SSHGate *consume*
@@ -274,7 +290,29 @@ These are the highest-priority forward items.
   pre-tool-use hook) — build on that probe rather than starting cold.
 
 - **Final product shape — component decomposition & packaging (owner direction,
-  filed 2026-07-10).** Before the public release push, pin down the parts a user
+  filed 2026-07-10).**
+  > **✅ RESOLVED (#74 design pass + Karthi rulings, 2026-07-12).** One repo; six packageable
+  > parts, names/binaries UNCHANGED (no rename of the live signer unit): **A1** the whole
+  > Claude Code plugin, **A2** the MCP server binary (also its own registry artifact — the
+  > cheap seam that buys Codex/Gemini/Cursor reach), **A3** the `sshgate` CLI binary
+  > (human-only control plane: pubkey/add/revoke/xfer), **A4** the local Telegram signer
+  > (unchanged, the default & stronger Tier-2 channel — see the anchor RESOLVED note above),
+  > **A5** the hosted signer as `pkg/signerkit` embeddable library + a 4-page reference web
+  > app (BUILD THIS — see the one-codebase requirement below), **A6** the gate (never
+  > user-installed; pushed by provisioning). Install story = three roles: agent kit (Tier-1) →
+  > + local signer (Tier-2) → + hosted signer (Tier-3). Provisioning stays human-only (no
+  > `add_server`). **Q4 one-codebase requirement (Karthi, hard):** `signerkit` is the SHARED
+  > signing core and the existing local `sshgate-signer-telegram` is refactored to consume it —
+  > local + hosted are two thin front-ends over ONE signer codebase, not a fork. Build key
+  > custody as `crypto.Signer` (KMS/HSM-able), required audit sink, Lock/RotateTo, from a rebase
+  > spike of `feat/v2-hosted-signer` first. **Q6 marketplace (Karthi):** publish to the top ~10
+  > agent marketplaces/registries; a separate research pass enumerates per-surface requirements,
+  > the easy first win, the repo-readiness checklist, and the submission/email contacts so the
+  > ball leaves Karthi's court (deliver as an HTML file). Verification (T1–T7 on Codex/Gemini)
+  > gates the uploads; push stays Karthi-gated + PII audit. Full record:
+  > `local-workspace/release-2026-07-04/design-74/SYNTHESIS.md`.
+
+  Before the public release push, pin down the parts a user
   actually installs and where each management surface lives. The parts as
   understood today: (a) the **gate** (+ the SSH key line) installed on target
   servers; (b) the **MCP server** — the agent tool surface that talks to gated
