@@ -270,6 +270,60 @@ verify-repro:
 		echo "verify-repro: FAIL — two identical-flag gate builds hashed differently ($$ha vs $$hb): GATE_BUILD_FLAGS has a nondeterminism regression" >&2; exit 1; fi; \
 	echo "verify-repro: OK — two local gate builds byte-identical ($$ha) (cross-machine repro vs the committed artifact is CI's job, §11.4)"
 
+# ---------------------------------------------------------------------------
+# MCPB bundle — the A2 artifact for Smithery + the Official MCP Registry
+# ---------------------------------------------------------------------------
+# `make mcpb` packs packaging/mcpb/ into a single sshgate-mcp.mcpb: a zip (the
+# documented MCPB format) with manifest.json at the archive ROOT and one
+# sshgate-mcp binary per OS+arch under server/bin/, chosen at runtime by
+# server/sshgate-mcp-launch.sh (MCPB's platform_overrides key on OS only — there
+# is no arch selector in the manifest spec, so a launcher does the arch pick).
+#
+# Reproducible by construction: CGO-free deterministic Go builds (-trimpath
+# -buildid=, VERSION stamped via -X) into a staging tree, then a NORMALIZED zip
+# (fixed mtimes via SOURCE_DATE_EPOCH, sorted entries, -X to drop uid/gid/extra
+# attrs). release.yml and publish-mcp.yml both call this and MUST get
+# byte-identical output, so publish-mcp can prove the Release asset whose sha256
+# it injects into server.json IS the reproducible build.
+#
+# We pack the documented zip layout directly instead of `npx @anthropic-ai/mcpb
+# pack`: the official packer needs network at build time and stamps live mtimes
+# (non-reproducible), either of which would break that byte-identical cross-check.
+MCPB_DIR    := packaging/mcpb
+MCPB_OUTDIR := $(MCPB_DIR)/dist
+MCPB_STAGE  := $(MCPB_OUTDIR)/bundle
+MCPB_BUNDLE := $(MCPB_OUTDIR)/sshgate-mcp.mcpb
+# Fixed timestamp for reproducible zips (2020-01-01 UTC; DOS zip can't encode
+# pre-1980). Override SOURCE_DATE_EPOCH to pin a different value.
+SOURCE_DATE_EPOCH ?= 1577836800
+MCPB_MCP_LDFLAGS  := -trimpath -ldflags '-s -w -buildid= -X $(MCP_PKG).Version=$(VERSION)'
+
+mcpb:
+	@command -v zip >/dev/null 2>&1 || { echo "mcpb: 'zip' is required (Info-ZIP)" >&2; exit 1; }
+	@command -v jq  >/dev/null 2>&1 || { echo "mcpb: 'jq' is required" >&2; exit 1; }
+	@if [ -z "$(VERSION)" ]; then echo "mcpb: VERSION is empty" >&2; exit 1; fi
+	rm -rf "$(MCPB_STAGE)"
+	mkdir -p "$(MCPB_STAGE)/server/bin"
+	CGO_ENABLED=0 GOOS=linux  GOARCH=amd64 go build $(MCPB_MCP_LDFLAGS) -o "$(MCPB_STAGE)/server/bin/sshgate-mcp-linux-amd64"  ./src/mcp/cmd/sshgate-mcp
+	CGO_ENABLED=0 GOOS=linux  GOARCH=arm64 go build $(MCPB_MCP_LDFLAGS) -o "$(MCPB_STAGE)/server/bin/sshgate-mcp-linux-arm64"  ./src/mcp/cmd/sshgate-mcp
+	CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build $(MCPB_MCP_LDFLAGS) -o "$(MCPB_STAGE)/server/bin/sshgate-mcp-darwin-amd64" ./src/mcp/cmd/sshgate-mcp
+	CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build $(MCPB_MCP_LDFLAGS) -o "$(MCPB_STAGE)/server/bin/sshgate-mcp-darwin-arm64" ./src/mcp/cmd/sshgate-mcp
+	install -m 0755 "$(MCPB_DIR)/server/sshgate-mcp-launch.sh" "$(MCPB_STAGE)/server/sshgate-mcp-launch.sh"
+	@# manifest.json at the archive ROOT, version stamped from VERSION (sans 'v')
+	@# so the bundle can never disagree with the repo.
+	@vf=$$(sed 's/^v//' VERSION); \
+	jq --arg v "$$vf" '.version = $$v' "$(MCPB_DIR)/manifest.json" > "$(MCPB_STAGE)/manifest.json"
+	@# Reproducible archive: pin every mtime, then zip sorted entries with no
+	@# uid/gid/extra attrs (-X) and no directory entries (-D).
+	find "$(MCPB_STAGE)" -exec touch -h -d "@$(SOURCE_DATE_EPOCH)" {} +
+	rm -f "$(MCPB_BUNDLE)"
+	cd "$(MCPB_STAGE)" && find . -type f | LC_ALL=C sort | sed 's|^\./||' | zip -q -X -D "$(abspath $(MCPB_BUNDLE))" -@
+	@echo "mcpb: built $(MCPB_BUNDLE) (VERSION=$(VERSION))"
+	@sha256sum "$(MCPB_BUNDLE)"
+	@unzip -l "$(MCPB_BUNDLE)" | awk '{print $$4}' | grep -qx 'manifest.json' \
+		&& echo "mcpb: OK — manifest.json is at the archive root" \
+		|| { echo "mcpb: FAIL — manifest.json is not at the archive root" >&2; exit 1; }
+
 # gitleaks scans the commits that would be pushed (origin/main..HEAD) for
 # secrets. Skips with a loud note if gitleaks is not installed — CI must have
 # it. Scanning the push delta (not full history) keeps intentional test
