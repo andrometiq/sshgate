@@ -70,7 +70,9 @@ codex plugin add sshgate@sshgate
 ```
 
 `sshgate@sshgate` is `<plugin-name>@<marketplace-name>` — both are `sshgate`,
-from `marketplace.json`. This registers the MCP server and the skills/commands.
+from `marketplace.json`. This installs the plugin (the MCP server, plus its
+skills/commands surface as far as Codex supports it — MCP registration is
+verified; skill invocation has not been smoke-tested in a live Codex session).
 
 Or, for just the bare MCP server without the plugin wrapper:
 
