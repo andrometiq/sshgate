@@ -26,8 +26,8 @@ import (
 // MECHANISM, NOT POLICY. This file owns no product decision. It does
 // not decide who may enroll, whether TOTP or a passkey is required,
 // whether a step-up is needed per-approval or per-session, or how long
-// a session lives by default — those are the caller's (Karthi's product
-// layer) to set. What lives here are the verbs: enroll a secret, verify
+// a session lives by default — those are the caller's (the product
+// layer's) to set. What lives here are the verbs: enroll a secret, verify
 // a code, register a credential, assert a credential, issue a session,
 // validate it, revoke it, and the re-auth (step-up) primitive the
 // approve route CAN call. The enforcement decision of when to demand a
@@ -36,7 +36,7 @@ import (
 //
 // RP-ID / origin is CONFIG. Passkeys are origin-bound: a credential
 // registered for rp-id "signer.example.com" only asserts against that
-// origin. The hostname is Karthi's deploy decision, so AuthConfig takes
+// origin. The hostname is a deploy decision, so AuthConfig takes
 // it as a parameter; AuthManager refuses to construct without it (an
 // empty RP would silently accept any origin, which the WebAuthn lib
 // itself rejects — we surface that as a construction error, not a
@@ -506,7 +506,7 @@ const (
 // This is a PRIMITIVE, not a policy: it performs a step-up when asked. It
 // does NOT decide whether a step-up is required, nor whether it is needed
 // per-approval or per-session — that enforcement choice belongs to the
-// route's configuration (Karthi's product call, flagged #2). A route that
+// route's configuration (a product-layer decision, flagged #2). A route that
 // wants per-action step-up calls this on every approve; a route that
 // treats the session itself as sufficient simply never calls it.
 //

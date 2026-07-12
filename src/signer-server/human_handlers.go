@@ -75,7 +75,7 @@ type HumanAPIConfig struct {
 	// step-up per-approval vs per-session). It is a CONFIG flag, not a
 	// baked default: the mechanism (AuthManager.StepUp / FinishLogin)
 	// supports per-action step-up unconditionally; whether to ENFORCE it
-	// is left here for Karthi to set. Defaults to the zero value (false),
+	// is left here for the deploy to set. Defaults to the zero value (false),
 	// which is NOT a policy claim that step-up is unnecessary — it is the
 	// inert default of a flag the deploy must consciously set.
 	RequireStepUp bool
