@@ -49,6 +49,7 @@ import (
 
 	"github.com/BurntSushi/toml"
 
+	"github.com/karthikeyan5/sshgate/pkg/signerkit"
 	"github.com/karthikeyan5/sshgate/src/redact"
 	redactrules "github.com/karthikeyan5/sshgate/src/redact/rules"
 	"github.com/karthikeyan5/sshgate/src/signer"
@@ -246,20 +247,38 @@ func run(args []string) int {
 		return 1
 	}
 
-	daemon := &signer.Daemon{
-		Key:          priv,
+	// One codebase (signerkit phase 4): the local signer constructs its core
+	// through signerkit.New instead of a signer.Daemon struct literal, so this
+	// front-end and the embeddable/hosted front-end share ONE signing core.
+	// The wiring is byte-for-byte the same as the old literal: the file key
+	// loaded above is passed as the crypto.Signer identity (an
+	// ed25519.PrivateKey satisfies crypto.Signer, and signBytes pins
+	// crypto.Hash(0) so a minted envelope is identical to the pre-seam
+	// ed25519.Sign — proven by the phase-0 envelope golden); the same audit
+	// log, xfer registry, and single-sourced redaction salt+rules go in, and
+	// NowFunc stays nil (⇒ time.Now), exactly as the literal left it. New's ONLY
+	// error returns are a nil Signer or nil Audit, both unreachable here because
+	// LoadKey and OpenAuditLog above already returned non-nil-or-failed (C9;
+	// proven in new_unreachable_test.go). The error is still checked so no
+	// future wiring change can construct a broken Service silently.
+	svc, err := signerkit.New(signerkit.Config{
+		Signer:       priv,
 		Backend:      bk,
 		Audit:        audit,
+		XferRegistry: xferReg,
 		RedactSalt:   redactSalt,
 		RedactRules:  redactRules,
-		XferRegistry: xferReg,
+	})
+	if err != nil {
+		logf("construct signer: %v", err)
+		return 1
 	}
 	// HandlerTimeout bounds the WHOLE connection (request read + approval
 	// wait + response write) under serveOne's single absolute deadline.
 	// It is pinned to sigwire.SignerHandlerTimeout, which is defined as
 	// ApprovalWindow + slack, so it can never fall at/below the window and
 	// strand an approved-but-undelivered signature. See sigwire/timeouts.go.
-	srv := &signer.Server{Path: cfg.Paths.Socket, Handler: daemon, HandlerTimeout: sigwire.SignerHandlerTimeout}
+	srv := &signer.Server{Path: cfg.Paths.Socket, Handler: svc, HandlerTimeout: sigwire.SignerHandlerTimeout}
 
 	// SIGHUP: log "restart to apply changes" and continue.
 	hupCh := make(chan os.Signal, 1)
