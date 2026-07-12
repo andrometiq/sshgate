@@ -19,6 +19,7 @@ import (
 	virtualwebauthn "github.com/descope/virtualwebauthn"
 	"github.com/pquerna/otp/totp"
 
+	"github.com/karthikeyan5/sshgate/pkg/signerkit"
 	signerserver "github.com/karthikeyan5/sshgate/src/signer-server"
 	"github.com/karthikeyan5/sshgate/src/signer-server/store"
 )
@@ -44,11 +45,14 @@ func humanFixture(t *testing.T) (*httptest.Server, string, *store.DB, *signerser
 	if err != nil {
 		t.Fatalf("gen key: %v", err)
 	}
-	signer, err := signerserver.NewSigner(priv)
+	svc, err := signerkit.New(signerkit.Config{
+		Signer: priv,
+		Audit:  signerkit.NewAppendOnlySink(io.Discard),
+	})
 	if err != nil {
-		t.Fatalf("NewSigner: %v", err)
+		t.Fatalf("signerkit.New: %v", err)
 	}
-	engine, err := signerserver.NewApprovalEngine(db, signer)
+	engine, err := signerserver.NewApprovalEngine(db, svc)
 	if err != nil {
 		t.Fatalf("NewApprovalEngine: %v", err)
 	}
@@ -64,7 +68,7 @@ func humanFixture(t *testing.T) (*httptest.Server, string, *store.DB, *signerser
 
 	logger := log.New(io.Discard, "test: ", 0)
 	srv := signerserver.NewServer(apiKey, db, logger)
-	srv.Signer = signer
+	srv.Signer = svc
 	srv.AttachHuman(&signerserver.HumanAPI{
 		Auth:   am,
 		Engine: engine,
@@ -479,8 +483,11 @@ func humanFixtureWithPolicy(t *testing.T, cfg signerserver.HumanAPIConfig) (*htt
 	if err != nil {
 		t.Fatalf("gen key: %v", err)
 	}
-	signer, _ := signerserver.NewSigner(priv)
-	engine, _ := signerserver.NewApprovalEngine(db, signer)
+	svc, err := signerkit.New(signerkit.Config{Signer: priv, Audit: signerkit.NewAppendOnlySink(io.Discard)})
+	if err != nil {
+		t.Fatalf("signerkit.New: %v", err)
+	}
+	engine, _ := signerserver.NewApprovalEngine(db, svc)
 	am, err := signerserver.NewAuthManager(db, signerserver.AuthConfig{
 		RPID: waRPID, RPDisplayName: waRPName, RPOrigins: []string{waOrigin}, SessionTTL: time.Hour,
 	})
@@ -488,7 +495,7 @@ func humanFixtureWithPolicy(t *testing.T, cfg signerserver.HumanAPIConfig) (*htt
 		t.Fatalf("NewAuthManager: %v", err)
 	}
 	srv := signerserver.NewServer(apiKey, db, log.New(io.Discard, "", 0))
-	srv.Signer = signer
+	srv.Signer = svc
 	srv.AttachHuman(&signerserver.HumanAPI{Auth: am, Engine: engine, Store: db, Cfg: cfg})
 	ts := httptest.NewServer(srv)
 	t.Cleanup(ts.Close)

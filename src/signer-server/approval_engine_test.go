@@ -6,12 +6,14 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"errors"
+	"io"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/karthikeyan5/sshgate/pkg/signerkit"
 	"github.com/karthikeyan5/sshgate/src/gate"
 	signerserver "github.com/karthikeyan5/sshgate/src/signer-server"
 	"github.com/karthikeyan5/sshgate/src/signer-server/store"
@@ -32,11 +34,14 @@ func engineFixture(t *testing.T) (*signerserver.ApprovalEngine, *store.DB, ed255
 	if err != nil {
 		t.Fatalf("gen key: %v", err)
 	}
-	signer, err := signerserver.NewSigner(priv)
+	svc, err := signerkit.New(signerkit.Config{
+		Signer: priv,
+		Audit:  signerkit.NewAppendOnlySink(io.Discard),
+	})
 	if err != nil {
-		t.Fatalf("NewSigner: %v", err)
+		t.Fatalf("signerkit.New: %v", err)
 	}
-	eng, err := signerserver.NewApprovalEngine(db, signer)
+	eng, err := signerserver.NewApprovalEngine(db, svc)
 	if err != nil {
 		t.Fatalf("NewApprovalEngine: %v", err)
 	}
@@ -422,5 +427,64 @@ func assertGateValid(t *testing.T, sigBlob []byte, pub ed25519.PublicKey, wantCm
 		if inner != wantCmd {
 			t.Fatalf("gate inner cmd[%d] = %q; want %q", i, inner, wantCmd)
 		}
+	}
+}
+
+// failingSink is an AuditSink whose methods always error, to prove the hosted
+// vote path fails CLOSED (C5): a verdict that cannot be recorded aborts the
+// vote before any state flip.
+type failingSink struct{}
+
+func (failingSink) Call(context.Context, signerkit.AuditCall) error {
+	return errors.New("audit sink down")
+}
+func (failingSink) Verdict(context.Context, signerkit.AuditVerdict) error {
+	return errors.New("audit sink down")
+}
+
+// TestEngine_VerdictFailClosed proves the C5 hosted contract: when the audit
+// sink cannot record the verdict, SubmitVote returns an error and does NOT flip
+// the row — the request stays pending (retryable), never approved without a
+// durable record of who decided it. This is the OPPOSITE of the local daemon's
+// fail-open, post-delivery audit, and is per-spec.
+func TestEngine_VerdictFailClosed(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "failclosed.db")
+	db, err := store.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("gen key: %v", err)
+	}
+	svc, err := signerkit.New(signerkit.Config{Signer: priv, Audit: failingSink{}})
+	if err != nil {
+		t.Fatalf("signerkit.New: %v", err)
+	}
+	eng, err := signerserver.NewApprovalEngine(db, svc)
+	if err != nil {
+		t.Fatalf("NewApprovalEngine: %v", err)
+	}
+
+	seedRequest(t, db, "r-fc-1", 1, cmdJSON{Server: "prod", Cmd: "systemctl restart nginx", TTLSeconds: 120})
+
+	_, err = eng.SubmitVote(context.Background(), "r-fc-1", "alice", store.DecisionApprove, "webauthn", signerserver.ApprovalPolicy{})
+	if err == nil {
+		t.Fatalf("SubmitVote: expected fail-closed error when the audit sink is down, got nil")
+	}
+
+	// The row must still be pending — the verdict failure aborted BEFORE the flip.
+	got, err := db.GetByID(context.Background(), "r-fc-1")
+	if err != nil {
+		t.Fatalf("GetByID: %v", err)
+	}
+	if got.Status != store.StatusPending {
+		t.Fatalf("status = %q; want pending (fail-closed: no flip without a durable verdict)", got.Status)
+	}
+	if len(got.Signatures) != 0 {
+		t.Fatalf("row has signatures after a fail-closed vote")
 	}
 }

@@ -51,6 +51,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/karthikeyan5/sshgate/pkg/signerkit"
 	signerserver "github.com/karthikeyan5/sshgate/src/signer-server"
 	"github.com/karthikeyan5/sshgate/src/signer-server/store"
 )
@@ -110,9 +111,22 @@ func run(args []string) int {
 		logf("--signing-key-file is required (see --help)")
 		return 1
 	}
-	signer, err := signerserver.LoadSigningKey(*signingKeyFile)
+	// Load the master key and construct the SHARED signerkit core (the same
+	// core the local Telegram signer uses — one codebase, phase 5). LoadKey
+	// enforces the 0600/size/exists reflexes; New requires a non-nil Signer +
+	// Audit sink. The hosted plane fails CLOSED without an audit trail, so we
+	// anchor it to an append-only JSON-Lines sink on stderr.
+	signingKey, err := signerkit.LoadKey(*signingKeyFile)
 	if err != nil {
 		logf("load signing key: %v", err)
+		return 1
+	}
+	core, err := signerkit.New(signerkit.Config{
+		Signer: signingKey,
+		Audit:  signerkit.NewAppendOnlySink(os.Stderr),
+	})
+	if err != nil {
+		logf("construct signing core: %v", err)
 		return 1
 	}
 
@@ -130,7 +144,7 @@ func run(args []string) int {
 	defer func() { _ = db.Close() }()
 
 	srv := signerserver.NewServer(apiKey, db, logger)
-	srv.Signer = signer
+	srv.Signer = core
 
 	httpSrv := &http.Server{
 		Addr:              *addr,

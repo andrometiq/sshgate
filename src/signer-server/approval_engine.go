@@ -2,12 +2,15 @@ package signerserver
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
 	"time"
 
+	"github.com/karthikeyan5/sshgate/pkg/signerkit"
 	"github.com/karthikeyan5/sshgate/src/signer-server/store"
 )
 
@@ -48,27 +51,45 @@ type VoteOutcome struct {
 	Flipped  bool
 }
 
-// ApprovalEngine ties the pure state machine to the store and the
-// Phase-A Signer. It holds no mutable state of its own; all state lives
-// in the store, and the only synchronisation is the store's
-// pending-guarded UpdateStatus. Safe for concurrent use.
-type ApprovalEngine struct {
-	Store  store.Store
-	Signer *Signer
+// HostedCore is the shared signerkit core the hosted approval engine depends
+// on. It replaces the branch's own signerserver.Signer (deleted in the phase-5
+// one-codebase port): sign-at-approval now routes through the SAME custody
+// choke point as the local socket path (SignApproved → signBytes), so Lock,
+// RotateTo, and the crypto.Signer seam govern hosted signing for free; and the
+// human's decision is recorded on the required audit sink (Verdict), fail-
+// closed. *signerkit.Service satisfies this interface.
+type HostedCore interface {
+	// SignApproved mints gate-valid envelopes for an approved request at
+	// approval time, routed through the custody choke point.
+	SignApproved(cmds []signerkit.HostedSignCommand, approvedAt time.Time) ([]signerkit.HostedSignResult, error)
+	// Verdict records a single operator's resolution on the required audit
+	// sink. Emitted BEFORE any state flip; a sink error aborts the vote
+	// (C5 hosted fail-closed).
+	Verdict(ctx context.Context, e signerkit.AuditVerdict) error
 }
 
-// NewApprovalEngine constructs an engine. Both dependencies are
-// required: an engine without a Store cannot read votes, and one
-// without a Signer cannot mint on approval. It refuses a nil dependency
-// so the misconfiguration fails at construction, not at the first vote.
-func NewApprovalEngine(st store.Store, signer *Signer) (*ApprovalEngine, error) {
+// ApprovalEngine ties the pure state machine to the store and the shared
+// signerkit core. It holds no mutable state of its own; all state lives in the
+// store, and the only synchronisation is the store's pending-guarded
+// UpdateStatus. Safe for concurrent use.
+type ApprovalEngine struct {
+	Store store.Store
+	Core  HostedCore
+}
+
+// NewApprovalEngine constructs an engine. Both dependencies are required: an
+// engine without a Store cannot read votes, and one without the signerkit core
+// can neither mint on approval nor record the verdict. It refuses a nil
+// dependency so the misconfiguration fails at construction, not at the first
+// vote.
+func NewApprovalEngine(st store.Store, core HostedCore) (*ApprovalEngine, error) {
 	if st == nil {
 		return nil, errors.New("signerserver: NewApprovalEngine: nil Store")
 	}
-	if signer == nil {
-		return nil, errors.New("signerserver: NewApprovalEngine: nil Signer")
+	if core == nil {
+		return nil, errors.New("signerserver: NewApprovalEngine: nil core")
 	}
-	return &ApprovalEngine{Store: st, Signer: signer}, nil
+	return &ApprovalEngine{Store: st, Core: core}, nil
 }
 
 // SubmitVote records one operator's vote and advances the request's
@@ -134,6 +155,31 @@ func (e *ApprovalEngine) SubmitVote(
 		return VoteOutcome{}, fmt.Errorf("record vote: %w", err)
 	}
 
+	// Emit the verdict on the required audit sink BEFORE any state flip, and
+	// FAIL CLOSED on a sink error (C5 hosted contract — the opposite of the
+	// local daemon's fail-open, post-delivery audit). If the trail cannot be
+	// written, the vote is aborted before any terminal transition: the row
+	// stays pending and is retryable, so a compromised or misconfigured host
+	// app cannot flip a request to approved/denied without a durable record of
+	// who decided it. We emit on every call (not only the first, non-duplicate
+	// record) so a retry AFTER a transient sink failure still writes a verdict
+	// before it is allowed to flip — audit repetition is strictly safer here
+	// than a fail-open gap.
+	if err := e.Core.Verdict(ctx, signerkit.AuditVerdict{
+		Time:      time.Now().UTC(),
+		RequestID: requestID,
+		Operator: signerkit.Operator{
+			ID:          operator,
+			DisplayName: operator,
+			Verified:    true,
+			AuthnMethod: authnMethod,
+		},
+		CommandSHA256: commandsSHA256(req.Commands),
+		Approved:      decision == store.DecisionApprove,
+	}); err != nil {
+		return VoteOutcome{}, fmt.Errorf("audit verdict (fail-closed): %w", err)
+	}
+
 	// Recompute the decision over the FULL vote set, using the request's
 	// stored N (not whatever was passed in policy).
 	effPolicy := policy
@@ -177,7 +223,7 @@ func (e *ApprovalEngine) approve(ctx context.Context, req *store.Request, policy
 	}
 
 	approvedAt := time.Now().UTC()
-	results, err := e.Signer.Sign(cmds, approvedAt)
+	results, err := e.Core.SignApproved(cmds, approvedAt)
 	if err != nil {
 		return false, fmt.Errorf("sign on approval: %w", err)
 	}
@@ -250,10 +296,10 @@ func (e *ApprovalEngine) flip(ctx context.Context, requestID string, status stor
 }
 
 // commandsForSigning decodes the stored commands blob (JSON
-// []signRequestCmd) into the Signer's SignCommand shape. The stored
-// blob is exactly what handleSign persisted (validated, canonical
-// JSON), so the cmd + ttl_seconds fields are present and positive.
-func commandsForSigning(blob []byte) ([]SignCommand, error) {
+// []signRequestCmd) into the shared core's HostedSignCommand shape. The stored
+// blob is exactly what handleSign persisted (validated, canonical JSON), so the
+// cmd + ttl_seconds + host_key_fp fields are present.
+func commandsForSigning(blob []byte) ([]signerkit.HostedSignCommand, error) {
 	var stored []signRequestCmd
 	if err := json.Unmarshal(blob, &stored); err != nil {
 		return nil, fmt.Errorf("decode stored commands: %w", err)
@@ -261,11 +307,19 @@ func commandsForSigning(blob []byte) ([]SignCommand, error) {
 	if len(stored) == 0 {
 		return nil, errors.New("signerserver: stored request has no commands to sign")
 	}
-	out := make([]SignCommand, len(stored))
+	out := make([]signerkit.HostedSignCommand, len(stored))
 	for i, c := range stored {
-		out[i] = SignCommand{Cmd: c.Cmd, TTLSeconds: c.TTLSeconds, HostKeyFP: c.HostKeyFP}
+		out[i] = signerkit.HostedSignCommand{Cmd: c.Cmd, TTLSeconds: c.TTLSeconds, HostKeyFP: c.HostKeyFP}
 	}
 	return out, nil
+}
+
+// commandsSHA256 returns the hex SHA-256 of the stored commands blob — a
+// stable identifier for exactly what a vote resolves, recorded on the audit
+// verdict in place of the raw command bytes.
+func commandsSHA256(blob []byte) string {
+	sum := sha256.Sum256(blob)
+	return hex.EncodeToString(sum[:])
 }
 
 // derefVotes flattens []*store.Vote (the store's return shape) to
