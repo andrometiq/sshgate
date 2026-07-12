@@ -1,6 +1,6 @@
 .PHONY: all build install-local test test-integration vet clean sshgate-gate-linux \
 	sshgate-mcp-darwin sshgate-signer-telegram-darwin darwin cross sshgate-signer-server \
-	preflight e2e smoke gitleaks release-gate verify-dist verify-repro
+	preflight e2e smoke gitleaks release-gate verify-dist verify-repro verify-versions mcpb
 
 # ---------------------------------------------------------------------------
 # Verified release channel (spec §11)
@@ -31,12 +31,29 @@ GATE_RELEASE_TOOLCHAIN := $(shell awk '/^toolchain /{print $$2}' go.mod)
 DIST_GATE_DIR := dist/gate
 DIST_GATE_BIN := $(DIST_GATE_DIR)/sshgate-gate-linux-amd64
 
+# ---------------------------------------------------------------------------
+# Version stamping for the NON-gate binaries (T4)
+# ---------------------------------------------------------------------------
+# The gate carries a scannable .rodata version MARKER (§11.2, package gatever)
+# for downgrade-cue safety. The other binaries have no such constraint, so they
+# take a PLAIN -X of their version variable, single-sourced from the same
+# VERSION file the gate marker and the plugin-manifest guard already use. The
+# source defaults are "dev"; these flags stamp the real version at link time.
+# A wrong -X symbol path is SILENTLY IGNORED by the Go linker, so a build that
+# looks stamped could still ship "dev" — the `verify-versions` target builds and
+# RUNS each binary to prove the stamp actually landed, so the T4 drift (a
+# hardcoded 0.2.0 while VERSION said 0.1.4) can never silently return.
+MCP_PKG                     := github.com/karthikeyan5/sshgate/src/mcp
+MCP_VERSION_FLAGS           := -ldflags '-X $(MCP_PKG).Version=$(VERSION)'
+SIGNER_VERSION_FLAGS        := -ldflags '-X main.version=$(VERSION)'
+SIGNER_SERVER_VERSION_FLAGS := -ldflags '-X main.version=$(VERSION)'
+
 all: vet test build
 
 build: sshgate-signer-server sshgate-gate-linux
 	mkdir -p bin
-	go build -o bin/sshgate-mcp              ./src/mcp/cmd/sshgate-mcp
-	go build -o bin/sshgate-signer-telegram  ./src/signer/cmd/sshgate-signer-telegram
+	go build $(MCP_VERSION_FLAGS)    -o bin/sshgate-mcp              ./src/mcp/cmd/sshgate-mcp
+	go build $(SIGNER_VERSION_FLAGS) -o bin/sshgate-signer-telegram  ./src/signer/cmd/sshgate-signer-telegram
 	go build -o bin/sshgate-gate             ./src/gate/cmd/sshgate-gate
 	go build -o bin/sshgate                  ./src/cli/cmd/sshgate
 
@@ -47,7 +64,7 @@ build: sshgate-signer-server sshgate-gate-linux
 # this target is for laptop-side dev + cross-compile parity.
 sshgate-signer-server:
 	mkdir -p bin
-	go build -o bin/sshgate-signer-server ./src/signer-server/cmd/sshgate-signer-server
+	go build $(SIGNER_SERVER_VERSION_FLAGS) -o bin/sshgate-signer-server ./src/signer-server/cmd/sshgate-signer-server
 
 # Cross-compile sshgate-gate for the remote host (linux/amd64) — the DEV build.
 # Fast + unpinned: it uses the LOCAL toolchain and writes to bin/, sharing only
@@ -102,13 +119,13 @@ release-gate:
 # Both archs built: amd64 (Intel Macs) + arm64 (Apple Silicon).
 sshgate-mcp-darwin:
 	mkdir -p bin
-	GOOS=darwin GOARCH=amd64 go build -trimpath -ldflags='-s -w' -o bin/sshgate-mcp-darwin-amd64 ./src/mcp/cmd/sshgate-mcp
-	GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags='-s -w' -o bin/sshgate-mcp-darwin-arm64 ./src/mcp/cmd/sshgate-mcp
+	GOOS=darwin GOARCH=amd64 go build -trimpath -ldflags='-s -w -X $(MCP_PKG).Version=$(VERSION)' -o bin/sshgate-mcp-darwin-amd64 ./src/mcp/cmd/sshgate-mcp
+	GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags='-s -w -X $(MCP_PKG).Version=$(VERSION)' -o bin/sshgate-mcp-darwin-arm64 ./src/mcp/cmd/sshgate-mcp
 
 sshgate-signer-telegram-darwin:
 	mkdir -p bin
-	GOOS=darwin GOARCH=amd64 go build -trimpath -ldflags='-s -w' -o bin/sshgate-signer-telegram-darwin-amd64 ./src/signer/cmd/sshgate-signer-telegram
-	GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags='-s -w' -o bin/sshgate-signer-telegram-darwin-arm64 ./src/signer/cmd/sshgate-signer-telegram
+	GOOS=darwin GOARCH=amd64 go build -trimpath -ldflags='-s -w -X main.version=$(VERSION)' -o bin/sshgate-signer-telegram-darwin-amd64 ./src/signer/cmd/sshgate-signer-telegram
+	GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags='-s -w -X main.version=$(VERSION)' -o bin/sshgate-signer-telegram-darwin-arm64 ./src/signer/cmd/sshgate-signer-telegram
 
 darwin: sshgate-mcp-darwin sshgate-signer-telegram-darwin
 	@echo "darwin builds done; sshgate-gate remains linux-only (deployed to Linux remotes)"
@@ -131,8 +148,8 @@ cross: build darwin
 #     published bytes.
 # Run from the user's clone (it has src/). Honors $XDG_CONFIG_HOME.
 install-local: build
-	go install ./src/mcp/cmd/sshgate-mcp
-	go install ./src/signer/cmd/sshgate-signer-telegram
+	go install $(MCP_VERSION_FLAGS)    ./src/mcp/cmd/sshgate-mcp
+	go install $(SIGNER_VERSION_FLAGS) ./src/signer/cmd/sshgate-signer-telegram
 	go install ./src/cli/cmd/sshgate
 	@if [ ! -f $(DIST_GATE_BIN) ]; then \
 		echo "install-local: $(DIST_GATE_BIN) is missing — it is committed to the repo; run 'make release-gate' to (re)build it, or fetch it from the clean tree" >&2; exit 1; fi
@@ -177,7 +194,7 @@ clean:
 # unit suite, a secret scan of the commits about to be pushed, a clean build,
 # the CHEAP verified-release-channel checks, and the two-build reproducibility
 # assertion. No Docker, so it runs anywhere in well under a minute.
-preflight: vet test gitleaks build verify-dist verify-repro
+preflight: vet test gitleaks build verify-dist verify-versions verify-repro
 	@echo "preflight: OK — safe to push"
 
 # verify-dist: the FAST verified-release-channel checks (§11). It deliberately
@@ -204,6 +221,33 @@ verify-dist:
 	if [ "$$pv" != "$$vf" ]; then \
 		echo "verify-dist: plugin.json version '$$pv' != VERSION '$$vf' (manifest must follow VERSION, sans leading v)" >&2; exit 1; fi
 	@echo "verify-dist: OK — committed gate matches its .sha256, plugin.json version matches VERSION (source↔binary is CI's job, §11.4)"
+
+# verify-versions: the T4 version-stamp drift guard. verify-dist proves the
+# plugin.json↔VERSION pair; this proves the three -X-stamped Go binaries
+# (sshgate-mcp, sshgate-signer-telegram, sshgate-signer-server) report VERSION
+# too. It BUILDS each with its version flags and RUNS `--version`, because a
+# wrong -X symbol path is silently ignored by the linker — only building+running
+# proves the stamp reached the binary. A binary reporting "dev" (stamp did not
+# land) or any value != VERSION (a reintroduced hardcode) fails the gate. Kept
+# out of verify-dist so that target stays build-free; wired into preflight.
+verify-versions:
+	@vf=$$(cat VERSION 2>/dev/null); \
+	if [ -z "$$vf" ]; then echo "verify-versions: VERSION file is missing/empty" >&2; exit 1; fi; \
+	tmpdir=$$(mktemp -d) || exit 1; \
+	trap 'rm -rf "$$tmpdir"' EXIT; \
+	go build $(MCP_VERSION_FLAGS)           -o "$$tmpdir/sshgate-mcp"             ./src/mcp/cmd/sshgate-mcp || exit 1; \
+	go build $(SIGNER_VERSION_FLAGS)        -o "$$tmpdir/sshgate-signer-telegram" ./src/signer/cmd/sshgate-signer-telegram || exit 1; \
+	go build $(SIGNER_SERVER_VERSION_FLAGS) -o "$$tmpdir/sshgate-signer-server"   ./src/signer-server/cmd/sshgate-signer-server || exit 1; \
+	fail=0; \
+	for b in sshgate-mcp sshgate-signer-telegram sshgate-signer-server; do \
+		got=$$("$$tmpdir/$$b" --version 2>/dev/null | awk '{print $$NF}'); \
+		if [ "$$got" != "$$vf" ]; then \
+			echo "verify-versions: FAIL — $$b reports '$$got', expected VERSION '$$vf' (broken -X wiring or a reintroduced hardcoded version)" >&2; \
+			fail=1; \
+		fi; \
+	done; \
+	[ $$fail -eq 0 ] || exit 1; \
+	echo "verify-versions: OK — sshgate-mcp / signer-telegram / signer-server all report VERSION $$vf"
 
 # verify-repro: the STANDING two-build reproducibility assertion (spec §11.8
 # task 14). Builds the gate TWICE with the SHARED flag set (GATE_BUILD_FLAGS)

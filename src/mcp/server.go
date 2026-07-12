@@ -45,7 +45,18 @@ func isCleanShutdown(err error) bool {
 // Version is the SSHGate MCP server's reported version string. It
 // flows into the JSON-RPC initialize response and from there into
 // Claude Code's session log.
-const Version = "0.2.0"
+//
+// It is a var, not a const, so the build stamps it from the single
+// VERSION file at link time via -ldflags
+// "-X github.com/karthikeyan5/sshgate/src/mcp.Version=<VERSION>"
+// (Makefile MCP_VERSION_FLAGS). Unstamped builds — `go test`, a plain
+// `go build` — keep the "dev" default; a wrong -X symbol path is
+// silently ignored by the linker, so `make verify-versions` builds and
+// runs the binary to prove the stamp actually landed. This keeps the
+// handshake version in lockstep with VERSION and forbids the old drift
+// (a hardcoded 0.2.0 while VERSION said 0.1.4). TestVersionDefault guards
+// that the source default stays "dev".
+var Version = "dev"
 
 // ServerName MUST equal the .mcp.json key. Claude Code routes tool
 // names by "mcp__<ServerName>__<tool>" — a mismatch causes silent

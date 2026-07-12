@@ -50,7 +50,14 @@ import (
 	"github.com/karthikeyan5/sshgate/src/signer-server/store"
 )
 
-const version = "0.2.0-scaffold-1"
+// version is stamped from the single VERSION file at link time via
+// -ldflags "-X main.version=<VERSION>" (Makefile SIGNER_SERVER_VERSION_FLAGS).
+// Unstamped builds keep "dev"; `make verify-versions` proves the stamp
+// landed. The hosted signer-server is still a v2 scaffold, but its
+// reported version tracks the repo VERSION like every other binary rather
+// than carrying an independently-drifting literal (it read 0.2.0-scaffold-1
+// while VERSION said 0.1.4).
+var version = "dev"
 
 func main() {
 	os.Exit(run(os.Args[1:]))
