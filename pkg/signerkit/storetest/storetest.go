@@ -21,6 +21,7 @@ package storetest
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -44,6 +45,20 @@ func snapshot(r *store.Request) terminalSnapshot {
 // state with one stable payload, no losing writer's payload ever lands, and a
 // post-resolution UpdateStatus (a late loser) cannot overwrite the winner.
 //
+// Crucially it observes the row DURING the race, not only after it settles. An
+// earlier version of this hammer ran every assertion after wg.Wait(), which a
+// non-atomic (read-then-write / last-writer-wins) Store passed vacuously: with
+// no concurrent reader, the row is simply read once the dust settles, in some
+// terminal state, and the immutability re-reads that follow see nothing change
+// because nobody is writing any more. To actually exercise the atomicity
+// contract we (a) start a concurrent reader that snapshots the FIRST terminal
+// (non-pending) state it observes and flags any later change to it, and (b)
+// stagger the writers so a non-atomic Store resolves the row early and then a
+// later writer clobbers the already-resolved row — a mutation the reader
+// catches and the post-wait first-vs-final compare catches. An atomic CAS Store
+// makes every write after the first a no-op, so the first terminal state IS the
+// final one and both checks pass.
+//
 // newStore must return a FRESH, empty Store backed by its own storage.
 func RunConcurrentFlip(t *testing.T, newStore func(t *testing.T) store.Store) {
 	t.Helper()
@@ -61,10 +76,50 @@ func RunConcurrentFlip(t *testing.T, newStore func(t *testing.T) store.Store) {
 		t.Fatalf("Insert: %v", err)
 	}
 
-	// Fire N writers simultaneously: half race an approve (each with a DISTINCT
-	// signature blob + approver), half race a deny. Exactly one transition may
-	// win the pending guard.
+	// A concurrent reader spins on GetByID for the whole race. It captures the
+	// FIRST terminal (non-pending) state it observes and flags if the terminal
+	// row is EVER seen to change afterwards. Under an atomic CAS Store the first
+	// terminal state is final — the pending-guard makes every later write a
+	// no-op — so firstTerminal never changes and mutatedAfterResolve stays
+	// false. Under a read-then-write Store a late writer clobbers the resolved
+	// row, which this reader observes directly. Its fields are read only after
+	// the reader has been joined (happens-after), so the access is race-free.
+	var (
+		firstTerminal       terminalSnapshot
+		sawTerminal         bool
+		mutatedAfterResolve bool
+	)
+	readerStop := make(chan struct{})
+	readerDone := make(chan struct{})
+	go func() {
+		defer close(readerDone)
+		for {
+			if g, err := st.GetByID(ctx, rid); err == nil && g.Status != store.StatusPending {
+				snap := snapshot(g)
+				if !sawTerminal {
+					firstTerminal = snap
+					sawTerminal = true
+				} else if snap != firstTerminal {
+					mutatedAfterResolve = true
+				}
+			}
+			select {
+			case <-readerStop:
+				return
+			default:
+			}
+		}
+	}()
+
+	// Fire N writers: half race an approve (each with a DISTINCT signature blob
+	// + approver), half race a deny. Exactly one transition may win the pending
+	// guard. The stagger spreads the writes out so that, on a non-atomic Store,
+	// writer 0 resolves the row almost immediately and each later writer lands a
+	// few ms afterward — giving the reader a window to observe the first
+	// resolution before a loser clobbers it. On an atomic Store the stagger is
+	// harmless: whoever writes first wins and the rest are no-ops.
 	const writers = 32
+	const stagger = 1 * time.Millisecond
 	var wg sync.WaitGroup
 	start := make(chan struct{})
 	for i := 0; i < writers; i++ {
@@ -72,6 +127,7 @@ func RunConcurrentFlip(t *testing.T, newStore func(t *testing.T) store.Store) {
 		go func(i int) {
 			defer wg.Done()
 			<-start
+			time.Sleep(time.Duration(i) * stagger)
 			if i%2 == 0 {
 				sig := []byte(fmt.Sprintf(`[{"cmd":"x","sig":"WINNER-%d"}]`, i))
 				_ = st.UpdateStatus(ctx, rid, store.StatusApproved, sig, fmt.Sprintf("op-%d", i))
@@ -82,6 +138,10 @@ func RunConcurrentFlip(t *testing.T, newStore func(t *testing.T) store.Store) {
 	}
 	close(start)
 	wg.Wait()
+
+	// Stop the reader and join it before touching its captured state.
+	close(readerStop)
+	<-readerDone
 
 	got, err := st.GetByID(ctx, rid)
 	if err != nil {
@@ -100,6 +160,33 @@ func RunConcurrentFlip(t *testing.T, newStore func(t *testing.T) store.Store) {
 	}
 	if got.Status == store.StatusDenied && len(got.Signatures) != 0 {
 		t.Fatalf("denied winner carries signatures — a losing approve leaked in")
+	}
+
+	// The reader's mid-race observations are the teeth of this hammer. Once a
+	// request resolves it is immutable; if the terminal row was seen to change
+	// after it first resolved, a losing writer overwrote the winner — exactly
+	// the single-sign violation a non-atomic UpdateStatus commits.
+	if sawTerminal {
+		if mutatedAfterResolve {
+			t.Fatalf("terminal row mutated mid-race: a late writer overwrote an already-resolved row (non-atomic UpdateStatus)")
+		}
+		if snapshot(got) != firstTerminal {
+			t.Fatalf("row changed after it first resolved: first-observed %+v != final %+v (a non-atomic UpdateStatus let a loser overwrite the winner)", firstTerminal, snapshot(got))
+		}
+	}
+
+	// Single-winner: the surviving approver names exactly ONE operator, and for
+	// an approved winner the persisted signature belongs to that SAME operator.
+	// A read-then-write Store that let two writers interleave could leave one
+	// writer's approver stamped over another writer's signature blob.
+	if strings.Contains(got.ApprovedBy, ",") {
+		t.Fatalf("approved_by names multiple operators %q — more than one writer's transition landed", got.ApprovedBy)
+	}
+	if got.Status == store.StatusApproved {
+		winner := strings.TrimPrefix(got.ApprovedBy, "op-")
+		if want := "WINNER-" + winner; !strings.Contains(string(got.Signatures), want) {
+			t.Fatalf("winner mismatch: approved_by=%q but signatures=%q do not carry %q — approver and signature came from different writers", got.ApprovedBy, string(got.Signatures), want)
+		}
 	}
 
 	// Immutability: the terminal row must not change across repeated reads.
