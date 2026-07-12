@@ -263,7 +263,7 @@ func commandsForSigning(blob []byte) ([]SignCommand, error) {
 	}
 	out := make([]SignCommand, len(stored))
 	for i, c := range stored {
-		out[i] = SignCommand{Cmd: c.Cmd, TTLSeconds: c.TTLSeconds}
+		out[i] = SignCommand{Cmd: c.Cmd, TTLSeconds: c.TTLSeconds, HostKeyFP: c.HostKeyFP}
 	}
 	return out, nil
 }

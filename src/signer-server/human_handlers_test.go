@@ -125,7 +125,7 @@ func loginClient(t *testing.T, ts *httptest.Server, username, totpSecret string)
 // store, mirroring what /v1/sign persists, and returns its id.
 func seedPendingRequest(t *testing.T, db *store.DB, id string, n int, cmd string, ttl int64) {
 	t.Helper()
-	blob := mustMarshal(t, []cmdJSON{{Server: "prod", Cmd: cmd, TTLSeconds: ttl}})
+	blob := mustMarshal(t, []cmdJSON{{Server: "prod", Cmd: cmd, TTLSeconds: ttl, HostKeyFP: testHostFP}})
 	if err := db.Insert(context.Background(), &store.Request{
 		RequestID:         id,
 		Status:            store.StatusPending,

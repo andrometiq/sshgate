@@ -54,7 +54,7 @@ func TestWireFrozen_HostedClientStillDecodesV1(t *testing.T) {
 	// Submit via the frozen client. This decodes the 202 {request_id,
 	// poll_url} response; a drift there fails Request.
 	resultCh, err := client.Request(ctx, backend.ApprovalRequest{
-		Commands:  []backend.CommandReq{{Server: "prod", Cmd: cmd, TTLSec: 120}},
+		Commands:  []backend.CommandReq{{Server: "prod", Cmd: cmd, TTLSec: 120, HostKeyFP: testHostFP}},
 		Submitted: time.Now(),
 	})
 	if err != nil {
@@ -89,7 +89,7 @@ func TestWireFrozen_HostedClientStillDecodesV1(t *testing.T) {
 			t.Fatalf("signature cmd = %q; want %q", res.Signatures[0].Cmd, cmd)
 		}
 		// And the signature the frozen client surfaced is GATE-VALID.
-		inner, verr := gate.VerifySigned(res.Signatures[0].Sig, pub, time.Now().Add(time.Second))
+		inner, _, verr := gate.VerifySigned(res.Signatures[0].Sig, pub, time.Now().Add(time.Second), []string{testHostFP})
 		if verr != nil {
 			t.Fatalf("gate.VerifySigned rejected the wire signature: %v", verr)
 		}

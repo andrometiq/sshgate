@@ -32,6 +32,13 @@ type signRequestCmd struct {
 	Server     string `json:"server"`
 	Cmd        string `json:"cmd"`
 	TTLSeconds int64  `json:"ttl_seconds"`
+	// HostKeyFP is the target server's SSH host-key fingerprint
+	// ("SHA256:..."), sourced by the MCP from its trusted registry. It is
+	// persisted verbatim in the stored commands blob and threaded to the
+	// signer at approval time, which stamps it into SigPayload.Host so the
+	// gate can enforce the per-server binding (fail-closed on a mismatch).
+	// omitempty keeps the v1 wire shape unchanged for a caller that omits it.
+	HostKeyFP string `json:"host_key_fp,omitempty"`
 }
 
 // signAcceptedResponse is the 202 Accepted body returned from POST

@@ -78,6 +78,11 @@ type signRequestCmdV2 struct {
 	Server     string `json:"server"`
 	Cmd        string `json:"cmd"`
 	TTLSeconds int64  `json:"ttl_seconds"`
+	// HostKeyFP threads the target's pinned SSH host-key fingerprint to the
+	// hosted signer so the minted SigPayload.Host binds the envelope to the
+	// executing gate. omitempty keeps the wire byte-identical for any legacy
+	// caller that does not set it (the frozen decoder ignores an absent field).
+	HostKeyFP string `json:"host_key_fp,omitempty"`
 }
 
 // signAcceptedBody is the 202 response. We only consume RequestID;
@@ -154,6 +159,7 @@ func (h *HostedServerBackend) Request(ctx context.Context, req ApprovalRequest) 
 			Server:     c.Server,
 			Cmd:        c.Cmd,
 			TTLSeconds: c.TTLSec,
+			HostKeyFP:  c.HostKeyFP,
 		}
 	}
 	payload, err := json.Marshal(body)

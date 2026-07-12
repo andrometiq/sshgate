@@ -48,7 +48,7 @@ func TestSigner_GoldenGateRoundTrip(t *testing.T) {
 
 	approvedAt := time.Unix(1_700_000_000, 0)
 	const cmd = "systemctl restart nginx"
-	results, err := s.Sign([]signerserver.SignCommand{{Cmd: cmd, TTLSeconds: 120}}, approvedAt)
+	results, err := s.Sign([]signerserver.SignCommand{{Cmd: cmd, TTLSeconds: 120, HostKeyFP: testHostFP}}, approvedAt)
 	if err != nil {
 		t.Fatalf("Sign: %v", err)
 	}
@@ -62,7 +62,7 @@ func TestSigner_GoldenGateRoundTrip(t *testing.T) {
 	// gate verifies at a clock inside the validity window (just after
 	// approval). It must ACCEPT and hand back the inner cmd.
 	verifyAt := approvedAt.Add(30 * time.Second)
-	innerCmd, err := gate.VerifySigned(results[0].Sig, pub, verifyAt)
+	innerCmd, _, err := gate.VerifySigned(results[0].Sig, pub, verifyAt, []string{testHostFP})
 	if err != nil {
 		t.Fatalf("gate.VerifySigned rejected a freshly-minted envelope: %v", err)
 	}
@@ -86,14 +86,14 @@ func TestSigner_GoldenRejectsTampering(t *testing.T) {
 	approvedAt := time.Unix(1_700_000_000, 0)
 	verifyAt := approvedAt.Add(30 * time.Second)
 	const cmd = "rm -rf /var/cache/app"
-	results, err := s.Sign([]signerserver.SignCommand{{Cmd: cmd, TTLSeconds: 60}}, approvedAt)
+	results, err := s.Sign([]signerserver.SignCommand{{Cmd: cmd, TTLSeconds: 60, HostKeyFP: testHostFP}}, approvedAt)
 	if err != nil {
 		t.Fatalf("Sign: %v", err)
 	}
 	good := results[0].Sig
 
 	// Baseline: the untampered envelope verifies.
-	if _, err := gate.VerifySigned(good, pub, verifyAt); err != nil {
+	if _, _, err := gate.VerifySigned(good, pub, verifyAt, []string{testHostFP}); err != nil {
 		t.Fatalf("baseline envelope failed to verify: %v", err)
 	}
 
@@ -123,7 +123,7 @@ func TestSigner_GoldenRejectsTampering(t *testing.T) {
 		t.Fatalf("marshal tampered payload: %v", err)
 	}
 	tamperedPayloadEnvelope := prefix + sigB64 + ":" + enc.EncodeToString(tamperedPB)
-	if _, err := gate.VerifySigned(tamperedPayloadEnvelope, pub, verifyAt); !errors.Is(err, gate.ErrBadSig) {
+	if _, _, err := gate.VerifySigned(tamperedPayloadEnvelope, pub, verifyAt, []string{testHostFP}); !errors.Is(err, gate.ErrBadSig) {
 		t.Fatalf("tampered-payload envelope: got err %v, want ErrBadSig", err)
 	}
 
@@ -134,7 +134,7 @@ func TestSigner_GoldenRejectsTampering(t *testing.T) {
 	}
 	rawSig[0] ^= 0xFF
 	tamperedSigEnvelope := prefix + enc.EncodeToString(rawSig) + ":" + payloadB64
-	if _, err := gate.VerifySigned(tamperedSigEnvelope, pub, verifyAt); !errors.Is(err, gate.ErrBadSig) {
+	if _, _, err := gate.VerifySigned(tamperedSigEnvelope, pub, verifyAt, []string{testHostFP}); !errors.Is(err, gate.ErrBadSig) {
 		t.Fatalf("tampered-sig envelope: got err %v, want ErrBadSig", err)
 	}
 
@@ -143,7 +143,7 @@ func TestSigner_GoldenRejectsTampering(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generate other key: %v", err)
 	}
-	if _, err := gate.VerifySigned(good, otherPub, verifyAt); !errors.Is(err, gate.ErrBadSig) {
+	if _, _, err := gate.VerifySigned(good, otherPub, verifyAt, []string{testHostFP}); !errors.Is(err, gate.ErrBadSig) {
 		t.Fatalf("wrong-key verify: got err %v, want ErrBadSig", err)
 	}
 }
@@ -159,8 +159,8 @@ func TestSigner_FreshNoncePerCommand(t *testing.T) {
 
 	// Two identical commands in one batch.
 	batch, err := s.Sign([]signerserver.SignCommand{
-		{Cmd: cmd, TTLSeconds: 60},
-		{Cmd: cmd, TTLSeconds: 60},
+		{Cmd: cmd, TTLSeconds: 60, HostKeyFP: testHostFP},
+		{Cmd: cmd, TTLSeconds: 60, HostKeyFP: testHostFP},
 	}, approvedAt)
 	if err != nil {
 		t.Fatalf("Sign batch: %v", err)
@@ -170,7 +170,7 @@ func TestSigner_FreshNoncePerCommand(t *testing.T) {
 	}
 
 	// Same command, separate Sign call, same approval time.
-	again, err := s.Sign([]signerserver.SignCommand{{Cmd: cmd, TTLSeconds: 60}}, approvedAt)
+	again, err := s.Sign([]signerserver.SignCommand{{Cmd: cmd, TTLSeconds: 60, HostKeyFP: testHostFP}}, approvedAt)
 	if err != nil {
 		t.Fatalf("Sign again: %v", err)
 	}
@@ -199,11 +199,11 @@ func TestSigner_ValidityWindowEnforced(t *testing.T) {
 	maxSecs := int64(sigwire.MaxSigValidity / time.Second) // 300
 
 	// At the cap: allowed, and gate accepts it.
-	atCap, err := s.Sign([]signerserver.SignCommand{{Cmd: "df -h", TTLSeconds: maxSecs}}, approvedAt)
+	atCap, err := s.Sign([]signerserver.SignCommand{{Cmd: "df -h", TTLSeconds: maxSecs, HostKeyFP: testHostFP}}, approvedAt)
 	if err != nil {
 		t.Fatalf("Sign at-cap TTL (%d): unexpected error %v", maxSecs, err)
 	}
-	if _, err := gate.VerifySigned(atCap[0].Sig, pub, approvedAt.Add(time.Second)); err != nil {
+	if _, _, err := gate.VerifySigned(atCap[0].Sig, pub, approvedAt.Add(time.Second), []string{testHostFP}); err != nil {
 		t.Fatalf("gate rejected an at-cap envelope: %v", err)
 	}
 	// Verify Exp-TS == maxSecs exactly.
@@ -212,7 +212,7 @@ func TestSigner_ValidityWindowEnforced(t *testing.T) {
 	}
 
 	// Over the cap: rejected, no envelope minted.
-	over, err := s.Sign([]signerserver.SignCommand{{Cmd: "df -h", TTLSeconds: maxSecs + 1}}, approvedAt)
+	over, err := s.Sign([]signerserver.SignCommand{{Cmd: "df -h", TTLSeconds: maxSecs + 1, HostKeyFP: testHostFP}}, approvedAt)
 	if err == nil {
 		t.Fatalf("Sign over-cap TTL (%d): expected error, got results %v", maxSecs+1, over)
 	}
@@ -222,7 +222,7 @@ func TestSigner_ValidityWindowEnforced(t *testing.T) {
 
 	// Non-positive TTL: rejected.
 	for _, bad := range []int64{0, -1, -300} {
-		if _, err := s.Sign([]signerserver.SignCommand{{Cmd: "df -h", TTLSeconds: bad}}, approvedAt); err == nil {
+		if _, err := s.Sign([]signerserver.SignCommand{{Cmd: "df -h", TTLSeconds: bad, HostKeyFP: testHostFP}}, approvedAt); err == nil {
 			t.Fatalf("Sign TTL=%d: expected error, got nil", bad)
 		}
 	}
@@ -230,8 +230,8 @@ func TestSigner_ValidityWindowEnforced(t *testing.T) {
 	// A batch where one command is over-cap must reject the WHOLE batch
 	// (no partial results).
 	mixed, err := s.Sign([]signerserver.SignCommand{
-		{Cmd: "ok", TTLSeconds: 60},
-		{Cmd: "bad", TTLSeconds: maxSecs + 100},
+		{Cmd: "ok", TTLSeconds: 60, HostKeyFP: testHostFP},
+		{Cmd: "bad", TTLSeconds: maxSecs + 100, HostKeyFP: testHostFP},
 	}, approvedAt)
 	if err == nil {
 		t.Fatalf("mixed batch with an over-cap command: expected error, got %v", mixed)
@@ -248,7 +248,7 @@ func TestSigner_TSIsApprovalTime(t *testing.T) {
 	t.Parallel()
 	s, _ := testSigner(t)
 	approvedAt := time.Unix(1_650_000_000, 0)
-	results, err := s.Sign([]signerserver.SignCommand{{Cmd: "id", TTLSeconds: 90}}, approvedAt)
+	results, err := s.Sign([]signerserver.SignCommand{{Cmd: "id", TTLSeconds: 90, HostKeyFP: testHostFP}}, approvedAt)
 	if err != nil {
 		t.Fatalf("Sign: %v", err)
 	}
@@ -354,11 +354,11 @@ func TestLoadSigningKey_HappyPath(t *testing.T) {
 	}
 
 	approvedAt := time.Unix(1_700_000_000, 0)
-	res, err := s.Sign([]signerserver.SignCommand{{Cmd: "whoami", TTLSeconds: 60}}, approvedAt)
+	res, err := s.Sign([]signerserver.SignCommand{{Cmd: "whoami", TTLSeconds: 60, HostKeyFP: testHostFP}}, approvedAt)
 	if err != nil {
 		t.Fatalf("Sign with loaded key: %v", err)
 	}
-	if _, err := gate.VerifySigned(res[0].Sig, pub, approvedAt.Add(time.Second)); err != nil {
+	if _, _, err := gate.VerifySigned(res[0].Sig, pub, approvedAt.Add(time.Second), []string{testHostFP}); err != nil {
 		t.Fatalf("envelope from on-disk key failed gate verify: %v", err)
 	}
 }
@@ -374,7 +374,7 @@ func TestSigner_NonceFailureSurfaces(t *testing.T) {
 	})
 	defer restore()
 
-	if _, err := s.Sign([]signerserver.SignCommand{{Cmd: "id", TTLSeconds: 60}}, time.Now()); err == nil {
+	if _, err := s.Sign([]signerserver.SignCommand{{Cmd: "id", TTLSeconds: 60, HostKeyFP: testHostFP}}, time.Now()); err == nil {
 		t.Fatalf("expected nonce failure to surface as an error, got nil")
 	}
 }
@@ -392,8 +392,8 @@ func TestSigner_WireShapeMatchesHosted(t *testing.T) {
 	approvedAt := time.Unix(1_700_000_000, 0)
 
 	cmds := []signerserver.SignCommand{
-		{Cmd: "systemctl status nginx", TTLSeconds: 120},
-		{Cmd: "journalctl -u nginx -n 50", TTLSeconds: 120},
+		{Cmd: "systemctl status nginx", TTLSeconds: 120, HostKeyFP: testHostFP},
+		{Cmd: "journalctl -u nginx -n 50", TTLSeconds: 120, HostKeyFP: testHostFP},
 	}
 	results, err := s.Sign(cmds, approvedAt)
 	if err != nil {
@@ -438,8 +438,8 @@ func TestSigner_WireShapeMatchesHosted(t *testing.T) {
 		RequestID: "r_test",
 		Submitted: approvedAt,
 		Commands: []backend.CommandReq{
-			{Cmd: cmds[0].Cmd, TTLSec: cmds[0].TTLSeconds},
-			{Cmd: cmds[1].Cmd, TTLSec: cmds[1].TTLSeconds},
+			{Cmd: cmds[0].Cmd, TTLSec: cmds[0].TTLSeconds, HostKeyFP: testHostFP},
+			{Cmd: cmds[1].Cmd, TTLSec: cmds[1].TTLSeconds, HostKeyFP: testHostFP},
 		},
 	}
 
@@ -464,7 +464,7 @@ func TestSigner_WireShapeMatchesHosted(t *testing.T) {
 		}
 		// And the surfaced envelope still verifies under gate — proving
 		// the wire round-trip did not corrupt the signature.
-		if _, err := gate.VerifySigned(res.Signatures[i].Sig, pub, approvedAt.Add(time.Second)); err != nil {
+		if _, _, err := gate.VerifySigned(res.Signatures[i].Sig, pub, approvedAt.Add(time.Second), []string{testHostFP}); err != nil {
 			t.Fatalf("signature[%d] failed gate verify after hosted.go round-trip: %v", i, err)
 		}
 	}

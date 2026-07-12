@@ -514,7 +514,7 @@ func (d *Daemon) HandleSignRequest(ctx context.Context, conn io.ReadWriter) erro
 		if ttl > int64(sigwire.MaxSigValidity/time.Second) {
 			return d.respondError(conn, req.RequestID, fmt.Sprintf("commands[%d].ttl_seconds %d exceeds max %d", i, ttl, int64(sigwire.MaxSigValidity/time.Second)))
 		}
-		apReq.Commands[i] = CommandReq{Server: c.Server, Cmd: c.Cmd, TTLSec: ttl, Reveal: c.Reveal, Reason: c.Reason}
+		apReq.Commands[i] = CommandReq{Server: c.Server, Cmd: c.Cmd, TTLSec: ttl, Reveal: c.Reveal, Reason: c.Reason, HostKeyFP: c.Host}
 	}
 
 	// Lone-admin-verb invariant: an SSHGATE_ admin verb (SSHGATE_UPDATE /

@@ -59,6 +59,14 @@ type SignResult struct {
 type SignCommand struct {
 	Cmd        string
 	TTLSeconds int64
+	// HostKeyFP is the target gate's SSH host-key fingerprint ("SHA256:...").
+	// Sign stamps it into SigPayload.Host so the minted envelope is bound to
+	// the executing gate; the current gate fail-closes a Host-less or
+	// mismatched write (gate.VerifySigned → ErrHostMismatch), so a real
+	// deployment MUST supply it. It is threaded from the stored request's
+	// commands blob (host_key_fp), which the MCP sourced from its trusted
+	// registry.
+	HostKeyFP string
 }
 
 // Sign produces a signed envelope for each command in cmds, stamped at
@@ -112,6 +120,10 @@ func (s *Signer) Sign(cmds []SignCommand, approvedAt time.Time) ([]SignResult, e
 			TS:    ts,
 			Exp:   ts + c.TTLSeconds,
 			Nonce: nonce,
+			// Bind the signature to the target's pinned host key (D4). The MCP
+			// sourced this fingerprint from its trusted registry and threaded
+			// it here through the stored request; the gate enforces the match.
+			Host: c.HostKeyFP,
 		}
 
 		// Sign the exact bytes gate will reconstruct on the verify side.

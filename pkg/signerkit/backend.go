@@ -96,6 +96,14 @@ type CommandReq struct {
 	TTLSec int64
 	Reveal bool
 	Reason string
+	// HostKeyFP is the target server's SSH host-key fingerprint
+	// ("SHA256:..."), sourced by the MCP from its TRUSTED registry (never an
+	// agent parameter). A remote-signing backend (HostedServerBackend) carries
+	// it over the machine wire so the hosted signer can bind the minted
+	// SigPayload.Host to the executing gate — the gate fail-closes a Host-less
+	// or mismatched write (gate.ErrHostMismatch). Local-signing backends ignore
+	// it (the local daemon binds Host from its own socket signRequestCmd.Host).
+	HostKeyFP string
 }
 
 // ResultStatus is the outcome of an ApprovalRequest. The zero value is

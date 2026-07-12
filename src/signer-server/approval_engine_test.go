@@ -43,20 +43,35 @@ func engineFixture(t *testing.T) (*signerserver.ApprovalEngine, *store.DB, ed255
 	return eng, db, pub
 }
 
+// testHostFP is the pinned gate host-key fingerprint every fixture binds
+// signatures to. Since main moved the security floor under the branch, the
+// gate fail-closes a Host-less write (gate.ErrHostMismatch), so a seeded
+// request must carry a host FP and gate.VerifySigned must be told that FP is
+// the executing gate's own (selfHostFPs). Kept in canonical SHA256: form.
+const testHostFP = "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+
 // cmdJSON mirrors the handlers package's unexported signRequestCmd wire
-// shape (server, cmd, ttl_seconds) so a seeded request's Commands blob is
-// byte-identical to what handleSign persists — which is exactly what the
-// engine's commandsForSigning decodes.
+// shape (server, cmd, ttl_seconds, host_key_fp) so a seeded request's
+// Commands blob is byte-identical to what handleSign persists — which is
+// exactly what the engine's commandsForSigning decodes.
 type cmdJSON struct {
 	Server     string `json:"server"`
 	Cmd        string `json:"cmd"`
 	TTLSeconds int64  `json:"ttl_seconds"`
+	HostKeyFP  string `json:"host_key_fp,omitempty"`
 }
 
 // seedRequest inserts a pending request with the given N and one or more
 // commands (cmd + ttl).
 func seedRequest(t *testing.T, db *store.DB, id string, n int, cmds ...cmdJSON) {
 	t.Helper()
+	// Stamp the pinned host FP on any command that did not set one, so every
+	// seeded request mints gate-verifiable (host-bound) signatures.
+	for i := range cmds {
+		if cmds[i].HostKeyFP == "" {
+			cmds[i].HostKeyFP = testHostFP
+		}
+	}
 	blob, err := json.Marshal(cmds)
 	if err != nil {
 		t.Fatalf("marshal commands: %v", err)
@@ -397,7 +412,7 @@ func assertGateValid(t *testing.T, sigBlob []byte, pub ed25519.PublicKey, wantCm
 	// the engine, so verify at now+1s which is inside any positive TTL.
 	verifyAt := time.Now().Add(time.Second)
 	for i, sc := range sigs {
-		inner, err := gate.VerifySigned(sc.Sig, pub, verifyAt)
+		inner, _, err := gate.VerifySigned(sc.Sig, pub, verifyAt, []string{testHostFP})
 		if err != nil {
 			t.Fatalf("gate.VerifySigned rejected persisted signature[%d]: %v", i, err)
 		}
