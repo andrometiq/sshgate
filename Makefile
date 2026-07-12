@@ -220,7 +220,18 @@ verify-dist:
 	if [ -z "$$pv" ]; then echo "verify-dist: could not read version from .claude-plugin/plugin.json" >&2; exit 1; fi; \
 	if [ "$$pv" != "$$vf" ]; then \
 		echo "verify-dist: plugin.json version '$$pv' != VERSION '$$vf' (manifest must follow VERSION, sans leading v)" >&2; exit 1; fi
-	@echo "verify-dist: OK — committed gate matches its .sha256, plugin.json version matches VERSION (source↔binary is CI's job, §11.4)"
+	@# Same drift guard for the other published manifests that carry a hand-set
+	@# version (server.json for the MCP Registry, gemini-extension.json for the
+	@# Gemini gallery). The mcpb manifest is NOT listed here — `make mcpb` stamps
+	@# its version from VERSION at pack time, so its committed value is a template.
+	@vf=$$(sed 's/^v//' VERSION); \
+	for f in server.json gemini-extension.json; do \
+		fv=$$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$$f" | head -1); \
+		if [ -z "$$fv" ]; then echo "verify-dist: could not read version from $$f" >&2; exit 1; fi; \
+		if [ "$$fv" != "$$vf" ]; then \
+			echo "verify-dist: $$f version '$$fv' != VERSION '$$vf' (manifest must follow VERSION, sans leading v)" >&2; exit 1; fi; \
+	done
+	@echo "verify-dist: OK — committed gate matches its .sha256; plugin.json / server.json / gemini-extension.json versions match VERSION (source↔binary is CI's job, §11.4)"
 
 # verify-versions: the T4 version-stamp drift guard. verify-dist proves the
 # plugin.json↔VERSION pair; this proves the three -X-stamped Go binaries
