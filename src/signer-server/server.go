@@ -32,6 +32,16 @@ type Server struct {
 	// commit-1 test fixtures + smoke runs without a DB file).
 	Store store.Store
 
+	// Signer is the signing engine: it holds the hosted signer's
+	// Ed25519 master key and mints gate-valid SSHGATE_SIG envelopes at
+	// approval time. Production wiring (cmd/sshgate-signer-server)
+	// loads it via LoadSigningKey and refuses to start if the key is
+	// missing or insecure; the route/auth tests leave it nil because
+	// they exercise transport, not signing. The approval surface that
+	// drives Signer.Sign (HTTP→approval→sign) lands in a later phase;
+	// this phase establishes the engine itself.
+	Signer *Signer
+
 	// PollWait bounds the long-poll wait inside /v1/poll/{id}. The
 	// HTTP client may pass a shorter wait via ?wait= (v2.1); for now
 	// this is the only knob. Defaults to 30s in NewServer.
@@ -40,6 +50,15 @@ type Server struct {
 	// Logger receives one line per request (method, path, status,
 	// duration). Defaults to log.Default() if nil.
 	Logger *log.Logger
+
+	// Human is the optional human-plane API (Phase E): the /auth/* and
+	// /ui/* routes, gated by a server-side session (NOT the bearer key).
+	// When nil the server exposes only the machine plane (/v1/*,
+	// /healthz) — the v2.0 behaviour. Set it BEFORE the server starts
+	// serving (it is read once in routes()). The two planes share this
+	// mux but never share credentials: see human_handlers.go's plane-
+	// separation contract.
+	Human *HumanAPI
 
 	mux *http.ServeMux
 }
@@ -81,6 +100,26 @@ func (s *Server) routes() {
 	s.mux.Handle("POST /v1/sign", s.withAuth(http.HandlerFunc(s.handleSign)))
 	s.mux.Handle("GET /v1/poll/{request_id}", s.withAuth(http.HandlerFunc(s.handlePoll)))
 	s.mux.Handle("GET /v1/audit", s.withAuth(http.HandlerFunc(s.handleAudit)))
+}
+
+// AttachHuman mounts the human-plane (Phase E) routes onto the server's
+// mux and records the HumanAPI on the Server. It MUST be called before
+// the server begins serving (mux route registration is not safe to race
+// with ServeHTTP). It panics on a double-attach or a nil argument — both
+// are wiring mistakes that should surface at startup, not silently.
+//
+// The human routes (/auth/*, /ui/*) are session-gated; they share this
+// mux with the bearer-gated machine routes (/v1/*) but never share
+// credentials. Mounting them does not touch the frozen /v1 handlers.
+func (s *Server) AttachHuman(h *HumanAPI) {
+	if h == nil {
+		panic("signerserver: AttachHuman: nil HumanAPI")
+	}
+	if s.Human != nil {
+		panic("signerserver: AttachHuman: human plane already attached")
+	}
+	s.Human = h
+	h.registerHumanRoutes(s.mux)
 }
 
 // ServeHTTP makes Server an http.Handler. The wrapping logRequest
