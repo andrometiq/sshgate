@@ -1,4 +1,4 @@
-package signer
+package signerkit
 
 import (
 	"bufio"
@@ -17,7 +17,6 @@ import (
 	"time"
 
 	"github.com/karthikeyan5/sshgate/src/redact"
-	"github.com/karthikeyan5/sshgate/src/signer/backend"
 	"github.com/karthikeyan5/sshgate/src/sigwire"
 	"github.com/karthikeyan5/sshgate/src/xfer"
 	"github.com/karthikeyan5/sshgate/src/xferwire"
@@ -71,7 +70,7 @@ type grant struct {
 // nil, in which case the daemon falls back to time.Now.
 type Daemon struct {
 	Key     ed25519.PrivateKey
-	Backend backend.Backend
+	Backend Backend
 	Audit   *AuditLog
 	NowFunc func() time.Time
 
@@ -451,10 +450,10 @@ func (d *Daemon) HandleSignRequest(ctx context.Context, conn io.ReadWriter) erro
 		return d.respondError(conn, req.RequestID, "no commands in request")
 	}
 
-	apReq := backend.ApprovalRequest{
+	apReq := ApprovalRequest{
 		RequestID: req.RequestID,
 		Submitted: d.now(),
-		Commands:  make([]backend.CommandReq, len(req.Commands)),
+		Commands:  make([]CommandReq, len(req.Commands)),
 	}
 	for i, c := range req.Commands {
 		if c.Cmd == "" {
@@ -487,7 +486,7 @@ func (d *Daemon) HandleSignRequest(ctx context.Context, conn io.ReadWriter) erro
 		if ttl > int64(sigwire.MaxSigValidity/time.Second) {
 			return d.respondError(conn, req.RequestID, fmt.Sprintf("commands[%d].ttl_seconds %d exceeds max %d", i, ttl, int64(sigwire.MaxSigValidity/time.Second)))
 		}
-		apReq.Commands[i] = backend.CommandReq{Server: c.Server, Cmd: c.Cmd, TTLSec: ttl, Reveal: c.Reveal, Reason: c.Reason}
+		apReq.Commands[i] = CommandReq{Server: c.Server, Cmd: c.Cmd, TTLSec: ttl, Reveal: c.Reveal, Reason: c.Reason}
 	}
 
 	// Lone-admin-verb invariant: an SSHGATE_ admin verb (SSHGATE_UPDATE /
@@ -517,7 +516,7 @@ func (d *Daemon) HandleSignRequest(ctx context.Context, conn io.ReadWriter) erro
 	// signs a NORMAL per-command payload (byte-identical to a
 	// human-approved one), so the gate never learns a grant was involved.
 	if id, ok := d.matchGrant(req.Commands); ok {
-		return d.respond(conn, req, backend.Result{Status: backend.StatusApproved, ApprovedBy: "grant:" + id})
+		return d.respond(conn, req, Result{Status: StatusApproved, ApprovedBy: "grant:" + id})
 	}
 
 	resultCh, err := d.Backend.Request(ctx, apReq)
@@ -525,16 +524,16 @@ func (d *Daemon) HandleSignRequest(ctx context.Context, conn io.ReadWriter) erro
 		return d.respondError(conn, req.RequestID, fmt.Sprintf("backend: %v", err))
 	}
 
-	var result backend.Result
+	var result Result
 	select {
 	case r, ok := <-resultCh:
 		if !ok {
-			result = backend.Result{Status: backend.StatusTimeout}
+			result = Result{Status: StatusTimeout}
 		} else {
 			result = r
 		}
 	case <-ctx.Done():
-		result = backend.Result{Status: backend.StatusTimeout}
+		result = Result{Status: StatusTimeout}
 	}
 
 	return d.respond(conn, req, result)
@@ -544,16 +543,16 @@ func (d *Daemon) HandleSignRequest(ctx context.Context, conn io.ReadWriter) erro
 // backend's verdict, writes it, and records the audit event. The
 // response/audit pair is intentionally produced inside one function so
 // the two cannot drift.
-func (d *Daemon) respond(conn io.Writer, req signRequest, result backend.Result) error {
+func (d *Daemon) respond(conn io.Writer, req signRequest, result Result) error {
 	// AuthMode (F4) is derived from the SAME helper the audit uses, gated on
 	// the APPROVAL STATE (not ApprovedBy alone — the real Telegram backend
 	// carries the denier's name on a DENY too), so the socket response and the
 	// audit row never disagree on how a write was authorised. It is empty for
 	// denied/timeout/error, "human" for a real-time tap, and "grant:<id>" for a
 	// standing-grant auto-sign.
-	resp := signResponse{RequestID: req.RequestID, Status: result.Status.String(), AuthMode: authMode(result.Status == backend.StatusApproved, result.ApprovedBy), ProtoVersion: sigwire.ProtoVersion}
+	resp := signResponse{RequestID: req.RequestID, Status: result.Status.String(), AuthMode: authMode(result.Status == StatusApproved, result.ApprovedBy), ProtoVersion: sigwire.ProtoVersion}
 
-	if result.Status == backend.StatusApproved {
+	if result.Status == StatusApproved {
 		// Two paths:
 		//   1. Remote-signing backend (HostedServerBackend): the server
 		//      holds the key and returned the wire-formatted signatures
@@ -615,13 +614,13 @@ func (d *Daemon) respond(conn io.Writer, req signRequest, result backend.Result)
 // (F1) so a write-lost denied/timeout is logged distinctly from a delivered
 // one. An unknown/error status keeps its own string (no -undelivered suffix:
 // there is no decided verdict to strand).
-func undeliveredStatus(s backend.ResultStatus) string {
+func undeliveredStatus(s ResultStatus) string {
 	switch s {
-	case backend.StatusApproved:
+	case StatusApproved:
 		return "approved-undelivered"
-	case backend.StatusDenied:
+	case StatusDenied:
 		return "denied-undelivered"
-	case backend.StatusTimeout:
+	case StatusTimeout:
 		return "timeout-undelivered"
 	default:
 		return s.String()
@@ -688,7 +687,7 @@ func (d *Daemon) handleRequestGrant(ctx context.Context, conn io.ReadWriter, lin
 	}
 	duration := time.Duration(req.DurationSec) * time.Second
 
-	resultCh, err := d.Backend.RequestGrant(ctx, backend.GrantApprovalRequest{
+	resultCh, err := d.Backend.RequestGrant(ctx, GrantApprovalRequest{
 		RequestID: req.RequestID,
 		Alias:     req.Alias,
 		Scope:     req.Scope,
@@ -699,19 +698,19 @@ func (d *Daemon) handleRequestGrant(ctx context.Context, conn io.ReadWriter, lin
 		return d.respondGrantError(conn, req.RequestID, fmt.Sprintf("backend: %v", err))
 	}
 
-	var result backend.Result
+	var result Result
 	select {
 	case r, ok := <-resultCh:
 		if !ok {
-			result = backend.Result{Status: backend.StatusTimeout}
+			result = Result{Status: StatusTimeout}
 		} else {
 			result = r
 		}
 	case <-ctx.Done():
-		result = backend.Result{Status: backend.StatusTimeout}
+		result = Result{Status: StatusTimeout}
 	}
 
-	if result.Status != backend.StatusApproved {
+	if result.Status != StatusApproved {
 		resp := grantResponse{RequestID: req.RequestID, Status: result.Status.String(), ProtoVersion: sigwire.ProtoVersion}
 		if err := writeJSONLine(conn, resp); err != nil {
 			d.auditGrant(req, result.Status.String(), result.ApprovedBy)
@@ -1017,7 +1016,7 @@ func (d *Daemon) handleTransfer(ctx context.Context, conn io.ReadWriter, line []
 
 	// One human approval. The banner labels come from the REGISTRY, not the MCP
 	// alias, so a lying MCP cannot mislabel src/dest.
-	resultCh, err := d.Backend.RequestTransfer(ctx, backend.TransferApprovalRequest{
+	resultCh, err := d.Backend.RequestTransfer(ctx, TransferApprovalRequest{
 		RequestID: req.RequestID,
 		XferID:    xferID,
 		SrcLabel:  srcLabel,
@@ -1032,19 +1031,19 @@ func (d *Daemon) handleTransfer(ctx context.Context, conn io.ReadWriter, line []
 		return d.respondTransferError(conn, req.RequestID, fmt.Sprintf("backend: %v", err))
 	}
 
-	var result backend.Result
+	var result Result
 	select {
 	case r, ok := <-resultCh:
 		if !ok {
-			result = backend.Result{Status: backend.StatusTimeout}
+			result = Result{Status: StatusTimeout}
 		} else {
 			result = r
 		}
 	case <-ctx.Done():
-		result = backend.Result{Status: backend.StatusTimeout}
+		result = Result{Status: StatusTimeout}
 	}
 
-	if result.Status != backend.StatusApproved {
+	if result.Status != StatusApproved {
 		resp := transferResponse{RequestID: req.RequestID, Status: result.Status.String(), ProtoVersion: sigwire.ProtoVersion}
 		if err := writeJSONLine(conn, resp); err != nil {
 			d.auditTransfer(req, xferID, undeliveredStatus(result.Status), result.ApprovedBy)
@@ -1197,7 +1196,7 @@ func (d *Daemon) handleRegisterXferKey(ctx context.Context, conn io.ReadWriter, 
 		return d.respondRegisterXferKeyError(conn, req.RequestID, "invalid label")
 	}
 
-	resultCh, err := d.Backend.RequestRegisterKey(ctx, backend.RegisterApprovalRequest{
+	resultCh, err := d.Backend.RequestRegisterKey(ctx, RegisterApprovalRequest{
 		RequestID: req.RequestID,
 		HostFP:    req.HostFP,
 		Label:     req.Label,
@@ -1208,19 +1207,19 @@ func (d *Daemon) handleRegisterXferKey(ctx context.Context, conn io.ReadWriter, 
 		return d.respondRegisterXferKeyError(conn, req.RequestID, fmt.Sprintf("backend: %v", err))
 	}
 
-	var result backend.Result
+	var result Result
 	select {
 	case r, ok := <-resultCh:
 		if !ok {
-			result = backend.Result{Status: backend.StatusTimeout}
+			result = Result{Status: StatusTimeout}
 		} else {
 			result = r
 		}
 	case <-ctx.Done():
-		result = backend.Result{Status: backend.StatusTimeout}
+		result = Result{Status: StatusTimeout}
 	}
 
-	if result.Status != backend.StatusApproved {
+	if result.Status != StatusApproved {
 		resp := registerXferKeyResponse{RequestID: req.RequestID, Status: result.Status.String(), ProtoVersion: sigwire.ProtoVersion}
 		if err := writeJSONLine(conn, resp); err != nil {
 			d.auditRegisterXferKey(req, undeliveredStatus(result.Status), result.ApprovedBy)

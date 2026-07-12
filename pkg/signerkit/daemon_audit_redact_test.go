@@ -1,4 +1,4 @@
-package signer
+package signerkit
 
 import (
 	"bufio"
@@ -13,7 +13,6 @@ import (
 
 	"github.com/karthikeyan5/sshgate/src/redact"
 	redactrules "github.com/karthikeyan5/sshgate/src/redact/rules"
-	"github.com/karthikeyan5/sshgate/src/signer/backend"
 )
 
 // readAuditEvents reads back the JSON-Lines audit log written to path.
@@ -56,7 +55,7 @@ func newRedactingDaemon(t *testing.T, path string) *Daemon {
 	t.Cleanup(func() { al.Close() })
 	return &Daemon{
 		Key:         priv,
-		Backend:     backend.NewMockBackend(),
+		Backend:     NewMockBackend(),
 		Audit:       al,
 		NowFunc:     func() time.Time { return time.Unix(1000, 0) },
 		RedactSalt:  [32]byte{0x7e},
@@ -127,7 +126,7 @@ func TestSignerAuditNoRulesPassThrough(t *testing.T) {
 	defer al.Close()
 	d := &Daemon{
 		Key:     priv,
-		Backend: backend.NewMockBackend(),
+		Backend: NewMockBackend(),
 		Audit:   al,
 		NowFunc: func() time.Time { return time.Unix(1000, 0) },
 		// no redactSalt / redactRules

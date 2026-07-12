@@ -1,4 +1,4 @@
-package signer
+package signerkit
 
 import (
 	"crypto/ed25519"

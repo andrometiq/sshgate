@@ -292,7 +292,7 @@ func (h *HostedServerBackend) pollLoop(parentCtx context.Context, pollURL string
 
 		switch body.Status {
 		case "approved":
-			// Convert wire-shape signedSig → backend.SignedCmd so the
+			// Convert wire-shape signedSig → SignedCmd so the
 			// daemon's signing path can pass these through verbatim
 			// instead of re-signing with its (now-vestigial-in-this-
 			// mode) local key.

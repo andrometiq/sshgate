@@ -1,10 +1,9 @@
-package signer
+package signerkit
 
 import (
 	"crypto/ed25519"
 	"testing"
 
-	"github.com/karthikeyan5/sshgate/src/signer/backend"
 	"github.com/karthikeyan5/sshgate/src/xfer"
 )
 
@@ -91,7 +90,7 @@ func TestSocketGolden_Sign(t *testing.T) {
 
 	// approved: identical inner sig to the envelope host golden (request_id is a
 	// socket field, not part of the signed payload).
-	mock := backend.NewMockBackend()
+	mock := NewMockBackend()
 	d, _ := goldenSignDaemon(t, mock)
 	mock.Approve("s_ok", "operator")
 	body := `{"kind":"sign","request_id":"s_ok","commands":[{"server":"prod","cmd":"` +
@@ -99,7 +98,7 @@ func TestSocketGolden_Sign(t *testing.T) {
 	assertGolden(t, "wantSignApproved", driveGolden(t, d, body), wantSignApproved)
 
 	// denied
-	md := backend.NewMockBackend()
+	md := NewMockBackend()
 	dd, _ := goldenSignDaemon(t, md)
 	md.Deny("s_deny")
 	assertGolden(t, "wantSignDenied",
@@ -107,7 +106,7 @@ func TestSocketGolden_Sign(t *testing.T) {
 		wantSignDenied)
 
 	// timeout
-	mt := backend.NewMockBackend()
+	mt := NewMockBackend()
 	dt, _ := goldenSignDaemon(t, mt)
 	mt.Timeout("s_to")
 	assertGolden(t, "wantSignTimeout",
@@ -115,14 +114,14 @@ func TestSocketGolden_Sign(t *testing.T) {
 		wantSignTimeout)
 
 	// error: empty commands list
-	de, _ := goldenSignDaemon(t, backend.NewMockBackend())
+	de, _ := goldenSignDaemon(t, NewMockBackend())
 	assertGolden(t, "wantSignErrNoCommands",
 		driveGolden(t, de, `{"kind":"sign","request_id":"s_nocmd","commands":[]}`),
 		wantSignErrNoCommands)
 
 	// error: unknown/unsupported kind — respondError echoes the PEEKED kind as
 	// the request_id (daemon.go:434), a behaviour worth freezing.
-	du, _ := goldenSignDaemon(t, backend.NewMockBackend())
+	du, _ := goldenSignDaemon(t, NewMockBackend())
 	assertGolden(t, "wantSignErrUnknownKind",
 		driveGolden(t, du, `{"kind":"frobnicate","request_id":"s_x","commands":[]}`),
 		wantSignErrUnknownKind)
@@ -134,21 +133,21 @@ func TestSocketGolden_Grant(t *testing.T) {
 	defer func() { randRead = orig }()
 	randRead = fixedEntropy()
 
-	mock := backend.NewMockBackend()
+	mock := NewMockBackend()
 	d, _ := goldenSignDaemon(t, mock)
 	mock.Approve("g_ok", "operator")
 	assertGolden(t, "wantGrantApproved",
 		driveGolden(t, d, `{"kind":"request_grant","request_id":"g_ok","alias":"prod","scope":"all","duration_seconds":3600}`),
 		wantGrantApproved)
 
-	md := backend.NewMockBackend()
+	md := NewMockBackend()
 	dd, _ := goldenSignDaemon(t, md)
 	md.Deny("g_deny")
 	assertGolden(t, "wantGrantDenied",
 		driveGolden(t, dd, `{"kind":"request_grant","request_id":"g_deny","alias":"prod","scope":"all","duration_seconds":3600}`),
 		wantGrantDenied)
 
-	de, _ := goldenSignDaemon(t, backend.NewMockBackend())
+	de, _ := goldenSignDaemon(t, NewMockBackend())
 	assertGolden(t, "wantGrantErrScope",
 		driveGolden(t, de, `{"kind":"request_grant","request_id":"g_scope","alias":"prod","scope":"bogus","duration_seconds":3600}`),
 		wantGrantErrScope)
@@ -160,12 +159,12 @@ func TestSocketGolden_RevokeGrant(t *testing.T) {
 	defer func() { randRead = orig }()
 	randRead = fixedEntropy()
 
-	d, _ := goldenSignDaemon(t, backend.NewMockBackend())
+	d, _ := goldenSignDaemon(t, NewMockBackend())
 	assertGolden(t, "wantRevokeApproved",
 		driveGolden(t, d, `{"kind":"revoke_grant","request_id":"rv_ok","alias":"prod"}`),
 		wantRevokeApproved)
 
-	de, _ := goldenSignDaemon(t, backend.NewMockBackend())
+	de, _ := goldenSignDaemon(t, NewMockBackend())
 	assertGolden(t, "wantRevokeErrNoAlias",
 		driveGolden(t, de, `{"kind":"revoke_grant","request_id":"rv_x"}`),
 		wantRevokeErrNoAlias)
@@ -178,13 +177,13 @@ func TestSocketGolden_ListGrants(t *testing.T) {
 	randRead = fixedEntropy()
 
 	// empty
-	d, _ := goldenSignDaemon(t, backend.NewMockBackend())
+	d, _ := goldenSignDaemon(t, NewMockBackend())
 	assertGolden(t, "wantListEmpty",
 		driveGolden(t, d, `{"kind":"list_grants","request_id":"l_e"}`),
 		wantListEmpty)
 
 	// one live grant: mint it (deterministic id via the entropy stub), then list.
-	mock := backend.NewMockBackend()
+	mock := NewMockBackend()
 	d1, _ := goldenSignDaemon(t, mock)
 	mock.Approve("l_mk", "operator")
 	if got := driveGolden(t, d1, `{"kind":"request_grant","request_id":"l_mk","alias":"prod","scope":"all","duration_seconds":3600}`); got == "" {
@@ -195,7 +194,7 @@ func TestSocketGolden_ListGrants(t *testing.T) {
 		wantListOne)
 
 	// error: missing request_id → echoed as ""
-	de, _ := goldenSignDaemon(t, backend.NewMockBackend())
+	de, _ := goldenSignDaemon(t, NewMockBackend())
 	assertGolden(t, "wantListErrNoID",
 		driveGolden(t, de, `{"kind":"list_grants","alias":"prod"}`),
 		wantListErrNoID)
@@ -207,7 +206,7 @@ func TestSocketGolden_Transfer(t *testing.T) {
 	defer func() { randRead = orig }()
 	randRead = fixedEntropy()
 
-	mock := backend.NewMockBackend()
+	mock := NewMockBackend()
 	d, _ := goldenXferDaemon(t, mock)
 	mock.Approve("x_ok", "operator")
 	approvedBody := `{"kind":"transfer","request_id":"x_ok","src_alias":"src","src_fp":"` + goldenSrcFP +
@@ -216,7 +215,7 @@ func TestSocketGolden_Transfer(t *testing.T) {
 	assertGolden(t, "wantXferApproved", driveGolden(t, d, approvedBody), wantXferApproved)
 
 	// denied (fps registered so it reaches the backend, then denied)
-	md := backend.NewMockBackend()
+	md := NewMockBackend()
 	dd, _ := goldenXferDaemon(t, md)
 	md.Deny("x_deny")
 	deniedBody := `{"kind":"transfer","request_id":"x_deny","src_alias":"src","src_fp":"` + goldenSrcFP +
@@ -225,7 +224,7 @@ func TestSocketGolden_Transfer(t *testing.T) {
 	assertGolden(t, "wantXferDenied", driveGolden(t, dd, deniedBody), wantXferDenied)
 
 	// error: invalid src_fp (rejected before any lookup/sign)
-	de, _ := goldenXferDaemon(t, backend.NewMockBackend())
+	de, _ := goldenXferDaemon(t, NewMockBackend())
 	badBody := `{"kind":"transfer","request_id":"x_badfp","src_alias":"src","src_fp":"not-a-fingerprint",` +
 		`"src_path":"` + goldenSrcPath + `","dest_alias":"dest","dest_fp":"` + goldenDestFP +
 		`","dest_path":"` + goldenDestPath + `","mode":"` + goldenMode + `","ttl_seconds":60}`
@@ -242,7 +241,7 @@ func TestSocketGolden_RegisterKey(t *testing.T) {
 	regFP := "SHA256:reg-fp-golden-cccccccccccccccccccccccc"
 
 	// approved
-	mock := backend.NewMockBackend()
+	mock := NewMockBackend()
 	d, _ := goldenXferDaemon(t, mock)
 	mock.Approve("k_ok", "operator")
 	body := `{"kind":"register_xfer_key","request_id":"k_ok","host_fp":"` + regFP +
@@ -250,7 +249,7 @@ func TestSocketGolden_RegisterKey(t *testing.T) {
 	assertGolden(t, "wantRegApproved", driveGolden(t, d, body), wantRegApproved)
 
 	// denied
-	md := backend.NewMockBackend()
+	md := NewMockBackend()
 	dd, _ := goldenXferDaemon(t, md)
 	md.Deny("k_deny")
 	dbody := `{"kind":"register_xfer_key","request_id":"k_deny","host_fp":"` + regFP +
@@ -258,7 +257,7 @@ func TestSocketGolden_RegisterKey(t *testing.T) {
 	assertGolden(t, "wantRegDenied", driveGolden(t, dd, dbody), wantRegDenied)
 
 	// error: invalid host_fp
-	de, _ := goldenXferDaemon(t, backend.NewMockBackend())
+	de, _ := goldenXferDaemon(t, NewMockBackend())
 	ebody := `{"kind":"register_xfer_key","request_id":"k_badfp","host_fp":"not-a-fingerprint",` +
 		`"label":"reg-golden","box_pub":"` + boxText + `","id_pub":"` + idText + `"}`
 	assertGolden(t, "wantRegErrBadFP", driveGolden(t, de, ebody), wantRegErrBadFP)

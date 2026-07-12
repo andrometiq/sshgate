@@ -1,33 +1,19 @@
-// Package signer implements the local approval daemon that owns the
-// master Ed25519 signing key on the operator's machine. It runs as a dedicated
-// OS user so that Claude Code (running as karthi) cannot read the key
-// or attach to the daemon's process memory.
+// Package signer is a compatibility bridge during the signerkit
+// extraction. The local approval daemon that owns the master Ed25519
+// signing key now lives in pkg/signerkit; this package re-exports the
+// symbols the local cmd/sshgate-signer-telegram entry point and the
+// external tests still reference (Daemon, Server, RequestHandler,
+// AuditLog, AuditEvent, XferRegistry, LoadKey, GenerateKeyPair,
+// OpenAuditLog, NewMemAuditLog, LoadXferRegistry, MaxGrantDuration) as
+// type/var/const aliases — see signerkit_bridge.go.
 //
-// The daemon listens on a Unix socket and serves a one-JSON-line
-// request/response protocol from the SSHGate MCP. Each sign request is
-// dispatched to a pluggable backend.Backend (StubBackend for the
-// phase-1 test that proves the cryptographic loop without a human in
-// the loop; TelegramBackend lands in task 2.1). On Approved the daemon
-// signs each command with the master key and returns the wire-format
-// SSHGATE_SIG envelope; on Denied or Timeout the daemon writes an
-// audit record and returns the status with no signatures.
+// The daemon's behavior is unchanged: it runs as a dedicated OS user so
+// that the agent cannot read the key or attach to the daemon's process
+// memory, listens on a Unix socket, serves the one-JSON-line
+// request/response protocol from the SSHGate MCP, dispatches each sign
+// request to a pluggable Backend, and on Approved signs each command
+// with the master key and returns the wire-format SSHGATE_SIG envelope.
 //
-// The package exports five pieces of machinery used by the cmd/
-// entry point and tests:
-//
-//   - LoadKey, GenerateKeyPair: master private key on disk, with the
-//     0o077 permission check that makes "world-readable signing key"
-//     a startup failure.
-//   - AuditLog, OpenAuditLog: append-only JSON-Lines audit with fsync
-//     per record, per daemon.md §5.
-//   - Server (+ RequestHandler interface): the Unix-socket accept loop
-//     with per-connection deadlines, panic recovery, and stale-socket
-//     cleanup.
-//   - Daemon (+ HandleSignRequest): the orchestrator — read request,
-//     ask Backend, sign, respond, audit. Implements RequestHandler.
-//   - AuditEvent: the on-disk schema for the audit log.
-//
-// Stdio discipline: operator-side log lines go to stderr, prefixed
-// with "signer: ". Stdout is unused (the protocol is on the Unix
-// socket).
+// These aliases are removed once all consumers import pkg/signerkit
+// directly (extraction phase 6).
 package signer

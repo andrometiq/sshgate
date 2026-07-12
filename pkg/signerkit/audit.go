@@ -1,4 +1,4 @@
-package signer
+package signerkit
 
 import (
 	"encoding/json"
@@ -13,7 +13,7 @@ import (
 // file is still useful when the operator has no JSON tooling handy.
 //
 // Status is one of "approved", "approved-undelivered", "denied",
-// "timeout", "error" — the same strings backend.ResultStatus.String()
+// "timeout", "error" — the same strings ResultStatus.String()
 // emits, plus "error" for protocol-level failures where no approval
 // channel was even consulted, plus "approved-undelivered" when an
 // approved request was signed but the response write to the MCP

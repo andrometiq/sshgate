@@ -1,4 +1,4 @@
-package signer
+package signerkit
 
 import (
 	"bytes"
@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/karthikeyan5/sshgate/src/gate"
-	"github.com/karthikeyan5/sshgate/src/signer/backend"
 	"github.com/karthikeyan5/sshgate/src/sigwire"
 	"github.com/karthikeyan5/sshgate/src/xfer"
 )
@@ -92,7 +91,7 @@ func fixedEntropy() func([]byte) (int, error) {
 // goldenSignDaemon builds a Daemon with the fixed key, the fixed clock, an
 // in-memory audit sink, and the supplied backend — the minimal realistic core
 // for driving the sign path.
-func goldenSignDaemon(t *testing.T, bk backend.Backend) (*Daemon, ed25519.PublicKey) {
+func goldenSignDaemon(t *testing.T, bk Backend) (*Daemon, ed25519.PublicKey) {
 	t.Helper()
 	priv, pub := goldenSignerKey()
 	audit, err := NewMemAuditLog()
@@ -112,7 +111,7 @@ func goldenSignDaemon(t *testing.T, bk backend.Backend) (*Daemon, ed25519.Public
 // goldenXferDaemon builds a Daemon additionally wired with a transfer registry
 // holding TWO endpoints (src + dest) whose box/id keys are FIXED, so the two
 // signed legs — which embed the registry-sourced keys — are byte-reproducible.
-func goldenXferDaemon(t *testing.T, bk backend.Backend) (*Daemon, ed25519.PublicKey) {
+func goldenXferDaemon(t *testing.T, bk Backend) (*Daemon, ed25519.PublicKey) {
 	t.Helper()
 	d, pub := goldenSignDaemon(t, bk)
 	reg, err := LoadXferRegistry(filepath.Join(t.TempDir(), "xfer-registry.json"))
@@ -205,7 +204,7 @@ func TestEnvelopeGolden_SignHost(t *testing.T) {
 	defer func() { randRead = orig }()
 	randRead = fixedEntropy()
 
-	mock := backend.NewMockBackend()
+	mock := NewMockBackend()
 	d, pub := goldenSignDaemon(t, mock)
 	mock.Approve("r_host", "operator")
 
@@ -246,7 +245,7 @@ func TestEnvelopeGolden_SignReveal(t *testing.T) {
 	defer func() { randRead = orig }()
 	randRead = fixedEntropy()
 
-	mock := backend.NewMockBackend()
+	mock := NewMockBackend()
 	d, pub := goldenSignDaemon(t, mock)
 	mock.Approve("r_reveal", "operator")
 
@@ -283,7 +282,7 @@ func TestEnvelopeGolden_TransferLegs(t *testing.T) {
 	defer func() { randRead = orig }()
 	randRead = fixedEntropy()
 
-	mock := backend.NewMockBackend()
+	mock := NewMockBackend()
 	d, pub := goldenXferDaemon(t, mock)
 	mock.Approve("t_golden", "operator")
 

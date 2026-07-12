@@ -1,4 +1,4 @@
-package signer
+package signerkit
 
 import (
 	"bytes"
@@ -13,7 +13,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/karthikeyan5/sshgate/src/signer/backend"
 	"github.com/karthikeyan5/sshgate/src/xfer"
 )
 
@@ -27,14 +26,14 @@ import (
 // registerSpy wraps a Backend and records whether RequestRegisterKey was called,
 // returning a fast timeout so a test never hangs if the pre-prompt cap regresses.
 type registerSpy struct {
-	backend.Backend
+	Backend
 	registerCalls int
 }
 
-func (s *registerSpy) RequestRegisterKey(_ context.Context, _ backend.RegisterApprovalRequest) (<-chan backend.Result, error) {
+func (s *registerSpy) RequestRegisterKey(_ context.Context, _ RegisterApprovalRequest) (<-chan Result, error) {
 	s.registerCalls++
-	ch := make(chan backend.Result, 1)
-	ch <- backend.Result{Status: backend.StatusTimeout}
+	ch := make(chan Result, 1)
+	ch <- Result{Status: StatusTimeout}
 	return ch, nil
 }
 
@@ -76,7 +75,7 @@ func driveRegisterInternal(t *testing.T, d *Daemon, reqID, fp, label, box, id st
 // TestRegisterLabelCap_OverLongRejectedBeforePrompt: a 65-char label is rejected
 // with "invalid label" BEFORE the backend prompt is reached.
 func TestRegisterLabelCap_OverLongRejectedBeforePrompt(t *testing.T) {
-	spy := &registerSpy{Backend: backend.NewMockBackend()}
+	spy := &registerSpy{Backend: NewMockBackend()}
 	reg, err := LoadXferRegistry(filepath.Join(t.TempDir(), "reg.json"))
 	if err != nil {
 		t.Fatal(err)
@@ -106,7 +105,7 @@ func TestRegisterLabelCap_OverLongRejectedBeforePrompt(t *testing.T) {
 // TestRegisterLabelCap_AtLimitPassesToPrompt: a 64-char label passes the cap and
 // reaches the prompt (the spy records the call and returns timeout).
 func TestRegisterLabelCap_AtLimitPassesToPrompt(t *testing.T) {
-	spy := &registerSpy{Backend: backend.NewMockBackend()}
+	spy := &registerSpy{Backend: NewMockBackend()}
 	reg, err := LoadXferRegistry(filepath.Join(t.TempDir(), "reg.json"))
 	if err != nil {
 		t.Fatal(err)
@@ -156,7 +155,7 @@ func TestRegisterApprovedError(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer audit.Close()
-	mock := backend.NewMockBackend()
+	mock := NewMockBackend()
 	_, priv, _ := ed25519.GenerateKey(rand.Reader)
 	d := &Daemon{Key: priv, Backend: mock, Audit: audit, XferRegistry: reg, NowFunc: func() time.Time { return time.Unix(1000, 0) }}
 
@@ -199,7 +198,7 @@ func TestTransferApprovedError(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer audit.Close()
-	mock := backend.NewMockBackend()
+	mock := NewMockBackend()
 	_, priv, _ := ed25519.GenerateKey(rand.Reader)
 	d := &Daemon{Key: priv, Backend: mock, Audit: audit, XferRegistry: reg, NowFunc: func() time.Time { return time.Unix(1000, 0) }}
 

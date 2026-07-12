@@ -1,4 +1,4 @@
-package signer
+package signerkit
 
 import (
 	"bytes"
@@ -9,8 +9,6 @@ import (
 	"errors"
 	"testing"
 	"time"
-
-	"github.com/karthikeyan5/sshgate/src/signer/backend"
 )
 
 // TestSignAll_NonceFailure swaps the package-level randRead seam for a
@@ -40,7 +38,7 @@ func TestSignAll_NonceFailure(t *testing.T) {
 	}
 	defer audit.Close()
 
-	mock := backend.NewMockBackend()
+	mock := NewMockBackend()
 	mock.Approve("r_nonce", "karthi")
 	d := &Daemon{
 		Key:     priv,
