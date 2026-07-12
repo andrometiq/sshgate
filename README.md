@@ -72,6 +72,44 @@ macOS: cross-compile only for now; a native install path is a future release. Se
 
 ---
 
+## Use with any MCP client
+
+SSHGate's agent half is a plain **stdio MCP server** (`sshgate-mcp`), so it works
+beyond Claude Code — OpenAI Codex, Cursor, Gemini CLI, or any client that takes
+an `mcpServers` config. Build the binary first (`make install-local` puts
+`sshgate-mcp` on your `$PATH`), then:
+
+**Generic `mcpServers` snippet** (same shape as [`.mcp.json`](.mcp.json)):
+
+```json
+{
+  "mcpServers": {
+    "sshgate": {
+      "command": "sshgate-mcp",
+      "env": { "SSHGATE_SIGNER_SOCK": "/run/sshgatesigner/sock" }
+    }
+  }
+}
+```
+
+**OpenAI Codex** reads the plugin manifests natively — two commands:
+
+```sh
+codex plugin marketplace add karthikeyan5/SSHGate
+codex plugin add sshgate@sshgate
+```
+
+**Cursor** — an "Add to Cursor" deeplink, and **Gemini CLI** —
+`gemini extensions install https://github.com/karthikeyan5/SSHGate` (SSHGate
+carries a root `gemini-extension.json`). Exact commands, the deeplink, and the
+per-client details are in **[docs/install-generic-mcp.md](docs/install-generic-mcp.md)**.
+
+> **Same boundary applies everywhere.** Reads run free, but **writes need the
+> signer daemon + a provisioned gate** — set those up per [`INSTALL.md`](INSTALL.md).
+> The MCP server alone gives read-only operation; that is by design, not a bug.
+
+---
+
 ## Three tiers of setup
 
 `/sshgate:setup` is tiered and idempotent. Start with the lightest tier that meets your needs; you can upgrade later without tearing anything down.

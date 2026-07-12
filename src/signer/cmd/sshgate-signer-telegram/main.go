@@ -56,7 +56,13 @@ import (
 	"github.com/karthikeyan5/sshgate/src/sigwire"
 )
 
-const version = "0.2.0"
+// version is stamped from the single VERSION file at link time via
+// -ldflags "-X main.version=<VERSION>" (Makefile SIGNER_VERSION_FLAGS).
+// Unstamped builds keep "dev"; `make verify-versions` proves the stamp
+// landed (a wrong -X path is silently ignored by the linker). This keeps
+// the daemon's --version in lockstep with VERSION instead of drifting
+// (it read a hardcoded 0.2.0 while VERSION said 0.1.4).
+var version = "dev"
 
 type tomlConfig struct {
 	Paths struct {

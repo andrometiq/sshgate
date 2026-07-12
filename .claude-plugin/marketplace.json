@@ -1,6 +1,7 @@
 {
   "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
   "name": "sshgate",
+  "description": "SSHGate — a security gate for AI-agent SSH access. Reads run freely; writes need a human Telegram tap.",
   "owner": {
     "name": "Essdee"
   },

@@ -1,0 +1,114 @@
+name: publish-mcp
+
+# Publish server.json to the Official MCP Registry (registry.modelcontextprotocol.io)
+# on every v* tag. The registry hosts METADATA only; the actual artifact is the
+# .mcpb bundle attached to the GitHub Release by release.yml. Both workflows fire
+# on the same tag — this job builds the bundle, proves it is byte-identical to the
+# published Release asset, injects that asset's SHA-256 into server.json, and
+# publishes via OIDC (no stored secret). Per the registry's package-types doc,
+# the registry itself does NOT validate fileSha256 — MCP clients validate it
+# before installation — which is exactly why this byte-identity proof matters:
+# a wrong hash here would brick every client install, not the publish.
+#
+# The registry's mcpb ownership proof is: the packages[].identifier URL contains
+# the string "mcp" (the sshgate-mcp.mcpb asset satisfies this) AND server.json
+# carries the artifact's fileSha256. server.json ships a machine-replaceable
+# all-zero placeholder for that hash; this workflow injects the real one and
+# HARD-FAILS if the placeholder survives — a stale placeholder can never publish.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+  id-token: write   # GitHub OIDC → mcp-publisher login github-oidc (no secret)
+
+jobs:
+  publish-mcp:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go (pinned toolchain from go.mod)
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          check-latest: false
+
+      - name: Tag ↔ server.json consistency
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"                 # e.g. v0.1.4
+          VER="$(jq -r '.version' server.json)"
+          if [ "$TAG" != "v$VER" ]; then
+            echo "::error::tag $TAG != v+server.json version (v$VER) — bump server.json 'version' AND the packages[].identifier release URL before tagging"
+            exit 1
+          fi
+          ID="$(jq -r '.packages[0].identifier' server.json)"
+          case "$ID" in
+            */download/"$TAG"/sshgate-mcp.mcpb) : ;;
+            *) echo "::error::packages[0].identifier ($ID) does not point at release $TAG's sshgate-mcp.mcpb asset — update the download URL"; exit 1 ;;
+          esac
+
+      - name: Build the MCPB bundle
+        run: make mcpb
+
+      - name: Compute bundle SHA-256 and inject into server.json
+        run: |
+          set -euo pipefail
+          BUNDLE=packaging/mcpb/dist/sshgate-mcp.mcpb
+          test -f "$BUNDLE" || { echo "::error::bundle not found at $BUNDLE (make mcpb)"; exit 1; }
+          SHA="$(sha256sum "$BUNDLE" | awk '{print $1}')"
+          echo "bundle sha256: $SHA"
+          PLACEHOLDER=0000000000000000000000000000000000000000000000000000000000000000
+          if ! grep -q "$PLACEHOLDER" server.json; then
+            echo "::error::placeholder fileSha256 not present in server.json — refusing to guess which field to set"
+            exit 1
+          fi
+          tmp="$(mktemp)"
+          jq --arg sha "$SHA" '.packages[0].fileSha256 = $sha' server.json > "$tmp"
+          mv "$tmp" server.json
+          # HARD FAIL if the placeholder survived injection (task requirement).
+          if grep -q "$PLACEHOLDER" server.json; then
+            echo "::error::placeholder fileSha256 survived injection — aborting publish"
+            exit 1
+          fi
+          grep -q "$SHA" server.json || { echo "::error::computed sha256 absent after injection"; exit 1; }
+
+      - name: Verify the built bundle matches the published Release asset
+        run: |
+          set -euo pipefail
+          URL="$(jq -r '.packages[0].identifier' server.json)"
+          WANT="$(jq -r '.packages[0].fileSha256' server.json)"
+          echo "expecting release asset $URL to hash to $WANT"
+          # release.yml fires on the same tag but must finish its full test
+          # suite + 12 cross-builds before the Release (and this asset) exists,
+          # so it typically lands MINUTES after this job reaches here. Poll for
+          # up to ~10 minutes rather than failing while release.yml is still
+          # building.
+          for i in $(seq 1 30); do
+            if curl -fsSL -o published.mcpb "$URL"; then break; fi
+            echo "asset not up yet (attempt $i/30) — waiting 20s"; sleep 20
+          done
+          test -f published.mcpb || { echo "::error::release asset $URL is not reachable — did release.yml finish? re-run this job after the Release assets are attached"; exit 1; }
+          GOT="$(sha256sum published.mcpb | awk '{print $1}')"
+          if [ "$GOT" != "$WANT" ]; then
+            echo "::error::Release asset sha256 ($GOT) != locally built bundle ($WANT) — the published .mcpb is not the reproducible build"
+            exit 1
+          fi
+          echo "OK — Release asset is byte-identical to the built bundle"
+
+      - name: Install mcp-publisher
+        run: |
+          set -euo pipefail
+          curl -L "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz" | tar xz mcp-publisher
+          sudo mv mcp-publisher /usr/local/bin/
+
+      - name: Login to the registry (GitHub OIDC)
+        run: mcp-publisher login github-oidc
+
+      - name: Publish
+        run: mcp-publisher publish

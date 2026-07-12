@@ -1,6 +1,11 @@
 bin/
 *.tmp
 /tmp/
+
+# MCPB bundle build output (cross-compiled binaries + packed .mcpb). Generated
+# by `make mcpb`; the manifest template + launcher under packaging/mcpb/ are the
+# only committed sources. Never commit the built binaries or the .mcpb archive.
+/packaging/mcpb/dist/
 **/.DS_Store
 .idea/
 *.swp

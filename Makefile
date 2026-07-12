@@ -1,6 +1,6 @@
 .PHONY: all build install-local test test-integration vet clean sshgate-gate-linux \
 	sshgate-mcp-darwin sshgate-signer-telegram-darwin darwin cross sshgate-signer-server \
-	preflight e2e smoke gitleaks release-gate verify-dist verify-repro
+	preflight e2e smoke gitleaks release-gate verify-dist verify-repro verify-versions mcpb
 
 # ---------------------------------------------------------------------------
 # Verified release channel (spec §11)
@@ -31,12 +31,29 @@ GATE_RELEASE_TOOLCHAIN := $(shell awk '/^toolchain /{print $$2}' go.mod)
 DIST_GATE_DIR := dist/gate
 DIST_GATE_BIN := $(DIST_GATE_DIR)/sshgate-gate-linux-amd64
 
+# ---------------------------------------------------------------------------
+# Version stamping for the NON-gate binaries (T4)
+# ---------------------------------------------------------------------------
+# The gate carries a scannable .rodata version MARKER (§11.2, package gatever)
+# for downgrade-cue safety. The other binaries have no such constraint, so they
+# take a PLAIN -X of their version variable, single-sourced from the same
+# VERSION file the gate marker and the plugin-manifest guard already use. The
+# source defaults are "dev"; these flags stamp the real version at link time.
+# A wrong -X symbol path is SILENTLY IGNORED by the Go linker, so a build that
+# looks stamped could still ship "dev" — the `verify-versions` target builds and
+# RUNS each binary to prove the stamp actually landed, so the T4 drift (a
+# hardcoded 0.2.0 while VERSION said 0.1.4) can never silently return.
+MCP_PKG                     := github.com/karthikeyan5/sshgate/src/mcp
+MCP_VERSION_FLAGS           := -ldflags '-X $(MCP_PKG).Version=$(VERSION)'
+SIGNER_VERSION_FLAGS        := -ldflags '-X main.version=$(VERSION)'
+SIGNER_SERVER_VERSION_FLAGS := -ldflags '-X main.version=$(VERSION)'
+
 all: vet test build
 
 build: sshgate-signer-server sshgate-gate-linux
 	mkdir -p bin
-	go build -o bin/sshgate-mcp              ./src/mcp/cmd/sshgate-mcp
-	go build -o bin/sshgate-signer-telegram  ./src/signer/cmd/sshgate-signer-telegram
+	go build $(MCP_VERSION_FLAGS)    -o bin/sshgate-mcp              ./src/mcp/cmd/sshgate-mcp
+	go build $(SIGNER_VERSION_FLAGS) -o bin/sshgate-signer-telegram  ./src/signer/cmd/sshgate-signer-telegram
 	go build -o bin/sshgate-gate             ./src/gate/cmd/sshgate-gate
 	go build -o bin/sshgate                  ./src/cli/cmd/sshgate
 
@@ -47,7 +64,7 @@ build: sshgate-signer-server sshgate-gate-linux
 # this target is for laptop-side dev + cross-compile parity.
 sshgate-signer-server:
 	mkdir -p bin
-	go build -o bin/sshgate-signer-server ./src/signer-server/cmd/sshgate-signer-server
+	go build $(SIGNER_SERVER_VERSION_FLAGS) -o bin/sshgate-signer-server ./src/signer-server/cmd/sshgate-signer-server
 
 # Cross-compile sshgate-gate for the remote host (linux/amd64) — the DEV build.
 # Fast + unpinned: it uses the LOCAL toolchain and writes to bin/, sharing only
@@ -102,13 +119,13 @@ release-gate:
 # Both archs built: amd64 (Intel Macs) + arm64 (Apple Silicon).
 sshgate-mcp-darwin:
 	mkdir -p bin
-	GOOS=darwin GOARCH=amd64 go build -trimpath -ldflags='-s -w' -o bin/sshgate-mcp-darwin-amd64 ./src/mcp/cmd/sshgate-mcp
-	GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags='-s -w' -o bin/sshgate-mcp-darwin-arm64 ./src/mcp/cmd/sshgate-mcp
+	GOOS=darwin GOARCH=amd64 go build -trimpath -ldflags='-s -w -X $(MCP_PKG).Version=$(VERSION)' -o bin/sshgate-mcp-darwin-amd64 ./src/mcp/cmd/sshgate-mcp
+	GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags='-s -w -X $(MCP_PKG).Version=$(VERSION)' -o bin/sshgate-mcp-darwin-arm64 ./src/mcp/cmd/sshgate-mcp
 
 sshgate-signer-telegram-darwin:
 	mkdir -p bin
-	GOOS=darwin GOARCH=amd64 go build -trimpath -ldflags='-s -w' -o bin/sshgate-signer-telegram-darwin-amd64 ./src/signer/cmd/sshgate-signer-telegram
-	GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags='-s -w' -o bin/sshgate-signer-telegram-darwin-arm64 ./src/signer/cmd/sshgate-signer-telegram
+	GOOS=darwin GOARCH=amd64 go build -trimpath -ldflags='-s -w -X main.version=$(VERSION)' -o bin/sshgate-signer-telegram-darwin-amd64 ./src/signer/cmd/sshgate-signer-telegram
+	GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags='-s -w -X main.version=$(VERSION)' -o bin/sshgate-signer-telegram-darwin-arm64 ./src/signer/cmd/sshgate-signer-telegram
 
 darwin: sshgate-mcp-darwin sshgate-signer-telegram-darwin
 	@echo "darwin builds done; sshgate-gate remains linux-only (deployed to Linux remotes)"
@@ -131,8 +148,8 @@ cross: build darwin
 #     published bytes.
 # Run from the user's clone (it has src/). Honors $XDG_CONFIG_HOME.
 install-local: build
-	go install ./src/mcp/cmd/sshgate-mcp
-	go install ./src/signer/cmd/sshgate-signer-telegram
+	go install $(MCP_VERSION_FLAGS)    ./src/mcp/cmd/sshgate-mcp
+	go install $(SIGNER_VERSION_FLAGS) ./src/signer/cmd/sshgate-signer-telegram
 	go install ./src/cli/cmd/sshgate
 	@if [ ! -f $(DIST_GATE_BIN) ]; then \
 		echo "install-local: $(DIST_GATE_BIN) is missing — it is committed to the repo; run 'make release-gate' to (re)build it, or fetch it from the clean tree" >&2; exit 1; fi
@@ -177,7 +194,7 @@ clean:
 # unit suite, a secret scan of the commits about to be pushed, a clean build,
 # the CHEAP verified-release-channel checks, and the two-build reproducibility
 # assertion. No Docker, so it runs anywhere in well under a minute.
-preflight: vet test gitleaks build verify-dist verify-repro
+preflight: vet test gitleaks build verify-dist verify-versions verify-repro
 	@echo "preflight: OK — safe to push"
 
 # verify-dist: the FAST verified-release-channel checks (§11). It deliberately
@@ -203,7 +220,45 @@ verify-dist:
 	if [ -z "$$pv" ]; then echo "verify-dist: could not read version from .claude-plugin/plugin.json" >&2; exit 1; fi; \
 	if [ "$$pv" != "$$vf" ]; then \
 		echo "verify-dist: plugin.json version '$$pv' != VERSION '$$vf' (manifest must follow VERSION, sans leading v)" >&2; exit 1; fi
-	@echo "verify-dist: OK — committed gate matches its .sha256, plugin.json version matches VERSION (source↔binary is CI's job, §11.4)"
+	@# Same drift guard for the other published manifests that carry a hand-set
+	@# version (server.json for the MCP Registry, gemini-extension.json for the
+	@# Gemini gallery). The mcpb manifest is NOT listed here — `make mcpb` stamps
+	@# its version from VERSION at pack time, so its committed value is a template.
+	@vf=$$(sed 's/^v//' VERSION); \
+	for f in server.json gemini-extension.json; do \
+		fv=$$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$$f" | head -1); \
+		if [ -z "$$fv" ]; then echo "verify-dist: could not read version from $$f" >&2; exit 1; fi; \
+		if [ "$$fv" != "$$vf" ]; then \
+			echo "verify-dist: $$f version '$$fv' != VERSION '$$vf' (manifest must follow VERSION, sans leading v)" >&2; exit 1; fi; \
+	done
+	@echo "verify-dist: OK — committed gate matches its .sha256; plugin.json / server.json / gemini-extension.json versions match VERSION (source↔binary is CI's job, §11.4)"
+
+# verify-versions: the T4 version-stamp drift guard. verify-dist proves the
+# plugin.json↔VERSION pair; this proves the three -X-stamped Go binaries
+# (sshgate-mcp, sshgate-signer-telegram, sshgate-signer-server) report VERSION
+# too. It BUILDS each with its version flags and RUNS `--version`, because a
+# wrong -X symbol path is silently ignored by the linker — only building+running
+# proves the stamp reached the binary. A binary reporting "dev" (stamp did not
+# land) or any value != VERSION (a reintroduced hardcode) fails the gate. Kept
+# out of verify-dist so that target stays build-free; wired into preflight.
+verify-versions:
+	@vf=$$(cat VERSION 2>/dev/null); \
+	if [ -z "$$vf" ]; then echo "verify-versions: VERSION file is missing/empty" >&2; exit 1; fi; \
+	tmpdir=$$(mktemp -d) || exit 1; \
+	trap 'rm -rf "$$tmpdir"' EXIT; \
+	go build $(MCP_VERSION_FLAGS)           -o "$$tmpdir/sshgate-mcp"             ./src/mcp/cmd/sshgate-mcp || exit 1; \
+	go build $(SIGNER_VERSION_FLAGS)        -o "$$tmpdir/sshgate-signer-telegram" ./src/signer/cmd/sshgate-signer-telegram || exit 1; \
+	go build $(SIGNER_SERVER_VERSION_FLAGS) -o "$$tmpdir/sshgate-signer-server"   ./src/signer-server/cmd/sshgate-signer-server || exit 1; \
+	fail=0; \
+	for b in sshgate-mcp sshgate-signer-telegram sshgate-signer-server; do \
+		got=$$("$$tmpdir/$$b" --version 2>/dev/null | awk '{print $$NF}'); \
+		if [ "$$got" != "$$vf" ]; then \
+			echo "verify-versions: FAIL — $$b reports '$$got', expected VERSION '$$vf' (broken -X wiring or a reintroduced hardcoded version)" >&2; \
+			fail=1; \
+		fi; \
+	done; \
+	[ $$fail -eq 0 ] || exit 1; \
+	echo "verify-versions: OK — sshgate-mcp / signer-telegram / signer-server all report VERSION $$vf"
 
 # verify-repro: the STANDING two-build reproducibility assertion (spec §11.8
 # task 14). Builds the gate TWICE with the SHARED flag set (GATE_BUILD_FLAGS)
@@ -225,6 +280,67 @@ verify-repro:
 	if [ "$$ha" != "$$hb" ]; then \
 		echo "verify-repro: FAIL — two identical-flag gate builds hashed differently ($$ha vs $$hb): GATE_BUILD_FLAGS has a nondeterminism regression" >&2; exit 1; fi; \
 	echo "verify-repro: OK — two local gate builds byte-identical ($$ha) (cross-machine repro vs the committed artifact is CI's job, §11.4)"
+
+# ---------------------------------------------------------------------------
+# MCPB bundle — the A2 artifact for Smithery + the Official MCP Registry
+# ---------------------------------------------------------------------------
+# `make mcpb` packs packaging/mcpb/ into a single sshgate-mcp.mcpb: a zip (the
+# documented MCPB format) with manifest.json at the archive ROOT and one
+# sshgate-mcp binary per OS+arch under server/bin/, chosen at runtime by
+# server/sshgate-mcp-launch.sh (MCPB's platform_overrides key on OS only — there
+# is no arch selector in the manifest spec, so a launcher does the arch pick).
+#
+# Reproducible by construction: CGO-free deterministic Go builds (-trimpath
+# -buildid=, VERSION stamped via -X) into a staging tree, then a NORMALIZED zip
+# (fixed mtimes via SOURCE_DATE_EPOCH, sorted entries, -X to drop uid/gid/extra
+# attrs). release.yml and publish-mcp.yml both call this and MUST get
+# byte-identical output, so publish-mcp can prove the Release asset whose sha256
+# it injects into server.json IS the reproducible build.
+#
+# We pack the documented zip layout directly instead of `npx @anthropic-ai/mcpb
+# pack`: the official packer needs network at build time and stamps live mtimes
+# (non-reproducible), either of which would break that byte-identical cross-check.
+MCPB_DIR    := packaging/mcpb
+MCPB_OUTDIR := $(MCPB_DIR)/dist
+MCPB_STAGE  := $(MCPB_OUTDIR)/bundle
+MCPB_BUNDLE := $(MCPB_OUTDIR)/sshgate-mcp.mcpb
+# Fixed timestamp for reproducible zips (2020-01-01 UTC; DOS zip can't encode
+# pre-1980). Override SOURCE_DATE_EPOCH to pin a different value.
+SOURCE_DATE_EPOCH ?= 1577836800
+MCPB_MCP_LDFLAGS  := -trimpath -ldflags '-s -w -buildid= -X $(MCP_PKG).Version=$(VERSION)'
+
+mcpb:
+	@command -v zip >/dev/null 2>&1 || { echo "mcpb: 'zip' is required (Info-ZIP)" >&2; exit 1; }
+	@command -v jq  >/dev/null 2>&1 || { echo "mcpb: 'jq' is required" >&2; exit 1; }
+	@if [ -z "$(VERSION)" ]; then echo "mcpb: VERSION is empty" >&2; exit 1; fi
+	rm -rf "$(MCPB_STAGE)"
+	mkdir -p "$(MCPB_STAGE)/server/bin"
+	CGO_ENABLED=0 GOOS=linux  GOARCH=amd64 go build $(MCPB_MCP_LDFLAGS) -o "$(MCPB_STAGE)/server/bin/sshgate-mcp-linux-amd64"  ./src/mcp/cmd/sshgate-mcp
+	CGO_ENABLED=0 GOOS=linux  GOARCH=arm64 go build $(MCPB_MCP_LDFLAGS) -o "$(MCPB_STAGE)/server/bin/sshgate-mcp-linux-arm64"  ./src/mcp/cmd/sshgate-mcp
+	CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build $(MCPB_MCP_LDFLAGS) -o "$(MCPB_STAGE)/server/bin/sshgate-mcp-darwin-amd64" ./src/mcp/cmd/sshgate-mcp
+	CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build $(MCPB_MCP_LDFLAGS) -o "$(MCPB_STAGE)/server/bin/sshgate-mcp-darwin-arm64" ./src/mcp/cmd/sshgate-mcp
+	install -m 0755 "$(MCPB_DIR)/server/sshgate-mcp-launch.sh" "$(MCPB_STAGE)/server/sshgate-mcp-launch.sh"
+	@# manifest.json at the archive ROOT, version stamped from VERSION (sans 'v')
+	@# so the bundle can never disagree with the repo.
+	@vf=$$(sed 's/^v//' VERSION); \
+	jq --arg v "$$vf" '.version = $$v' "$(MCPB_DIR)/manifest.json" > "$(MCPB_STAGE)/manifest.json"
+	@# Reproducible archive: normalize modes (zip records them in the central
+	@# directory, and `go build`/`jq >` output modes follow the builder's umask
+	@# — an 002/077 umask would silently change the bundle hash), pin every
+	@# mtime, then zip sorted entries with no uid/gid/extra attrs (-X) and no
+	@# directory entries (-D). manifest.json 0644; everything under server/ is
+	@# executable (launcher + binaries) → 0755.
+	find "$(MCPB_STAGE)" -type d -exec chmod 0755 {} +
+	chmod 0644 "$(MCPB_STAGE)/manifest.json"
+	find "$(MCPB_STAGE)/server" -type f -exec chmod 0755 {} +
+	find "$(MCPB_STAGE)" -exec touch -h -d "@$(SOURCE_DATE_EPOCH)" {} +
+	rm -f "$(MCPB_BUNDLE)"
+	cd "$(MCPB_STAGE)" && find . -type f | LC_ALL=C sort | sed 's|^\./||' | zip -q -X -D "$(abspath $(MCPB_BUNDLE))" -@
+	@echo "mcpb: built $(MCPB_BUNDLE) (VERSION=$(VERSION))"
+	@sha256sum "$(MCPB_BUNDLE)"
+	@unzip -l "$(MCPB_BUNDLE)" | awk '{print $$4}' | grep -qx 'manifest.json' \
+		&& echo "mcpb: OK — manifest.json is at the archive root" \
+		|| { echo "mcpb: FAIL — manifest.json is not at the archive root" >&2; exit 1; }
 
 # gitleaks scans the commits that would be pushed (origin/main..HEAD) for
 # secrets. Skips with a loud note if gitleaks is not installed — CI must have

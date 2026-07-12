@@ -2,5 +2,12 @@
   "name": "sshgate",
   "version": "0.1.4",
   "description": "Claude Code plugin that SSHs into your servers; reads run freely, writes need a Telegram tap to approve.",
+  "author": {
+    "name": "Essdee",
+    "url": "https://github.com/karthikeyan5/SSHGate"
+  },
+  "homepage": "https://github.com/karthikeyan5/SSHGate",
+  "repository": "https://github.com/karthikeyan5/SSHGate",
+  "license": "MIT",
   "keywords": ["ssh", "remote", "ops", "security", "telegram"]
 }

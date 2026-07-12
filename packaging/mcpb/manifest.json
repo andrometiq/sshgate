@@ -1,0 +1,57 @@
+{
+  "manifest_version": "0.3",
+  "name": "sshgate",
+  "display_name": "SSHGate",
+  "version": "0.1.4",
+  "description": "Agent SSH to your Linux servers: reads run free, writes need a human Telegram tap.",
+  "long_description": "SSHGate is a security gate for AI-agent SSH access. This bundle installs ONLY the MCP client half (sshgate-mcp). It is not a complete install on its own: writes require the local SSHGate signer daemon (which holds the signing key under a dedicated Unix user and asks for a Telegram approval), and every target server must first be provisioned with the SSHGate gate binary + a forced-command SSH key line. Do the one-time signer + per-server gate setup from INSTALL.md before expecting writes to work; reads work as soon as at least one server is registered. The security boundary is the Ed25519 signature checked by the on-host gate under an OpenSSH forced command — the read/write classifier only routes.",
+  "author": {
+    "name": "Essdee",
+    "url": "https://github.com/karthikeyan5/SSHGate"
+  },
+  "homepage": "https://github.com/karthikeyan5/SSHGate",
+  "documentation": "https://github.com/karthikeyan5/SSHGate/blob/main/INSTALL.md",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/karthikeyan5/SSHGate"
+  },
+  "license": "MIT",
+  "keywords": ["ssh", "remote", "ops", "security", "telegram"],
+  "server": {
+    "type": "binary",
+    "entry_point": "server/sshgate-mcp-launch.sh",
+    "mcp_config": {
+      "command": "${__dirname}/server/sshgate-mcp-launch.sh",
+      "args": [],
+      "env": {
+        "SSHGATE_SIGNER_SOCK": "${user_config.signer_sock}"
+      }
+    }
+  },
+  "user_config": {
+    "signer_sock": {
+      "type": "string",
+      "title": "Signer socket path",
+      "description": "Unix socket of the local SSHGate signer daemon. Writes are approved through it; reads never touch it. Leave the default unless you moved the signer socket.",
+      "default": "/run/sshgatesigner/sock",
+      "required": false
+    }
+  },
+  "compatibility": {
+    "platforms": ["linux", "darwin"]
+  },
+  "tools_generated": false,
+  "tools": [
+    {"name": "run", "description": "Run one shell command on a registered server. Reads run directly; writes request a human Telegram approval first."},
+    {"name": "run_batch", "description": "Run a sequence of commands on a server; all writes bundle into a single approval (one tap). Reads run directly."},
+    {"name": "list_servers", "description": "List every registered server (alias, host, port, user, added_at, read_only tier), sorted by alias."},
+    {"name": "status", "description": "Report signer-socket reachability and per-server SSH reachability plus each server's read_only tier."},
+    {"name": "ping", "description": "Check whether ONE registered server is reachable (single SSH dial + SSHGATE_OK probe). Read-only, no approval."},
+    {"name": "revoke_server", "description": "Revoke a registered server: signs SSHGATE_REVOKE (one approval), the gate tears down its authorized_keys line and files."},
+    {"name": "request_grant", "description": "Request a standing grant so matching writes auto-sign for a 1-24h window. Requires a distinct human approval; the agent can only request."},
+    {"name": "revoke_grant", "description": "Drop a server's standing grant so writes prompt again. De-escalation only — always safe, no approval."},
+    {"name": "list_grants", "description": "List the live standing grants the signer holds (optionally one alias). Read-only, no approval; use to reconcile after a timeout."},
+    {"name": "update_gate", "description": "Request a signed, in-place update of a server's gate binary. Human approves a hash-bound GATE BINARY UPDATE banner; never grant-signed."},
+    {"name": "transfer", "description": "Move a secret file between two registered servers, end-to-end encrypted through the gate under one SECRET TRANSFER approval. Plaintext never reaches the agent."}
+  ]
+}

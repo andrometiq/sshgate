@@ -1,0 +1,14 @@
+{
+  "name": "sshgate",
+  "version": "0.1.4",
+  "description": "SSH into your Linux servers from your agent: reads run free, writes need a Telegram tap. Build sshgate-mcp from source (make install-local) until releases exist; the signer daemon + per-server gate are prerequisites (see INSTALL.md).",
+  "mcpServers": {
+    "sshgate": {
+      "command": "sshgate-mcp",
+      "args": [],
+      "env": {
+        "SSHGATE_SIGNER_SOCK": "/run/sshgatesigner/sock"
+      }
+    }
+  }
+}
