@@ -250,7 +250,12 @@ These are the highest-priority forward items.
 > authenticated off-machine human). **Ruling:** the signer keeps its OWN Telegram poller
 > exactly as today — the *stronger*, isolated-domain channel — and C3 is not pursued, not even
 > as a later signer-owned-broker variant. Follow-up task: audit the current poller/signer
-> channel and confirm it needs no improvement; leave it as-is if so. Consequence: the
+> channel and confirm it needs no improvement; leave it as-is if so. *Audit done (2026-07-13):
+> the channel's reliability + authz model holds up as-is — one real gap (unbounded Telegram
+> HTTP client could wedge the poll goroutine for hours on a black-holed connection) fixed in
+> `e6f98e1`; everything else confirmed sound (offset non-persistence, crash windows, double-tap
+> idempotence, allowlist/callback authz, replay, approval-to-request binding). Q3 closed.*
+> Consequence: the
 > ops-hardening items previously marked "(subsumed)" by this anchor (DENY/TIMEOUT verdict
 > delivery, concurrent approvals, reachability-monitor push) **un-subsume** and fold into the
 > #65 async-approval build. The strike-through item below is kept for history.
