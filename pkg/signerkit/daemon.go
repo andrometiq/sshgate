@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
@@ -56,23 +57,50 @@ type grant struct {
 	expiry   time.Time
 }
 
-// Daemon is the signer core. It owns the Ed25519 private key, the
-// pluggable approval Backend, and the audit log. One Daemon instance
-// serves an arbitrary number of concurrent connections; HandleSignRequest
-// is safe for concurrent calls because:
+// Daemon is the signer core. It owns the signing identity, the pluggable
+// approval Backend, and the audit log. One Daemon instance serves an
+// arbitrary number of concurrent connections; HandleSignRequest is safe for
+// concurrent calls because:
 //
-//   - Key is read-only after construction.
+//   - Key / Signer are read-only after construction.
+//   - The mutable custody state (Lock/Unlock/RotateTo — see custody.go) is
+//     guarded by custodyMu and only ever read through signBytes.
 //   - Backend.Request is documented as concurrency-safe.
 //   - AuditLog.Write is mutex-protected.
+//
+// Signing identity (resolved per-signature inside signBytes, see custody.go):
+// a RotateTo target wins, else the exported Signer (crypto.Signer — a
+// KMS/HSM/agent-backed key never held in process memory), else the exported
+// Key (the legacy raw Ed25519 key); all three nil ⇒ ErrNoSigner. Pinning
+// crypto.Hash(0) keeps the file-key path byte-identical to the pre-seam
+// ed25519.Sign call (RFC 8032 determinism).
 //
 // NowFunc is the injected clock used to compute the signed payload's
 // TS / Exp fields. Tests inject a fixed clock; main wiring leaves it
 // nil, in which case the daemon falls back to time.Now.
 type Daemon struct {
-	Key     ed25519.PrivateKey
+	Key ed25519.PrivateKey
+	// Signer, when non-nil, is the crypto.Signer identity used to mint every
+	// signature — it wins over Key (C7). It lets the raw key live in a KMS/HSM
+	// or ssh-agent and never enter process memory. New(Config) sets it; a
+	// struct-literal Daemon may set either Signer or Key. Read-only after
+	// construction; RotateTo installs a live replacement without touching it.
+	Signer  crypto.Signer
 	Backend Backend
 	Audit   *AuditLog
 	NowFunc func() time.Time
+
+	// custody state: the in-memory kill-switch (Lock) and rotation (RotateTo)
+	// installed after construction. It BREAKS the historical "Key is read-only
+	// after construction" concurrency argument, so every field here is written
+	// only under custodyMu.Lock and read only under custodyMu.RLock, exclusively
+	// through resolveSigner/signBytes (custody.go). It is process-memory only:
+	// a signer restart clears the lock and any rotation, reverting to the
+	// constructed Signer/Key (same posture as grants).
+	custodyMu  sync.RWMutex
+	locked     bool
+	lockReason string
+	rotSigner  crypto.Signer
 
 	// grants is the in-memory standing-grant table, keyed by server
 	// alias (one grant per alias — a new grant for an alias replaces the
@@ -1108,7 +1136,13 @@ func (d *Daemon) signTransferLegs(sendCmd, sendFP, recvCmd, recvFP string, ttl i
 		if err != nil {
 			return nil, fmt.Errorf("marshal payload: %w", err)
 		}
-		sig := ed25519.Sign(d.Key, signedBytes)
+		// Route through the single custody choke point (C1/C3/C7): Lock
+		// refuses the leg here, and the crypto.Signer seam (crypto.Hash(0))
+		// keeps the file-key bytes identical to the old ed25519.Sign call.
+		sig, err := d.signBytes(signedBytes)
+		if err != nil {
+			return nil, err
+		}
 		wire, err := sigwire.EncodeSigned(sig, payload)
 		if err != nil {
 			return nil, fmt.Errorf("encode: %w", err)
@@ -1442,7 +1476,14 @@ func (d *Daemon) signAll(cmds []signRequestCmd) ([]signResponseSig, error) {
 		if err != nil {
 			return nil, fmt.Errorf("marshal payload: %w", err)
 		}
-		sig := ed25519.Sign(d.Key, signedBytes)
+		// Route through the single custody choke point (C1/C3/C7): Lock
+		// refuses the signature here, and the crypto.Signer seam
+		// (crypto.Hash(0)) keeps the file-key bytes byte-identical to the
+		// old ed25519.Sign call (the phase-0 envelope goldens prove it).
+		sig, err := d.signBytes(signedBytes)
+		if err != nil {
+			return nil, err
+		}
 		wire, err := sigwire.EncodeSigned(sig, payload)
 		if err != nil {
 			return nil, fmt.Errorf("encode: %w", err)
