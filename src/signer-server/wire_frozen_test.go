@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/karthikeyan5/sshgate/pkg/signerkit"
 	"github.com/karthikeyan5/sshgate/pkg/signerkit/sqlitestore"
 	"github.com/karthikeyan5/sshgate/src/gate"
-	"github.com/karthikeyan5/sshgate/src/signer/backend"
 )
 
 // wire_frozen_test.go asserts the MACHINE plane stays BYTE-FROZEN against
@@ -40,7 +40,7 @@ func TestWireFrozen_HostedClientStillDecodesV1(t *testing.T) {
 
 	const cmd = "systemctl restart nginx"
 
-	client := &backend.HostedServerBackend{
+	client := &signerkit.HostedServerBackend{
 		BaseURL:  ts.URL,
 		APIKey:   apiKey,
 		ClientID: "karthi-laptop",
@@ -53,8 +53,8 @@ func TestWireFrozen_HostedClientStillDecodesV1(t *testing.T) {
 
 	// Submit via the frozen client. This decodes the 202 {request_id,
 	// poll_url} response; a drift there fails Request.
-	resultCh, err := client.Request(ctx, backend.ApprovalRequest{
-		Commands:  []backend.CommandReq{{Server: "prod", Cmd: cmd, TTLSec: 120, HostKeyFP: testHostFP}},
+	resultCh, err := client.Request(ctx, signerkit.ApprovalRequest{
+		Commands:  []signerkit.CommandReq{{Server: "prod", Cmd: cmd, TTLSec: 120, HostKeyFP: testHostFP}},
 		Submitted: time.Now(),
 	})
 	if err != nil {
@@ -79,7 +79,7 @@ func TestWireFrozen_HostedClientStillDecodesV1(t *testing.T) {
 	// The frozen client must decode the approved poll response.
 	select {
 	case res := <-resultCh:
-		if res.Status != backend.StatusApproved {
+		if res.Status != signerkit.StatusApproved {
 			t.Fatalf("frozen client result status = %v; want approved", res.Status)
 		}
 		if len(res.Signatures) != 1 {

@@ -16,7 +16,6 @@ import (
 
 	"github.com/karthikeyan5/sshgate/pkg/signerkit"
 	"github.com/karthikeyan5/sshgate/src/gate"
-	"github.com/karthikeyan5/sshgate/src/signer/backend"
 	"github.com/karthikeyan5/sshgate/src/sigwire"
 )
 
@@ -323,17 +322,17 @@ func TestSigner_WireShapeMatchesHosted(t *testing.T) {
 	ts := httptest.NewServer(mux)
 	defer ts.Close()
 
-	h := &backend.HostedServerBackend{
+	h := &signerkit.HostedServerBackend{
 		BaseURL:  ts.URL,
 		APIKey:   apiKey,
 		ClientID: "wire-test-client",
 		PollWait: time.Second,
 		Timeout:  5 * time.Second,
 	}
-	req := backend.ApprovalRequest{
+	req := signerkit.ApprovalRequest{
 		RequestID: "r_test",
 		Submitted: approvedAt,
-		Commands: []backend.CommandReq{
+		Commands: []signerkit.CommandReq{
 			{Cmd: cmds[0].Cmd, TTLSec: cmds[0].TTLSeconds, HostKeyFP: testHostFP},
 			{Cmd: cmds[1].Cmd, TTLSec: cmds[1].TTLSeconds, HostKeyFP: testHostFP},
 		},
@@ -345,7 +344,7 @@ func TestSigner_WireShapeMatchesHosted(t *testing.T) {
 	}
 	res := <-ch
 
-	if res.Status != backend.StatusApproved {
+	if res.Status != signerkit.StatusApproved {
 		t.Fatalf("backend result status = %v, want approved", res.Status)
 	}
 	if len(res.Signatures) != len(cmds) {

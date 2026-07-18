@@ -63,6 +63,12 @@ type Server struct {
 	Human *HumanAPI
 
 	mux *http.ServeMux
+
+	// machineAttached guards AttachMachine against a double-attach — the
+	// machine plane's counterpart to the s.Human != nil guard in
+	// AttachHuman. Set true the first time AttachMachine registers the
+	// /v1/* + /healthz routes.
+	machineAttached bool
 }
 
 // NewServer builds a Server with routes registered. The Server's
@@ -85,13 +91,29 @@ func NewServer(auth string, st store.Store, logger *log.Logger) *Server {
 		Logger:   logger,
 		mux:      http.NewServeMux(),
 	}
-	s.routes()
+	s.AttachMachine()
 	return s
 }
 
-// routes registers the v2.0 route table. Go 1.22+ ServeMux pattern
-// syntax is used for the {request_id} wildcard on /v1/poll/.
-func (s *Server) routes() {
+// AttachMachine registers the bearer-gated MACHINE plane on the server's
+// mux:
+//
+//	GET  /healthz               (public — no auth; load balancers / monitoring)
+//	POST /v1/sign               (withAuth bearer)
+//	GET  /v1/poll/{request_id}  (withAuth bearer)
+//	GET  /v1/audit              (withAuth bearer)
+//
+// The wire these routes speak is BYTE-FROZEN (wire_frozen_test.go); this is a
+// byte-preserving extraction of the former routes(). Go 1.22+ ServeMux
+// pattern syntax is used for the {request_id} wildcard on /v1/poll/. NewServer
+// calls it, so a bare Server is already complete — it is exported only for
+// symmetry with AttachHuman. It panics on a double-attach (a wiring mistake
+// that should surface at startup, not silently), mirroring AttachHuman.
+func (s *Server) AttachMachine() {
+	if s.machineAttached {
+		panic("signerserver: AttachMachine: machine plane already attached")
+	}
+	s.machineAttached = true
 	// Public route: liveness check. No auth — load balancers and
 	// monitoring need to hit this without a token.
 	s.mux.HandleFunc("GET /healthz", s.handleHealthz)
