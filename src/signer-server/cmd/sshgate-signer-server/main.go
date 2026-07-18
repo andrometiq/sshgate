@@ -143,8 +143,13 @@ func run(args []string) int {
 	}
 	defer func() { _ = db.Close() }()
 
-	srv := hosted.NewServer(apiKey, db, logger)
-	srv.Signer = core
+	// Machine-plane only (Auth zero): served surface is identical to the
+	// former NewServer + srv.Signer = core wiring.
+	srv, err := hosted.New(hosted.Config{Core: core, Store: db, APIKey: apiKey, Logger: logger})
+	if err != nil {
+		logf("build hosted server: %v", err)
+		return 1
+	}
 
 	httpSrv := &http.Server{
 		Addr:              *addr,
