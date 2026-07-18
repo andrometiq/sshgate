@@ -36,6 +36,12 @@ Once a release is tagged you can instead `go install` a pinned version directly:
 go install github.com/karthikeyan5/sshgate/src/mcp/cmd/sshgate-mcp@v0.1.4
 ```
 
+> Note: a plain `go install` applies no build flags, so a binary installed this
+> way reports `--version` as `dev` rather than the tag. The version is cosmetic
+> (it appears only in the MCP handshake); the binary is otherwise identical. For
+> a stamped binary, build from a checkout with `make` (which passes the version
+> via `-ldflags`) or download the release asset.
+
 ## 2. Generic `mcpServers` snippet (any stdio MCP client)
 
 Point your client at the binary and pass the signer socket via the environment.
