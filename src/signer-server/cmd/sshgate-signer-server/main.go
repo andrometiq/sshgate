@@ -52,8 +52,8 @@ import (
 	"time"
 
 	"github.com/karthikeyan5/sshgate/pkg/signerkit"
+	"github.com/karthikeyan5/sshgate/pkg/signerkit/hosted"
 	"github.com/karthikeyan5/sshgate/pkg/signerkit/sqlitestore"
-	signerserver "github.com/karthikeyan5/sshgate/src/signer-server"
 )
 
 // version is stamped from the single VERSION file at link time via
@@ -143,7 +143,7 @@ func run(args []string) int {
 	}
 	defer func() { _ = db.Close() }()
 
-	srv := signerserver.NewServer(apiKey, db, logger)
+	srv := hosted.NewServer(apiKey, db, logger)
 	srv.Signer = core
 
 	httpSrv := &http.Server{

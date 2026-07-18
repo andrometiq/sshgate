@@ -1,4 +1,4 @@
-package signerserver
+package hosted
 
 import (
 	"crypto/rand"
@@ -18,7 +18,7 @@ func generateRequestID() string {
 		// broken — we'd rather crash here than emit a predictable
 		// ID. Tests don't exercise this branch because they wrap
 		// the call site, not this function.
-		panic("signerserver: crypto/rand failed: " + err.Error())
+		panic("hosted: crypto/rand failed: " + err.Error())
 	}
 	return "r_" + base64.RawURLEncoding.EncodeToString(b[:])
 }

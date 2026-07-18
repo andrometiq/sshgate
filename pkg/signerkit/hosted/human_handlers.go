@@ -1,4 +1,4 @@
-package signerserver
+package hosted
 
 import (
 	"bytes"

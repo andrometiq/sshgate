@@ -1,4 +1,4 @@
-package signerserver_test
+package hosted_test
 
 import (
 	"bytes"

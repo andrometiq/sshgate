@@ -1,4 +1,4 @@
-package signerserver
+package hosted
 
 import (
 	"crypto/subtle"
@@ -56,10 +56,9 @@ type Server struct {
 	// Human is the optional human-plane API (Phase E): the /auth/* and
 	// /ui/* routes, gated by a server-side session (NOT the bearer key).
 	// When nil the server exposes only the machine plane (/v1/*,
-	// /healthz) — the v2.0 behaviour. Set it BEFORE the server starts
-	// serving (it is read once in routes()). The two planes share this
-	// mux but never share credentials: see human_handlers.go's plane-
-	// separation contract.
+	// /healthz) — the v2.0 behaviour. Mount it via AttachHuman before the
+	// server starts serving. The two planes share this mux but never share
+	// credentials: see human_handlers.go's plane-separation contract.
 	Human *HumanAPI
 
 	mux *http.ServeMux
@@ -79,7 +78,7 @@ type Server struct {
 // mistake surfaces during test setup, not in production traffic.
 func NewServer(auth string, st store.Store, logger *log.Logger) *Server {
 	if auth == "" {
-		panic("signerserver: NewServer: APIKey is required")
+		panic("hosted: NewServer: APIKey is required")
 	}
 	if logger == nil {
 		logger = log.Default()
@@ -111,7 +110,7 @@ func NewServer(auth string, st store.Store, logger *log.Logger) *Server {
 // that should surface at startup, not silently), mirroring AttachHuman.
 func (s *Server) AttachMachine() {
 	if s.machineAttached {
-		panic("signerserver: AttachMachine: machine plane already attached")
+		panic("hosted: AttachMachine: machine plane already attached")
 	}
 	s.machineAttached = true
 	// Public route: liveness check. No auth — load balancers and
@@ -137,10 +136,10 @@ func (s *Server) AttachMachine() {
 // credentials. Mounting them does not touch the frozen /v1 handlers.
 func (s *Server) AttachHuman(h *HumanAPI) {
 	if h == nil {
-		panic("signerserver: AttachHuman: nil HumanAPI")
+		panic("hosted: AttachHuman: nil HumanAPI")
 	}
 	if s.Human != nil {
-		panic("signerserver: AttachHuman: human plane already attached")
+		panic("hosted: AttachHuman: human plane already attached")
 	}
 	s.Human = h
 	h.registerHumanRoutes(s.mux)

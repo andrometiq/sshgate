@@ -1,4 +1,4 @@
-package signerserver_test
+package hosted_test
 
 import (
 	"bytes"
@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	signerserver "github.com/karthikeyan5/sshgate/src/signer-server"
+	"github.com/karthikeyan5/sshgate/pkg/signerkit/hosted"
 )
 
 // newTestServer builds an httptest.Server wrapping our handler. The
@@ -22,7 +22,7 @@ func newTestServer(t *testing.T) (*httptest.Server, string) {
 	// Silence the per-request log line during tests; keep the prefix
 	// so we can still find it if a test prints unexpected output.
 	logger := log.New(io.Discard, "test: ", 0)
-	srv := signerserver.NewServer(apiKey, nil, logger)
+	srv := hosted.NewServer(apiKey, nil, logger)
 	ts := httptest.NewServer(srv)
 	t.Cleanup(ts.Close)
 	return ts, apiKey
@@ -206,5 +206,5 @@ func TestNewServer_PanicsOnEmptyAPIKey(t *testing.T) {
 			t.Fatal("NewServer with empty API key should panic")
 		}
 	}()
-	_ = signerserver.NewServer("", nil, nil)
+	_ = hosted.NewServer("", nil, nil)
 }

@@ -1,4 +1,4 @@
-package signerserver
+package hosted
 
 import "github.com/karthikeyan5/sshgate/pkg/signerkit/store"
 

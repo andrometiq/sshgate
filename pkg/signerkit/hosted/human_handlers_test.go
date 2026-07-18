@@ -1,4 +1,4 @@
-package signerserver_test
+package hosted_test
 
 import (
 	"bytes"
@@ -20,9 +20,9 @@ import (
 	"github.com/pquerna/otp/totp"
 
 	"github.com/karthikeyan5/sshgate/pkg/signerkit"
+	"github.com/karthikeyan5/sshgate/pkg/signerkit/hosted"
 	"github.com/karthikeyan5/sshgate/pkg/signerkit/sqlitestore"
 	"github.com/karthikeyan5/sshgate/pkg/signerkit/store"
-	signerserver "github.com/karthikeyan5/sshgate/src/signer-server"
 )
 
 // humanFixture stands up a full server with BOTH planes wired: the
@@ -31,7 +31,7 @@ import (
 // engine. It returns the httptest server, the bearer key, the store, the
 // auth manager (for seeding TOTP), and the signer's public key (for the
 // gate-valid approve-path proof).
-func humanFixture(t *testing.T) (*httptest.Server, string, *sqlitestore.DB, *signerserver.AuthManager, ed25519.PublicKey) {
+func humanFixture(t *testing.T) (*httptest.Server, string, *sqlitestore.DB, *hosted.AuthManager, ed25519.PublicKey) {
 	t.Helper()
 	const apiKey = "test-bearer-key"
 
@@ -53,11 +53,11 @@ func humanFixture(t *testing.T) (*httptest.Server, string, *sqlitestore.DB, *sig
 	if err != nil {
 		t.Fatalf("signerkit.New: %v", err)
 	}
-	engine, err := signerserver.NewApprovalEngine(db, svc)
+	engine, err := hosted.NewApprovalEngine(db, svc)
 	if err != nil {
 		t.Fatalf("NewApprovalEngine: %v", err)
 	}
-	am, err := signerserver.NewAuthManager(db, signerserver.AuthConfig{
+	am, err := hosted.NewAuthManager(db, hosted.AuthConfig{
 		RPID:          waRPID,
 		RPDisplayName: waRPName,
 		RPOrigins:     []string{waOrigin},
@@ -68,13 +68,13 @@ func humanFixture(t *testing.T) (*httptest.Server, string, *sqlitestore.DB, *sig
 	}
 
 	logger := log.New(io.Discard, "test: ", 0)
-	srv := signerserver.NewServer(apiKey, db, logger)
+	srv := hosted.NewServer(apiKey, db, logger)
 	srv.Signer = svc
-	srv.AttachHuman(&signerserver.HumanAPI{
+	srv.AttachHuman(&hosted.HumanAPI{
 		Auth:   am,
 		Engine: engine,
 		Store:  db,
-		Cfg: signerserver.HumanAPIConfig{
+		Cfg: hosted.HumanAPIConfig{
 			// SecureCookie false so the cookie survives plain-HTTP httptest.
 			SecureCookie: false,
 		},
@@ -87,7 +87,7 @@ func humanFixture(t *testing.T) (*httptest.Server, string, *sqlitestore.DB, *sig
 
 // seedTOTPUser creates a user and enrolls a TOTP secret, returning the
 // user id and secret so a test can log in.
-func seedTOTPUser(t *testing.T, db *sqlitestore.DB, am *signerserver.AuthManager, username string) (string, string) {
+func seedTOTPUser(t *testing.T, db *sqlitestore.DB, am *hosted.AuthManager, username string) (string, string) {
 	t.Helper()
 	ctx := context.Background()
 	userID := "u-" + username
@@ -343,8 +343,8 @@ func TestHuman_ApproveDrivesGateValidSignature(t *testing.T) {
 // denied terminal state (with deny-veto configured on).
 func TestHuman_DenyResolves(t *testing.T) {
 	t.Parallel()
-	ts, _, db, am, _ := humanFixtureWithPolicy(t, signerserver.HumanAPIConfig{
-		ApprovalPolicy: signerserver.ApprovalPolicy{DenyVeto: true},
+	ts, _, db, am, _ := humanFixtureWithPolicy(t, hosted.HumanAPIConfig{
+		ApprovalPolicy: hosted.ApprovalPolicy{DenyVeto: true},
 	})
 	_, secret := seedTOTPUser(t, db, am, "alice")
 	seedPendingRequest(t, db, "r-deny-1", 2, "rm -rf /tmp/x", 60)
@@ -374,7 +374,7 @@ func TestHuman_DenyResolves(t *testing.T) {
 // the policy in.
 func TestHuman_StepUpEnforced(t *testing.T) {
 	t.Parallel()
-	ts, _, db, am, pub := humanFixtureWithPolicy(t, signerserver.HumanAPIConfig{
+	ts, _, db, am, pub := humanFixtureWithPolicy(t, hosted.HumanAPIConfig{
 		RequireStepUp: true,
 	})
 	_, secret := seedTOTPUser(t, db, am, "alice")
@@ -471,7 +471,7 @@ func TestHuman_WebAuthnRegisterRoundTripOverHTTP(t *testing.T) {
 
 // humanFixtureWithPolicy is humanFixture but with an explicit
 // HumanAPIConfig (the default fixture uses the inert zero policy).
-func humanFixtureWithPolicy(t *testing.T, cfg signerserver.HumanAPIConfig) (*httptest.Server, string, *sqlitestore.DB, *signerserver.AuthManager, ed25519.PublicKey) {
+func humanFixtureWithPolicy(t *testing.T, cfg hosted.HumanAPIConfig) (*httptest.Server, string, *sqlitestore.DB, *hosted.AuthManager, ed25519.PublicKey) {
 	t.Helper()
 	const apiKey = "test-bearer-key"
 	path := filepath.Join(t.TempDir(), "human.db")
@@ -488,16 +488,16 @@ func humanFixtureWithPolicy(t *testing.T, cfg signerserver.HumanAPIConfig) (*htt
 	if err != nil {
 		t.Fatalf("signerkit.New: %v", err)
 	}
-	engine, _ := signerserver.NewApprovalEngine(db, svc)
-	am, err := signerserver.NewAuthManager(db, signerserver.AuthConfig{
+	engine, _ := hosted.NewApprovalEngine(db, svc)
+	am, err := hosted.NewAuthManager(db, hosted.AuthConfig{
 		RPID: waRPID, RPDisplayName: waRPName, RPOrigins: []string{waOrigin}, SessionTTL: time.Hour,
 	})
 	if err != nil {
 		t.Fatalf("NewAuthManager: %v", err)
 	}
-	srv := signerserver.NewServer(apiKey, db, log.New(io.Discard, "", 0))
+	srv := hosted.NewServer(apiKey, db, log.New(io.Discard, "", 0))
 	srv.Signer = svc
-	srv.AttachHuman(&signerserver.HumanAPI{Auth: am, Engine: engine, Store: db, Cfg: cfg})
+	srv.AttachHuman(&hosted.HumanAPI{Auth: am, Engine: engine, Store: db, Cfg: cfg})
 	ts := httptest.NewServer(srv)
 	t.Cleanup(ts.Close)
 	return ts, apiKey, db, am, pub
@@ -510,7 +510,7 @@ func findSessionCookie(t *testing.T, client *http.Client, ts *httptest.Server) *
 		t.Fatalf("parse ts URL: %v", err)
 	}
 	for _, c := range client.Jar.Cookies(parsed) {
-		if c.Name == signerserver.SessionCookieName {
+		if c.Name == hosted.SessionCookieName {
 			return c
 		}
 	}

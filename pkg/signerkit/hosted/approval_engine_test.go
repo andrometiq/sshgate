@@ -1,4 +1,4 @@
-package signerserver_test
+package hosted_test
 
 import (
 	"context"
@@ -14,15 +14,15 @@ import (
 	"time"
 
 	"github.com/karthikeyan5/sshgate/pkg/signerkit"
+	"github.com/karthikeyan5/sshgate/pkg/signerkit/hosted"
 	"github.com/karthikeyan5/sshgate/pkg/signerkit/sqlitestore"
 	"github.com/karthikeyan5/sshgate/pkg/signerkit/store"
 	"github.com/karthikeyan5/sshgate/src/gate"
-	signerserver "github.com/karthikeyan5/sshgate/src/signer-server"
 )
 
 // engineFixture stands up a real SQLite store, a real Signer, and the
 // engine that wires them, returning the public key for gate verification.
-func engineFixture(t *testing.T) (*signerserver.ApprovalEngine, *sqlitestore.DB, ed25519.PublicKey) {
+func engineFixture(t *testing.T) (*hosted.ApprovalEngine, *sqlitestore.DB, ed25519.PublicKey) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "engine.db")
 	db, err := sqlitestore.Open(path)
@@ -42,7 +42,7 @@ func engineFixture(t *testing.T) (*signerserver.ApprovalEngine, *sqlitestore.DB,
 	if err != nil {
 		t.Fatalf("signerkit.New: %v", err)
 	}
-	eng, err := signerserver.NewApprovalEngine(db, svc)
+	eng, err := hosted.NewApprovalEngine(db, svc)
 	if err != nil {
 		t.Fatalf("NewApprovalEngine: %v", err)
 	}
@@ -106,11 +106,11 @@ func TestEngine_1of1_ApproveSignsAndFlips(t *testing.T) {
 	seedRequest(t, db, "r1", 1, cmdJSON{Server: "prod", Cmd: cmd, TTLSeconds: 120})
 
 	out, err := eng.SubmitVote(ctx, "r1", "alice", store.DecisionApprove, "webauthn",
-		signerserver.ApprovalPolicy{})
+		hosted.ApprovalPolicy{})
 	if err != nil {
 		t.Fatalf("SubmitVote: %v", err)
 	}
-	if out.Decision != signerserver.DecisionApproved {
+	if out.Decision != hosted.DecisionApproved {
 		t.Fatalf("decision = %q; want approved", out.Decision)
 	}
 	if !out.Flipped {
@@ -147,11 +147,11 @@ func TestEngine_2of3_ThresholdCrossing(t *testing.T) {
 
 	// First approve: pending, no signatures, no flip.
 	out1, err := eng.SubmitVote(ctx, "r2", "alice", store.DecisionApprove, "webauthn",
-		signerserver.ApprovalPolicy{})
+		hosted.ApprovalPolicy{})
 	if err != nil {
 		t.Fatalf("first SubmitVote: %v", err)
 	}
-	if out1.Decision != signerserver.DecisionPending || out1.Flipped {
+	if out1.Decision != hosted.DecisionPending || out1.Flipped {
 		t.Fatalf("after 1/2 approvals: decision=%q flipped=%v; want pending/false", out1.Decision, out1.Flipped)
 	}
 	mid, _ := db.GetByID(ctx, "r2")
@@ -161,11 +161,11 @@ func TestEngine_2of3_ThresholdCrossing(t *testing.T) {
 
 	// Second approve: crosses threshold, flips.
 	out2, err := eng.SubmitVote(ctx, "r2", "bob", store.DecisionApprove, "totp",
-		signerserver.ApprovalPolicy{})
+		hosted.ApprovalPolicy{})
 	if err != nil {
 		t.Fatalf("second SubmitVote: %v", err)
 	}
-	if out2.Decision != signerserver.DecisionApproved || !out2.Flipped {
+	if out2.Decision != hosted.DecisionApproved || !out2.Flipped {
 		t.Fatalf("after 2/2: decision=%q flipped=%v; want approved/true", out2.Decision, out2.Flipped)
 	}
 	got, _ := db.GetByID(ctx, "r2")
@@ -189,11 +189,11 @@ func TestEngine_DenyVetoOnVsOff(t *testing.T) {
 	eng, db, _ := engineFixture(t)
 	seedRequest(t, db, "rd", 2, cmdJSON{Server: "prod", Cmd: "rm -rf /tmp/x", TTLSeconds: 60})
 	out, err := eng.SubmitVote(ctx, "rd", "bob", store.DecisionDeny, "webauthn",
-		signerserver.ApprovalPolicy{DenyVeto: true})
+		hosted.ApprovalPolicy{DenyVeto: true})
 	if err != nil {
 		t.Fatalf("SubmitVote(deny veto on): %v", err)
 	}
-	if out.Decision != signerserver.DecisionDenied || !out.Flipped {
+	if out.Decision != hosted.DecisionDenied || !out.Flipped {
 		t.Fatalf("deny veto on: decision=%q flipped=%v; want denied/true", out.Decision, out.Flipped)
 	}
 	got, _ := db.GetByID(ctx, "rd")
@@ -208,11 +208,11 @@ func TestEngine_DenyVetoOnVsOff(t *testing.T) {
 	eng2, db2, _ := engineFixture(t)
 	seedRequest(t, db2, "rd2", 2, cmdJSON{Server: "prod", Cmd: "rm -rf /tmp/x", TTLSeconds: 60})
 	out2, err := eng2.SubmitVote(ctx, "rd2", "bob", store.DecisionDeny, "webauthn",
-		signerserver.ApprovalPolicy{DenyVeto: false})
+		hosted.ApprovalPolicy{DenyVeto: false})
 	if err != nil {
 		t.Fatalf("SubmitVote(deny veto off): %v", err)
 	}
-	if out2.Decision != signerserver.DecisionPending || out2.Flipped {
+	if out2.Decision != hosted.DecisionPending || out2.Flipped {
 		t.Fatalf("deny veto off: decision=%q flipped=%v; want pending/false", out2.Decision, out2.Flipped)
 	}
 	got2, _ := db2.GetByID(ctx, "rd2")
@@ -231,11 +231,11 @@ func TestEngine_SelfApproveOnVsOff(t *testing.T) {
 	eng, db, _ := engineFixture(t)
 	seedRequest(t, db, "rs", 1, cmdJSON{Server: "prod", Cmd: "id", TTLSeconds: 60})
 	out, err := eng.SubmitVote(ctx, "rs", "alice", store.DecisionApprove, "webauthn",
-		signerserver.ApprovalPolicy{AllowSelfApprove: false, Requester: "alice"})
+		hosted.ApprovalPolicy{AllowSelfApprove: false, Requester: "alice"})
 	if err != nil {
 		t.Fatalf("SubmitVote(self off): %v", err)
 	}
-	if out.Decision != signerserver.DecisionPending || out.Flipped {
+	if out.Decision != hosted.DecisionPending || out.Flipped {
 		t.Fatalf("self-approve off: decision=%q flipped=%v; want pending/false", out.Decision, out.Flipped)
 	}
 
@@ -243,11 +243,11 @@ func TestEngine_SelfApproveOnVsOff(t *testing.T) {
 	eng2, db2, pub := engineFixture(t)
 	seedRequest(t, db2, "rs2", 1, cmdJSON{Server: "prod", Cmd: "id", TTLSeconds: 60})
 	out2, err := eng2.SubmitVote(ctx, "rs2", "alice", store.DecisionApprove, "webauthn",
-		signerserver.ApprovalPolicy{AllowSelfApprove: true, Requester: "alice"})
+		hosted.ApprovalPolicy{AllowSelfApprove: true, Requester: "alice"})
 	if err != nil {
 		t.Fatalf("SubmitVote(self on): %v", err)
 	}
-	if out2.Decision != signerserver.DecisionApproved || !out2.Flipped {
+	if out2.Decision != hosted.DecisionApproved || !out2.Flipped {
 		t.Fatalf("self-approve on: decision=%q flipped=%v; want approved/true", out2.Decision, out2.Flipped)
 	}
 	got, _ := db2.GetByID(ctx, "rs2")
@@ -267,14 +267,14 @@ func TestEngine_DuplicateVoteIdempotent(t *testing.T) {
 	// alice approves twice while still below threshold (N=2). Both calls
 	// see pending; the duplicate is collapsed by the store and does NOT
 	// push the count to 2.
-	if _, err := eng.SubmitVote(ctx, "rdup", "alice", store.DecisionApprove, "webauthn", signerserver.ApprovalPolicy{}); err != nil {
+	if _, err := eng.SubmitVote(ctx, "rdup", "alice", store.DecisionApprove, "webauthn", hosted.ApprovalPolicy{}); err != nil {
 		t.Fatalf("first alice vote: %v", err)
 	}
-	out2, err := eng.SubmitVote(ctx, "rdup", "alice", store.DecisionApprove, "webauthn", signerserver.ApprovalPolicy{})
+	out2, err := eng.SubmitVote(ctx, "rdup", "alice", store.DecisionApprove, "webauthn", hosted.ApprovalPolicy{})
 	if err != nil {
 		t.Fatalf("duplicate alice vote: %v", err)
 	}
-	if out2.Decision != signerserver.DecisionPending {
+	if out2.Decision != hosted.DecisionPending {
 		t.Fatalf("duplicate vote decision = %q; want pending (must not count twice)", out2.Decision)
 	}
 	votesList, _ := db.ListVotes(ctx, "rdup")
@@ -283,7 +283,7 @@ func TestEngine_DuplicateVoteIdempotent(t *testing.T) {
 	}
 
 	// Now bob crosses the threshold.
-	if _, err := eng.SubmitVote(ctx, "rdup", "bob", store.DecisionApprove, "totp", signerserver.ApprovalPolicy{}); err != nil {
+	if _, err := eng.SubmitVote(ctx, "rdup", "bob", store.DecisionApprove, "totp", hosted.ApprovalPolicy{}); err != nil {
 		t.Fatalf("bob vote: %v", err)
 	}
 	approved, _ := db.GetByID(ctx, "rdup")
@@ -294,7 +294,7 @@ func TestEngine_DuplicateVoteIdempotent(t *testing.T) {
 
 	// A late vote on the now-approved request is a no-op: ErrAlreadyResolved,
 	// signatures unchanged.
-	if _, err := eng.SubmitVote(ctx, "rdup", "carol", store.DecisionApprove, "webauthn", signerserver.ApprovalPolicy{}); !errors.Is(err, signerserver.ErrAlreadyResolved) {
+	if _, err := eng.SubmitVote(ctx, "rdup", "carol", store.DecisionApprove, "webauthn", hosted.ApprovalPolicy{}); !errors.Is(err, hosted.ErrAlreadyResolved) {
 		t.Fatalf("late vote err = %v; want ErrAlreadyResolved", err)
 	}
 	after, _ := db.GetByID(ctx, "rdup")
@@ -309,7 +309,7 @@ func TestEngine_NotFound(t *testing.T) {
 	t.Parallel()
 	eng, db, _ := engineFixture(t)
 	ctx := context.Background()
-	if _, err := eng.SubmitVote(ctx, "ghost", "alice", store.DecisionApprove, "webauthn", signerserver.ApprovalPolicy{}); !errors.Is(err, store.ErrNotFound) {
+	if _, err := eng.SubmitVote(ctx, "ghost", "alice", store.DecisionApprove, "webauthn", hosted.ApprovalPolicy{}); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("SubmitVote(missing) = %v; want ErrNotFound", err)
 	}
 	if v, _ := db.ListVotes(ctx, "ghost"); len(v) != 0 {
@@ -345,13 +345,13 @@ func TestEngine_ThresholdRace(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start // release all goroutines together
-			out, err := eng.SubmitVote(ctx, "rrace", op, store.DecisionApprove, "webauthn", signerserver.ApprovalPolicy{})
-			if err != nil && !errors.Is(err, signerserver.ErrAlreadyResolved) {
+			out, err := eng.SubmitVote(ctx, "rrace", op, store.DecisionApprove, "webauthn", hosted.ApprovalPolicy{})
+			if err != nil && !errors.Is(err, hosted.ErrAlreadyResolved) {
 				errCount.Add(1)
 				t.Errorf("SubmitVote: %v", err)
 				return
 			}
-			if err == nil && out.Decision == signerserver.DecisionApproved {
+			if err == nil && out.Decision == hosted.DecisionApproved {
 				approvedN.Add(1)
 			}
 			if out.Flipped {
@@ -465,14 +465,14 @@ func TestEngine_VerdictFailClosed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("signerkit.New: %v", err)
 	}
-	eng, err := signerserver.NewApprovalEngine(db, svc)
+	eng, err := hosted.NewApprovalEngine(db, svc)
 	if err != nil {
 		t.Fatalf("NewApprovalEngine: %v", err)
 	}
 
 	seedRequest(t, db, "r-fc-1", 1, cmdJSON{Server: "prod", Cmd: "systemctl restart nginx", TTLSeconds: 120})
 
-	_, err = eng.SubmitVote(context.Background(), "r-fc-1", "alice", store.DecisionApprove, "webauthn", signerserver.ApprovalPolicy{})
+	_, err = eng.SubmitVote(context.Background(), "r-fc-1", "alice", store.DecisionApprove, "webauthn", hosted.ApprovalPolicy{})
 	if err == nil {
 		t.Fatalf("SubmitVote: expected fail-closed error when the audit sink is down, got nil")
 	}

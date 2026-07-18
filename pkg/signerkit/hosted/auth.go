@@ -1,4 +1,4 @@
-package signerserver
+package hosted
 
 import (
 	"bytes"
@@ -120,16 +120,16 @@ type AuthManager struct {
 // validator, surfaced here as a construction error.
 func NewAuthManager(st store.Store, cfg AuthConfig) (*AuthManager, error) {
 	if st == nil {
-		return nil, errors.New("signerserver: NewAuthManager: nil Store")
+		return nil, errors.New("hosted: NewAuthManager: nil Store")
 	}
 	if cfg.RPID == "" {
-		return nil, errors.New("signerserver: NewAuthManager: RPID is required (passkeys are origin-bound; it is a deploy decision)")
+		return nil, errors.New("hosted: NewAuthManager: RPID is required (passkeys are origin-bound; it is a deploy decision)")
 	}
 	if len(cfg.RPOrigins) == 0 {
-		return nil, errors.New("signerserver: NewAuthManager: at least one RPOrigin is required")
+		return nil, errors.New("hosted: NewAuthManager: at least one RPOrigin is required")
 	}
 	if cfg.SessionTTL <= 0 {
-		return nil, errors.New("signerserver: NewAuthManager: SessionTTL must be > 0 (the lifetime is the caller's choice, not a baked default)")
+		return nil, errors.New("hosted: NewAuthManager: SessionTTL must be > 0 (the lifetime is the caller's choice, not a baked default)")
 	}
 	display := cfg.RPDisplayName
 	if display == "" {
@@ -141,7 +141,7 @@ func NewAuthManager(st store.Store, cfg AuthConfig) (*AuthManager, error) {
 		RPOrigins:     cfg.RPOrigins,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("signerserver: NewAuthManager: webauthn config: %w", err)
+		return nil, fmt.Errorf("hosted: NewAuthManager: webauthn config: %w", err)
 	}
 	if cfg.TOTPIssuer == "" {
 		cfg.TOTPIssuer = display
@@ -183,7 +183,7 @@ type TOTPEnrollment struct {
 // decides whether re-enroll is permitted; the mechanism just does it.
 func (m *AuthManager) EnrollTOTP(ctx context.Context, userID, accountName string) (*TOTPEnrollment, error) {
 	if userID == "" {
-		return nil, errors.New("signerserver: EnrollTOTP: empty user_id")
+		return nil, errors.New("hosted: EnrollTOTP: empty user_id")
 	}
 	if accountName == "" {
 		accountName = userID
@@ -193,10 +193,10 @@ func (m *AuthManager) EnrollTOTP(ctx context.Context, userID, accountName string
 		AccountName: accountName,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("signerserver: EnrollTOTP: generate: %w", err)
+		return nil, fmt.Errorf("hosted: EnrollTOTP: generate: %w", err)
 	}
 	if err := m.store.SetTOTP(ctx, userID, key.Secret()); err != nil {
-		return nil, fmt.Errorf("signerserver: EnrollTOTP: persist: %w", err)
+		return nil, fmt.Errorf("hosted: EnrollTOTP: persist: %w", err)
 	}
 	return &TOTPEnrollment{Secret: key.Secret(), URI: key.URL()}, nil
 }
@@ -204,12 +204,12 @@ func (m *AuthManager) EnrollTOTP(ctx context.Context, userID, accountName string
 // ErrTOTPNotEnrolled is returned by VerifyTOTP when the user has no
 // stored secret. It is distinct from a wrong-code failure so the route
 // can distinguish "you never enrolled" from "wrong code".
-var ErrTOTPNotEnrolled = errors.New("signerserver: TOTP not enrolled for user")
+var ErrTOTPNotEnrolled = errors.New("hosted: TOTP not enrolled for user")
 
 // ErrAuthFailed is the generic, deliberately opaque auth-failure
 // sentinel: a wrong TOTP code, a failed assertion, etc. Routes map it to
 // 401 without leaking which factor failed or why.
-var ErrAuthFailed = errors.New("signerserver: authentication failed")
+var ErrAuthFailed = errors.New("hosted: authentication failed")
 
 // VerifyTOTP checks code against the user's stored secret using the
 // standard 30s period with ±1 period of skew (the RFC-6238 reflex: a
@@ -218,14 +218,14 @@ var ErrAuthFailed = errors.New("signerserver: authentication failed")
 // ErrTOTPNotEnrolled if the user has no secret.
 func (m *AuthManager) VerifyTOTP(ctx context.Context, userID, code string) error {
 	if userID == "" {
-		return errors.New("signerserver: VerifyTOTP: empty user_id")
+		return errors.New("hosted: VerifyTOTP: empty user_id")
 	}
 	secret, err := m.store.GetTOTP(ctx, userID)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			return ErrTOTPNotEnrolled
 		}
-		return fmt.Errorf("signerserver: VerifyTOTP: load secret: %w", err)
+		return fmt.Errorf("hosted: VerifyTOTP: load secret: %w", err)
 	}
 	// Explicit Digits/Algorithm: ValidateCustom does NOT default Digits
 	// (a zero Digits validates against a 0-digit code and always fails),
@@ -297,7 +297,7 @@ func (m *AuthManager) BeginRegistration(ctx context.Context, userID string) (*pr
 	}
 	options, session, err := m.wa.BeginRegistration(user)
 	if err != nil {
-		return nil, "", fmt.Errorf("signerserver: BeginRegistration: %w", err)
+		return nil, "", fmt.Errorf("hosted: BeginRegistration: %w", err)
 	}
 	now := m.now()
 	id, err := m.challenges.put(session, ceremonyRegister, userID, now, now.Add(m.cfg.ChallengeTTL), m.newID)
@@ -332,7 +332,7 @@ func (m *AuthManager) FinishRegistration(ctx context.Context, userID, challengeI
 	}
 	blob, err := json.Marshal(cred)
 	if err != nil {
-		return nil, fmt.Errorf("signerserver: FinishRegistration: marshal credential: %w", err)
+		return nil, fmt.Errorf("hosted: FinishRegistration: marshal credential: %w", err)
 	}
 	row := &store.Credential{
 		UserID:       userID,
@@ -340,7 +340,7 @@ func (m *AuthManager) FinishRegistration(ctx context.Context, userID, challengeI
 		Blob:         blob,
 	}
 	if err := m.store.AddCredential(ctx, row); err != nil {
-		return nil, fmt.Errorf("signerserver: FinishRegistration: store: %w", err)
+		return nil, fmt.Errorf("hosted: FinishRegistration: store: %w", err)
 	}
 	return row, nil
 }
@@ -356,7 +356,7 @@ func (m *AuthManager) BeginLogin(ctx context.Context, userID string) (*protocol.
 	}
 	options, session, err := m.wa.BeginLogin(user)
 	if err != nil {
-		return nil, "", fmt.Errorf("signerserver: BeginLogin: %w", err)
+		return nil, "", fmt.Errorf("hosted: BeginLogin: %w", err)
 	}
 	now := m.now()
 	id, err := m.challenges.put(session, ceremonyLogin, userID, now, now.Add(m.cfg.ChallengeTTL), m.newID)
@@ -410,16 +410,16 @@ func (m *AuthManager) FinishLogin(ctx context.Context, userID, challengeID strin
 func (m *AuthManager) updateCredential(ctx context.Context, userID string, cred *webauthn.Credential) error {
 	rows, err := m.store.ListCredentials(ctx, userID)
 	if err != nil {
-		return fmt.Errorf("signerserver: updateCredential: list: %w", err)
+		return fmt.Errorf("hosted: updateCredential: list: %w", err)
 	}
 	blob, err := json.Marshal(cred)
 	if err != nil {
-		return fmt.Errorf("signerserver: updateCredential: marshal: %w", err)
+		return fmt.Errorf("hosted: updateCredential: marshal: %w", err)
 	}
 	for _, row := range rows {
 		if bytes.Equal(row.CredentialID, cred.ID) {
 			if err := m.store.UpdateCredential(ctx, row.ID, blob); err != nil {
-				return fmt.Errorf("signerserver: updateCredential: store: %w", err)
+				return fmt.Errorf("hosted: updateCredential: store: %w", err)
 			}
 			return nil
 		}
@@ -442,11 +442,11 @@ const SessionCookieName = "sshgate_session"
 // base64url. The caller sets it as a cookie.
 func (m *AuthManager) IssueSession(ctx context.Context, userID string) (*store.Session, error) {
 	if userID == "" {
-		return nil, errors.New("signerserver: IssueSession: empty user_id")
+		return nil, errors.New("hosted: IssueSession: empty user_id")
 	}
 	id, err := m.newID()
 	if err != nil {
-		return nil, fmt.Errorf("signerserver: IssueSession: mint id: %w", err)
+		return nil, fmt.Errorf("hosted: IssueSession: mint id: %w", err)
 	}
 	now := m.now().UTC()
 	sess := &store.Session{
@@ -456,7 +456,7 @@ func (m *AuthManager) IssueSession(ctx context.Context, userID string) (*store.S
 		ExpiresAt: now.Add(m.cfg.SessionTTL),
 	}
 	if err := m.store.CreateSession(ctx, sess); err != nil {
-		return nil, fmt.Errorf("signerserver: IssueSession: persist: %w", err)
+		return nil, fmt.Errorf("hosted: IssueSession: persist: %w", err)
 	}
 	return sess, nil
 }
@@ -474,7 +474,7 @@ func (m *AuthManager) ValidateSession(ctx context.Context, token string) (*store
 		if errors.Is(err, store.ErrNotFound) {
 			return nil, ErrAuthFailed
 		}
-		return nil, fmt.Errorf("signerserver: ValidateSession: %w", err)
+		return nil, fmt.Errorf("hosted: ValidateSession: %w", err)
 	}
 	return sess, nil
 }
@@ -527,9 +527,9 @@ func (m *AuthManager) StepUp(ctx context.Context, userID string, method StepUpMe
 		// A WebAuthn step-up is the Begin/FinishLogin ceremony; the route
 		// drives those directly. We reject here so a caller cannot mistake
 		// StepUp for performing the assertion itself.
-		return "", errors.New("signerserver: StepUp: webauthn step-up is performed via Begin/FinishLogin, not StepUp")
+		return "", errors.New("hosted: StepUp: webauthn step-up is performed via Begin/FinishLogin, not StepUp")
 	default:
-		return "", fmt.Errorf("signerserver: StepUp: unknown method %q", method)
+		return "", fmt.Errorf("hosted: StepUp: unknown method %q", method)
 	}
 }
 

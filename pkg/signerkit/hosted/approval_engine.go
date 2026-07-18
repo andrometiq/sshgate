@@ -1,4 +1,4 @@
-package signerserver
+package hosted
 
 import (
 	"context"
@@ -39,7 +39,7 @@ import (
 // recorded and no side effect runs — the spec's "a vote after a
 // terminal decision is a no-op", surfaced to the caller as a typed
 // error so the HTTP layer can answer 409/200 as it sees fit.
-var ErrAlreadyResolved = errors.New("signerserver: request already resolved")
+var ErrAlreadyResolved = errors.New("hosted: request already resolved")
 
 // VoteOutcome is what SubmitVote returns: the recomputed decision after
 // the vote, plus whether THIS call was the one that performed the
@@ -84,10 +84,10 @@ type ApprovalEngine struct {
 // vote.
 func NewApprovalEngine(st store.Store, core HostedCore) (*ApprovalEngine, error) {
 	if st == nil {
-		return nil, errors.New("signerserver: NewApprovalEngine: nil Store")
+		return nil, errors.New("hosted: NewApprovalEngine: nil Store")
 	}
 	if core == nil {
-		return nil, errors.New("signerserver: NewApprovalEngine: nil core")
+		return nil, errors.New("hosted: NewApprovalEngine: nil core")
 	}
 	return &ApprovalEngine{Store: st, Core: core}, nil
 }
@@ -123,13 +123,13 @@ func (e *ApprovalEngine) SubmitVote(
 	policy ApprovalPolicy,
 ) (VoteOutcome, error) {
 	if requestID == "" {
-		return VoteOutcome{}, errors.New("signerserver: SubmitVote: empty request_id")
+		return VoteOutcome{}, errors.New("hosted: SubmitVote: empty request_id")
 	}
 	if operator == "" {
-		return VoteOutcome{}, errors.New("signerserver: SubmitVote: empty operator")
+		return VoteOutcome{}, errors.New("hosted: SubmitVote: empty operator")
 	}
 	if !decision.IsValid() {
-		return VoteOutcome{}, fmt.Errorf("signerserver: SubmitVote: invalid decision %q", decision)
+		return VoteOutcome{}, fmt.Errorf("hosted: SubmitVote: invalid decision %q", decision)
 	}
 
 	req, err := e.Store.GetByID(ctx, requestID)
@@ -305,7 +305,7 @@ func commandsForSigning(blob []byte) ([]signerkit.HostedSignCommand, error) {
 		return nil, fmt.Errorf("decode stored commands: %w", err)
 	}
 	if len(stored) == 0 {
-		return nil, errors.New("signerserver: stored request has no commands to sign")
+		return nil, errors.New("hosted: stored request has no commands to sign")
 	}
 	out := make([]signerkit.HostedSignCommand, len(stored))
 	for i, c := range stored {

@@ -53,8 +53,10 @@ type Config struct {
 // inner core — so phase 4 wires signer.Server{Handler: svc} with no new socket
 // types added to the frozen API. Its custody methods (Lock/Unlock/RotateTo)
 // delegate to the Daemon so a *Service is the single frozen surface an
-// integrator holds. The hosted machine/human planes (Submit/Pending/Vote,
-// AttachMachine/AttachHuman) land on this type in phase 5.
+// integrator holds. The hosted HTTP planes live in pkg/signerkit/hosted
+// (AttachMachine/AttachHuman on hosted.Server); whether the Submit/Pending/Vote
+// + Attach* surface should instead be promoted onto this Service type is an
+// open owner ratification (see carve-2026-07-18/DESIGN-carve.md S2).
 type Service struct {
 	daemon *Daemon
 	audit  AuditSink

@@ -1,10 +1,10 @@
-package signerserver_test
+package hosted_test
 
 import (
 	"testing"
 	"time"
 
-	signerserver "github.com/karthikeyan5/sshgate/src/signer-server"
+	"github.com/karthikeyan5/sshgate/pkg/signerkit/hosted"
 	"github.com/karthikeyan5/sshgate/pkg/signerkit/store"
 )
 
@@ -33,160 +33,160 @@ func TestDecide_Matrix(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		name   string
-		policy signerserver.ApprovalPolicy
+		policy hosted.ApprovalPolicy
 		votes  []store.Vote
-		want   signerserver.ApprovalDecision
+		want   hosted.ApprovalDecision
 	}{
 		// --- 1-of-1 ---
 		{
 			name:   "1of1 no votes -> pending",
-			policy: signerserver.ApprovalPolicy{RequiredApprovals: 1},
+			policy: hosted.ApprovalPolicy{RequiredApprovals: 1},
 			votes:  votes(),
-			want:   signerserver.DecisionPending,
+			want:   hosted.DecisionPending,
 		},
 		{
 			name:   "1of1 one approve -> approved",
-			policy: signerserver.ApprovalPolicy{RequiredApprovals: 1},
+			policy: hosted.ApprovalPolicy{RequiredApprovals: 1},
 			votes:  votes(ap("alice")),
-			want:   signerserver.DecisionApproved,
+			want:   hosted.DecisionApproved,
 		},
 
 		// --- 2-of-3 ---
 		{
 			name:   "2of3 one approve -> pending",
-			policy: signerserver.ApprovalPolicy{RequiredApprovals: 2},
+			policy: hosted.ApprovalPolicy{RequiredApprovals: 2},
 			votes:  votes(ap("alice")),
-			want:   signerserver.DecisionPending,
+			want:   hosted.DecisionPending,
 		},
 		{
 			name:   "2of3 two approve -> approved",
-			policy: signerserver.ApprovalPolicy{RequiredApprovals: 2},
+			policy: hosted.ApprovalPolicy{RequiredApprovals: 2},
 			votes:  votes(ap("alice"), ap("bob")),
-			want:   signerserver.DecisionApproved,
+			want:   hosted.DecisionApproved,
 		},
 		{
 			name:   "2of3 three approve -> approved (overshoot fine)",
-			policy: signerserver.ApprovalPolicy{RequiredApprovals: 2},
+			policy: hosted.ApprovalPolicy{RequiredApprovals: 2},
 			votes:  votes(ap("alice"), ap("bob"), ap("carol")),
-			want:   signerserver.DecisionApproved,
+			want:   hosted.DecisionApproved,
 		},
 
 		// --- duplicate votes collapse ---
 		{
 			name:   "duplicate approve from one operator counts once -> pending at N=2",
-			policy: signerserver.ApprovalPolicy{RequiredApprovals: 2},
+			policy: hosted.ApprovalPolicy{RequiredApprovals: 2},
 			votes:  votes(ap("alice"), ap("alice")),
-			want:   signerserver.DecisionPending,
+			want:   hosted.DecisionPending,
 		},
 		{
 			name:   "duplicate first-wins: approve then deny from same op stays approve",
-			policy: signerserver.ApprovalPolicy{RequiredApprovals: 1, DenyVeto: true},
+			policy: hosted.ApprovalPolicy{RequiredApprovals: 1, DenyVeto: true},
 			votes:  votes(ap("alice"), dn("alice")),
-			want:   signerserver.DecisionApproved,
+			want:   hosted.DecisionApproved,
 		},
 
 		// --- deny veto ON ---
 		{
 			name:   "deny_veto on, one deny -> denied",
-			policy: signerserver.ApprovalPolicy{RequiredApprovals: 2, DenyVeto: true},
+			policy: hosted.ApprovalPolicy{RequiredApprovals: 2, DenyVeto: true},
 			votes:  votes(ap("alice"), dn("bob")),
-			want:   signerserver.DecisionDenied,
+			want:   hosted.DecisionDenied,
 		},
 		{
 			name:   "deny_veto on, veto wins tie even at threshold",
-			policy: signerserver.ApprovalPolicy{RequiredApprovals: 2, DenyVeto: true},
+			policy: hosted.ApprovalPolicy{RequiredApprovals: 2, DenyVeto: true},
 			votes:  votes(ap("alice"), ap("bob"), dn("carol")),
-			want:   signerserver.DecisionDenied,
+			want:   hosted.DecisionDenied,
 		},
 
 		// --- deny veto OFF ---
 		{
 			name:   "deny_veto off, one deny does not deny -> still pending",
-			policy: signerserver.ApprovalPolicy{RequiredApprovals: 2, DenyVeto: false},
+			policy: hosted.ApprovalPolicy{RequiredApprovals: 2, DenyVeto: false},
 			votes:  votes(ap("alice"), dn("bob")),
-			want:   signerserver.DecisionPending,
+			want:   hosted.DecisionPending,
 		},
 		{
 			name:   "deny_veto off, enough approves despite a deny -> approved",
-			policy: signerserver.ApprovalPolicy{RequiredApprovals: 2, DenyVeto: false},
+			policy: hosted.ApprovalPolicy{RequiredApprovals: 2, DenyVeto: false},
 			votes:  votes(ap("alice"), ap("bob"), dn("carol")),
-			want:   signerserver.DecisionApproved,
+			want:   hosted.DecisionApproved,
 		},
 
 		// --- self-approve OFF ---
 		{
 			name: "self_approve off, requester's approve ignored -> pending",
-			policy: signerserver.ApprovalPolicy{
+			policy: hosted.ApprovalPolicy{
 				RequiredApprovals: 1, AllowSelfApprove: false, Requester: "alice",
 			},
 			votes: votes(ap("alice")),
-			want:  signerserver.DecisionPending,
+			want:  hosted.DecisionPending,
 		},
 		{
 			name: "self_approve off, requester deny ignored under veto -> not denied, pending",
-			policy: signerserver.ApprovalPolicy{
+			policy: hosted.ApprovalPolicy{
 				RequiredApprovals: 1, DenyVeto: true, AllowSelfApprove: false, Requester: "alice",
 			},
 			votes: votes(dn("alice")),
-			want:  signerserver.DecisionPending,
+			want:  hosted.DecisionPending,
 		},
 		{
 			name: "self_approve off, requester+other -> only other counts -> approved at N=1",
-			policy: signerserver.ApprovalPolicy{
+			policy: hosted.ApprovalPolicy{
 				RequiredApprovals: 1, AllowSelfApprove: false, Requester: "alice",
 			},
 			votes: votes(ap("alice"), ap("bob")),
-			want:  signerserver.DecisionApproved,
+			want:  hosted.DecisionApproved,
 		},
 		{
 			name: "self_approve off, requester+other at N=2 -> pending (requester doesn't count)",
-			policy: signerserver.ApprovalPolicy{
+			policy: hosted.ApprovalPolicy{
 				RequiredApprovals: 2, AllowSelfApprove: false, Requester: "alice",
 			},
 			votes: votes(ap("alice"), ap("bob")),
-			want:  signerserver.DecisionPending,
+			want:  hosted.DecisionPending,
 		},
 
 		// --- self-approve ON ---
 		{
 			name: "self_approve on, requester's approve counts -> approved at N=1",
-			policy: signerserver.ApprovalPolicy{
+			policy: hosted.ApprovalPolicy{
 				RequiredApprovals: 1, AllowSelfApprove: true, Requester: "alice",
 			},
 			votes: votes(ap("alice")),
-			want:  signerserver.DecisionApproved,
+			want:  hosted.DecisionApproved,
 		},
 		{
 			name: "self_approve on, requester deny vetoes own request",
-			policy: signerserver.ApprovalPolicy{
+			policy: hosted.ApprovalPolicy{
 				RequiredApprovals: 1, DenyVeto: true, AllowSelfApprove: true, Requester: "alice",
 			},
 			votes: votes(dn("alice")),
-			want:  signerserver.DecisionDenied,
+			want:  hosted.DecisionDenied,
 		},
 
 		// --- N floor: non-positive N treated as 1 (never auto-approve) ---
 		{
 			name:   "N=0 floored to 1: no votes -> pending (not auto-approved)",
-			policy: signerserver.ApprovalPolicy{RequiredApprovals: 0},
+			policy: hosted.ApprovalPolicy{RequiredApprovals: 0},
 			votes:  votes(),
-			want:   signerserver.DecisionPending,
+			want:   hosted.DecisionPending,
 		},
 		{
 			name:   "N=0 floored to 1: one approve -> approved",
-			policy: signerserver.ApprovalPolicy{RequiredApprovals: 0},
+			policy: hosted.ApprovalPolicy{RequiredApprovals: 0},
 			votes:  votes(ap("alice")),
-			want:   signerserver.DecisionApproved,
+			want:   hosted.DecisionApproved,
 		},
 
 		// --- no requester identity supplied: no self-vote logic applies ---
 		{
 			name: "empty requester, self_approve off: nobody is the requester, vote counts",
-			policy: signerserver.ApprovalPolicy{
+			policy: hosted.ApprovalPolicy{
 				RequiredApprovals: 1, AllowSelfApprove: false, Requester: "",
 			},
 			votes: votes(ap("alice")),
-			want:  signerserver.DecisionApproved,
+			want:  hosted.DecisionApproved,
 		},
 	}
 
@@ -194,7 +194,7 @@ func TestDecide_Matrix(t *testing.T) {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := signerserver.Decide(tc.policy, tc.votes)
+			got := hosted.Decide(tc.policy, tc.votes)
 			if got != tc.want {
 				t.Fatalf("Decide = %q; want %q", got, tc.want)
 			}
@@ -208,8 +208,8 @@ func TestApprovingOperators(t *testing.T) {
 	t.Parallel()
 
 	// Self-approve off: requester excluded; order is first-vote order.
-	got := signerserver.ApprovingOperators(
-		signerserver.ApprovalPolicy{AllowSelfApprove: false, Requester: "alice"},
+	got := hosted.ApprovingOperators(
+		hosted.ApprovalPolicy{AllowSelfApprove: false, Requester: "alice"},
 		votes(ap("bob"), ap("alice"), dn("carol"), ap("dave")),
 	)
 	want := []string{"bob", "dave"}
@@ -223,8 +223,8 @@ func TestApprovingOperators(t *testing.T) {
 	}
 
 	// Self-approve on: requester's approve is included.
-	got2 := signerserver.ApprovingOperators(
-		signerserver.ApprovalPolicy{AllowSelfApprove: true, Requester: "alice"},
+	got2 := hosted.ApprovingOperators(
+		hosted.ApprovalPolicy{AllowSelfApprove: true, Requester: "alice"},
 		votes(ap("alice"), ap("bob")),
 	)
 	if len(got2) != 2 || got2[0] != "alice" || got2[1] != "bob" {

@@ -1,4 +1,4 @@
-package signerserver_test
+package hosted_test
 
 import (
 	"context"
@@ -11,15 +11,15 @@ import (
 	virtualwebauthn "github.com/descope/virtualwebauthn"
 	"github.com/pquerna/otp/totp"
 
+	"github.com/karthikeyan5/sshgate/pkg/signerkit/hosted"
 	"github.com/karthikeyan5/sshgate/pkg/signerkit/sqlitestore"
 	"github.com/karthikeyan5/sshgate/pkg/signerkit/store"
-	signerserver "github.com/karthikeyan5/sshgate/src/signer-server"
 )
 
 // authFixture stands up a real SQLite store + an AuthManager with a fixed
 // RP config, and seeds one user. Returns the manager, the store, and the
 // seeded user id.
-func authFixture(t *testing.T) (*signerserver.AuthManager, *sqlitestore.DB, string) {
+func authFixture(t *testing.T) (*hosted.AuthManager, *sqlitestore.DB, string) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "auth.db")
 	db, err := sqlitestore.Open(path)
@@ -28,7 +28,7 @@ func authFixture(t *testing.T) (*signerserver.AuthManager, *sqlitestore.DB, stri
 	}
 	t.Cleanup(func() { _ = db.Close() })
 
-	am, err := signerserver.NewAuthManager(db, signerserver.AuthConfig{
+	am, err := hosted.NewAuthManager(db, hosted.AuthConfig{
 		RPID:          "signer.example.com",
 		RPDisplayName: "SSHGate Signer",
 		RPOrigins:     []string{"https://signer.example.com"},
@@ -62,22 +62,22 @@ func TestNewAuthManager_RejectsMisconfig(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = db.Close() })
 
-	good := signerserver.AuthConfig{RPID: "signer.example.com", RPOrigins: []string{"https://signer.example.com"}, SessionTTL: time.Minute}
+	good := hosted.AuthConfig{RPID: "signer.example.com", RPOrigins: []string{"https://signer.example.com"}, SessionTTL: time.Minute}
 
 	cases := []struct {
 		name string
 		st   store.Store
-		cfg  signerserver.AuthConfig
+		cfg  hosted.AuthConfig
 	}{
 		{"nil store", nil, good},
-		{"empty RPID", db, signerserver.AuthConfig{RPOrigins: []string{"https://signer.example.com"}, SessionTTL: time.Minute}},
-		{"no origins", db, signerserver.AuthConfig{RPID: "signer.example.com", SessionTTL: time.Minute}},
-		{"zero TTL", db, signerserver.AuthConfig{RPID: "signer.example.com", RPOrigins: []string{"https://signer.example.com"}}},
+		{"empty RPID", db, hosted.AuthConfig{RPOrigins: []string{"https://signer.example.com"}, SessionTTL: time.Minute}},
+		{"no origins", db, hosted.AuthConfig{RPID: "signer.example.com", SessionTTL: time.Minute}},
+		{"zero TTL", db, hosted.AuthConfig{RPID: "signer.example.com", RPOrigins: []string{"https://signer.example.com"}}},
 	}
 	for _, tc := range cases {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := signerserver.NewAuthManager(tc.st, tc.cfg); err == nil {
+			if _, err := hosted.NewAuthManager(tc.st, tc.cfg); err == nil {
 				t.Fatalf("NewAuthManager(%s) = nil err; want a rejection", tc.name)
 			}
 		})
@@ -117,7 +117,7 @@ func TestTOTP_EnrollAndVerify(t *testing.T) {
 	if code == wrong { // astronomically unlikely, but be deterministic
 		wrong = "111111"
 	}
-	if err := am.VerifyTOTP(ctx, userID, wrong); !errors.Is(err, signerserver.ErrAuthFailed) {
+	if err := am.VerifyTOTP(ctx, userID, wrong); !errors.Is(err, hosted.ErrAuthFailed) {
 		t.Fatalf("VerifyTOTP(wrong) = %v; want ErrAuthFailed", err)
 	}
 
@@ -138,7 +138,7 @@ func TestTOTP_EnrollAndVerify(t *testing.T) {
 	// Guard: only meaningful if the stale code actually differs from the
 	// current one (it virtually always does).
 	if staleCode != code {
-		if err := am.VerifyTOTP(ctx, userID, staleCode); !errors.Is(err, signerserver.ErrAuthFailed) {
+		if err := am.VerifyTOTP(ctx, userID, staleCode); !errors.Is(err, hosted.ErrAuthFailed) {
 			t.Fatalf("VerifyTOTP(stale +10m) = %v; want ErrAuthFailed", err)
 		}
 	}
@@ -149,7 +149,7 @@ func TestTOTP_EnrollAndVerify(t *testing.T) {
 func TestTOTP_NotEnrolled(t *testing.T) {
 	t.Parallel()
 	am, _, userID := authFixture(t)
-	if err := am.VerifyTOTP(context.Background(), userID, "123456"); !errors.Is(err, signerserver.ErrTOTPNotEnrolled) {
+	if err := am.VerifyTOTP(context.Background(), userID, "123456"); !errors.Is(err, hosted.ErrTOTPNotEnrolled) {
 		t.Fatalf("VerifyTOTP(no secret) = %v; want ErrTOTPNotEnrolled", err)
 	}
 }
@@ -170,7 +170,7 @@ func waRP() virtualwebauthn.RelyingParty {
 // registerPasskey drives a full BeginRegistration → software authenticator
 // → FinishRegistration round-trip and returns the authenticator + the
 // credential so a subsequent login can assert with them.
-func registerPasskey(t *testing.T, am *signerserver.AuthManager, userID string) (virtualwebauthn.Authenticator, virtualwebauthn.Credential) {
+func registerPasskey(t *testing.T, am *hosted.AuthManager, userID string) (virtualwebauthn.Authenticator, virtualwebauthn.Credential) {
 	t.Helper()
 	ctx := context.Background()
 
@@ -253,7 +253,7 @@ func TestWebAuthn_ChallengeMisuseRejected(t *testing.T) {
 	ctx := context.Background()
 
 	// A finish with a never-issued challenge id fails closed.
-	if _, err := am.FinishRegistration(ctx, userID, "bogus-handle", []byte(`{}`)); !errors.Is(err, signerserver.ErrAuthFailed) {
+	if _, err := am.FinishRegistration(ctx, userID, "bogus-handle", []byte(`{}`)); !errors.Is(err, hosted.ErrAuthFailed) {
 		t.Fatalf("FinishRegistration(bogus) = %v; want ErrAuthFailed", err)
 	}
 
@@ -272,7 +272,7 @@ func TestWebAuthn_ChallengeMisuseRejected(t *testing.T) {
 		t.Fatalf("FinishRegistration(first): %v", err)
 	}
 	// Second use of the same handle: rejected.
-	if _, err := am.FinishRegistration(ctx, userID, challengeID, []byte(resp)); !errors.Is(err, signerserver.ErrAuthFailed) {
+	if _, err := am.FinishRegistration(ctx, userID, challengeID, []byte(resp)); !errors.Is(err, hosted.ErrAuthFailed) {
 		t.Fatalf("FinishRegistration(replay) = %v; want ErrAuthFailed", err)
 	}
 }
@@ -305,7 +305,7 @@ func TestSession_IssueValidateRevoke(t *testing.T) {
 	if err := am.RevokeSession(ctx, sess.ID); err != nil {
 		t.Fatalf("RevokeSession: %v", err)
 	}
-	if _, err := am.ValidateSession(ctx, sess.ID); !errors.Is(err, signerserver.ErrAuthFailed) {
+	if _, err := am.ValidateSession(ctx, sess.ID); !errors.Is(err, hosted.ErrAuthFailed) {
 		t.Fatalf("ValidateSession(after revoke) = %v; want ErrAuthFailed", err)
 	}
 }
@@ -325,7 +325,7 @@ func TestSession_Expiry(t *testing.T) {
 	if err := db.CreateUser(context.Background(), &store.User{ID: userID, Username: "bob", Role: "operator"}); err != nil {
 		t.Fatalf("CreateUser: %v", err)
 	}
-	am, err := signerserver.NewAuthManager(db, signerserver.AuthConfig{
+	am, err := hosted.NewAuthManager(db, hosted.AuthConfig{
 		RPID:       "signer.example.com",
 		RPOrigins:  []string{"https://signer.example.com"},
 		SessionTTL: time.Nanosecond, // already-expired by validate time
@@ -339,7 +339,7 @@ func TestSession_Expiry(t *testing.T) {
 		t.Fatalf("IssueSession: %v", err)
 	}
 	time.Sleep(2 * time.Millisecond)
-	if _, err := am.ValidateSession(ctx, sess.ID); !errors.Is(err, signerserver.ErrAuthFailed) {
+	if _, err := am.ValidateSession(ctx, sess.ID); !errors.Is(err, hosted.ErrAuthFailed) {
 		t.Fatalf("ValidateSession(expired) = %v; want ErrAuthFailed", err)
 	}
 }
@@ -359,19 +359,19 @@ func TestStepUp_TOTP(t *testing.T) {
 	}
 	code, _ := totp.GenerateCode(enr.Secret, time.Now())
 
-	method, err := am.StepUp(ctx, userID, signerserver.StepUpTOTP, code)
+	method, err := am.StepUp(ctx, userID, hosted.StepUpTOTP, code)
 	if err != nil {
 		t.Fatalf("StepUp(valid totp) = %v; want nil", err)
 	}
-	if method != signerserver.StepUpTOTP {
+	if method != hosted.StepUpTOTP {
 		t.Fatalf("step-up method = %q; want totp", method)
 	}
 
-	if _, err := am.StepUp(ctx, userID, signerserver.StepUpTOTP, "000000"); err == nil {
+	if _, err := am.StepUp(ctx, userID, hosted.StepUpTOTP, "000000"); err == nil {
 		t.Fatalf("StepUp(wrong totp) = nil; want failure")
 	}
 
-	if _, err := am.StepUp(ctx, userID, signerserver.StepUpWebAuthn, ""); err == nil {
+	if _, err := am.StepUp(ctx, userID, hosted.StepUpWebAuthn, ""); err == nil {
 		t.Fatalf("StepUp(webauthn) should error: it is performed via the login ceremony, not StepUp")
 	}
 }
