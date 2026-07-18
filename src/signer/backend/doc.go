@@ -1,18 +1,12 @@
-// Package backend defines the abstract approval-channel interface used
-// by the signer daemon, plus the concrete implementations the daemon
-// can be wired to.
+// Package backend is the local Telegram approval front end: TelegramBackend
+// posts each request to the operator's Telegram DM and waits for an
+// inline-keyboard tap, ChatStore persists the linked DM chat_id, and
+// Explainer renders optional plain-English command explanations.
+// TelegramBackend implements the signerkit.Backend interface defined in
+// pkg/signerkit, which also holds the other implementations (StubBackend,
+// MockBackend, HostedServerBackend) and the request/result types.
 //
-// The Backend interface is the v1→v2 swap point: v1 ships StubBackend
-// (always denies, used by the phase-1 end-to-end test that proves the
-// signing loop without a human in the loop) and — landing in task 2.1 —
-// TelegramBackend, which posts the request to the operator's Telegram DM and waits for
-// an inline-keyboard tap. v2's HostedServerBackend implements the same
-// interface against a remote HTTPS approval service.
-//
-// MockBackend is a test fixture: tests inject it into the daemon and
-// drive specific outcomes (Approve / Deny / Timeout) by request ID.
-//
-// Implementations MUST be safe for concurrent calls — the daemon serves
+// TelegramBackend MUST be safe for concurrent calls — the daemon serves
 // multiple sign requests in parallel and a backend that serialises
 // internally is acceptable, but one that races on shared state is not.
 package backend
