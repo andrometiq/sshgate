@@ -19,7 +19,7 @@
 //     root is exactly the install-time mistake we want to catch).
 //  2. Acquires an flock on <sock_dir>/sock.lock (daemon.md §3.1). A
 //     second start refuses immediately.
-//  3. Loads the private key via signer.LoadKey (mode 0o077 check).
+//  3. Loads the private key via signerkit.LoadKey (mode 0o077 check).
 //  4. Opens the audit log in append mode.
 //  5. Builds the configured backend (currently only "stub"; "telegram"
 //     is recognised as a config value but returns "not yet implemented
@@ -52,7 +52,6 @@ import (
 	"github.com/karthikeyan5/sshgate/pkg/signerkit"
 	"github.com/karthikeyan5/sshgate/src/redact"
 	redactrules "github.com/karthikeyan5/sshgate/src/redact/rules"
-	"github.com/karthikeyan5/sshgate/src/signer"
 	"github.com/karthikeyan5/sshgate/src/signer/backend"
 	"github.com/karthikeyan5/sshgate/src/sigwire"
 )
@@ -196,13 +195,13 @@ func run(args []string) int {
 	}
 	defer release()
 
-	priv, err := signer.LoadKey(cfg.Paths.Key)
+	priv, err := signerkit.LoadKey(cfg.Paths.Key)
 	if err != nil {
 		logf("load key: %v", err)
 		return 1
 	}
 
-	audit, err := signer.OpenAuditLog(cfg.Paths.AuditLog)
+	audit, err := signerkit.OpenAuditLog(cfg.Paths.AuditLog)
 	if err != nil {
 		logf("open audit log: %v", err)
 		return 1
@@ -241,14 +240,14 @@ func run(args []string) int {
 	// transfer at the lookup step. A present file must be 0600 (LoadXferRegistry
 	// enforces the group/other-bit rejection — it is a trust anchor).
 	xferRegPath := filepath.Join(filepath.Dir(cfg.Paths.Key), "xfer-registry.json")
-	xferReg, err := signer.LoadXferRegistry(xferRegPath)
+	xferReg, err := signerkit.LoadXferRegistry(xferRegPath)
 	if err != nil {
 		logf("load xfer registry: %v", err)
 		return 1
 	}
 
 	// One codebase (signerkit phase 4): the local signer constructs its core
-	// through signerkit.New instead of a signer.Daemon struct literal, so this
+	// through signerkit.New instead of a signerkit.Daemon struct literal, so this
 	// front-end and the embeddable/hosted front-end share ONE signing core.
 	// The wiring is byte-for-byte the same as the old literal: the file key
 	// loaded above is passed as the crypto.Signer identity (an
@@ -278,7 +277,7 @@ func run(args []string) int {
 	// It is pinned to sigwire.SignerHandlerTimeout, which is defined as
 	// ApprovalWindow + slack, so it can never fall at/below the window and
 	// strand an approved-but-undelivered signature. See sigwire/timeouts.go.
-	srv := &signer.Server{Path: cfg.Paths.Socket, Handler: svc, HandlerTimeout: sigwire.SignerHandlerTimeout}
+	srv := &signerkit.Server{Path: cfg.Paths.Socket, Handler: svc, HandlerTimeout: sigwire.SignerHandlerTimeout}
 
 	// SIGHUP: log "restart to apply changes" and continue.
 	hupCh := make(chan os.Signal, 1)
@@ -340,10 +339,10 @@ func buildBackend(ctx context.Context, bcfg struct {
 	Type     string         `toml:"type"`
 	Telegram telegramConfig `toml:"telegram"`
 	Hosted   hostedConfig   `toml:"hosted"`
-}, redactSalt [32]byte, redactRules []redact.Rule) (backend.Backend, error) {
+}, redactSalt [32]byte, redactRules []redact.Rule) (signerkit.Backend, error) {
 	switch bcfg.Type {
 	case "stub":
-		return backend.StubBackend{}, nil
+		return signerkit.StubBackend{}, nil
 	case "telegram":
 		return buildTelegramBackend(ctx, bcfg.Telegram, redactSalt, redactRules)
 	case "hosted":
@@ -360,7 +359,7 @@ func buildBackend(ctx context.Context, bcfg struct {
 // "error" responses to the MCP, which surfaces the operator's
 // misconfiguration without preventing other v1 backends from
 // continuing to work after a swap-back).
-func buildHostedBackend(c hostedConfig) (backend.Backend, error) {
+func buildHostedBackend(c hostedConfig) (signerkit.Backend, error) {
 	if c.BaseURL == "" {
 		return nil, errors.New(`config missing backend.hosted.base_url`)
 	}
@@ -388,7 +387,7 @@ func buildHostedBackend(c hostedConfig) (backend.Backend, error) {
 	}
 	logf("hosted backend ready (base_url=%s client_id=%s poll_wait=%s timeout=%s)",
 		c.BaseURL, c.ClientID, pollWait, timeout)
-	return &backend.HostedServerBackend{
+	return &signerkit.HostedServerBackend{
 		BaseURL:    c.BaseURL,
 		APIKey:     key,
 		ClientID:   c.ClientID,
@@ -401,7 +400,7 @@ func buildHostedBackend(c hostedConfig) (backend.Backend, error) {
 // buildTelegramBackend reads the bot token, constructs the backend
 // (which calls getMe internally — daemon.md §11 "fail fast at the
 // boundary"), and starts the polling goroutine before returning.
-func buildTelegramBackend(ctx context.Context, c telegramConfig, redactSalt [32]byte, redactRules []redact.Rule) (backend.Backend, error) {
+func buildTelegramBackend(ctx context.Context, c telegramConfig, redactSalt [32]byte, redactRules []redact.Rule) (signerkit.Backend, error) {
 	if c.TokenPath == "" {
 		return nil, errors.New(`config missing backend.telegram.token_path`)
 	}
@@ -663,7 +662,7 @@ func doInitFlow(configPath string, dev bool) error {
 		}
 	}
 
-	if err := signer.GenerateKeyPair(keyPath, pubPath); err != nil {
+	if err := signerkit.GenerateKeyPair(keyPath, pubPath); err != nil {
 		return fmt.Errorf("generate keypair: %w", err)
 	}
 

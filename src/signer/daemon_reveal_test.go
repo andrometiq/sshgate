@@ -7,7 +7,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/karthikeyan5/sshgate/src/signer/backend"
+	"github.com/karthikeyan5/sshgate/pkg/signerkit"
 	"github.com/karthikeyan5/sshgate/src/sigwire"
 )
 
@@ -18,7 +18,7 @@ import (
 // regression that dropped it would silently un-reveal every approval.
 func TestDaemon_SignsRevealFlag(t *testing.T) {
 	t.Parallel()
-	mock := backend.NewMockBackend()
+	mock := signerkit.NewMockBackend()
 	d, pub, audit, _ := newDaemon(t, mock)
 	defer audit.Close()
 
@@ -65,7 +65,7 @@ func TestDaemon_SignsRevealFlag(t *testing.T) {
 // field) signs a reveal=false payload — the common case stays un-revealed.
 func TestDaemon_DefaultIsNotReveal(t *testing.T) {
 	t.Parallel()
-	mock := backend.NewMockBackend()
+	mock := signerkit.NewMockBackend()
 	d, _, audit, _ := newDaemon(t, mock)
 	defer audit.Close()
 

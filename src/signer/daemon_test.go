@@ -15,9 +15,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/karthikeyan5/sshgate/pkg/signerkit"
 	"github.com/karthikeyan5/sshgate/src/sigwire"
-	"github.com/karthikeyan5/sshgate/src/signer"
-	"github.com/karthikeyan5/sshgate/src/signer/backend"
 )
 
 // memConn is an in-memory full-duplex pipe wrapper with separate
@@ -31,18 +30,18 @@ type memConn struct {
 func (m *memConn) Read(p []byte) (int, error)  { return m.in.Read(p) }
 func (m *memConn) Write(p []byte) (int, error) { return m.out.Write(p) }
 
-func newDaemon(t *testing.T, bk backend.Backend) (*signer.Daemon, ed25519.PublicKey, *signer.AuditLog, string) {
+func newDaemon(t *testing.T, bk signerkit.Backend) (*signerkit.Daemon, ed25519.PublicKey, *signerkit.AuditLog, string) {
 	t.Helper()
 	pub, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatalf("genkey: %v", err)
 	}
 	auditPath := filepath.Join(t.TempDir(), "audit.log")
-	audit, err := signer.OpenAuditLog(auditPath)
+	audit, err := signerkit.OpenAuditLog(auditPath)
 	if err != nil {
 		t.Fatalf("open audit: %v", err)
 	}
-	d := &signer.Daemon{
+	d := &signerkit.Daemon{
 		Key:     priv,
 		Backend: bk,
 		Audit:   audit,
@@ -53,7 +52,7 @@ func newDaemon(t *testing.T, bk backend.Backend) (*signer.Daemon, ed25519.Public
 
 func TestDaemon_ApprovePath_SignaturesVerify(t *testing.T) {
 	t.Parallel()
-	mock := backend.NewMockBackend()
+	mock := signerkit.NewMockBackend()
 	d, pub, audit, auditPath := newDaemon(t, mock)
 	defer audit.Close()
 
@@ -137,7 +136,7 @@ func TestDaemon_ApprovePath_SignaturesVerify(t *testing.T) {
 // dropped the field would silently un-bind every signature.
 func TestDaemon_SignsHostBinding(t *testing.T) {
 	t.Parallel()
-	mock := backend.NewMockBackend()
+	mock := signerkit.NewMockBackend()
 	d, pub, audit, _ := newDaemon(t, mock)
 	defer audit.Close()
 
@@ -183,7 +182,7 @@ func TestDaemon_SignsHostBinding(t *testing.T) {
 
 func TestDaemon_DenyPath(t *testing.T) {
 	t.Parallel()
-	mock := backend.NewMockBackend()
+	mock := signerkit.NewMockBackend()
 	d, _, audit, auditPath := newDaemon(t, mock)
 	defer audit.Close()
 	mock.Deny("r_d1")
@@ -211,7 +210,7 @@ func TestDaemon_DenyPath(t *testing.T) {
 
 func TestDaemon_TimeoutPath(t *testing.T) {
 	t.Parallel()
-	mock := backend.NewMockBackend()
+	mock := signerkit.NewMockBackend()
 	d, _, audit, auditPath := newDaemon(t, mock)
 	defer audit.Close()
 	mock.Timeout("r_t1")
@@ -239,11 +238,11 @@ func TestDaemon_TimeoutPath(t *testing.T) {
 
 func TestDaemon_MalformedRequest(t *testing.T) {
 	t.Parallel()
-	mock := backend.NewMockBackend()
+	mock := signerkit.NewMockBackend()
 	d, _, audit, auditPath := newDaemon(t, mock)
 	defer audit.Close()
 	// Garbled JSON: missing closing brace, then newline.
-	conn := &memConn{in: bytes.NewReader([]byte(`{"kind":"sign"`+"\n")), out: &bytes.Buffer{}}
+	conn := &memConn{in: bytes.NewReader([]byte(`{"kind":"sign"` + "\n")), out: &bytes.Buffer{}}
 	if err := d.HandleSignRequest(context.Background(), conn); err != nil {
 		t.Fatalf("HandleSignRequest unexpectedly returned err: %v", err)
 	}
@@ -270,7 +269,7 @@ func TestDaemon_MalformedRequest(t *testing.T) {
 
 func TestDaemon_ConcurrentRequestsDontCross(t *testing.T) {
 	t.Parallel()
-	mock := backend.NewMockBackend()
+	mock := signerkit.NewMockBackend()
 	d, _, audit, _ := newDaemon(t, mock)
 	defer audit.Close()
 
@@ -320,7 +319,7 @@ func TestDaemon_AuditRecordsServerFieldVerbatim(t *testing.T) {
 	// is responsible for passing the alias rather than the host;
 	// this test pins the daemon side of that contract so a future
 	// daemon refactor can't silently mangle the field.
-	mock := backend.NewMockBackend()
+	mock := signerkit.NewMockBackend()
 	d, _, audit, auditPath := newDaemon(t, mock)
 	defer audit.Close()
 	mock.Approve("r_alias1", "karthi")
@@ -354,7 +353,7 @@ func (f *failingWriter) Write(p []byte) (int, error) { return 0, io.ErrClosedPip
 
 func TestDaemon_ApprovedButWriteFails_AuditRecordsUndelivered(t *testing.T) {
 	t.Parallel()
-	mock := backend.NewMockBackend()
+	mock := signerkit.NewMockBackend()
 	d, _, audit, auditPath := newDaemon(t, mock)
 	defer audit.Close()
 	mock.Approve("r_und1", "karthi")
@@ -397,19 +396,19 @@ func TestDaemon_VerdictWriteFails_AuditRecordsUndelivered(t *testing.T) {
 	cases := []struct {
 		name       string
 		reqID      string
-		arm        func(m *backend.MockBackend, reqID string)
+		arm        func(m *signerkit.MockBackend, reqID string)
 		wantStatus string
 	}{
 		{
 			name:       "denied write-lost",
 			reqID:      "r_deny_und",
-			arm:        func(m *backend.MockBackend, id string) { m.Deny(id) },
+			arm:        func(m *signerkit.MockBackend, id string) { m.Deny(id) },
 			wantStatus: "denied-undelivered",
 		},
 		{
 			name:       "timeout write-lost",
 			reqID:      "r_to_und",
-			arm:        func(m *backend.MockBackend, id string) { m.Timeout(id) },
+			arm:        func(m *signerkit.MockBackend, id string) { m.Timeout(id) },
 			wantStatus: "timeout-undelivered",
 		},
 	}
@@ -417,7 +416,7 @@ func TestDaemon_VerdictWriteFails_AuditRecordsUndelivered(t *testing.T) {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			mock := backend.NewMockBackend()
+			mock := signerkit.NewMockBackend()
 			d, _, audit, auditPath := newDaemon(t, mock)
 			defer audit.Close()
 			tc.arm(mock, tc.reqID)
@@ -446,11 +445,11 @@ func TestDaemon_RemoteSignPath_PassesSignaturesVerbatim(t *testing.T) {
 	// Simulates a HostedServerBackend that returned pre-signed wire
 	// strings. The daemon must pass them through unmodified — NOT
 	// re-sign with d.Key.
-	mock := backend.NewMockBackend()
+	mock := signerkit.NewMockBackend()
 	d, pub, audit, auditPath := newDaemon(t, mock)
 	defer audit.Close()
 
-	cannedSigs := []backend.SignedCmd{
+	cannedSigs := []signerkit.SignedCmd{
 		{Cmd: "systemctl restart nginx", Sig: "SSHGATE_SIG:remote-sig-1"},
 		{Cmd: "apt install -y certbot", Sig: "SSHGATE_SIG:remote-sig-2"},
 	}
@@ -501,13 +500,13 @@ func TestDaemon_RemoteSignPath_PassesSignaturesVerbatim(t *testing.T) {
 
 func TestDaemon_RemoteSign_LengthMismatch_RespondsError(t *testing.T) {
 	t.Parallel()
-	mock := backend.NewMockBackend()
+	mock := signerkit.NewMockBackend()
 	d, _, audit, auditPath := newDaemon(t, mock)
 	defer audit.Close()
 
 	// Two commands in request, one signature returned.
 	mock.ApproveWithSignatures("r_mismatch_len",
-		[]backend.SignedCmd{{Cmd: "echo a", Sig: "SSHGATE_SIG:x"}},
+		[]signerkit.SignedCmd{{Cmd: "echo a", Sig: "SSHGATE_SIG:x"}},
 		"karthi")
 	req := `{"kind":"sign","request_id":"r_mismatch_len","commands":[{"server":"p","cmd":"echo a","ttl_seconds":60},{"server":"p","cmd":"echo b","ttl_seconds":60}]}`
 	conn := &memConn{in: bytes.NewReader([]byte(req + "\n")), out: &bytes.Buffer{}}
@@ -536,14 +535,14 @@ func TestDaemon_RemoteSign_LengthMismatch_RespondsError(t *testing.T) {
 
 func TestDaemon_RemoteSign_CmdMismatch_RespondsError(t *testing.T) {
 	t.Parallel()
-	mock := backend.NewMockBackend()
+	mock := signerkit.NewMockBackend()
 	d, _, audit, auditPath := newDaemon(t, mock)
 	defer audit.Close()
 
 	// Length matches but the second sig's Cmd doesn't match the
 	// request's second command — defence against a misbehaving server.
 	mock.ApproveWithSignatures("r_mismatch_cmd",
-		[]backend.SignedCmd{
+		[]signerkit.SignedCmd{
 			{Cmd: "echo a", Sig: "SSHGATE_SIG:x1"},
 			{Cmd: "WRONG", Sig: "SSHGATE_SIG:x2"},
 		},
@@ -574,16 +573,16 @@ func TestDaemon_RemoteSign_CmdMismatch_RespondsError(t *testing.T) {
 }
 
 // readAudit re-opens the audit log file and parses all lines.
-func readAudit(t *testing.T, path string) []signer.AuditEvent {
+func readAudit(t *testing.T, path string) []signerkit.AuditEvent {
 	t.Helper()
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read audit: %v", err)
 	}
-	var out []signer.AuditEvent
+	var out []signerkit.AuditEvent
 	sc := bufio.NewScanner(bytes.NewReader(data))
 	for sc.Scan() {
-		var ev signer.AuditEvent
+		var ev signerkit.AuditEvent
 		if err := json.Unmarshal(sc.Bytes(), &ev); err != nil {
 			t.Fatalf("bad audit line: %v\n%q", err, sc.Text())
 		}

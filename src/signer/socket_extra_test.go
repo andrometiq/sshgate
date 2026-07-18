@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/karthikeyan5/sshgate/src/signer"
+	"github.com/karthikeyan5/sshgate/pkg/signerkit"
 )
 
 // blockingHandler never reads and never writes; it blocks until its
@@ -35,7 +35,7 @@ func TestServer_PerConnectionDeadline(t *testing.T) {
 	dir := t.TempDir()
 	sockPath := filepath.Join(dir, "sock")
 	ctx, cancel := context.WithCancel(context.Background())
-	srv := &signer.Server{
+	srv := &signerkit.Server{
 		Path:           sockPath,
 		Handler:        blockingHandler{},
 		HandlerTimeout: 150 * time.Millisecond,
@@ -109,7 +109,7 @@ func TestServer_HandlerPanicRecovered(t *testing.T) {
 	dir := t.TempDir()
 	sockPath := filepath.Join(dir, "sock")
 	ctx, cancel := context.WithCancel(context.Background())
-	srv := &signer.Server{Path: sockPath, Handler: &panicOnceHandler{}}
+	srv := &signerkit.Server{Path: sockPath, Handler: &panicOnceHandler{}}
 	done := make(chan error, 1)
 	go func() { done <- srv.Listen(ctx) }()
 	waitForSocket(t, sockPath, cancel)

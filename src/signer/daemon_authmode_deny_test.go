@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/karthikeyan5/sshgate/src/signer/backend"
+	"github.com/karthikeyan5/sshgate/pkg/signerkit"
 )
 
 // realDenyBackend is a backend stub that mirrors the REAL Telegram backend's
@@ -21,29 +21,29 @@ import (
 // reproduces what production actually does. The Result is fully configurable
 // so the same stub drives the approved-undelivered over-correction check.
 type realDenyBackend struct {
-	result backend.Result
+	result signerkit.Result
 }
 
-func (b realDenyBackend) Request(context.Context, backend.ApprovalRequest) (<-chan backend.Result, error) {
-	ch := make(chan backend.Result, 1)
+func (b realDenyBackend) Request(context.Context, signerkit.ApprovalRequest) (<-chan signerkit.Result, error) {
+	ch := make(chan signerkit.Result, 1)
 	ch <- b.result
 	return ch, nil
 }
 
-func (b realDenyBackend) RequestGrant(context.Context, backend.GrantApprovalRequest) (<-chan backend.Result, error) {
-	ch := make(chan backend.Result, 1)
+func (b realDenyBackend) RequestGrant(context.Context, signerkit.GrantApprovalRequest) (<-chan signerkit.Result, error) {
+	ch := make(chan signerkit.Result, 1)
 	ch <- b.result
 	return ch, nil
 }
 
-func (b realDenyBackend) RequestTransfer(context.Context, backend.TransferApprovalRequest) (<-chan backend.Result, error) {
-	ch := make(chan backend.Result, 1)
+func (b realDenyBackend) RequestTransfer(context.Context, signerkit.TransferApprovalRequest) (<-chan signerkit.Result, error) {
+	ch := make(chan signerkit.Result, 1)
 	ch <- b.result
 	return ch, nil
 }
 
-func (b realDenyBackend) RequestRegisterKey(context.Context, backend.RegisterApprovalRequest) (<-chan backend.Result, error) {
-	ch := make(chan backend.Result, 1)
+func (b realDenyBackend) RequestRegisterKey(context.Context, signerkit.RegisterApprovalRequest) (<-chan signerkit.Result, error) {
+	ch := make(chan signerkit.Result, 1)
 	ch <- b.result
 	return ch, nil
 }
@@ -69,8 +69,8 @@ func (c *failWriteConn) Write([]byte) (int, error)  { return 0, errors.New("writ
 // auth_mode come back "human".
 func TestAuthMode_RealDeny_NotRecordedAsHuman(t *testing.T) {
 	t.Parallel()
-	bk := realDenyBackend{result: backend.Result{
-		Status:     backend.StatusDenied,
+	bk := realDenyBackend{result: signerkit.Result{
+		Status:     signerkit.StatusDenied,
 		ApprovedBy: "@denier", // real Telegram backend behaviour on a DENY
 	}}
 	d, _, audit, auditPath, _ := newGrantDaemon(t, bk, time.Unix(1000, 0))
@@ -104,8 +104,8 @@ func TestAuthMode_RealDeny_NotRecordedAsHuman(t *testing.T) {
 // helper keys on HasPrefix(status,"approved"), so it still resolves "human".
 func TestAuthMode_ApprovedUndelivered_StillHuman(t *testing.T) {
 	t.Parallel()
-	bk := realDenyBackend{result: backend.Result{
-		Status:     backend.StatusApproved,
+	bk := realDenyBackend{result: signerkit.Result{
+		Status:     signerkit.StatusApproved,
 		ApprovedBy: "karthi",
 	}}
 	d, _, audit, auditPath, _ := newGrantDaemon(t, bk, time.Unix(1000, 0))
@@ -134,7 +134,7 @@ func TestAuthMode_ApprovedUndelivered_StillHuman(t *testing.T) {
 // grant marker either).
 func TestAuthMode_GrantUndelivered_StillGrant(t *testing.T) {
 	t.Parallel()
-	mock := backend.NewMockBackend()
+	mock := signerkit.NewMockBackend()
 	d, _, audit, auditPath, _ := newGrantDaemon(t, mock, time.Unix(1000, 0))
 	defer audit.Close()
 

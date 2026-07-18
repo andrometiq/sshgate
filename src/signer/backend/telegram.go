@@ -17,11 +17,12 @@ import (
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
+	"github.com/karthikeyan5/sshgate/pkg/signerkit"
 	"github.com/karthikeyan5/sshgate/src/redact"
 	"github.com/karthikeyan5/sshgate/src/sigwire"
 )
 
-// TelegramBackend implements Backend over a dedicated Telegram bot DM.
+// TelegramBackend implements signerkit.Backend over a dedicated Telegram bot DM.
 //
 // The contract (spec §"signer-bot"): signer posts a message
 // listing the queued commands plus Approve/Deny inline-keyboard buttons
@@ -104,7 +105,7 @@ type TelegramBackend struct {
 // ps.once.Do — both establish happens-before with the publish, so
 // there's no need for a separate mutex protecting the fields.
 type pendingState struct {
-	ch        chan Result
+	ch        chan signerkit.Result
 	once      sync.Once
 	chatID    int64  // DM chat where the request message was posted
 	messageID int    // for editing the message on resolution
@@ -478,14 +479,14 @@ func (t *TelegramBackend) handleCallback(cb *tgbotapi.CallbackQuery) {
 	}
 	ps := raw.(*pendingState)
 
-	var status ResultStatus
+	var status signerkit.ResultStatus
 	var verbPast string
 	switch action {
 	case "approve":
-		status = StatusApproved
+		status = signerkit.StatusApproved
 		verbPast = "Approved"
 	case "deny":
-		status = StatusDenied
+		status = signerkit.StatusDenied
 		verbPast = "Denied"
 	default:
 		// parseCallbackData guarantees this; defensive.
@@ -493,7 +494,7 @@ func (t *TelegramBackend) handleCallback(cb *tgbotapi.CallbackQuery) {
 	}
 
 	approver := callbackApprover(cb)
-	t.resolve(reqID, ps, Result{Status: status, ApprovedBy: approver})
+	t.resolve(reqID, ps, signerkit.Result{Status: status, ApprovedBy: approver})
 
 	// Answer the callback so the user's client clears its spinner.
 	ans := tgbotapi.NewCallback(cb.ID, strings.ToLower(verbPast))
@@ -513,10 +514,10 @@ func (t *TelegramBackend) handleCallback(cb *tgbotapi.CallbackQuery) {
 	}
 }
 
-// Request implements Backend. Caller must have called Run first;
+// Request implements signerkit.Backend. Caller must have called Run first;
 // otherwise messages cannot be delivered (the polling goroutine
 // resolves callbacks).
-func (t *TelegramBackend) Request(ctx context.Context, req ApprovalRequest) (<-chan Result, error) {
+func (t *TelegramBackend) Request(ctx context.Context, req signerkit.ApprovalRequest) (<-chan signerkit.Result, error) {
 	chatID, ok, err := t.chatStore.Load()
 	if err != nil {
 		return nil, fmt.Errorf("chatstore load: %w", err)
@@ -556,7 +557,7 @@ func (t *TelegramBackend) Request(ctx context.Context, req ApprovalRequest) (<-c
 		return nil, fmt.Errorf("telegram send: %s", redactToken(err))
 	}
 
-	ch := make(chan Result, 1)
+	ch := make(chan signerkit.Result, 1)
 	// done signals the timer + ctx-watcher to exit cleanly when the
 	// request is resolved by approve/deny. Closing done is idempotent
 	// because we guard the close with stopOnce.
@@ -596,7 +597,7 @@ func (t *TelegramBackend) Request(ctx context.Context, req ApprovalRequest) (<-c
 	return ch, nil
 }
 
-// RequestGrant implements Backend's standing-grant approval. It mirrors
+// RequestGrant implements signerkit.Backend's standing-grant approval. It mirrors
 // Request — same chatStore load, same t.pending registration keyed by
 // RequestID, same approve:/deny: callback wiring, timer + ctx watcher,
 // and resolve path (handleCallback/resolve are generic over RequestID, so
@@ -605,7 +606,7 @@ func (t *TelegramBackend) Request(ctx context.Context, req ApprovalRequest) (<-c
 // distinct, scary "STANDING GRANT" banner so the human cannot mistake it
 // for a one-shot write — approving it auto-signs the scoped commands for
 // the whole window without further taps.
-func (t *TelegramBackend) RequestGrant(ctx context.Context, req GrantApprovalRequest) (<-chan Result, error) {
+func (t *TelegramBackend) RequestGrant(ctx context.Context, req signerkit.GrantApprovalRequest) (<-chan signerkit.Result, error) {
 	chatID, ok, err := t.chatStore.Load()
 	if err != nil {
 		return nil, fmt.Errorf("chatstore load: %w", err)
@@ -636,7 +637,7 @@ func (t *TelegramBackend) RequestGrant(ctx context.Context, req GrantApprovalReq
 		return nil, fmt.Errorf("telegram send: %s", redactToken(err))
 	}
 
-	ch := make(chan Result, 1)
+	ch := make(chan signerkit.Result, 1)
 	done := make(chan struct{})
 	var stopOnce sync.Once
 	stopTimer := func() {
@@ -665,22 +666,22 @@ func (t *TelegramBackend) RequestGrant(ctx context.Context, req GrantApprovalReq
 	return ch, nil
 }
 
-// RequestTransfer implements Backend's box→box SECRET-TRANSFER approval. Like
+// RequestTransfer implements signerkit.Backend's box→box SECRET-TRANSFER approval. Like
 // RequestGrant it is a separate method (not an approve-label switch on Request)
 // with its own distinct, alarming banner: approving it lets the signer mint the
 // two host-bound signed legs under one tap. The banner LABELS come from the
 // signer's registry (carried in req), never the MCP alias, so a lying MCP
 // cannot mislabel the destination.
-func (t *TelegramBackend) RequestTransfer(ctx context.Context, req TransferApprovalRequest) (<-chan Result, error) {
+func (t *TelegramBackend) RequestTransfer(ctx context.Context, req signerkit.TransferApprovalRequest) (<-chan signerkit.Result, error) {
 	text := formatTransferApprovalMessage(req, t.reqTimeout, t.RedactSalt, t.RedactRules)
 	return t.dispatchApproval(ctx, req.RequestID, text, "✓ Approve SECRET TRANSFER")
 }
 
-// RequestRegisterKey implements Backend's XFER-KEY REGISTER approval — the
+// RequestRegisterKey implements signerkit.Backend's XFER-KEY REGISTER approval — the
 // human-only control that populates the signer's transfer trust anchor. Always
 // a prompt; its own distinct banner names the consequence (adding a transfer
 // trust anchor) and shows the exact keys the operator is confirming.
-func (t *TelegramBackend) RequestRegisterKey(ctx context.Context, req RegisterApprovalRequest) (<-chan Result, error) {
+func (t *TelegramBackend) RequestRegisterKey(ctx context.Context, req signerkit.RegisterApprovalRequest) (<-chan signerkit.Result, error) {
 	text := formatRegisterApprovalMessage(req, t.reqTimeout)
 	return t.dispatchApproval(ctx, req.RequestID, text, "✓ Approve XFER-KEY REGISTER")
 }
@@ -691,7 +692,7 @@ func (t *TelegramBackend) RequestRegisterKey(ctx context.Context, req RegisterAp
 // wiring keyed by RequestID, the same resolve/timeout path) — only the message
 // body and the approve-button label differ, both passed in. Request and
 // RequestGrant predate this helper and are intentionally left untouched.
-func (t *TelegramBackend) dispatchApproval(ctx context.Context, reqID, text, approveLabel string) (<-chan Result, error) {
+func (t *TelegramBackend) dispatchApproval(ctx context.Context, reqID, text, approveLabel string) (<-chan signerkit.Result, error) {
 	chatID, ok, err := t.chatStore.Load()
 	if err != nil {
 		return nil, fmt.Errorf("chatstore load: %w", err)
@@ -714,7 +715,7 @@ func (t *TelegramBackend) dispatchApproval(ctx context.Context, reqID, text, app
 		return nil, fmt.Errorf("telegram send: %s", redactToken(err))
 	}
 
-	ch := make(chan Result, 1)
+	ch := make(chan signerkit.Result, 1)
 	done := make(chan struct{})
 	var stopOnce sync.Once
 	stopTimer := func() {
@@ -746,7 +747,7 @@ func (t *TelegramBackend) dispatchApproval(ctx context.Context, reqID, text, app
 // resolve sends r on ps.ch exactly once and tears down the watcher
 // goroutine. Subsequent resolves are silent no-ops (handled by
 // sync.Once).
-func (t *TelegramBackend) resolve(reqID string, ps *pendingState, r Result) {
+func (t *TelegramBackend) resolve(reqID string, ps *pendingState, r signerkit.Result) {
 	ps.once.Do(func() {
 		ps.ch <- r
 		close(ps.ch)
@@ -756,12 +757,12 @@ func (t *TelegramBackend) resolve(reqID string, ps *pendingState, r Result) {
 }
 
 // timeout edits the message to reflect expiration and resolves with
-// StatusTimeout. Idempotent via sync.Once — if approve/deny got there
+// signerkit.StatusTimeout. Idempotent via sync.Once — if approve/deny got there
 // first, we don't edit the message (that path already did).
 func (t *TelegramBackend) timeout(reqID string, ps *pendingState) {
 	resolved := false
 	ps.once.Do(func() {
-		ps.ch <- Result{Status: StatusTimeout}
+		ps.ch <- signerkit.Result{Status: signerkit.StatusTimeout}
 		close(ps.ch)
 		ps.stopTimer()
 		t.pending.Delete(reqID)
@@ -832,11 +833,11 @@ func callbackApprover(cb *tgbotapi.CallbackQuery) string {
 // outcomeMark returns the leading glyph used in the message-footer
 // edit (visual quick-scan for the operator scrolling back through
 // their bot history).
-func outcomeMark(s ResultStatus) string {
+func outcomeMark(s signerkit.ResultStatus) string {
 	switch s {
-	case StatusApproved:
+	case signerkit.StatusApproved:
 		return "✓"
-	case StatusDenied:
+	case signerkit.StatusDenied:
 		return "✗"
 	default:
 		return "•"
@@ -854,7 +855,7 @@ func outcomeMark(s ResultStatus) string {
 // "commands only + footer" rendering. The error string is fed through
 // sanitiseExplainerErr before rendering so we never leak credentials,
 // upstream URLs, or stack-y wrappers to the operator's Telegram DM.
-func (t *TelegramBackend) runExplainer(ctx context.Context, cmds []CommandReq) (lines []string, err error) {
+func (t *TelegramBackend) runExplainer(ctx context.Context, cmds []signerkit.CommandReq) (lines []string, err error) {
 	if t.Explainer == nil || len(cmds) == 0 {
 		return nil, nil
 	}
@@ -947,7 +948,7 @@ const updateVerbPrefix = "SSHGATE_UPDATE "
 
 // requestHasUpdate reports whether any command in req is a signed gate-binary
 // update. update_gate sends exactly one such command.
-func requestHasUpdate(req ApprovalRequest) bool {
+func requestHasUpdate(req signerkit.ApprovalRequest) bool {
 	for _, c := range req.Commands {
 		if strings.HasPrefix(c.Cmd, updateVerbPrefix) {
 			return true
@@ -964,7 +965,7 @@ func requestHasUpdate(req ApprovalRequest) bool {
 // printed OUTSIDE redactForDisplay (Finding 7). Reason (when the MCP set one)
 // carries the staged + running build revisions so a downgrade is spottable.
 // Plain text (no parse-mode), like formatApprovalMessage.
-func formatUpdateApprovalMessage(req ApprovalRequest, timeout time.Duration) string {
+func formatUpdateApprovalMessage(req signerkit.ApprovalRequest, timeout time.Duration) string {
 	var b strings.Builder
 	// update_gate always sends exactly one command; guard anyway.
 	if len(req.Commands) == 0 {
@@ -1027,7 +1028,7 @@ func isLower64Hex(s string) bool {
 	return true
 }
 
-func formatApprovalMessage(req ApprovalRequest, timeout time.Duration, explanations []string, explainErr error, salt [32]byte, rules []redact.Rule) string {
+func formatApprovalMessage(req signerkit.ApprovalRequest, timeout time.Duration, explanations []string, explainErr error, salt [32]byte, rules []redact.Rule) string {
 	// A gate-binary update gets its own alarming layout and, crucially, renders
 	// the committed SHA-256 RAW (never through redactForDisplay) — see
 	// formatUpdateApprovalMessage. Checked first: an update is never also a
@@ -1116,7 +1117,7 @@ func formatApprovalMessage(req ApprovalRequest, timeout time.Duration, explanati
 // per-session marker, the command shape stays visible, and req.Commands is
 // read but never mutated (the grant is stored from the RAW command list, not
 // this display copy).
-func formatGrantApprovalMessage(req GrantApprovalRequest, timeout time.Duration, salt [32]byte, rules []redact.Rule) string {
+func formatGrantApprovalMessage(req signerkit.GrantApprovalRequest, timeout time.Duration, salt [32]byte, rules []redact.Rule) string {
 	var b strings.Builder
 	b.WriteString("⚠️ STANDING GRANT — approving this auto-signs the commands below for the whole window WITHOUT further taps.\n\n")
 	fmt.Fprintf(&b, "🟠 SSHGate STANDING GRANT — %s\n\n", req.Alias)
@@ -1149,7 +1150,7 @@ func formatGrantApprovalMessage(req GrantApprovalRequest, timeout time.Duration,
 // from the signer's registry (carried in req), NOT the MCP alias, so a lying MCP
 // cannot mislabel the destination. Paths run through redactForDisplay for the
 // display copy only (the request is never mutated). Plain text, no parse-mode.
-func formatTransferApprovalMessage(req TransferApprovalRequest, timeout time.Duration, salt [32]byte, rules []redact.Rule) string {
+func formatTransferApprovalMessage(req signerkit.TransferApprovalRequest, timeout time.Duration, salt [32]byte, rules []redact.Rule) string {
 	var b strings.Builder
 	b.WriteString("⚠️ SECRET TRANSFER — approving this MOVES a secret file across hosts.\n")
 	b.WriteString("   The value is encrypted end-to-end; the agent only relays ciphertext.\n\n")
@@ -1169,7 +1170,7 @@ func formatTransferApprovalMessage(req TransferApprovalRequest, timeout time.Dur
 // and shows the exact key lines the operator is confirming, each shape-validated
 // so a smuggled newline cannot forge a banner line. The keys are PUBLIC, so they
 // render raw (WYSIWYG) when well-formed. Plain text, no parse-mode.
-func formatRegisterApprovalMessage(req RegisterApprovalRequest, timeout time.Duration) string {
+func formatRegisterApprovalMessage(req signerkit.RegisterApprovalRequest, timeout time.Duration) string {
 	var b strings.Builder
 	b.WriteString("⚠️ XFER-KEY REGISTER — approving this ADDS a box→box transfer trust anchor.\n")
 	b.WriteString("   These keys let the signer build transfer legs to/from this host. Only approve keys you provisioned.\n\n")
@@ -1267,7 +1268,7 @@ func isSingleLineNoControl(s string) bool {
 // SECRET-REVEAL. The MCP enforces single-command-only for reveals, so in
 // practice a reveal request is exactly one command; this scans defensively so
 // the scary UX is shown if reveal appears anywhere.
-func requestHasReveal(req ApprovalRequest) bool {
+func requestHasReveal(req signerkit.ApprovalRequest) bool {
 	for _, c := range req.Commands {
 		if c.Reveal {
 			return true
@@ -1289,4 +1290,4 @@ func maskUserID(id int64) string {
 }
 
 // Compile-time interface check.
-var _ Backend = (*TelegramBackend)(nil)
+var _ signerkit.Backend = (*TelegramBackend)(nil)

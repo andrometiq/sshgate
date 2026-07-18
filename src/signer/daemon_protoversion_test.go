@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/karthikeyan5/sshgate/src/signer/backend"
+	"github.com/karthikeyan5/sshgate/pkg/signerkit"
 	"github.com/karthikeyan5/sshgate/src/sigwire"
 )
 
@@ -22,7 +22,7 @@ func TestDaemon_ProtoVersionMismatch(t *testing.T) {
 	// A backend that is never armed: a correct daemon rejects on version
 	// BEFORE ever reaching the backend. If the version check regressed, the
 	// un-armed mock would hang until the package timeout — a loud failure.
-	mock := backend.NewMockBackend()
+	mock := signerkit.NewMockBackend()
 	d, _, audit, auditPath := newDaemon(t, mock)
 	defer audit.Close()
 
@@ -64,7 +64,7 @@ func TestDaemon_ProtoVersionMismatch(t *testing.T) {
 // strictly-decoded field on the sign path, not an unknown-field rejection.
 func TestDaemon_ProtoVersionMatchSigns(t *testing.T) {
 	t.Parallel()
-	mock := backend.NewMockBackend()
+	mock := signerkit.NewMockBackend()
 	d, _, audit, _ := newDaemon(t, mock)
 	defer audit.Close()
 	mock.Approve("r_pv", "karthi")
@@ -90,7 +90,7 @@ func TestDaemon_ProtoVersionMatchSigns(t *testing.T) {
 // sign exactly as before the version stamp existed.
 func TestDaemon_LegacyNoProtoVersionSigns(t *testing.T) {
 	t.Parallel()
-	mock := backend.NewMockBackend()
+	mock := signerkit.NewMockBackend()
 	d, _, audit, _ := newDaemon(t, mock)
 	defer audit.Close()
 	mock.Approve("r_legacy", "karthi")
@@ -117,7 +117,7 @@ func TestDaemon_LegacyNoProtoVersionSigns(t *testing.T) {
 // echoes the request_id.
 func TestDaemon_GrantProtoVersionMismatch(t *testing.T) {
 	t.Parallel()
-	mock := backend.NewMockBackend()
+	mock := signerkit.NewMockBackend()
 	d, _, audit, _ := newDaemon(t, mock)
 	defer audit.Close()
 
@@ -157,7 +157,7 @@ func TestDaemon_GrantProtoVersionMismatch(t *testing.T) {
 // struct even on the malformed path.
 func TestDaemon_MalformedPeekEchoesRequestID(t *testing.T) {
 	t.Parallel()
-	mock := backend.NewMockBackend()
+	mock := signerkit.NewMockBackend()
 	d, _, audit, _ := newDaemon(t, mock)
 	defer audit.Close()
 

@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/karthikeyan5/sshgate/src/signer"
+	"github.com/karthikeyan5/sshgate/pkg/signerkit"
 )
 
 func writeKeyFile(t *testing.T, path string, data []byte, mode os.FileMode) {
@@ -34,7 +34,7 @@ func TestLoadKey_ValidPrivateKey(t *testing.T) {
 	}
 	writeKeyFile(t, path, priv, 0o600)
 
-	got, err := signer.LoadKey(path)
+	got, err := signerkit.LoadKey(path)
 	if err != nil {
 		t.Fatalf("LoadKey: %v", err)
 	}
@@ -45,7 +45,7 @@ func TestLoadKey_ValidPrivateKey(t *testing.T) {
 
 func TestLoadKey_MissingFile(t *testing.T) {
 	t.Parallel()
-	_, err := signer.LoadKey(filepath.Join(t.TempDir(), "nope.key"))
+	_, err := signerkit.LoadKey(filepath.Join(t.TempDir(), "nope.key"))
 	if err == nil {
 		t.Fatal("expected error for missing file")
 	}
@@ -56,7 +56,7 @@ func TestLoadKey_MalformedLength(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "bad.key")
 	writeKeyFile(t, path, []byte("too short"), 0o600)
-	_, err := signer.LoadKey(path)
+	_, err := signerkit.LoadKey(path)
 	if err == nil {
 		t.Fatal("expected error for malformed key length")
 	}
@@ -77,7 +77,7 @@ func TestLoadKey_RefusesGroupOrWorldPerms(t *testing.T) {
 			t.Parallel()
 			path := filepath.Join(dir, "k_"+mode.String())
 			writeKeyFile(t, path, priv, mode)
-			_, err := signer.LoadKey(path)
+			_, err := signerkit.LoadKey(path)
 			if err == nil {
 				t.Fatalf("LoadKey accepted mode %#o; want refusal", mode)
 			}
@@ -91,7 +91,7 @@ func TestGenerateKeyPair_WritesUsableKeys(t *testing.T) {
 	privPath := filepath.Join(dir, "gate.key")
 	pubPath := filepath.Join(dir, "gate.pub")
 
-	if err := signer.GenerateKeyPair(privPath, pubPath); err != nil {
+	if err := signerkit.GenerateKeyPair(privPath, pubPath); err != nil {
 		t.Fatalf("GenerateKeyPair: %v", err)
 	}
 
@@ -112,7 +112,7 @@ func TestGenerateKeyPair_WritesUsableKeys(t *testing.T) {
 	}
 
 	// Material match
-	priv, err := signer.LoadKey(privPath)
+	priv, err := signerkit.LoadKey(privPath)
 	if err != nil {
 		t.Fatalf("LoadKey after Generate: %v", err)
 	}
@@ -137,10 +137,10 @@ func TestGenerateKeyPair_RefusesOverwrite(t *testing.T) {
 	dir := t.TempDir()
 	privPath := filepath.Join(dir, "gate.key")
 	pubPath := filepath.Join(dir, "gate.pub")
-	if err := signer.GenerateKeyPair(privPath, pubPath); err != nil {
+	if err := signerkit.GenerateKeyPair(privPath, pubPath); err != nil {
 		t.Fatalf("first generate: %v", err)
 	}
-	err := signer.GenerateKeyPair(privPath, pubPath)
+	err := signerkit.GenerateKeyPair(privPath, pubPath)
 	if err == nil {
 		t.Fatal("expected refusal on overwrite")
 	}
@@ -151,7 +151,7 @@ func TestGenerateKeyPair_RefusesOverwrite(t *testing.T) {
 	if err := os.WriteFile(pub2, []byte("anything"), 0o644); err != nil {
 		t.Fatalf("seed pub: %v", err)
 	}
-	if err := signer.GenerateKeyPair(priv2, pub2); err == nil {
+	if err := signerkit.GenerateKeyPair(priv2, pub2); err == nil {
 		t.Fatal("expected refusal when pub exists")
 	}
 }
@@ -161,7 +161,7 @@ func TestGenerateKeyPair_MissingParentDir(t *testing.T) {
 	// Generate must NOT silently mkdir; the caller is responsible for
 	// the directory layout (consistent with daemon.md §5 atomicity).
 	bad := filepath.Join(t.TempDir(), "nope", "gate.key")
-	err := signer.GenerateKeyPair(bad, bad+".pub")
+	err := signerkit.GenerateKeyPair(bad, bad+".pub")
 	if err == nil {
 		t.Fatal("expected error for missing parent dir")
 	}

@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/karthikeyan5/sshgate/src/signer"
+	"github.com/karthikeyan5/sshgate/pkg/signerkit"
 )
 
 func TestAuditLog_WriteAndReopenParses(t *testing.T) {
@@ -17,18 +17,18 @@ func TestAuditLog_WriteAndReopenParses(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "approvals.log")
 
-	log, err := signer.OpenAuditLog(path)
+	log, err := signerkit.OpenAuditLog(path)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	ev1 := signer.AuditEvent{
+	ev1 := signerkit.AuditEvent{
 		TS:        time.Now().UTC(),
 		RequestID: "r_1",
 		Status:    "approved",
 		Commands:  []string{"systemctl restart nginx"},
 		Servers:   []string{"prod-db"},
 	}
-	ev2 := signer.AuditEvent{
+	ev2 := signerkit.AuditEvent{
 		TS:        time.Now().UTC(),
 		RequestID: "r_2",
 		Status:    "denied",
@@ -51,10 +51,10 @@ func TestAuditLog_WriteAndReopenParses(t *testing.T) {
 		t.Fatalf("reopen: %v", err)
 	}
 	defer f.Close()
-	var got []signer.AuditEvent
+	var got []signerkit.AuditEvent
 	sc := bufio.NewScanner(f)
 	for sc.Scan() {
-		var ev signer.AuditEvent
+		var ev signerkit.AuditEvent
 		if err := json.Unmarshal(sc.Bytes(), &ev); err != nil {
 			t.Fatalf("parse %q: %v", sc.Text(), err)
 		}
@@ -84,11 +84,11 @@ func TestAuditEvent_AuthModeOnDisk(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "approvals.log")
-	log, err := signer.OpenAuditLog(path)
+	log, err := signerkit.OpenAuditLog(path)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	grant := signer.AuditEvent{
+	grant := signerkit.AuditEvent{
 		TS:         time.Now().UTC(),
 		RequestID:  "r_grant",
 		Status:     "approved",
@@ -97,7 +97,7 @@ func TestAuditEvent_AuthModeOnDisk(t *testing.T) {
 		ApprovedBy: "grant:g_abc",
 		AuthMode:   "grant:g_abc",
 	}
-	human := signer.AuditEvent{
+	human := signerkit.AuditEvent{
 		TS:         time.Now().UTC(),
 		RequestID:  "r_human",
 		Status:     "approved",
@@ -106,7 +106,7 @@ func TestAuditEvent_AuthModeOnDisk(t *testing.T) {
 		ApprovedBy: "karthi",
 		AuthMode:   "human",
 	}
-	denied := signer.AuditEvent{
+	denied := signerkit.AuditEvent{
 		TS:        time.Now().UTC(),
 		RequestID: "r_denied",
 		Status:    "denied",
@@ -114,7 +114,7 @@ func TestAuditEvent_AuthModeOnDisk(t *testing.T) {
 		Servers:   []string{"prod"},
 		// No ApprovedBy / AuthMode — the key must be omitted.
 	}
-	for _, ev := range []signer.AuditEvent{grant, human, denied} {
+	for _, ev := range []signerkit.AuditEvent{grant, human, denied} {
 		if err := log.Write(ev); err != nil {
 			t.Fatalf("Write: %v", err)
 		}
@@ -164,7 +164,7 @@ func TestAuditLog_FileMode(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "approvals.log")
-	log, err := signer.OpenAuditLog(path)
+	log, err := signerkit.OpenAuditLog(path)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -185,7 +185,7 @@ func TestAuditLog_ConcurrentWritesDontInterleave(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "approvals.log")
-	log, err := signer.OpenAuditLog(path)
+	log, err := signerkit.OpenAuditLog(path)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -197,7 +197,7 @@ func TestAuditLog_ConcurrentWritesDontInterleave(t *testing.T) {
 		i := i
 		go func() {
 			defer wg.Done()
-			ev := signer.AuditEvent{
+			ev := signerkit.AuditEvent{
 				TS:        time.Now().UTC(),
 				RequestID: "r_" + itoaPad(i),
 				Status:    "approved",
@@ -224,7 +224,7 @@ func TestAuditLog_ConcurrentWritesDontInterleave(t *testing.T) {
 	sc := bufio.NewScanner(f)
 	count := 0
 	for sc.Scan() {
-		var ev signer.AuditEvent
+		var ev signerkit.AuditEvent
 		if err := json.Unmarshal(sc.Bytes(), &ev); err != nil {
 			t.Fatalf("line %d failed to parse: %v\nline=%q", count, err, sc.Text())
 		}
@@ -243,11 +243,11 @@ func TestAuditLog_PersistsAcrossClose(t *testing.T) {
 	// cycles emulate a daemon that crashes and is restarted between
 	// each event. With fsync-per-write, all three lines must survive.
 	for i := 0; i < 3; i++ {
-		log, err := signer.OpenAuditLog(path)
+		log, err := signerkit.OpenAuditLog(path)
 		if err != nil {
 			t.Fatalf("Open[%d]: %v", i, err)
 		}
-		ev := signer.AuditEvent{
+		ev := signerkit.AuditEvent{
 			TS:        time.Now().UTC(),
 			RequestID: "r_" + itoaPad(i),
 			Status:    "approved",
@@ -272,14 +272,14 @@ func TestAuditLog_PersistsAcrossClose(t *testing.T) {
 
 func TestNewMemAuditLog_AcceptsWritesAndCloses(t *testing.T) {
 	t.Parallel()
-	log, err := signer.NewMemAuditLog()
+	log, err := signerkit.NewMemAuditLog()
 	if err != nil {
 		t.Fatalf("NewMemAuditLog: %v", err)
 	}
 	// Writes must succeed and not block, even with no reader on the
 	// other side (the internal drain goroutine reads continuously).
 	for i := 0; i < 100; i++ {
-		ev := signer.AuditEvent{
+		ev := signerkit.AuditEvent{
 			TS:        time.Now().UTC(),
 			RequestID: "r_" + itoaPad(i),
 			Status:    "approved",
@@ -294,7 +294,7 @@ func TestNewMemAuditLog_AcceptsWritesAndCloses(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 	// Writing after Close should fail rather than panic.
-	err = log.Write(signer.AuditEvent{RequestID: "post", Status: "x", Commands: []string{}, Servers: []string{}})
+	err = log.Write(signerkit.AuditEvent{RequestID: "post", Status: "x", Commands: []string{}, Servers: []string{}})
 	if err == nil {
 		t.Error("Write after Close returned nil; expected an error")
 	}

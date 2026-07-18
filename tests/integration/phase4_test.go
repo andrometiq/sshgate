@@ -18,7 +18,7 @@
 //     authorized_keys was not destroyed); ~/.sshgate-gate/ is gone; the MCP
 //     registry no longer holds the alias.
 //
-// The test runs end-to-end with the REAL signer.Server (auto-approve
+// The test runs end-to-end with the REAL signerkit.Server (auto-approve
 // backend), REAL sign.Client, REAL ssh.Client, REAL gate binary.
 // Only the human-tap stage is replaced by an in-process auto-approver,
 // which keeps the focus on the revoke flow rather than re-testing
@@ -34,12 +34,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/karthikeyan5/sshgate/pkg/signerkit"
 	"github.com/karthikeyan5/sshgate/src/mcp/registry"
 	signpkg "github.com/karthikeyan5/sshgate/src/mcp/sign"
 	sshpkg "github.com/karthikeyan5/sshgate/src/mcp/ssh"
 	"github.com/karthikeyan5/sshgate/src/mcp/tools"
-	"github.com/karthikeyan5/sshgate/src/signer"
-	"github.com/karthikeyan5/sshgate/src/signer/backend"
 )
 
 // autoApproveBackend is a Backend that approves every request as soon
@@ -58,12 +57,12 @@ func newAutoApproveBackend() *autoApproveBackend {
 	return &autoApproveBackend{closeCh: make(chan struct{})}
 }
 
-func (a *autoApproveBackend) Request(ctx context.Context, req backend.ApprovalRequest) (<-chan backend.Result, error) {
-	ch := make(chan backend.Result, 1)
+func (a *autoApproveBackend) Request(ctx context.Context, req signerkit.ApprovalRequest) (<-chan signerkit.Result, error) {
+	ch := make(chan signerkit.Result, 1)
 	a.mu.Lock()
 	if a.closed {
 		a.mu.Unlock()
-		ch <- backend.Result{Status: backend.StatusTimeout}
+		ch <- signerkit.Result{Status: signerkit.StatusTimeout}
 		close(ch)
 		return ch, nil
 	}
@@ -76,7 +75,7 @@ func (a *autoApproveBackend) Request(ctx context.Context, req backend.ApprovalRe
 		// channel closure (or just a single send — either is fine per
 		// the Backend contract).
 		select {
-		case ch <- backend.Result{Status: backend.StatusApproved, ApprovedBy: "auto-approve"}:
+		case ch <- signerkit.Result{Status: signerkit.StatusApproved, ApprovedBy: "auto-approve"}:
 		case <-ctx.Done():
 		case <-a.closeCh:
 		}
@@ -85,15 +84,15 @@ func (a *autoApproveBackend) Request(ctx context.Context, req backend.ApprovalRe
 }
 
 // RequestGrant mirrors Request with the same goroutine bookkeeping so the
-// backend satisfies the current backend.Backend interface (it grew RequestGrant
+// backend satisfies the current signerkit.Backend interface (it grew RequestGrant
 // with the standing-grants work). No Phase-4/5 test mints a grant through it,
-// but a signer.Daemon will not accept a Backend that lacks this method.
-func (a *autoApproveBackend) RequestGrant(ctx context.Context, req backend.GrantApprovalRequest) (<-chan backend.Result, error) {
-	ch := make(chan backend.Result, 1)
+// but a signerkit.Daemon will not accept a Backend that lacks this method.
+func (a *autoApproveBackend) RequestGrant(ctx context.Context, req signerkit.GrantApprovalRequest) (<-chan signerkit.Result, error) {
+	ch := make(chan signerkit.Result, 1)
 	a.mu.Lock()
 	if a.closed {
 		a.mu.Unlock()
-		ch <- backend.Result{Status: backend.StatusTimeout}
+		ch <- signerkit.Result{Status: signerkit.StatusTimeout}
 		close(ch)
 		return ch, nil
 	}
@@ -103,7 +102,7 @@ func (a *autoApproveBackend) RequestGrant(ctx context.Context, req backend.Grant
 	go func() {
 		defer a.wg.Done()
 		select {
-		case ch <- backend.Result{Status: backend.StatusApproved, ApprovedBy: "auto-approve"}:
+		case ch <- signerkit.Result{Status: signerkit.StatusApproved, ApprovedBy: "auto-approve"}:
 		case <-ctx.Done():
 		case <-a.closeCh:
 		}
@@ -112,15 +111,15 @@ func (a *autoApproveBackend) RequestGrant(ctx context.Context, req backend.Grant
 }
 
 // RequestTransfer mirrors Request with the same goroutine bookkeeping so the
-// backend satisfies the current backend.Backend interface (it grew RequestTransfer
+// backend satisfies the current signerkit.Backend interface (it grew RequestTransfer
 // with the box→box transfer work). No Phase-4/5 test moves a secret through it,
-// but a signer.Daemon will not accept a Backend that lacks this method.
-func (a *autoApproveBackend) RequestTransfer(ctx context.Context, req backend.TransferApprovalRequest) (<-chan backend.Result, error) {
-	ch := make(chan backend.Result, 1)
+// but a signerkit.Daemon will not accept a Backend that lacks this method.
+func (a *autoApproveBackend) RequestTransfer(ctx context.Context, req signerkit.TransferApprovalRequest) (<-chan signerkit.Result, error) {
+	ch := make(chan signerkit.Result, 1)
 	a.mu.Lock()
 	if a.closed {
 		a.mu.Unlock()
-		ch <- backend.Result{Status: backend.StatusTimeout}
+		ch <- signerkit.Result{Status: signerkit.StatusTimeout}
 		close(ch)
 		return ch, nil
 	}
@@ -130,7 +129,7 @@ func (a *autoApproveBackend) RequestTransfer(ctx context.Context, req backend.Tr
 	go func() {
 		defer a.wg.Done()
 		select {
-		case ch <- backend.Result{Status: backend.StatusApproved, ApprovedBy: "auto-approve"}:
+		case ch <- signerkit.Result{Status: signerkit.StatusApproved, ApprovedBy: "auto-approve"}:
 		case <-ctx.Done():
 		case <-a.closeCh:
 		}
@@ -139,16 +138,16 @@ func (a *autoApproveBackend) RequestTransfer(ctx context.Context, req backend.Tr
 }
 
 // RequestRegisterKey mirrors Request with the same goroutine bookkeeping so the
-// backend satisfies the current backend.Backend interface (it grew
+// backend satisfies the current signerkit.Backend interface (it grew
 // RequestRegisterKey with the box→box transfer work). No Phase-4/5 test registers
-// a transfer key through it, but a signer.Daemon will not accept a Backend that
+// a transfer key through it, but a signerkit.Daemon will not accept a Backend that
 // lacks this method.
-func (a *autoApproveBackend) RequestRegisterKey(ctx context.Context, req backend.RegisterApprovalRequest) (<-chan backend.Result, error) {
-	ch := make(chan backend.Result, 1)
+func (a *autoApproveBackend) RequestRegisterKey(ctx context.Context, req signerkit.RegisterApprovalRequest) (<-chan signerkit.Result, error) {
+	ch := make(chan signerkit.Result, 1)
 	a.mu.Lock()
 	if a.closed {
 		a.mu.Unlock()
-		ch <- backend.Result{Status: backend.StatusTimeout}
+		ch <- signerkit.Result{Status: signerkit.StatusTimeout}
 		close(ch)
 		return ch, nil
 	}
@@ -158,7 +157,7 @@ func (a *autoApproveBackend) RequestRegisterKey(ctx context.Context, req backend
 	go func() {
 		defer a.wg.Done()
 		select {
-		case ch <- backend.Result{Status: backend.StatusApproved, ApprovedBy: "auto-approve"}:
+		case ch <- signerkit.Result{Status: signerkit.StatusApproved, ApprovedBy: "auto-approve"}:
 		case <-ctx.Done():
 		case <-a.closeCh:
 		}
@@ -178,23 +177,23 @@ func (a *autoApproveBackend) Close() {
 	a.wg.Wait()
 }
 
-// startSignerAutoApprove boots a real signer.Server backed by the
+// startSignerAutoApprove boots a real signerkit.Server backed by the
 // auto-approve backend. Returns the socket path and a cleanup func.
 func startSignerAutoApprove(t *testing.T, masterKeyPath string) (string, func()) {
 	t.Helper()
-	priv, err := signer.LoadKey(masterKeyPath)
+	priv, err := signerkit.LoadKey(masterKeyPath)
 	if err != nil {
 		t.Fatalf("LoadKey: %v", err)
 	}
 	auditPath := filepath.Join(t.TempDir(), "approvals.log")
-	audit, err := signer.OpenAuditLog(auditPath)
+	audit, err := signerkit.OpenAuditLog(auditPath)
 	if err != nil {
 		t.Fatalf("OpenAuditLog: %v", err)
 	}
 	be := newAutoApproveBackend()
-	daemon := &signer.Daemon{Key: priv, Backend: be, Audit: audit}
+	daemon := &signerkit.Daemon{Key: priv, Backend: be, Audit: audit}
 	socketPath := filepath.Join(t.TempDir(), "signer.sock")
-	srv := &signer.Server{Path: socketPath, Handler: daemon, HandlerTimeout: 15 * time.Second}
+	srv := &signerkit.Server{Path: socketPath, Handler: daemon, HandlerTimeout: 15 * time.Second}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})

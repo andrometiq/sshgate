@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/karthikeyan5/sshgate/src/signer"
+	"github.com/karthikeyan5/sshgate/pkg/signerkit"
 )
 
 // TestAuditLog_WriteAfterCloseErrors pins the file-backed contract that
@@ -17,12 +17,12 @@ import (
 func TestAuditLog_WriteAfterCloseErrors(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "approvals.log")
-	log, err := signer.OpenAuditLog(path)
+	log, err := signerkit.OpenAuditLog(path)
 	if err != nil {
 		t.Fatalf("OpenAuditLog: %v", err)
 	}
 
-	ev := signer.AuditEvent{
+	ev := signerkit.AuditEvent{
 		TS:        time.Unix(1000, 0).UTC(),
 		RequestID: "r_pre",
 		Status:    "approved",
@@ -42,7 +42,7 @@ func TestAuditLog_WriteAfterCloseErrors(t *testing.T) {
 	}
 
 	// Write after Close must error rather than panic on the nil *os.File.
-	post := signer.AuditEvent{
+	post := signerkit.AuditEvent{
 		TS:        time.Unix(1001, 0).UTC(),
 		RequestID: "r_post",
 		Status:    "approved",

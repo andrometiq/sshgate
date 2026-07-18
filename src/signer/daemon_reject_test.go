@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/karthikeyan5/sshgate/src/signer/backend"
+	"github.com/karthikeyan5/sshgate/pkg/signerkit"
 )
 
 // TestDaemon_RejectsBadRequests is the protocol-validation table. Each
@@ -100,7 +100,7 @@ func TestDaemon_RejectsBadRequests(t *testing.T) {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			mock := backend.NewMockBackend()
+			mock := signerkit.NewMockBackend()
 			d, _, audit, auditPath := newDaemon(t, mock)
 			defer audit.Close()
 
@@ -144,7 +144,7 @@ func TestDaemon_RejectsBadRequests(t *testing.T) {
 // boundary test rather than an off-by-one.
 func TestDaemon_TTLBoundaryExactMaxAllowed(t *testing.T) {
 	t.Parallel()
-	mock := backend.NewMockBackend()
+	mock := signerkit.NewMockBackend()
 	d, _, audit, _ := newDaemon(t, mock)
 	defer audit.Close()
 	mock.Approve("r_ttlmax", "karthi")
@@ -211,7 +211,7 @@ func TestDaemon_BackendError(t *testing.T) {
 // response is written (there is no request_id to pin a response to).
 func TestDaemon_ReadEOFBeforeBytes(t *testing.T) {
 	t.Parallel()
-	mock := backend.NewMockBackend()
+	mock := signerkit.NewMockBackend()
 	d, _, audit, _ := newDaemon(t, mock)
 	defer audit.Close()
 
@@ -246,7 +246,7 @@ func TestDaemon_EmptyLineMalformed(t *testing.T) {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			mock := backend.NewMockBackend()
+			mock := signerkit.NewMockBackend()
 			d, _, audit, auditPath := newDaemon(t, mock)
 			defer audit.Close()
 
@@ -283,18 +283,18 @@ func TestDaemon_EmptyLineMalformed(t *testing.T) {
 // new fakes noted").
 type errBackend struct{ err error }
 
-func (b errBackend) Request(_ context.Context, _ backend.ApprovalRequest) (<-chan backend.Result, error) {
+func (b errBackend) Request(_ context.Context, _ signerkit.ApprovalRequest) (<-chan signerkit.Result, error) {
 	return nil, b.err
 }
 
-func (b errBackend) RequestGrant(_ context.Context, _ backend.GrantApprovalRequest) (<-chan backend.Result, error) {
+func (b errBackend) RequestGrant(_ context.Context, _ signerkit.GrantApprovalRequest) (<-chan signerkit.Result, error) {
 	return nil, b.err
 }
 
-func (b errBackend) RequestTransfer(_ context.Context, _ backend.TransferApprovalRequest) (<-chan backend.Result, error) {
+func (b errBackend) RequestTransfer(_ context.Context, _ signerkit.TransferApprovalRequest) (<-chan signerkit.Result, error) {
 	return nil, b.err
 }
 
-func (b errBackend) RequestRegisterKey(_ context.Context, _ backend.RegisterApprovalRequest) (<-chan backend.Result, error) {
+func (b errBackend) RequestRegisterKey(_ context.Context, _ signerkit.RegisterApprovalRequest) (<-chan signerkit.Result, error) {
 	return nil, b.err
 }

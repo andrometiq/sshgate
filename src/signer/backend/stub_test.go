@@ -5,18 +5,18 @@ import (
 	"testing"
 	"time"
 
-	"github.com/karthikeyan5/sshgate/src/signer/backend"
+	"github.com/karthikeyan5/sshgate/pkg/signerkit"
 )
 
 func TestStubBackend_DeniesImmediately(t *testing.T) {
 	t.Parallel()
-	var b backend.StubBackend
+	var b signerkit.StubBackend
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	ch, err := b.Request(ctx, backend.ApprovalRequest{
+	ch, err := b.Request(ctx, signerkit.ApprovalRequest{
 		RequestID: "r_stub",
-		Commands:  []backend.CommandReq{{Server: "x", Cmd: "echo hi", TTLSec: 60}},
+		Commands:  []signerkit.CommandReq{{Server: "x", Cmd: "echo hi", TTLSec: 60}},
 		Submitted: time.Now(),
 	})
 	if err != nil {
@@ -24,7 +24,7 @@ func TestStubBackend_DeniesImmediately(t *testing.T) {
 	}
 	select {
 	case got := <-ch:
-		if got.Status != backend.StatusDenied {
+		if got.Status != signerkit.StatusDenied {
 			t.Errorf("status = %v; want StatusDenied", got.Status)
 		}
 		if got.ApprovedBy != "" {
@@ -39,14 +39,14 @@ func TestStubBackend_DeniesEvenWhenCtxAlive(t *testing.T) {
 	t.Parallel()
 	// The stub MUST NOT block on ctx — its whole point is "policy = deny
 	// without consulting any external channel."
-	var b backend.StubBackend
-	ch, err := b.Request(context.Background(), backend.ApprovalRequest{RequestID: "r"})
+	var b signerkit.StubBackend
+	ch, err := b.Request(context.Background(), signerkit.ApprovalRequest{RequestID: "r"})
 	if err != nil {
 		t.Fatalf("Request err: %v", err)
 	}
 	select {
 	case got := <-ch:
-		if got.Status != backend.StatusDenied {
+		if got.Status != signerkit.StatusDenied {
 			t.Errorf("status = %v; want denied", got.Status)
 		}
 	case <-time.After(200 * time.Millisecond):
@@ -55,4 +55,4 @@ func TestStubBackend_DeniesEvenWhenCtxAlive(t *testing.T) {
 }
 
 // Compile-time assertion that StubBackend satisfies the interface.
-var _ backend.Backend = (*backend.StubBackend)(nil)
+var _ signerkit.Backend = (*signerkit.StubBackend)(nil)

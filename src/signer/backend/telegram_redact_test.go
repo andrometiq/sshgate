@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/karthikeyan5/sshgate/pkg/signerkit"
 	"github.com/karthikeyan5/sshgate/src/signer/backend"
 )
 
@@ -111,9 +112,9 @@ func TestTelegram_SendTransportErrorRedacted(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 
-	_, err := tb.Request(ctx, backend.ApprovalRequest{
+	_, err := tb.Request(ctx, signerkit.ApprovalRequest{
 		RequestID: "r_send_fail",
-		Commands:  []backend.CommandReq{{Server: "x", Cmd: "echo hi", TTLSec: 60}},
+		Commands:  []signerkit.CommandReq{{Server: "x", Cmd: "echo hi", TTLSec: 60}},
 	})
 	if err == nil {
 		t.Fatal("Request returned nil err against a dead endpoint; want a send error")
@@ -141,7 +142,7 @@ func TestTelegram_GrantSendTransportErrorRedacted(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 
-	_, err := tb.RequestGrant(ctx, backend.GrantApprovalRequest{
+	_, err := tb.RequestGrant(ctx, signerkit.GrantApprovalRequest{
 		RequestID: "g_send_fail",
 		Alias:     "x",
 		Scope:     "all",

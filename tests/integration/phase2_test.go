@@ -6,24 +6,24 @@
 // only fake being the Telegram API itself (an in-process httptest
 // server we drive from the test):
 //
-//   Runner (real MCP) → sign.Client → signer.Daemon (real)
-//                                       → TelegramBackend (real)
-//                                       → httptest fake Telegram
-//                                       → callback injected from test
-//                                       → daemon signs
-//   Runner → ssh.Client → Docker openssh-server → real gate binary
-//                                                 → /tmp/<file> on remote
+//	Runner (real MCP) → sign.Client → signerkit.Daemon (real)
+//	                                    → TelegramBackend (real)
+//	                                    → httptest fake Telegram
+//	                                    → callback injected from test
+//	                                    → daemon signs
+//	Runner → ssh.Client → Docker openssh-server → real gate binary
+//	                                              → /tmp/<file> on remote
 //
 // Six scenarios:
-//   1. Approve single write — message rendered, callback resolves,
-//      command runs on remote, audit logged.
-//   2. Deny single write — wrapped ErrDenied, no SSH, audit logged.
-//   3. Bulk approval — RunBatch with 3 commands triggers ONE
-//      sendMessage; one Approve callback resolves; all three run.
-//   4. Wrong-user callback — from.id mismatch is ignored; later real
-//      callback succeeds.
-//   5. Timeout — no callback within 500ms → wrapped ErrTimeout.
-//   6. Goroutine leak — goleak.VerifyNone at the end.
+//  1. Approve single write — message rendered, callback resolves,
+//     command runs on remote, audit logged.
+//  2. Deny single write — wrapped ErrDenied, no SSH, audit logged.
+//  3. Bulk approval — RunBatch with 3 commands triggers ONE
+//     sendMessage; one Approve callback resolves; all three run.
+//  4. Wrong-user callback — from.id mismatch is ignored; later real
+//     callback succeeds.
+//  5. Timeout — no callback within 500ms → wrapped ErrTimeout.
+//  6. Goroutine leak — goleak.VerifyNone at the end.
 //
 // If Docker isn't available the test skips cleanly (same pattern as
 // Phase 1).
@@ -49,11 +49,11 @@ import (
 
 	"go.uber.org/goleak"
 
+	"github.com/karthikeyan5/sshgate/pkg/signerkit"
 	"github.com/karthikeyan5/sshgate/src/mcp/registry"
 	signpkg "github.com/karthikeyan5/sshgate/src/mcp/sign"
 	sshpkg "github.com/karthikeyan5/sshgate/src/mcp/ssh"
 	"github.com/karthikeyan5/sshgate/src/mcp/tools"
-	"github.com/karthikeyan5/sshgate/src/signer"
 	"github.com/karthikeyan5/sshgate/src/signer/backend"
 )
 
@@ -289,7 +289,7 @@ func (f *fakeTG) answersSnapshot() []fakeTGAnswer {
 
 // --- signer + telegram wiring helpers --------------------------------
 
-// startSignerTelegram boots a real signer.Server in a goroutine,
+// startSignerTelegram boots a real signerkit.Server in a goroutine,
 // wired to a real TelegramBackend pointed at the supplied fakeTG. The
 // ChatStore is pre-populated with phase2ChatID (simulating a prior
 // /start). Returns the socket path, audit log path, the backend (for
@@ -297,13 +297,13 @@ func (f *fakeTG) answersSnapshot() []fakeTGAnswer {
 func startSignerTelegram(t *testing.T, masterKeyPath string, fake *fakeTG, reqTimeout time.Duration) (socketPath, auditPath string, tb *backend.TelegramBackend, cleanup func()) {
 	t.Helper()
 
-	priv, err := signer.LoadKey(masterKeyPath)
+	priv, err := signerkit.LoadKey(masterKeyPath)
 	if err != nil {
 		t.Fatalf("LoadKey: %v", err)
 	}
 
 	auditPath = filepath.Join(t.TempDir(), "approvals.log")
-	audit, err := signer.OpenAuditLog(auditPath)
+	audit, err := signerkit.OpenAuditLog(auditPath)
 	if err != nil {
 		t.Fatalf("OpenAuditLog: %v", err)
 	}
@@ -325,13 +325,13 @@ func startSignerTelegram(t *testing.T, masterKeyPath string, fake *fakeTG, reqTi
 		t.Fatalf("NewTelegramBackend: %v", err)
 	}
 
-	daemon := &signer.Daemon{
+	daemon := &signerkit.Daemon{
 		Key:     priv,
 		Backend: tb,
 		Audit:   audit,
 	}
 	socketPath = filepath.Join(t.TempDir(), "signer.sock")
-	srv := &signer.Server{
+	srv := &signerkit.Server{
 		Path:           socketPath,
 		Handler:        daemon,
 		HandlerTimeout: 30 * time.Second,
@@ -485,18 +485,18 @@ func extractRequestID(text string) string {
 }
 
 // readAuditLines parses the audit log into a slice of records.
-func readAuditLines(t *testing.T, path string) []signer.AuditEvent {
+func readAuditLines(t *testing.T, path string) []signerkit.AuditEvent {
 	t.Helper()
 	b, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read audit %s: %v", path, err)
 	}
-	var out []signer.AuditEvent
+	var out []signerkit.AuditEvent
 	for _, line := range strings.Split(strings.TrimRight(string(b), "\n"), "\n") {
 		if line == "" {
 			continue
 		}
-		var ev signer.AuditEvent
+		var ev signerkit.AuditEvent
 		if err := json.Unmarshal([]byte(line), &ev); err != nil {
 			t.Fatalf("parse audit line %q: %v", line, err)
 		}
@@ -507,7 +507,7 @@ func readAuditLines(t *testing.T, path string) []signer.AuditEvent {
 
 // findAuditByRequestID returns the first audit event with matching
 // RequestID, or nil.
-func findAuditByRequestID(events []signer.AuditEvent, reqID string) *signer.AuditEvent {
+func findAuditByRequestID(events []signerkit.AuditEvent, reqID string) *signerkit.AuditEvent {
 	for i := range events {
 		if events[i].RequestID == reqID {
 			return &events[i]

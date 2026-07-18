@@ -10,8 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/karthikeyan5/sshgate/src/signer"
-	"github.com/karthikeyan5/sshgate/src/signer/backend"
+	"github.com/karthikeyan5/sshgate/pkg/signerkit"
 )
 
 // This file is the PROVISIONING-LEVEL end-to-end gate (P4 spec §8). It differs
@@ -60,22 +59,22 @@ func genKeysOnGate(t *testing.T, dir string, args ...string) (boxLine, idLine st
 
 // buildSignerDaemon builds a real Daemon with an on-disk XferRegistry + audit log
 // and a MockBackend the caller drives with Approve.
-func buildSignerDaemon(t *testing.T, priv ed25519.PrivateKey, auditPath, regPath string) (*signer.Daemon, *backend.MockBackend) {
+func buildSignerDaemon(t *testing.T, priv ed25519.PrivateKey, auditPath, regPath string) (*signerkit.Daemon, *signerkit.MockBackend) {
 	t.Helper()
-	reg, err := signer.LoadXferRegistry(regPath)
+	reg, err := signerkit.LoadXferRegistry(regPath)
 	if err != nil {
 		t.Fatalf("load registry: %v", err)
 	}
-	audit, err := signer.OpenAuditLog(auditPath)
+	audit, err := signerkit.OpenAuditLog(auditPath)
 	if err != nil {
 		t.Fatalf("open audit: %v", err)
 	}
 	t.Cleanup(func() { _ = audit.Close() })
-	mock := backend.NewMockBackend()
-	return &signer.Daemon{Key: priv, Backend: mock, Audit: audit, XferRegistry: reg}, mock
+	mock := signerkit.NewMockBackend()
+	return &signerkit.Daemon{Key: priv, Backend: mock, Audit: audit, XferRegistry: reg}, mock
 }
 
-func registerViaDaemon(t *testing.T, d *signer.Daemon, mock *backend.MockBackend, reqID, fp, label, box, id string) {
+func registerViaDaemon(t *testing.T, d *signerkit.Daemon, mock *signerkit.MockBackend, reqID, fp, label, box, id string) {
 	t.Helper()
 	mock.Approve(reqID, "operator")
 	body := map[string]any{
@@ -97,7 +96,7 @@ func registerViaDaemon(t *testing.T, d *signer.Daemon, mock *backend.MockBackend
 	}
 }
 
-func mintTransferLegs(t *testing.T, d *signer.Daemon, mock *backend.MockBackend, reqID, srcFP, srcPath, destFP, destPath string) (sendSig, recvSig, xferID string) {
+func mintTransferLegs(t *testing.T, d *signerkit.Daemon, mock *signerkit.MockBackend, reqID, srcFP, srcPath, destFP, destPath string) (sendSig, recvSig, xferID string) {
 	t.Helper()
 	mock.Approve(reqID, "operator")
 	body := map[string]any{

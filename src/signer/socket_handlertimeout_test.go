@@ -12,8 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/karthikeyan5/sshgate/src/signer"
-	"github.com/karthikeyan5/sshgate/src/signer/backend"
+	"github.com/karthikeyan5/sshgate/pkg/signerkit"
 )
 
 // delayedBackend resolves every request with a fixed Result after a fixed
@@ -26,37 +25,37 @@ import (
 // Request honours ctx cancellation: if the daemon's connCtx fires before
 // the delay elapses, we stop the timer and never send — the daemon's own
 // <-ctx.Done() branch then resolves the request as timeout, exactly as a
-// real backend's contract requires (backend.Backend doc: "SHOULD honour
+// real backend's contract requires (signerkit.Backend doc: "SHOULD honour
 // ctx cancellation by yielding StatusTimeout").
 type delayedBackend struct {
 	delay  time.Duration
-	result backend.Result
+	result signerkit.Result
 }
 
-func (b delayedBackend) Request(ctx context.Context, _ backend.ApprovalRequest) (<-chan backend.Result, error) {
+func (b delayedBackend) Request(ctx context.Context, _ signerkit.ApprovalRequest) (<-chan signerkit.Result, error) {
 	return b.delayedResult(ctx), nil
 }
 
 // RequestGrant mirrors Request so delayedBackend satisfies the widened
 // Backend interface; the handler-timeout tests only exercise the sign
 // path, but the daemon needs a complete backend.
-func (b delayedBackend) RequestGrant(ctx context.Context, _ backend.GrantApprovalRequest) (<-chan backend.Result, error) {
+func (b delayedBackend) RequestGrant(ctx context.Context, _ signerkit.GrantApprovalRequest) (<-chan signerkit.Result, error) {
 	return b.delayedResult(ctx), nil
 }
 
 // RequestTransfer / RequestRegisterKey mirror Request so delayedBackend
 // satisfies the widened Backend interface; the handler-timeout tests only
 // exercise the sign path, but the daemon needs a complete backend.
-func (b delayedBackend) RequestTransfer(ctx context.Context, _ backend.TransferApprovalRequest) (<-chan backend.Result, error) {
+func (b delayedBackend) RequestTransfer(ctx context.Context, _ signerkit.TransferApprovalRequest) (<-chan signerkit.Result, error) {
 	return b.delayedResult(ctx), nil
 }
 
-func (b delayedBackend) RequestRegisterKey(ctx context.Context, _ backend.RegisterApprovalRequest) (<-chan backend.Result, error) {
+func (b delayedBackend) RequestRegisterKey(ctx context.Context, _ signerkit.RegisterApprovalRequest) (<-chan signerkit.Result, error) {
 	return b.delayedResult(ctx), nil
 }
 
-func (b delayedBackend) delayedResult(ctx context.Context) <-chan backend.Result {
-	ch := make(chan backend.Result, 1)
+func (b delayedBackend) delayedResult(ctx context.Context) <-chan signerkit.Result {
+	ch := make(chan signerkit.Result, 1)
 	go func() {
 		timer := time.NewTimer(b.delay)
 		defer timer.Stop()
@@ -73,8 +72,8 @@ func (b delayedBackend) delayedResult(ctx context.Context) <-chan backend.Result
 	return ch
 }
 
-// newServerWithDaemon stands up a real signer.Server over a unix socket in
-// t.TempDir(), backed by a real signer.Daemon (its own keypair + audit
+// newServerWithDaemon stands up a real signerkit.Server over a unix socket in
+// t.TempDir(), backed by a real signerkit.Daemon (its own keypair + audit
 // log) wired to bk, with the given HandlerTimeout. It returns the socket
 // path and a stop func that cancels Listen and waits for it to exit.
 //
@@ -82,18 +81,18 @@ func (b delayedBackend) delayedResult(ctx context.Context) <-chan backend.Result
 // daemon_test.go (newDaemon): a real Server + real Daemon, no mocked
 // transport, so the per-connection deadline in serveOne is genuinely
 // exercised end-to-end.
-func newServerWithDaemon(t *testing.T, bk backend.Backend, handlerTimeout time.Duration) (sockPath string, stop func()) {
+func newServerWithDaemon(t *testing.T, bk signerkit.Backend, handlerTimeout time.Duration) (sockPath string, stop func()) {
 	t.Helper()
 	_, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatalf("genkey: %v", err)
 	}
 	auditPath := filepath.Join(t.TempDir(), "audit.log")
-	audit, err := signer.OpenAuditLog(auditPath)
+	audit, err := signerkit.OpenAuditLog(auditPath)
 	if err != nil {
 		t.Fatalf("open audit: %v", err)
 	}
-	daemon := &signer.Daemon{
+	daemon := &signerkit.Daemon{
 		Key:     priv,
 		Backend: bk,
 		Audit:   audit,
@@ -103,7 +102,7 @@ func newServerWithDaemon(t *testing.T, bk backend.Backend, handlerTimeout time.D
 	dir := t.TempDir()
 	sockPath = filepath.Join(dir, "sock")
 	ctx, cancel := context.WithCancel(context.Background())
-	srv := &signer.Server{Path: sockPath, Handler: daemon, HandlerTimeout: handlerTimeout}
+	srv := &signerkit.Server{Path: sockPath, Handler: daemon, HandlerTimeout: handlerTimeout}
 	done := make(chan error, 1)
 	go func() { done <- srv.Listen(ctx) }()
 
@@ -185,7 +184,7 @@ func TestServer_DelayedApprovalWithinWindow_IsDelivered(t *testing.T) {
 	)
 	bk := delayedBackend{
 		delay:  approvalDelay,
-		result: backend.Result{Status: backend.StatusApproved, ApprovedBy: "karthi"},
+		result: signerkit.Result{Status: signerkit.StatusApproved, ApprovedBy: "karthi"},
 	}
 	sockPath, stop := newServerWithDaemon(t, bk, handlerTimeout)
 	defer stop()
@@ -239,7 +238,7 @@ func TestServer_ApprovalAfterWindow_IsNotApproved(t *testing.T) {
 	)
 	bk := delayedBackend{
 		delay:  approvalDelay,
-		result: backend.Result{Status: backend.StatusApproved, ApprovedBy: "karthi"},
+		result: signerkit.Result{Status: signerkit.StatusApproved, ApprovedBy: "karthi"},
 	}
 	sockPath, stop := newServerWithDaemon(t, bk, handlerTimeout)
 	defer stop()

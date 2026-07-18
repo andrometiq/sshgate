@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/karthikeyan5/sshgate/src/signer"
+	"github.com/karthikeyan5/sshgate/pkg/signerkit"
 )
 
 // echoHandler reads one line from the connection and writes it back.
@@ -31,12 +31,12 @@ func (echoHandler) HandleSignRequest(_ context.Context, conn io.ReadWriter) erro
 	return err
 }
 
-func startTestServer(t *testing.T, h signer.RequestHandler) (sockPath string, stop func()) {
+func startTestServer(t *testing.T, h signerkit.RequestHandler) (sockPath string, stop func()) {
 	t.Helper()
 	dir := t.TempDir()
 	sockPath = filepath.Join(dir, "sock")
 	ctx, cancel := context.WithCancel(context.Background())
-	srv := &signer.Server{Path: sockPath, Handler: h}
+	srv := &signerkit.Server{Path: sockPath, Handler: h}
 	done := make(chan error, 1)
 	go func() {
 		done <- srv.Listen(ctx)
@@ -163,7 +163,7 @@ func TestSocketServer_CleansStaleSocketFile(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	srv := &signer.Server{Path: sockPath, Handler: echoHandler{}}
+	srv := &signerkit.Server{Path: sockPath, Handler: echoHandler{}}
 	done := make(chan error, 1)
 	go func() { done <- srv.Listen(ctx) }()
 	deadline := time.Now().Add(2 * time.Second)
@@ -195,7 +195,7 @@ func TestSocketServer_RefusesIfLiveProcessHoldsSocket(t *testing.T) {
 	// First server holds the socket.
 	ctx1, cancel1 := context.WithCancel(context.Background())
 	defer cancel1()
-	srv1 := &signer.Server{Path: sockPath, Handler: echoHandler{}}
+	srv1 := &signerkit.Server{Path: sockPath, Handler: echoHandler{}}
 	done1 := make(chan error, 1)
 	go func() { done1 <- srv1.Listen(ctx1) }()
 	deadline := time.Now().Add(2 * time.Second)
@@ -210,7 +210,7 @@ func TestSocketServer_RefusesIfLiveProcessHoldsSocket(t *testing.T) {
 	}
 
 	// Second server on same path must refuse.
-	srv2 := &signer.Server{Path: sockPath, Handler: echoHandler{}}
+	srv2 := &signerkit.Server{Path: sockPath, Handler: echoHandler{}}
 	err := srv2.Listen(context.Background())
 	if err == nil {
 		t.Error("second server.Listen returned nil; want refusal")
@@ -229,7 +229,7 @@ func TestSocketServer_CtxCancelStopsAccept(t *testing.T) {
 	dir := t.TempDir()
 	sockPath := filepath.Join(dir, "sock")
 	ctx, cancel := context.WithCancel(context.Background())
-	srv := &signer.Server{Path: sockPath, Handler: echoHandler{}}
+	srv := &signerkit.Server{Path: sockPath, Handler: echoHandler{}}
 	done := make(chan error, 1)
 	go func() { done <- srv.Listen(ctx) }()
 	// Wait for bind

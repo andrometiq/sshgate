@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/karthikeyan5/sshgate/src/signer"
+	"github.com/karthikeyan5/sshgate/pkg/signerkit"
 	"github.com/karthikeyan5/sshgate/src/xfer"
 )
 
@@ -29,7 +29,7 @@ func xferKeyTexts(t *testing.T) (boxText, idText string, boxPub *[32]byte) {
 func TestXferRegistry_MissingFileIsEmpty(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "xfer-registry.json")
-	reg, err := signer.LoadXferRegistry(path)
+	reg, err := signerkit.LoadXferRegistry(path)
 	if err != nil {
 		t.Fatalf("LoadXferRegistry(missing): %v", err)
 	}
@@ -43,7 +43,7 @@ func TestXferRegistry_MissingFileIsEmpty(t *testing.T) {
 func TestXferRegistry_RegisterLookupRoundTrip(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "xfer-registry.json")
-	reg, err := signer.LoadXferRegistry(path)
+	reg, err := signerkit.LoadXferRegistry(path)
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
@@ -76,7 +76,7 @@ func TestXferRegistry_RegisterLookupRoundTrip(t *testing.T) {
 	}
 
 	// Reload from disk: the persisted entry must survive a fresh load.
-	reg2, err := signer.LoadXferRegistry(path)
+	reg2, err := signerkit.LoadXferRegistry(path)
 	if err != nil {
 		t.Fatalf("reload: %v", err)
 	}
@@ -90,7 +90,7 @@ func TestXferRegistry_RegisterLookupRoundTrip(t *testing.T) {
 func TestXferRegistry_OverwriteAllowed(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "xfer-registry.json")
-	reg, _ := signer.LoadXferRegistry(path)
+	reg, _ := signerkit.LoadXferRegistry(path)
 	box1, id1, _ := xferKeyTexts(t)
 	box2, id2, want2 := xferKeyTexts(t)
 	fp := "SHA256:rotate-me-bbbbbbbbbbbbbbbbbbbbbbbbbbbb"
@@ -120,7 +120,7 @@ func TestXferRegistry_RejectGroupWritable(t *testing.T) {
 	if err := os.WriteFile(path, []byte(`{"version":1,"servers":{}}`), 0o644); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	if _, err := signer.LoadXferRegistry(path); err == nil {
+	if _, err := signerkit.LoadXferRegistry(path); err == nil {
 		t.Error("LoadXferRegistry accepted a group/other-readable registry")
 	}
 }
@@ -130,7 +130,7 @@ func TestXferRegistry_RejectGroupWritable(t *testing.T) {
 func TestXferRegistry_RejectMalformedKey(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "xfer-registry.json")
-	reg, _ := signer.LoadXferRegistry(path)
+	reg, _ := signerkit.LoadXferRegistry(path)
 	_, idText, _ := xferKeyTexts(t)
 	if err := reg.Register("SHA256:x", "bad", "not-a-valid-box-key", idText); err == nil {
 		t.Error("Register accepted a malformed box key")

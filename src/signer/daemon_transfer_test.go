@@ -10,9 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/karthikeyan5/sshgate/pkg/signerkit"
 	"github.com/karthikeyan5/sshgate/src/gate"
-	"github.com/karthikeyan5/sshgate/src/signer"
-	"github.com/karthikeyan5/sshgate/src/signer/backend"
 	"github.com/karthikeyan5/sshgate/src/xfer"
 	"github.com/karthikeyan5/sshgate/src/xferwire"
 )
@@ -45,23 +44,23 @@ type registerHostResp struct {
 // registry plus the given backend and a fixed clock. Returns the daemon, its
 // master public key, the audit-log path, and the registry so a test can
 // pre-register peers.
-func newXferDaemon(t *testing.T, bk backend.Backend, base time.Time) (*signer.Daemon, ed25519.PublicKey, string, *signer.XferRegistry) {
+func newXferDaemon(t *testing.T, bk signerkit.Backend, base time.Time) (*signerkit.Daemon, ed25519.PublicKey, string, *signerkit.XferRegistry) {
 	t.Helper()
 	pub, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatalf("genkey: %v", err)
 	}
 	auditPath := filepath.Join(t.TempDir(), "audit.log")
-	audit, err := signer.OpenAuditLog(auditPath)
+	audit, err := signerkit.OpenAuditLog(auditPath)
 	if err != nil {
 		t.Fatalf("open audit: %v", err)
 	}
 	t.Cleanup(func() { audit.Close() })
-	reg, err := signer.LoadXferRegistry(filepath.Join(t.TempDir(), "xfer-registry.json"))
+	reg, err := signerkit.LoadXferRegistry(filepath.Join(t.TempDir(), "xfer-registry.json"))
 	if err != nil {
 		t.Fatalf("load registry: %v", err)
 	}
-	d := &signer.Daemon{
+	d := &signerkit.Daemon{
 		Key:          priv,
 		Backend:      bk,
 		Audit:        audit,
@@ -73,7 +72,7 @@ func newXferDaemon(t *testing.T, bk backend.Backend, base time.Time) (*signer.Da
 
 // registerHost generates a fresh box+id keypair, registers it under fp, and
 // returns the box public key and id public key for later assertions.
-func registerHost(t *testing.T, reg *signer.XferRegistry, fp, label string) (*[32]byte, ed25519.PublicKey) {
+func registerHost(t *testing.T, reg *signerkit.XferRegistry, fp, label string) (*[32]byte, ed25519.PublicKey) {
 	t.Helper()
 	bk, err := xfer.GenerateBoxKey()
 	if err != nil {
@@ -91,7 +90,7 @@ func registerHost(t *testing.T, reg *signer.XferRegistry, fp, label string) (*[3
 
 // driveTransfer sends a "transfer" request through the daemon and returns the
 // decoded response. The mock approval for reqID must be pre-armed by the caller.
-func driveTransfer(t *testing.T, d *signer.Daemon, reqID, srcFP, srcPath, destFP, destPath, mode string, ttl int64) transferRespDecoded {
+func driveTransfer(t *testing.T, d *signerkit.Daemon, reqID, srcFP, srcPath, destFP, destPath, mode string, ttl int64) transferRespDecoded {
 	t.Helper()
 	body := map[string]any{
 		"kind":        "transfer",
@@ -127,7 +126,7 @@ func driveTransfer(t *testing.T, d *signer.Daemon, reqID, srcFP, srcPath, destFP
 func TestTransfer_ApprovedTwoLegs(t *testing.T) {
 	t.Parallel()
 	base := time.Unix(1000, 0)
-	mock := backend.NewMockBackend()
+	mock := signerkit.NewMockBackend()
 	d, pub, _, reg := newXferDaemon(t, mock, base)
 
 	srcFP := "SHA256:src-fp-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -209,7 +208,7 @@ func TestTransfer_ApprovedTwoLegs(t *testing.T) {
 // TestTransfer_FreshXferIDPerApproval: two transfers mint distinct xferIDs.
 func TestTransfer_FreshXferIDPerApproval(t *testing.T) {
 	t.Parallel()
-	mock := backend.NewMockBackend()
+	mock := signerkit.NewMockBackend()
 	d, _, _, reg := newXferDaemon(t, mock, time.Unix(1000, 0))
 	srcFP := "SHA256:src-fp-cccccccccccccccccccccccccccccccc"
 	destFP := "SHA256:dst-fp-dddddddddddddddddddddddddddddddd"
@@ -229,7 +228,7 @@ func TestTransfer_FreshXferIDPerApproval(t *testing.T) {
 // registry lookup — no signing, error status.
 func TestTransfer_UnregisteredFails(t *testing.T) {
 	t.Parallel()
-	mock := backend.NewMockBackend()
+	mock := signerkit.NewMockBackend()
 	d, _, _, reg := newXferDaemon(t, mock, time.Unix(1000, 0))
 	srcFP := "SHA256:src-fp-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
 	destFP := "SHA256:dst-fp-ffffffffffffffffffffffffffffffff"
@@ -242,7 +241,7 @@ func TestTransfer_UnregisteredFails(t *testing.T) {
 	}
 
 	// src unregistered (register only dest).
-	d2, _, _, reg2 := newXferDaemon(t, backend.NewMockBackend(), time.Unix(1000, 0))
+	d2, _, _, reg2 := newXferDaemon(t, signerkit.NewMockBackend(), time.Unix(1000, 0))
 	registerHost(t, reg2, destFP, "d")
 	resp2 := driveTransfer(t, d2, "t_nosrc", srcFP, "/a", destFP, "/b", "0600", 60)
 	if resp2.Status != "error" || resp2.Send != nil {
@@ -253,7 +252,7 @@ func TestTransfer_UnregisteredFails(t *testing.T) {
 // TestTransfer_SelfTransferRejected: src_fp == dest_fp is refused.
 func TestTransfer_SelfTransferRejected(t *testing.T) {
 	t.Parallel()
-	mock := backend.NewMockBackend()
+	mock := signerkit.NewMockBackend()
 	d, _, _, reg := newXferDaemon(t, mock, time.Unix(1000, 0))
 	fp := "SHA256:same-fp-11111111111111111111111111111111"
 	registerHost(t, reg, fp, "x")
@@ -266,7 +265,7 @@ func TestTransfer_SelfTransferRejected(t *testing.T) {
 // TestTransfer_BadModeRejected: a mode outside the P2 allowlist is refused.
 func TestTransfer_BadModeRejected(t *testing.T) {
 	t.Parallel()
-	mock := backend.NewMockBackend()
+	mock := signerkit.NewMockBackend()
 	d, _, _, reg := newXferDaemon(t, mock, time.Unix(1000, 0))
 	srcFP := "SHA256:src-fp-22222222222222222222222222222222"
 	destFP := "SHA256:dst-fp-33333333333333333333333333333333"
@@ -282,7 +281,7 @@ func TestTransfer_BadModeRejected(t *testing.T) {
 // refuses transfers with a clear error rather than nil-panicking.
 func TestTransfer_NilRegistryFailsClosed(t *testing.T) {
 	t.Parallel()
-	d, _, _, _ := newXferDaemon(t, backend.NewMockBackend(), time.Unix(1000, 0))
+	d, _, _, _ := newXferDaemon(t, signerkit.NewMockBackend(), time.Unix(1000, 0))
 	d.XferRegistry = nil
 	resp := driveTransfer(t, d, "t_noreg", "SHA256:a-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "/a", "SHA256:b-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "/b", "0600", 60)
 	if resp.Status != "error" {
@@ -297,7 +296,7 @@ func TestTransfer_NilRegistryFailsClosed(t *testing.T) {
 func TestSignPath_RejectsTransferVerb(t *testing.T) {
 	t.Parallel()
 	base := time.Unix(1000, 0)
-	mock := backend.NewMockBackend()
+	mock := signerkit.NewMockBackend()
 	d, _, auditPath, _ := newXferDaemon(t, mock, base)
 
 	// Even with a standing grant covering ALL commands on the alias, the sign
@@ -336,7 +335,7 @@ func TestSignPath_RejectsTransferVerb(t *testing.T) {
 // backend and writes the registry ONLY on approval.
 func TestRegisterXferKey_ApprovedWrites(t *testing.T) {
 	t.Parallel()
-	mock := backend.NewMockBackend()
+	mock := signerkit.NewMockBackend()
 	d, _, _, reg := newXferDaemon(t, mock, time.Unix(1000, 0))
 	bk, _ := xfer.GenerateBoxKey()
 	ik, _ := xfer.GenerateIDKey()
@@ -356,7 +355,7 @@ func TestRegisterXferKey_ApprovedWrites(t *testing.T) {
 // unchanged (and still routes through the backend — no auto path).
 func TestRegisterXferKey_DeniedNoWrite(t *testing.T) {
 	t.Parallel()
-	mock := backend.NewMockBackend()
+	mock := signerkit.NewMockBackend()
 	d, _, _, reg := newXferDaemon(t, mock, time.Unix(1000, 0))
 	bk, _ := xfer.GenerateBoxKey()
 	ik, _ := xfer.GenerateIDKey()
@@ -374,7 +373,7 @@ func TestRegisterXferKey_DeniedNoWrite(t *testing.T) {
 
 // driveRegister sends a register_xfer_key request and returns the decoded
 // response.
-func driveRegister(t *testing.T, d *signer.Daemon, reqID, fp, label, boxText, idText string) registerHostResp {
+func driveRegister(t *testing.T, d *signerkit.Daemon, reqID, fp, label, boxText, idText string) registerHostResp {
 	t.Helper()
 	body := map[string]any{
 		"kind":       "register_xfer_key",

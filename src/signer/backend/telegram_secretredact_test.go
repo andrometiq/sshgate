@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/karthikeyan5/sshgate/pkg/signerkit"
 	"github.com/karthikeyan5/sshgate/src/redact"
 	redactrules "github.com/karthikeyan5/sshgate/src/redact/rules"
 	"github.com/karthikeyan5/sshgate/src/signer/backend"
@@ -54,9 +55,9 @@ func TestTelegram_ApprovalMessageRedactsSecret(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 
-	if _, err := tb.Request(ctx, backend.ApprovalRequest{
+	if _, err := tb.Request(ctx, signerkit.ApprovalRequest{
 		RequestID: "r_secret",
-		Commands: []backend.CommandReq{
+		Commands: []signerkit.CommandReq{
 			{Server: "prod", Cmd: `printf 'PASSWORD=` + secretFixture + `'`, TTLSec: 60},
 			{Server: "prod", Cmd: "systemctl restart nginx", TTLSec: 60}, // benign, must survive
 		},
@@ -98,9 +99,9 @@ func TestTelegram_ApprovalMessageNilRulesVerbatim(t *testing.T) {
 	}
 
 	cmd := `printf 'PASSWORD=` + secretFixture + `'`
-	if _, err := tb.Request(ctx, backend.ApprovalRequest{
+	if _, err := tb.Request(ctx, signerkit.ApprovalRequest{
 		RequestID: "r_nilrules",
-		Commands:  []backend.CommandReq{{Server: "prod", Cmd: cmd, TTLSec: 60}},
+		Commands:  []signerkit.CommandReq{{Server: "prod", Cmd: cmd, TTLSec: 60}},
 	}); err != nil {
 		t.Fatalf("Request: %v", err)
 	}
@@ -129,7 +130,7 @@ func TestTelegram_GrantMessageRedactsSecret(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 
-	if _, err := tb.RequestGrant(ctx, backend.GrantApprovalRequest{
+	if _, err := tb.RequestGrant(ctx, signerkit.GrantApprovalRequest{
 		RequestID: "g_secret",
 		Alias:     "prod",
 		Scope:     "commands",
@@ -173,7 +174,7 @@ func TestTelegram_GrantMessageNilRulesVerbatim(t *testing.T) {
 	}
 
 	cmd := `printf 'PASSWORD=` + secretFixture + `'`
-	if _, err := tb.RequestGrant(ctx, backend.GrantApprovalRequest{
+	if _, err := tb.RequestGrant(ctx, signerkit.GrantApprovalRequest{
 		RequestID: "g_nilrules",
 		Alias:     "prod",
 		Scope:     "commands",
@@ -209,9 +210,9 @@ func TestTelegram_ApprovalMessageDoesNotMutateRequest(t *testing.T) {
 	}
 
 	rawCmd := `printf 'PASSWORD=` + secretFixture + `'`
-	req := backend.ApprovalRequest{
+	req := signerkit.ApprovalRequest{
 		RequestID: "r_nomutate",
-		Commands:  []backend.CommandReq{{Server: "prod", Cmd: rawCmd, TTLSec: 60}},
+		Commands:  []signerkit.CommandReq{{Server: "prod", Cmd: rawCmd, TTLSec: 60}},
 	}
 	if _, err := tb.Request(ctx, req); err != nil {
 		t.Fatalf("Request: %v", err)
@@ -239,7 +240,7 @@ func TestTelegram_GrantMessageDoesNotMutateRequest(t *testing.T) {
 	}
 
 	rawCmd := `printf 'PASSWORD=` + secretFixture + `'`
-	req := backend.GrantApprovalRequest{
+	req := signerkit.GrantApprovalRequest{
 		RequestID: "g_nomutate",
 		Alias:     "prod",
 		Scope:     "commands",

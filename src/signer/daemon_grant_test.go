@@ -13,8 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/karthikeyan5/sshgate/src/signer"
-	"github.com/karthikeyan5/sshgate/src/signer/backend"
+	"github.com/karthikeyan5/sshgate/pkg/signerkit"
 	"github.com/karthikeyan5/sshgate/src/sigwire"
 )
 
@@ -40,19 +39,19 @@ func (c *clock) set(t time.Time) {
 
 // newGrantDaemon builds a Daemon with the given backend and a mutable
 // clock starting at base. Mirrors newDaemon's audit/key wiring.
-func newGrantDaemon(t *testing.T, bk backend.Backend, base time.Time) (*signer.Daemon, ed25519.PublicKey, *signer.AuditLog, string, *clock) {
+func newGrantDaemon(t *testing.T, bk signerkit.Backend, base time.Time) (*signerkit.Daemon, ed25519.PublicKey, *signerkit.AuditLog, string, *clock) {
 	t.Helper()
 	pub, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatalf("genkey: %v", err)
 	}
 	auditPath := filepath.Join(t.TempDir(), "audit.log")
-	audit, err := signer.OpenAuditLog(auditPath)
+	audit, err := signerkit.OpenAuditLog(auditPath)
 	if err != nil {
 		t.Fatalf("open audit: %v", err)
 	}
 	clk := &clock{t: base}
-	d := &signer.Daemon{
+	d := &signerkit.Daemon{
 		Key:     priv,
 		Backend: bk,
 		Audit:   audit,
@@ -101,7 +100,7 @@ func authModeFor(t *testing.T, auditPath, reqID string) string {
 // createGrant drives the real request_grant path through the daemon and
 // returns the decoded response. The backend approval for reqID must be
 // pre-armed by the caller (e.g. mock.Approve(reqID, "karthi")).
-func createGrant(t *testing.T, d *signer.Daemon, reqID, alias, scope string, commands []string, durationSec int64) grantResp {
+func createGrant(t *testing.T, d *signerkit.Daemon, reqID, alias, scope string, commands []string, durationSec int64) grantResp {
 	t.Helper()
 	body := map[string]any{
 		"kind":             "request_grant",
@@ -130,7 +129,7 @@ func createGrant(t *testing.T, d *signer.Daemon, reqID, alias, scope string, com
 
 // signOne drives a single-command sign request and returns the decoded
 // response. host/reveal/reason are optional.
-func signOne(t *testing.T, d *signer.Daemon, reqID, alias, cmd, host string, reveal bool, reason string) grantSignResp {
+func signOne(t *testing.T, d *signerkit.Daemon, reqID, alias, cmd, host string, reveal bool, reason string) grantSignResp {
 	t.Helper()
 	cmdObj := map[string]any{
 		"server":      alias,
@@ -193,7 +192,7 @@ func TestSignRequest_AdminVerbMustBeSoleCommand(t *testing.T) {
 
 	// signMulti sends a raw multi-command sign request (the shape a crafted
 	// client — not update_gate, which always sends one command — could send).
-	signMulti := func(t *testing.T, d *signer.Daemon, reqID string, cmds []string) grantSignResp {
+	signMulti := func(t *testing.T, d *signerkit.Daemon, reqID string, cmds []string) grantSignResp {
 		t.Helper()
 		var arr []any
 		for _, c := range cmds {
@@ -225,7 +224,7 @@ func TestSignRequest_AdminVerbMustBeSoleCommand(t *testing.T) {
 		name, cmds := name, cmds
 		t.Run("reject: "+name, func(t *testing.T) {
 			t.Parallel()
-			mock := backend.NewMockBackend()
+			mock := signerkit.NewMockBackend()
 			d, _, audit, _, _ := newGrantDaemon(t, mock, time.Unix(1000, 0))
 			defer audit.Close()
 			// Arm the mock so that IF the guard were removed, the request would be
@@ -246,7 +245,7 @@ func TestSignRequest_AdminVerbMustBeSoleCommand(t *testing.T) {
 	// it proceeds to a human prompt and signs both.
 	t.Run("normal 2-write batch unaffected", func(t *testing.T) {
 		t.Parallel()
-		mock := backend.NewMockBackend()
+		mock := signerkit.NewMockBackend()
 		d, _, audit, _, _ := newGrantDaemon(t, mock, time.Unix(1000, 0))
 		defer audit.Close()
 		mock.Approve("r_batch", "karthi")
@@ -269,7 +268,7 @@ func TestSignRequest_AdminVerbMustBeSoleCommand(t *testing.T) {
 // in the audit log is "grant:<id>", confirming the grant path.
 func TestGrant_ScopeAll_AutoSignsWithoutPrompt(t *testing.T) {
 	t.Parallel()
-	mock := backend.NewMockBackend()
+	mock := signerkit.NewMockBackend()
 	d, pub, audit, auditPath, _ := newGrantDaemon(t, mock, time.Unix(1000, 0))
 	defer audit.Close()
 
@@ -315,7 +314,7 @@ func TestGrant_ScopeAll_AutoSignsWithoutPrompt(t *testing.T) {
 // unchanged); the audit's auth_mode is the same value via the shared helper.
 func TestGrant_AuthModeOnSignResponseAndAudit(t *testing.T) {
 	t.Parallel()
-	mock := backend.NewMockBackend()
+	mock := signerkit.NewMockBackend()
 	d, _, audit, auditPath, _ := newGrantDaemon(t, mock, time.Unix(1000, 0))
 	defer audit.Close()
 
@@ -365,7 +364,7 @@ func TestGrant_AuthModeOnSignResponseAndAudit(t *testing.T) {
 // both fall through to the human prompt.
 func TestGrant_ScopeCommands_ExactMatchOnly(t *testing.T) {
 	t.Parallel()
-	mock := backend.NewMockBackend()
+	mock := signerkit.NewMockBackend()
 	d, _, audit, auditPath, _ := newGrantDaemon(t, mock, time.Unix(1000, 0))
 	defer audit.Close()
 
@@ -413,7 +412,7 @@ func TestGrant_ScopeCommands_ExactMatchOnly(t *testing.T) {
 // signed payload still carries reveal=true.
 func TestGrant_RevealNeverAutoSigned(t *testing.T) {
 	t.Parallel()
-	mock := backend.NewMockBackend()
+	mock := signerkit.NewMockBackend()
 	d, _, audit, auditPath, _ := newGrantDaemon(t, mock, time.Unix(1000, 0))
 	defer audit.Close()
 
@@ -456,7 +455,7 @@ func TestGrant_RevealNeverAutoSigned(t *testing.T) {
 // the same alias must STILL auto-sign — the carve-out must not over-reach.
 func TestGrant_AdminVerbNeverAutoSigned(t *testing.T) {
 	t.Parallel()
-	mock := backend.NewMockBackend()
+	mock := signerkit.NewMockBackend()
 	d, _, audit, auditPath, _ := newGrantDaemon(t, mock, time.Unix(1000, 0))
 	defer audit.Close()
 
@@ -500,7 +499,7 @@ func TestGrant_AdminVerbNeverAutoSigned(t *testing.T) {
 // command aimed at alias Y.
 func TestGrant_CrossServer(t *testing.T) {
 	t.Parallel()
-	mock := backend.NewMockBackend()
+	mock := signerkit.NewMockBackend()
 	d, _, audit, auditPath, _ := newGrantDaemon(t, mock, time.Unix(1000, 0))
 	defer audit.Close()
 
@@ -521,7 +520,7 @@ func TestGrant_CrossServer(t *testing.T) {
 // command prompts again (the signer never auto-signs past expiry).
 func TestGrant_Expired(t *testing.T) {
 	t.Parallel()
-	mock := backend.NewMockBackend()
+	mock := signerkit.NewMockBackend()
 	base := time.Unix(1000, 0)
 	d, _, audit, auditPath, clk := newGrantDaemon(t, mock, base)
 	defer audit.Close()
@@ -551,7 +550,7 @@ func TestGrant_Expired(t *testing.T) {
 // write prompts.
 func TestGrant_FreshDaemonHasNoGrants(t *testing.T) {
 	t.Parallel()
-	mock := backend.NewMockBackend()
+	mock := signerkit.NewMockBackend()
 	d, _, audit, auditPath, _ := newGrantDaemon(t, mock, time.Unix(1000, 0))
 	defer audit.Close()
 
@@ -569,7 +568,7 @@ func TestGrant_FreshDaemonHasNoGrants(t *testing.T) {
 // stores no grant — a subsequent matching write still prompts.
 func TestGrant_DeniedNotStored(t *testing.T) {
 	t.Parallel()
-	mock := backend.NewMockBackend()
+	mock := signerkit.NewMockBackend()
 	d, _, audit, auditPath, _ := newGrantDaemon(t, mock, time.Unix(1000, 0))
 	defer audit.Close()
 
@@ -614,7 +613,7 @@ func TestGrant_CreationValidation(t *testing.T) {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			mock := backend.NewMockBackend()
+			mock := signerkit.NewMockBackend()
 			d, _, audit, _, _ := newGrantDaemon(t, mock, time.Unix(1000, 0))
 			defer audit.Close()
 
@@ -635,7 +634,7 @@ func TestGrant_CreationValidation(t *testing.T) {
 // boundary, not an off-by-one.
 func TestGrant_BoundaryExact24hAllowed(t *testing.T) {
 	t.Parallel()
-	mock := backend.NewMockBackend()
+	mock := signerkit.NewMockBackend()
 	d, _, audit, _, _ := newGrantDaemon(t, mock, time.Unix(1000, 0))
 	defer audit.Close()
 
@@ -650,7 +649,7 @@ func TestGrant_BoundaryExact24hAllowed(t *testing.T) {
 // write that auto-signed before revoke prompts again after.
 func TestGrant_Revoke(t *testing.T) {
 	t.Parallel()
-	mock := backend.NewMockBackend()
+	mock := signerkit.NewMockBackend()
 	d, _, audit, auditPath, _ := newGrantDaemon(t, mock, time.Unix(1000, 0))
 	defer audit.Close()
 
@@ -707,7 +706,7 @@ func TestGrant_ByteIdenticalToHumanApproved(t *testing.T) {
 	base := time.Unix(1000, 0)
 
 	// Human-approved sign (no grant).
-	mock1 := backend.NewMockBackend()
+	mock1 := signerkit.NewMockBackend()
 	dH, pubH, auditH, _, _ := newGrantDaemon(t, mock1, base)
 	defer auditH.Close()
 	mock1.Approve("s_human", "karthi")
@@ -717,7 +716,7 @@ func TestGrant_ByteIdenticalToHumanApproved(t *testing.T) {
 	}
 
 	// Grant-auto-signed sign on a fresh daemon at the SAME clock.
-	mock2 := backend.NewMockBackend()
+	mock2 := signerkit.NewMockBackend()
 	dG, pubG, auditG, auditPathG, _ := newGrantDaemon(t, mock2, base)
 	defer auditG.Close()
 	mock2.Approve("g_req", "karthi")
@@ -796,7 +795,7 @@ type listGrantsResp struct {
 
 // listGrants drives the real list_grants path through the daemon and
 // returns the decoded response. alias is optional ("" = all).
-func listGrants(t *testing.T, d *signer.Daemon, reqID, alias string) listGrantsResp {
+func listGrants(t *testing.T, d *signerkit.Daemon, reqID, alias string) listGrantsResp {
 	t.Helper()
 	body := map[string]any{
 		"kind":       "list_grants",
@@ -825,7 +824,7 @@ func listGrants(t *testing.T, d *signer.Daemon, reqID, alias string) listGrantsR
 // commands, and expiry the daemon recorded.
 func TestListGrants_ReportsLiveGrant(t *testing.T) {
 	t.Parallel()
-	mock := backend.NewMockBackend()
+	mock := signerkit.NewMockBackend()
 	base := time.Unix(1000, 0)
 	d, _, audit, _, _ := newGrantDaemon(t, mock, base)
 	defer audit.Close()
@@ -873,7 +872,7 @@ func TestListGrants_ReportsLiveGrant(t *testing.T) {
 // phantom-expired grant.
 func TestListGrants_OmitsExpiredGrant(t *testing.T) {
 	t.Parallel()
-	mock := backend.NewMockBackend()
+	mock := signerkit.NewMockBackend()
 	base := time.Unix(1000, 0)
 	d, _, audit, _, clk := newGrantDaemon(t, mock, base)
 	defer audit.Close()
@@ -922,22 +921,22 @@ func (b *blockingBackend) wasCalled() bool {
 	return b.called
 }
 
-func (b *blockingBackend) Request(context.Context, backend.ApprovalRequest) (<-chan backend.Result, error) {
+func (b *blockingBackend) Request(context.Context, signerkit.ApprovalRequest) (<-chan signerkit.Result, error) {
 	b.mark()
 	return nil, fmt.Errorf("blockingBackend: Request must not be called by list_grants")
 }
 
-func (b *blockingBackend) RequestGrant(context.Context, backend.GrantApprovalRequest) (<-chan backend.Result, error) {
+func (b *blockingBackend) RequestGrant(context.Context, signerkit.GrantApprovalRequest) (<-chan signerkit.Result, error) {
 	b.mark()
 	return nil, fmt.Errorf("blockingBackend: RequestGrant must not be called by list_grants")
 }
 
-func (b *blockingBackend) RequestTransfer(context.Context, backend.TransferApprovalRequest) (<-chan backend.Result, error) {
+func (b *blockingBackend) RequestTransfer(context.Context, signerkit.TransferApprovalRequest) (<-chan signerkit.Result, error) {
 	b.mark()
 	return nil, fmt.Errorf("blockingBackend: RequestTransfer must not be called by list_grants")
 }
 
-func (b *blockingBackend) RequestRegisterKey(context.Context, backend.RegisterApprovalRequest) (<-chan backend.Result, error) {
+func (b *blockingBackend) RequestRegisterKey(context.Context, signerkit.RegisterApprovalRequest) (<-chan signerkit.Result, error) {
 	b.mark()
 	return nil, fmt.Errorf("blockingBackend: RequestRegisterKey must not be called by list_grants")
 }
@@ -967,7 +966,7 @@ func TestListGrants_NoApprovalNoBackend(t *testing.T) {
 // live grants, listing for one alias returns only that grant.
 func TestListGrants_AliasFilter(t *testing.T) {
 	t.Parallel()
-	mock := backend.NewMockBackend()
+	mock := signerkit.NewMockBackend()
 	d, _, audit, _, _ := newGrantDaemon(t, mock, time.Unix(1000, 0))
 	defer audit.Close()
 
@@ -1003,7 +1002,7 @@ func TestListGrants_AliasFilter(t *testing.T) {
 // contract).
 func TestListGrants_MissingRequestID(t *testing.T) {
 	t.Parallel()
-	mock := backend.NewMockBackend()
+	mock := signerkit.NewMockBackend()
 	d, _, audit, _, _ := newGrantDaemon(t, mock, time.Unix(1000, 0))
 	defer audit.Close()
 

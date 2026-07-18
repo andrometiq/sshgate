@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/karthikeyan5/sshgate/src/signer/backend"
+	"github.com/karthikeyan5/sshgate/pkg/signerkit"
 )
 
 // fakeServer implements the v2 wire protocol just enough to test the
@@ -189,11 +189,11 @@ func (f *fakeServer) handleWithAuth(token string) http.Handler {
 	})
 }
 
-func newFakeServerBackend(t *testing.T, fs *fakeServer) (*backend.HostedServerBackend, *httptest.Server) {
+func newFakeServerBackend(t *testing.T, fs *fakeServer) (*signerkit.HostedServerBackend, *httptest.Server) {
 	t.Helper()
 	ts := httptest.NewServer(fs.handleWithAuth("test-key"))
 	t.Cleanup(ts.Close)
-	return &backend.HostedServerBackend{
+	return &signerkit.HostedServerBackend{
 		BaseURL:    ts.URL,
 		APIKey:     "test-key",
 		ClientID:   "test-laptop",
@@ -210,9 +210,9 @@ func TestHostedServerBackend_Approved(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	ch, err := hb.Request(ctx, backend.ApprovalRequest{
+	ch, err := hb.Request(ctx, signerkit.ApprovalRequest{
 		RequestID: "ignored-by-server-but-required-by-daemon",
-		Commands:  []backend.CommandReq{{Server: "prod", Cmd: "echo hi", TTLSec: 60}},
+		Commands:  []signerkit.CommandReq{{Server: "prod", Cmd: "echo hi", TTLSec: 60}},
 		Submitted: time.Now(),
 	})
 	if err != nil {
@@ -223,7 +223,7 @@ func TestHostedServerBackend_Approved(t *testing.T) {
 		if !ok {
 			t.Fatal("channel closed without a result")
 		}
-		if res.Status != backend.StatusApproved {
+		if res.Status != signerkit.StatusApproved {
 			t.Errorf("status = %v; want StatusApproved", res.Status)
 		}
 		if res.ApprovedBy != "karthi" {
@@ -251,16 +251,16 @@ func TestHostedServerBackend_Denied(t *testing.T) {
 	hb, _ := newFakeServerBackend(t, fs)
 
 	ctx := context.Background()
-	ch, err := hb.Request(ctx, backend.ApprovalRequest{
+	ch, err := hb.Request(ctx, signerkit.ApprovalRequest{
 		RequestID: "r1",
-		Commands:  []backend.CommandReq{{Server: "p", Cmd: "rm -rf /", TTLSec: 60}},
+		Commands:  []signerkit.CommandReq{{Server: "p", Cmd: "rm -rf /", TTLSec: 60}},
 	})
 	if err != nil {
 		t.Fatalf("Request: %v", err)
 	}
 	select {
 	case res := <-ch:
-		if res.Status != backend.StatusDenied {
+		if res.Status != signerkit.StatusDenied {
 			t.Errorf("status = %v; want StatusDenied", res.Status)
 		}
 	case <-time.After(3 * time.Second):
@@ -278,16 +278,16 @@ func TestHostedServerBackend_TimeoutBudget(t *testing.T) {
 	hb.Timeout = 250 * time.Millisecond
 
 	start := time.Now()
-	ch, err := hb.Request(context.Background(), backend.ApprovalRequest{
+	ch, err := hb.Request(context.Background(), signerkit.ApprovalRequest{
 		RequestID: "r1",
-		Commands:  []backend.CommandReq{{Server: "p", Cmd: "x", TTLSec: 60}},
+		Commands:  []signerkit.CommandReq{{Server: "p", Cmd: "x", TTLSec: 60}},
 	})
 	if err != nil {
 		t.Fatalf("Request: %v", err)
 	}
 	select {
 	case res := <-ch:
-		if res.Status != backend.StatusTimeout {
+		if res.Status != signerkit.StatusTimeout {
 			t.Errorf("status = %v; want StatusTimeout", res.Status)
 		}
 	case <-time.After(2 * time.Second):
@@ -306,9 +306,9 @@ func TestHostedServerBackend_CtxCancel(t *testing.T) {
 	hb.Timeout = 5 * time.Second
 
 	ctx, cancel := context.WithCancel(context.Background())
-	ch, err := hb.Request(ctx, backend.ApprovalRequest{
+	ch, err := hb.Request(ctx, signerkit.ApprovalRequest{
 		RequestID: "r1",
-		Commands:  []backend.CommandReq{{Server: "p", Cmd: "x", TTLSec: 60}},
+		Commands:  []signerkit.CommandReq{{Server: "p", Cmd: "x", TTLSec: 60}},
 	})
 	if err != nil {
 		t.Fatalf("Request: %v", err)
@@ -321,7 +321,7 @@ func TestHostedServerBackend_CtxCancel(t *testing.T) {
 	}()
 	select {
 	case res := <-ch:
-		if res.Status != backend.StatusTimeout {
+		if res.Status != signerkit.StatusTimeout {
 			t.Errorf("status = %v; want StatusTimeout on ctx cancel", res.Status)
 		}
 	case <-time.After(2 * time.Second):
@@ -335,9 +335,9 @@ func TestHostedServerBackend_RejectsBadAuth(t *testing.T) {
 	hb, _ := newFakeServerBackend(t, fs)
 	hb.APIKey = "wrong-token"
 
-	_, err := hb.Request(context.Background(), backend.ApprovalRequest{
+	_, err := hb.Request(context.Background(), signerkit.ApprovalRequest{
 		RequestID: "r1",
-		Commands:  []backend.CommandReq{{Server: "p", Cmd: "x", TTLSec: 60}},
+		Commands:  []signerkit.CommandReq{{Server: "p", Cmd: "x", TTLSec: 60}},
 	})
 	if err == nil {
 		t.Fatal("Request should fail with 401")
@@ -351,19 +351,19 @@ func TestHostedServerBackend_ValidatesConfig(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		name string
-		hb   backend.HostedServerBackend
+		hb   signerkit.HostedServerBackend
 	}{
-		{"no BaseURL", backend.HostedServerBackend{APIKey: "k", ClientID: "c"}},
-		{"no APIKey", backend.HostedServerBackend{BaseURL: "http://x", ClientID: "c"}},
-		{"no ClientID", backend.HostedServerBackend{BaseURL: "http://x", APIKey: "k"}},
+		{"no BaseURL", signerkit.HostedServerBackend{APIKey: "k", ClientID: "c"}},
+		{"no APIKey", signerkit.HostedServerBackend{BaseURL: "http://x", ClientID: "c"}},
+		{"no ClientID", signerkit.HostedServerBackend{BaseURL: "http://x", APIKey: "k"}},
 	}
 	for _, tc := range cases {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			_, err := tc.hb.Request(context.Background(), backend.ApprovalRequest{
+			_, err := tc.hb.Request(context.Background(), signerkit.ApprovalRequest{
 				RequestID: "r",
-				Commands:  []backend.CommandReq{{Server: "p", Cmd: "x", TTLSec: 60}},
+				Commands:  []signerkit.CommandReq{{Server: "p", Cmd: "x", TTLSec: 60}},
 			})
 			if err == nil {
 				t.Fatal("expected validation error")
@@ -391,7 +391,7 @@ func TestHostedServerBackend_RejectsReveal(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	hb := &backend.HostedServerBackend{
+	hb := &signerkit.HostedServerBackend{
 		BaseURL:    ts.URL,
 		APIKey:     "k",
 		ClientID:   "karthi-laptop",
@@ -401,9 +401,9 @@ func TestHostedServerBackend_RejectsReveal(t *testing.T) {
 	}
 
 	// A reveal command (possibly mixed with an ordinary one) must be rejected.
-	ch, err := hb.Request(context.Background(), backend.ApprovalRequest{
+	ch, err := hb.Request(context.Background(), signerkit.ApprovalRequest{
 		RequestID: "r_reveal",
-		Commands: []backend.CommandReq{
+		Commands: []signerkit.CommandReq{
 			{Server: "prod", Cmd: "systemctl restart nginx", TTLSec: 60},
 			{Server: "prod", Cmd: "cat /etc/secret.env", TTLSec: 60, Reveal: true, Reason: "need the DB password"},
 		},
@@ -422,9 +422,9 @@ func TestHostedServerBackend_RejectsReveal(t *testing.T) {
 	}
 
 	// Sanity: the SAME backend still works for an ordinary (non-reveal) write.
-	ch2, err := hb.Request(context.Background(), backend.ApprovalRequest{
+	ch2, err := hb.Request(context.Background(), signerkit.ApprovalRequest{
 		RequestID: "r_plain",
-		Commands:  []backend.CommandReq{{Server: "prod", Cmd: "systemctl restart nginx", TTLSec: 60}},
+		Commands:  []signerkit.CommandReq{{Server: "prod", Cmd: "systemctl restart nginx", TTLSec: 60}},
 	})
 	if err != nil {
 		t.Fatalf("non-reveal Request should succeed; got %v", err)
@@ -454,7 +454,7 @@ func TestHostedServerBackend_SendsExpectedBody(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	hb := &backend.HostedServerBackend{
+	hb := &signerkit.HostedServerBackend{
 		BaseURL:    ts.URL,
 		APIKey:     "k",
 		ClientID:   "karthi-laptop",
@@ -462,9 +462,9 @@ func TestHostedServerBackend_SendsExpectedBody(t *testing.T) {
 		PollWait:   50 * time.Millisecond,
 		Timeout:    2 * time.Second,
 	}
-	ch, err := hb.Request(context.Background(), backend.ApprovalRequest{
+	ch, err := hb.Request(context.Background(), signerkit.ApprovalRequest{
 		RequestID: "ignored",
-		Commands: []backend.CommandReq{
+		Commands: []signerkit.CommandReq{
 			{Server: "prod", Cmd: "echo hi", TTLSec: 60},
 			{Server: "stage", Cmd: "uptime", TTLSec: 30},
 		},

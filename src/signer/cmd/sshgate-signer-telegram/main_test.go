@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/karthikeyan5/sshgate/src/signer/backend"
+	"github.com/karthikeyan5/sshgate/pkg/signerkit"
 )
 
 // ---------------------------------------------------------------------------
@@ -167,8 +167,8 @@ func TestBuildBackend_StubAndUnknown(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildBackend(stub) = %v; want nil", err)
 	}
-	if _, ok := bk.(backend.StubBackend); !ok {
-		t.Errorf("buildBackend(stub) returned %T; want backend.StubBackend", bk)
+	if _, ok := bk.(signerkit.StubBackend); !ok {
+		t.Errorf("buildBackend(stub) returned %T; want signerkit.StubBackend", bk)
 	}
 
 	cfg.Backend.Type = "nope-not-a-backend"

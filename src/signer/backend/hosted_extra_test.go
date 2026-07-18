@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/karthikeyan5/sshgate/src/signer/backend"
+	"github.com/karthikeyan5/sshgate/pkg/signerkit"
 )
 
 // TestHostedServerBackend_PollMatrix sweeps the /v1/poll outcomes that
@@ -22,27 +22,27 @@ func TestHostedServerBackend_PollMatrix(t *testing.T) {
 	cases := []struct {
 		name    string
 		mutate  func(fs *fakeServer)
-		wantSts backend.ResultStatus
+		wantSts signerkit.ResultStatus
 	}{
 		{
 			name:    "poll_404",
 			mutate:  func(fs *fakeServer) { fs.pollHTTPStatus = 404 },
-			wantSts: backend.StatusTimeout,
+			wantSts: signerkit.StatusTimeout,
 		},
 		{
 			name:    "poll_error_status",
 			mutate:  func(fs *fakeServer) { fs.pollAction = "error" },
-			wantSts: backend.StatusTimeout,
+			wantSts: signerkit.StatusTimeout,
 		},
 		{
 			name:    "poll_malformed_json",
 			mutate:  func(fs *fakeServer) { fs.pollMalformed = true },
-			wantSts: backend.StatusTimeout,
+			wantSts: signerkit.StatusTimeout,
 		},
 		{
 			name:    "poll_unknown_status",
 			mutate:  func(fs *fakeServer) { fs.pollRawStatus = "frobnicated" },
-			wantSts: backend.StatusTimeout,
+			wantSts: signerkit.StatusTimeout,
 		},
 	}
 	for _, tc := range cases {
@@ -55,9 +55,9 @@ func TestHostedServerBackend_PollMatrix(t *testing.T) {
 			hb.PollWait = 50 * time.Millisecond
 			hb.Timeout = 2 * time.Second
 
-			ch, err := hb.Request(context.Background(), backend.ApprovalRequest{
+			ch, err := hb.Request(context.Background(), signerkit.ApprovalRequest{
 				RequestID: "r1",
-				Commands:  []backend.CommandReq{{Server: "p", Cmd: "x", TTLSec: 60}},
+				Commands:  []signerkit.CommandReq{{Server: "p", Cmd: "x", TTLSec: 60}},
 			})
 			if err != nil {
 				t.Fatalf("Request: %v", err)
@@ -93,16 +93,16 @@ func TestHostedServerBackend_ConnectErrorThenApproved(t *testing.T) {
 	hb.Timeout = 5 * time.Second
 
 	start := time.Now()
-	ch, err := hb.Request(context.Background(), backend.ApprovalRequest{
+	ch, err := hb.Request(context.Background(), signerkit.ApprovalRequest{
 		RequestID: "r1",
-		Commands:  []backend.CommandReq{{Server: "prod", Cmd: "echo hi", TTLSec: 60}},
+		Commands:  []signerkit.CommandReq{{Server: "prod", Cmd: "echo hi", TTLSec: 60}},
 	})
 	if err != nil {
 		t.Fatalf("Request: %v", err)
 	}
 	select {
 	case res := <-ch:
-		if res.Status != backend.StatusApproved {
+		if res.Status != signerkit.StatusApproved {
 			t.Fatalf("status = %v; want StatusApproved after retry", res.Status)
 		}
 		if len(res.Signatures) != 1 || res.Signatures[0].Cmd != "echo hi" {
@@ -127,9 +127,9 @@ func TestHostedServerBackend_SignEmptyRequestID(t *testing.T) {
 	fs := &fakeServer{reqID: "", signEmptyReqID: true}
 	hb, _ := newFakeServerBackend(t, fs)
 
-	ch, err := hb.Request(context.Background(), backend.ApprovalRequest{
+	ch, err := hb.Request(context.Background(), signerkit.ApprovalRequest{
 		RequestID: "r1",
-		Commands:  []backend.CommandReq{{Server: "p", Cmd: "x", TTLSec: 60}},
+		Commands:  []signerkit.CommandReq{{Server: "p", Cmd: "x", TTLSec: 60}},
 	})
 	if err == nil {
 		t.Fatal("Request returned nil err on empty request_id; want an error")

@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/karthikeyan5/sshgate/pkg/signerkit"
 	"github.com/karthikeyan5/sshgate/src/signer/backend"
 )
 
@@ -28,7 +29,7 @@ func TestTelegram_RequestTransfer_LabelAndApprove(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	ch, err := tb.RequestTransfer(ctx, backend.TransferApprovalRequest{
+	ch, err := tb.RequestTransfer(ctx, signerkit.TransferApprovalRequest{
 		RequestID: "x_t1",
 		XferID:    "AQ4bKDVCT1xpdoOQnaq3xA",
 		SrcLabel:  "ram-gcp",
@@ -61,7 +62,7 @@ func TestTelegram_RequestTransfer_LabelAndApprove(t *testing.T) {
 	fake.pushCallback(allowedUserID, "karthi", "approve:x_t1", 2000, allowedChatID)
 	select {
 	case got := <-ch:
-		if got.Status != backend.StatusApproved {
+		if got.Status != signerkit.StatusApproved {
 			t.Errorf("status = %v; want approved", got.Status)
 		}
 		if got.Signatures != nil {
@@ -88,7 +89,7 @@ func TestTelegram_RequestRegisterKey_Label(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	ch, err := tb.RequestRegisterKey(ctx, backend.RegisterApprovalRequest{
+	ch, err := tb.RequestRegisterKey(ctx, signerkit.RegisterApprovalRequest{
 		RequestID: "x_r1",
 		HostFP:    "SHA256:reg-fp-2222222222222222222222222222222222",
 		Label:     "new-host",
@@ -111,7 +112,7 @@ func TestTelegram_RequestRegisterKey_Label(t *testing.T) {
 	fake.pushCallback(allowedUserID, "karthi", "approve:x_r1", 2001, allowedChatID)
 	select {
 	case got := <-ch:
-		if got.Status != backend.StatusApproved {
+		if got.Status != signerkit.StatusApproved {
 			t.Errorf("status = %v; want approved", got.Status)
 		}
 	case <-time.After(2 * time.Second):

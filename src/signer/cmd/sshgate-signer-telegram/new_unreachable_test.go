@@ -8,8 +8,6 @@ import (
 	"testing"
 
 	"github.com/karthikeyan5/sshgate/pkg/signerkit"
-	"github.com/karthikeyan5/sshgate/src/signer"
-	"github.com/karthikeyan5/sshgate/src/signer/backend"
 )
 
 // TestNewErrorUnreachableInShippedWiring proves C9's last item: signerkit.New,
@@ -25,10 +23,10 @@ import (
 //  1. New's ENTIRE error surface is exactly two typed sentinels, each requiring
 //     a nil interface: Config.Signer == nil → ErrNoSigner, Config.Audit == nil →
 //     ErrNoAudit (service.go). Cases 1a/1b below pin both.
-//  2. run() reaches the New call only AFTER signer.LoadKey and signer.OpenAuditLog
+//  2. run() reaches the New call only AFTER signerkit.LoadKey and signerkit.OpenAuditLog
 //     have both succeeded. LoadKey returns a non-nil, 64-byte ed25519.PrivateKey
 //     or an error (run() returns 1 first); OpenAuditLog returns a non-nil
-//     *signer.AuditLog or an error (run() returns 1 first). A non-nil concrete
+//     *signerkit.AuditLog or an error (run() returns 1 first). A non-nil concrete
 //     value assigned to Config.Signer (crypto.Signer) / Config.Audit (AuditSink)
 //     is a non-nil interface, so neither sentinel can fire.
 //  3. Feeding EXACTLY what run()'s construct step feeds — the LoadKey result as
@@ -44,10 +42,10 @@ func TestNewErrorUnreachableInShippedWiring(t *testing.T) {
 	// --- Reproduce run()'s two non-nil guarantees with the real loaders. ---
 	keyPath := filepath.Join(dir, "gate.key")
 	pubPath := filepath.Join(dir, "gate.pub")
-	if err := signer.GenerateKeyPair(keyPath, pubPath); err != nil {
+	if err := signerkit.GenerateKeyPair(keyPath, pubPath); err != nil {
 		t.Fatalf("GenerateKeyPair: %v", err)
 	}
-	priv, err := signer.LoadKey(keyPath)
+	priv, err := signerkit.LoadKey(keyPath)
 	if err != nil {
 		t.Fatalf("LoadKey: %v", err)
 	}
@@ -62,7 +60,7 @@ func TestNewErrorUnreachableInShippedWiring(t *testing.T) {
 		t.Fatal("LoadKey result is a nil crypto.Signer; impossible for a 64-byte key")
 	}
 
-	audit, err := signer.OpenAuditLog(filepath.Join(dir, "approvals.log"))
+	audit, err := signerkit.OpenAuditLog(filepath.Join(dir, "approvals.log"))
 	if err != nil {
 		t.Fatalf("OpenAuditLog: %v", err)
 	}
@@ -85,13 +83,13 @@ func TestNewErrorUnreachableInShippedWiring(t *testing.T) {
 	// --- 3. Exactly run()'s construct step: no error, usable Service. ---
 	// A missing xfer-registry file is an empty registry with a nil error, so
 	// this mirrors a fresh daemon with no transfer peers registered.
-	xferReg, err := signer.LoadXferRegistry(filepath.Join(dir, "xfer-registry.json"))
+	xferReg, err := signerkit.LoadXferRegistry(filepath.Join(dir, "xfer-registry.json"))
 	if err != nil {
 		t.Fatalf("LoadXferRegistry: %v", err)
 	}
 	svc, err := signerkit.New(signerkit.Config{
 		Signer:       priv,
-		Backend:      backend.StubBackend{},
+		Backend:      signerkit.StubBackend{},
 		Audit:        audit,
 		XferRegistry: xferReg,
 		RedactSalt:   [32]byte{},
@@ -103,6 +101,6 @@ func TestNewErrorUnreachableInShippedWiring(t *testing.T) {
 	if svc == nil {
 		t.Fatal("New(shipped wiring) returned a nil *Service with a nil error")
 	}
-	// run() wires it as signer.Server.Handler, i.e. a RequestHandler.
+	// run() wires it as signerkit.Server.Handler, i.e. a RequestHandler.
 	var _ signerkit.RequestHandler = svc
 }

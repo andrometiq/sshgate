@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/karthikeyan5/sshgate/pkg/signerkit"
 	"github.com/karthikeyan5/sshgate/src/signer/backend"
 )
 
@@ -452,9 +453,9 @@ func TestTelegram_ApprovePath(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 
-	ch, err := tb.Request(ctx, backend.ApprovalRequest{
+	ch, err := tb.Request(ctx, signerkit.ApprovalRequest{
 		RequestID: "r_approve",
-		Commands: []backend.CommandReq{
+		Commands: []signerkit.CommandReq{
 			{Server: "prod-db", Cmd: "systemctl restart nginx", TTLSec: 60},
 		},
 		Submitted: time.Now(),
@@ -479,13 +480,13 @@ func TestTelegram_ApprovePath(t *testing.T) {
 	// Inject an Approve callback from the allowed user.
 	fake.pushCallback(allowedUserID, "karthi", "approve:r_approve", 1000, allowedChatID)
 
-	var got backend.Result
+	var got signerkit.Result
 	select {
 	case got = <-ch:
 	case <-time.After(2 * time.Second):
 		t.Fatal("no Result delivered within 2s")
 	}
-	if got.Status != backend.StatusApproved {
+	if got.Status != signerkit.StatusApproved {
 		t.Errorf("Status = %v; want Approved", got.Status)
 	}
 	if got.ApprovedBy != "@karthi" {
@@ -521,9 +522,9 @@ func TestTelegram_DenyPath(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	ch, err := tb.Request(ctx, backend.ApprovalRequest{
+	ch, err := tb.Request(ctx, signerkit.ApprovalRequest{
 		RequestID: "r_deny",
-		Commands:  []backend.CommandReq{{Server: "x", Cmd: "rm -rf /tmp", TTLSec: 60}},
+		Commands:  []signerkit.CommandReq{{Server: "x", Cmd: "rm -rf /tmp", TTLSec: 60}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -534,7 +535,7 @@ func TestTelegram_DenyPath(t *testing.T) {
 
 	select {
 	case got := <-ch:
-		if got.Status != backend.StatusDenied {
+		if got.Status != signerkit.StatusDenied {
 			t.Errorf("Status = %v; want Denied", got.Status)
 		}
 	case <-time.After(2 * time.Second):
@@ -555,9 +556,9 @@ func TestTelegram_WrongUserCallbackIgnored(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	ch, err := tb.Request(ctx, backend.ApprovalRequest{
+	ch, err := tb.Request(ctx, signerkit.ApprovalRequest{
 		RequestID: "r_wrong",
-		Commands:  []backend.CommandReq{{Server: "x", Cmd: "echo hi", TTLSec: 60}},
+		Commands:  []signerkit.CommandReq{{Server: "x", Cmd: "echo hi", TTLSec: 60}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -572,7 +573,7 @@ func TestTelegram_WrongUserCallbackIgnored(t *testing.T) {
 	// not Approved.
 	select {
 	case got := <-ch:
-		if got.Status != backend.StatusTimeout {
+		if got.Status != signerkit.StatusTimeout {
 			t.Errorf("Status = %v; want Timeout (unauthorized callback should be ignored)", got.Status)
 		}
 	case <-time.After(2 * time.Second):
@@ -689,9 +690,9 @@ func TestTelegram_TimeoutDeliversTimeoutResult(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	ch, err := tb.Request(ctx, backend.ApprovalRequest{
+	ch, err := tb.Request(ctx, signerkit.ApprovalRequest{
 		RequestID: "r_timeout",
-		Commands:  []backend.CommandReq{{Server: "x", Cmd: "echo hi", TTLSec: 60}},
+		Commands:  []signerkit.CommandReq{{Server: "x", Cmd: "echo hi", TTLSec: 60}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -699,7 +700,7 @@ func TestTelegram_TimeoutDeliversTimeoutResult(t *testing.T) {
 
 	select {
 	case got := <-ch:
-		if got.Status != backend.StatusTimeout {
+		if got.Status != signerkit.StatusTimeout {
 			t.Errorf("Status = %v; want Timeout", got.Status)
 		}
 	case <-time.After(2 * time.Second):
@@ -731,9 +732,9 @@ func TestTelegram_CtxCancelDeliversTimeoutEarly(t *testing.T) {
 	}
 
 	reqCtx, reqCancel := context.WithCancel(context.Background())
-	ch, err := tb.Request(reqCtx, backend.ApprovalRequest{
+	ch, err := tb.Request(reqCtx, signerkit.ApprovalRequest{
 		RequestID: "r_ctx",
-		Commands:  []backend.CommandReq{{Server: "x", Cmd: "echo", TTLSec: 60}},
+		Commands:  []signerkit.CommandReq{{Server: "x", Cmd: "echo", TTLSec: 60}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -744,7 +745,7 @@ func TestTelegram_CtxCancelDeliversTimeoutEarly(t *testing.T) {
 
 	select {
 	case got := <-ch:
-		if got.Status != backend.StatusTimeout {
+		if got.Status != signerkit.StatusTimeout {
 			t.Errorf("Status = %v; want Timeout (ctx cancel)", got.Status)
 		}
 		if elapsed := time.Since(start); elapsed > time.Second {
@@ -767,9 +768,9 @@ func TestTelegram_RequestRequiresChatID(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := tb.Request(ctx, backend.ApprovalRequest{
+	_, err := tb.Request(ctx, signerkit.ApprovalRequest{
 		RequestID: "r_x",
-		Commands:  []backend.CommandReq{{Server: "x", Cmd: "echo", TTLSec: 60}},
+		Commands:  []signerkit.CommandReq{{Server: "x", Cmd: "echo", TTLSec: 60}},
 	})
 	if err == nil {
 		t.Fatal("Request returned nil err with empty chatstore; want error")
@@ -795,9 +796,9 @@ func TestTelegram_ExplainerHappyPath(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := tb.Request(ctx, backend.ApprovalRequest{
+	_, err := tb.Request(ctx, signerkit.ApprovalRequest{
 		RequestID: "r_expl",
-		Commands: []backend.CommandReq{
+		Commands: []signerkit.CommandReq{
 			{Server: "prod", Cmd: "systemctl restart nginx", TTLSec: 60},
 			{Server: "prod", Cmd: "apt install -y certbot", TTLSec: 60},
 		},
@@ -845,9 +846,9 @@ func TestTelegram_ExplainerEmptyEntryRendersFallbackText(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := tb.Request(ctx, backend.ApprovalRequest{
+	_, err := tb.Request(ctx, signerkit.ApprovalRequest{
 		RequestID: "r_partial",
-		Commands: []backend.CommandReq{
+		Commands: []signerkit.CommandReq{
 			{Server: "x", Cmd: "echo first", TTLSec: 60},
 			{Server: "x", Cmd: "echo second", TTLSec: 60},
 		},
@@ -880,9 +881,9 @@ func TestTelegram_ExplainerErrorFallsBackToFooter(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := tb.Request(ctx, backend.ApprovalRequest{
+	_, err := tb.Request(ctx, signerkit.ApprovalRequest{
 		RequestID: "r_err",
-		Commands: []backend.CommandReq{
+		Commands: []signerkit.CommandReq{
 			{Server: "x", Cmd: "echo hi", TTLSec: 60},
 		},
 	})
@@ -917,9 +918,9 @@ func TestTelegram_ExplainerTimeoutFallsBackToFooter(t *testing.T) {
 	}
 
 	start := time.Now()
-	_, err := tb.Request(ctx, backend.ApprovalRequest{
+	_, err := tb.Request(ctx, signerkit.ApprovalRequest{
 		RequestID: "r_to",
-		Commands: []backend.CommandReq{
+		Commands: []signerkit.CommandReq{
 			{Server: "x", Cmd: "echo timeout-case", TTLSec: 60},
 		},
 	})

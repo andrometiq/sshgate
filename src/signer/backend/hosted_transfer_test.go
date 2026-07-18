@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/karthikeyan5/sshgate/src/signer/backend"
+	"github.com/karthikeyan5/sshgate/pkg/signerkit"
 )
 
 // TestHosted_TransferFailsClosed: box→box transfer + xfer-key registration are
@@ -14,13 +14,13 @@ import (
 // for reveal and standing grants.
 func TestHosted_TransferFailsClosed(t *testing.T) {
 	t.Parallel()
-	h := &backend.HostedServerBackend{
+	h := &signerkit.HostedServerBackend{
 		BaseURL:  "https://signer.example.com",
 		APIKey:   "k",
 		ClientID: "laptop",
 	}
 
-	ch, err := h.RequestTransfer(context.Background(), backend.TransferApprovalRequest{RequestID: "t"})
+	ch, err := h.RequestTransfer(context.Background(), signerkit.TransferApprovalRequest{RequestID: "t"})
 	if err == nil {
 		t.Fatal("RequestTransfer returned no error on the hosted backend")
 	}
@@ -31,7 +31,7 @@ func TestHosted_TransferFailsClosed(t *testing.T) {
 		t.Errorf("RequestTransfer error = %q; want a fail-closed message", err)
 	}
 
-	ch2, err2 := h.RequestRegisterKey(context.Background(), backend.RegisterApprovalRequest{RequestID: "r"})
+	ch2, err2 := h.RequestRegisterKey(context.Background(), signerkit.RegisterApprovalRequest{RequestID: "r"})
 	if err2 == nil {
 		t.Fatal("RequestRegisterKey returned no error on the hosted backend")
 	}

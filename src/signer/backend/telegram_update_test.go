@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/karthikeyan5/sshgate/pkg/signerkit"
 	"github.com/karthikeyan5/sshgate/src/redact"
 	redactrules "github.com/karthikeyan5/sshgate/src/redact/rules"
 )
@@ -22,9 +23,9 @@ const updateHashFixture = "3a7bd3e2360a3d29eea436fcfb7e44c735d117c42d1c1835420b6
 // operator-facing Build line carried in Reason so a downgrade is spottable.
 func TestFormatApprovalMessage_UpdateBanner(t *testing.T) {
 	t.Parallel()
-	req := ApprovalRequest{
+	req := signerkit.ApprovalRequest{
 		RequestID: "r_update",
-		Commands: []CommandReq{
+		Commands: []signerkit.CommandReq{
 			{
 				Server: "prod-web",
 				Cmd:    "SSHGATE_UPDATE " + updateHashFixture,
@@ -79,9 +80,9 @@ func TestFormatApprovalMessage_UpdateBanner(t *testing.T) {
 // Build line entirely, while the banner + raw hash still render.
 func TestFormatApprovalMessage_UpdateNoReason(t *testing.T) {
 	t.Parallel()
-	req := ApprovalRequest{
+	req := signerkit.ApprovalRequest{
 		RequestID: "r_update_noreason",
-		Commands: []CommandReq{
+		Commands: []signerkit.CommandReq{
 			{Server: "prod-web", Cmd: "SSHGATE_UPDATE " + updateHashFixture, TTLSec: 300},
 		},
 		Submitted: time.Now(),
@@ -110,9 +111,9 @@ func TestFormatApprovalMessage_UpdateMalformedHash(t *testing.T) {
 	t.Parallel()
 	// A "hash" carrying an injected newline plus a forged extra banner line.
 	evil := "deadbeef\nApprove: yes — trust me"
-	req := ApprovalRequest{
+	req := signerkit.ApprovalRequest{
 		RequestID: "r_update_evil",
-		Commands: []CommandReq{
+		Commands: []signerkit.CommandReq{
 			{Server: "prod-web", Cmd: "SSHGATE_UPDATE " + evil, TTLSec: 300},
 		},
 		Submitted: time.Now(),
@@ -133,9 +134,9 @@ func TestFormatApprovalMessage_UpdateMalformedHash(t *testing.T) {
 	}
 
 	// A valid 64-hex hash still renders verbatim and is NOT flagged malformed.
-	reqOK := ApprovalRequest{
+	reqOK := signerkit.ApprovalRequest{
 		RequestID: "r_update_ok",
-		Commands: []CommandReq{
+		Commands: []signerkit.CommandReq{
 			{Server: "prod-web", Cmd: "SSHGATE_UPDATE " + updateHashFixture, TTLSec: 300},
 		},
 		Submitted: time.Now(),
@@ -154,9 +155,9 @@ func TestFormatApprovalMessage_UpdateMalformedHash(t *testing.T) {
 // update UX must be reserved for real updates so it keeps its signal.
 func TestFormatApprovalMessage_UpdateNormalWriteUnaffected(t *testing.T) {
 	t.Parallel()
-	req := ApprovalRequest{
+	req := signerkit.ApprovalRequest{
 		RequestID: "r_write",
-		Commands: []CommandReq{
+		Commands: []signerkit.CommandReq{
 			{Server: "prod", Cmd: "systemctl restart nginx", TTLSec: 60},
 		},
 		Submitted: time.Now(),
@@ -178,9 +179,9 @@ func TestFormatApprovalMessage_UpdateNormalWriteUnaffected(t *testing.T) {
 // renders its own banner (unchanged) and NEVER the update banner.
 func TestFormatApprovalMessage_UpdateRevealUnaffected(t *testing.T) {
 	t.Parallel()
-	req := ApprovalRequest{
+	req := signerkit.ApprovalRequest{
 		RequestID: "r_reveal",
-		Commands: []CommandReq{
+		Commands: []signerkit.CommandReq{
 			{
 				Server: "prod-db",
 				Cmd:    "cat /etc/secret.env",
@@ -213,9 +214,9 @@ func TestFormatApprovalMessage_UpdateHashRawUnderRealRuleset(t *testing.T) {
 	t.Parallel()
 	salt := [32]byte{0x5f}
 	rules := redactrules.Combined()
-	req := ApprovalRequest{
+	req := signerkit.ApprovalRequest{
 		RequestID: "r_update_realrules",
-		Commands: []CommandReq{
+		Commands: []signerkit.CommandReq{
 			{
 				Server: "prod-web",
 				Cmd:    "SSHGATE_UPDATE " + updateHashFixture,

@@ -4,7 +4,7 @@
 //
 // The full integration stack uses a real linuxserver/openssh-server
 // container as the remote target, a freshly cross-compiled gate
-// binary installed into the container, the real signer.Server
+// binary installed into the container, the real signerkit.Server
 // listening on a Unix socket under t.TempDir(), and the real MCP
 // tools.Runner directly (we don't stand up the JSON-RPC server — the
 // in-process Runner is the meaningful integration boundary).
@@ -34,12 +34,11 @@ import (
 
 	sshlib "golang.org/x/crypto/ssh"
 
+	"github.com/karthikeyan5/sshgate/pkg/signerkit"
 	"github.com/karthikeyan5/sshgate/src/mcp/registry"
 	signpkg "github.com/karthikeyan5/sshgate/src/mcp/sign"
 	sshpkg "github.com/karthikeyan5/sshgate/src/mcp/ssh"
 	"github.com/karthikeyan5/sshgate/src/mcp/tools"
-	"github.com/karthikeyan5/sshgate/src/signer"
-	"github.com/karthikeyan5/sshgate/src/signer/backend"
 )
 
 const (
@@ -236,14 +235,14 @@ func generateSSHKey(t *testing.T) (privPath, pubPath string) {
 }
 
 // generateGateKeyPair creates a fresh Ed25519 master signing key
-// pair via signer.GenerateKeyPair, in t.TempDir(). Returns the
+// pair via signerkit.GenerateKeyPair, in t.TempDir(). Returns the
 // private and public file paths.
 func generateGateKeyPair(t *testing.T) (privPath, pubPath string) {
 	t.Helper()
 	dir := t.TempDir()
 	privPath = filepath.Join(dir, "gate.key")
 	pubPath = filepath.Join(dir, "gate.pub")
-	if err := signer.GenerateKeyPair(privPath, pubPath); err != nil {
+	if err := signerkit.GenerateKeyPair(privPath, pubPath); err != nil {
 		t.Fatalf("GenerateKeyPair: %v", err)
 	}
 	return privPath, pubPath
@@ -420,7 +419,7 @@ func pasteSSHGatePlainLine(t *testing.T, pubKeyPath string) {
 	}
 }
 
-// startSigner spins up a real signer.Server in a goroutine,
+// startSigner spins up a real signerkit.Server in a goroutine,
 // bound to a socket under t.TempDir() and backed by StubBackend
 // (which denies every request). Returns the socket path and a
 // cleanup func that cancels the server context and waits for the
@@ -429,24 +428,24 @@ func pasteSSHGatePlainLine(t *testing.T, pubKeyPath string) {
 func startSigner(t *testing.T, masterKeyPath string) (socketPath string, cleanup func()) {
 	t.Helper()
 
-	priv, err := signer.LoadKey(masterKeyPath)
+	priv, err := signerkit.LoadKey(masterKeyPath)
 	if err != nil {
 		t.Fatalf("LoadKey: %v", err)
 	}
 
 	auditPath := filepath.Join(t.TempDir(), "approvals.log")
-	audit, err := signer.OpenAuditLog(auditPath)
+	audit, err := signerkit.OpenAuditLog(auditPath)
 	if err != nil {
 		t.Fatalf("OpenAuditLog: %v", err)
 	}
 
-	daemon := &signer.Daemon{
+	daemon := &signerkit.Daemon{
 		Key:     priv,
-		Backend: backend.StubBackend{},
+		Backend: signerkit.StubBackend{},
 		Audit:   audit,
 	}
 	socketPath = filepath.Join(t.TempDir(), "signer.sock")
-	srv := &signer.Server{
+	srv := &signerkit.Server{
 		Path:           socketPath,
 		Handler:        daemon,
 		HandlerTimeout: 10 * time.Second,

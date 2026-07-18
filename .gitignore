@@ -19,7 +19,7 @@ bin/
 # campaign reports. Generated at runtime; never commit (the key dir holds a
 # live SSH private key, the report can be large).
 /.gate-redteam*
-gate-redteam-report.jsonl
+gate-redteam-report*.jsonl
 
 # Scratch/junk dir for throwaway artifacts (e.g. red-team hunt findings/ideas
 # dumps, stray binaries). Never committed.

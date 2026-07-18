@@ -2,7 +2,7 @@ package backend
 
 // In-package (white-box) tests for unexported helpers that the external
 // backend_test package cannot reach: sanitiseExplainerErr, maskUserID,
-// and runExplainer's panic-recovery. (The MockBackend double-resolve
+// and runExplainer's panic-recovery. (The signerkit.MockBackend double-resolve
 // safety net moved to pkg/signerkit with mock.go.)
 
 import (
@@ -13,6 +13,8 @@ import (
 	"log"
 	"strings"
 	"testing"
+
+	"github.com/karthikeyan5/sshgate/pkg/signerkit"
 )
 
 // panicExplainer is the panicking-Explainer fixture from the brief: it
@@ -122,7 +124,7 @@ func TestRunExplainerRecoversPanic(t *testing.T) {
 	}
 	before := tb.PanicsTotal()
 
-	lines, err := tb.runExplainer(context.Background(), []CommandReq{{Server: "x", Cmd: "echo hi", TTLSec: 60}})
+	lines, err := tb.runExplainer(context.Background(), []signerkit.CommandReq{{Server: "x", Cmd: "echo hi", TTLSec: 60}})
 	if err == nil {
 		t.Fatal("runExplainer returned nil err on a panicking Explainer; want a fallback-signalling error")
 	}
@@ -147,7 +149,7 @@ func TestRunExplainerNoExplainerIsNoop(t *testing.T) {
 	t.Parallel()
 	tb := &TelegramBackend{logger: log.New(io.Discard, "", 0)}
 
-	lines, err := tb.runExplainer(context.Background(), []CommandReq{{Cmd: "echo hi"}})
+	lines, err := tb.runExplainer(context.Background(), []signerkit.CommandReq{{Cmd: "echo hi"}})
 	if err != nil || lines != nil {
 		t.Errorf("nil Explainer: got (%v, %v); want (nil, nil)", lines, err)
 	}

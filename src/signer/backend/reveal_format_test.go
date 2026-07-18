@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/karthikeyan5/sshgate/pkg/signerkit"
 )
 
 // TestFormatApprovalMessage_RevealBanner pins the distinct, scary rendering a
@@ -13,9 +15,9 @@ import (
 // distinction is the whole point of routing reveal through a separate UX.
 func TestFormatApprovalMessage_RevealBanner(t *testing.T) {
 	t.Parallel()
-	req := ApprovalRequest{
+	req := signerkit.ApprovalRequest{
 		RequestID: "r_reveal",
-		Commands: []CommandReq{
+		Commands: []signerkit.CommandReq{
 			{
 				Server: "prod-db",
 				Cmd:    "cat /etc/secret.env",
@@ -51,9 +53,9 @@ func TestFormatApprovalMessage_RevealBanner(t *testing.T) {
 // signal.
 func TestFormatApprovalMessage_NormalWriteNoBanner(t *testing.T) {
 	t.Parallel()
-	req := ApprovalRequest{
+	req := signerkit.ApprovalRequest{
 		RequestID: "r_write",
-		Commands: []CommandReq{
+		Commands: []signerkit.CommandReq{
 			{Server: "prod", Cmd: "systemctl restart nginx", TTLSec: 60},
 		},
 		Submitted: time.Now(),

@@ -4,13 +4,15 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/karthikeyan5/sshgate/pkg/signerkit"
 )
 
 // TestFormatTransferApprovalMessage_LabelsFromRegistry: the banner renders the
 // src/dest LABELS carried in the request (which the daemon sources from its
 // registry, never the MCP alias), plus the paths, mode, and xferID.
 func TestFormatTransferApprovalMessage_LabelsFromRegistry(t *testing.T) {
-	req := TransferApprovalRequest{
+	req := signerkit.TransferApprovalRequest{
 		RequestID: "t_fmt",
 		XferID:    "AQ4bKDVCT1xpdoOQnaq3xA",
 		SrcLabel:  "ram-gcp",
@@ -42,7 +44,7 @@ func TestFormatTransferApprovalMessage_LabelsFromRegistry(t *testing.T) {
 // embedded newline (a banner-line-forging attempt) renders as <malformed>, and
 // the forged line never appears.
 func TestFormatTransferApprovalMessage_NewlineCollapsed(t *testing.T) {
-	req := TransferApprovalRequest{
+	req := signerkit.TransferApprovalRequest{
 		RequestID: "t_evil",
 		XferID:    "abc",
 		SrcLabel:  "s",
@@ -65,7 +67,7 @@ func TestFormatTransferApprovalMessage_NewlineCollapsed(t *testing.T) {
 // TestFormatTransferApprovalMessage_MalformedFPCollapsed: a fingerprint with an
 // embedded newline collapses to <malformed>.
 func TestFormatTransferApprovalMessage_MalformedFPCollapsed(t *testing.T) {
-	req := TransferApprovalRequest{
+	req := signerkit.TransferApprovalRequest{
 		RequestID: "t_fp",
 		XferID:    "abc",
 		SrcLabel:  "s",
@@ -85,7 +87,7 @@ func TestFormatTransferApprovalMessage_MalformedFPCollapsed(t *testing.T) {
 // TestFormatRegisterApprovalMessage renders the host label, the truncated fp,
 // and the two public key lines; a newline-bearing key collapses to <malformed>.
 func TestFormatRegisterApprovalMessage(t *testing.T) {
-	req := RegisterApprovalRequest{
+	req := signerkit.RegisterApprovalRequest{
 		RequestID: "r_fmt",
 		HostFP:    "SHA256:9Zt7Xhost-example-dest-fp-1111111111111cd",
 		Label:     "host-gcp",

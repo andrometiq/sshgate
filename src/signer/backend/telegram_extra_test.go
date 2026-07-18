@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/karthikeyan5/sshgate/pkg/signerkit"
 	"github.com/karthikeyan5/sshgate/src/signer/backend"
 )
 
@@ -83,9 +84,9 @@ func TestTelegram_SendMessage5xxNoPendingEntry(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	ch, err := tb.Request(ctx, backend.ApprovalRequest{
+	ch, err := tb.Request(ctx, signerkit.ApprovalRequest{
 		RequestID: "r_send5xx",
-		Commands:  []backend.CommandReq{{Server: "x", Cmd: "echo hi", TTLSec: 60}},
+		Commands:  []signerkit.CommandReq{{Server: "x", Cmd: "echo hi", TTLSec: 60}},
 	})
 	if err == nil {
 		t.Fatal("Request returned nil err on sendMessage 5xx; want a 'telegram send' error")
@@ -283,12 +284,12 @@ func TestTelegram_ConcurrentRequestsResolvedOutOfOrder(t *testing.T) {
 
 	const n = 3
 	reqIDs := make([]string, n)
-	chans := make([]<-chan backend.Result, n)
+	chans := make([]<-chan signerkit.Result, n)
 	for i := 0; i < n; i++ {
 		reqIDs[i] = fmt.Sprintf("r_conc_%d", i)
-		ch, err := tb.Request(ctx, backend.ApprovalRequest{
+		ch, err := tb.Request(ctx, signerkit.ApprovalRequest{
 			RequestID: reqIDs[i],
-			Commands:  []backend.CommandReq{{Server: "x", Cmd: fmt.Sprintf("echo %d", i), TTLSec: 60}},
+			Commands:  []signerkit.CommandReq{{Server: "x", Cmd: fmt.Sprintf("echo %d", i), TTLSec: 60}},
 		})
 		if err != nil {
 			t.Fatalf("Request[%d]: %v", i, err)
@@ -313,7 +314,7 @@ func TestTelegram_ConcurrentRequestsResolvedOutOfOrder(t *testing.T) {
 			if !ok {
 				t.Fatalf("chan[%d] (%s) closed without a result", i, reqIDs[i])
 			}
-			if got.Status != backend.StatusApproved {
+			if got.Status != signerkit.StatusApproved {
 				t.Errorf("chan[%d] (%s) Status = %v; want Approved", i, reqIDs[i], got.Status)
 			}
 			if got.ApprovedBy != "@karthi" {
