@@ -194,7 +194,7 @@ clean:
 # unit suite, a secret scan of the commits about to be pushed, a clean build,
 # the CHEAP verified-release-channel checks, and the two-build reproducibility
 # assertion. No Docker, so it runs anywhere in well under a minute.
-preflight: vet test gitleaks build verify-dist verify-versions verify-repro verify-no-sqlite-local
+preflight: vet test gitleaks build verify-dist verify-versions verify-repro verify-no-sqlite-local verify-no-humanauth-local
 	@echo "preflight: OK — safe to push"
 
 # verify-no-sqlite-local proves the SQLite-containment invariant (D10 / spec
@@ -212,6 +212,23 @@ verify-no-sqlite-local:
 		echo "verify-no-sqlite-local: FAIL — the local signer links modernc.org/sqlite (D10 violation: the sqlite impl must stay contained in pkg/signerkit/sqlitestore)" >&2; exit 1; \
 	fi
 	@echo "verify-no-sqlite-local: OK — local Telegram signer does not link SQLite"
+
+# verify-no-humanauth-local proves the human-auth containment invariant (the
+# TCB-minimization premise behind the phase-5 hosted carve): the local Telegram
+# signer binary must NOT link the human-plane auth stack — WebAuthn/CBOR/TPM
+# (github.com/go-webauthn) or TOTP (github.com/pquerna/otp). Those live ONLY in
+# pkg/signerkit/hosted (imported by the hosted signer-server front end); the
+# local signer is a key-custody daemon and must stay that lean. A regression
+# that made signerkit — or the local signer — import the hosted package would
+# pull the WebAuthn/OTP parser stack into the local signer's transitive imports,
+# bloating its binary and widening its TCB. This gate fails the build if that
+# ever happens. Like verify-no-sqlite-local it is an import-graph check (no
+# build needed): `go list -deps` enumerates every transitive dependency.
+verify-no-humanauth-local:
+	@if go list -deps ./src/signer/cmd/sshgate-signer-telegram/... | grep -qE '^github.com/go-webauthn/|^github.com/pquerna/otp'; then \
+		echo "verify-no-humanauth-local: FAIL — the local signer links the human-plane auth stack (go-webauthn/pquerna-otp must stay contained in pkg/signerkit/hosted)" >&2; exit 1; \
+	fi
+	@echo "verify-no-humanauth-local: OK — local Telegram signer does not link the human-auth (WebAuthn/TOTP) stack"
 
 # verify-dist: the FAST verified-release-channel checks (§11). It deliberately
 # does NOT do the reproducible rebuild (that needs the pinned-toolchain download
