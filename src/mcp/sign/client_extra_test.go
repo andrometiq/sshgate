@@ -183,14 +183,14 @@ func TestSign_ErrorStatus_EmptyDetail_NoDetailMessage(t *testing.T) {
 	}
 }
 
-// ---- read-side EOF / partial line -> "read response", not ctx --------
+// ---- read-side EOF / partial invalid JSON -> malformed, not ctx --------
 //
 // The fake writes a fragment with NO trailing newline and then closes the
-// connection. bufio.ReadBytes('\n') therefore returns the partial bytes
-// plus io.EOF (a non-ctx error). Sign must surface this as the
-// "sign: read response" wrap, NOT mis-attribute it to ctx cancellation.
+// connection. The bounded reader preserves those non-empty bytes as a final
+// EOF frame; typed JSON decoding must reject it as malformed, NOT classify it
+// as a zero-byte lost verdict or mis-attribute it to ctx cancellation.
 
-func TestSign_ReadSideEOF_PartialLine_ReadResponseError(t *testing.T) {
+func TestSign_ReadSideEOF_PartialLine_MalformedResponse(t *testing.T) {
 	t.Parallel()
 	// Custom raw server: write a newline-less fragment, then close.
 	path, stop := startRawSigner(t, func(c rawConn) {
@@ -204,13 +204,16 @@ func TestSign_ReadSideEOF_PartialLine_ReadResponseError(t *testing.T) {
 	if err == nil {
 		t.Fatal("err is nil; want a read error on EOF/partial line")
 	}
-	if !strings.Contains(err.Error(), "read response") {
-		t.Errorf("err = %q; want it wrapped as a read-response error", err.Error())
+	if !strings.Contains(err.Error(), "malformed response") {
+		t.Errorf("err = %q; want malformed-response error", err.Error())
 	}
 	// Must NOT be attributed to context cancellation/deadline — the ctx
 	// is healthy; only the peer hung up.
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		t.Errorf("read EOF mis-attributed to ctx: %v", err)
+	}
+	if errors.Is(err, sign.ErrVerdictUnknown) {
+		t.Errorf("nonempty malformed EOF misclassified as unknown verdict: %v", err)
 	}
 }
 

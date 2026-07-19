@@ -1,12 +1,13 @@
 package sign
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
 
+	"github.com/karthikeyan5/sshgate/internal/lineframe"
+	"github.com/karthikeyan5/sshgate/src/policywire"
 	"github.com/karthikeyan5/sshgate/src/sigwire"
 )
 
@@ -289,8 +290,7 @@ func (c *Client) ListGrants(ctx context.Context, requestID, alias string) ([]Gra
 // read-one-line dance shared by RequestGrant and RevokeGrant. It mirrors
 // Sign's transport scaffold exactly (Sign predates this helper and is
 // left untouched). label prefixes error messages. The returned line is
-// the raw JSON response (newline trimmed by ReadBytes's framing — caller
-// unmarshals).
+// the raw JSON response (with an optional framing newline — caller unmarshals).
 func (c *Client) roundtrip(ctx context.Context, requestID string, body any, label string) ([]byte, error) {
 	timeout := c.Timeout
 	if timeout <= 0 {
@@ -330,8 +330,7 @@ func (c *Client) roundtrip(ctx context.Context, requestID string, body any, labe
 		return nil, fmt.Errorf("%s: write: %w", label, err)
 	}
 
-	br := bufio.NewReader(conn)
-	line, err := br.ReadBytes('\n')
+	line, err := lineframe.Read(conn, policywire.MaxSocketFrameBytes)
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return nil, fmt.Errorf("%s: %w", label, ctxErr)

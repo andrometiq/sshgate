@@ -3,11 +3,8 @@
 package policy
 
 import (
-	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
-	"crypto/sha256"
-	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -22,10 +19,6 @@ const (
 	manifestFile = "base.manifest"
 	anchorFile   = "base.anchor"
 	lockFile     = ".policy.lock"
-
-	anchorDomain  = "SSHGATE_POLICY_ANCHOR_V1\x00"
-	anchorSize    = len(anchorDomain) + 8 + 8 + sha256.Size
-	maxAnchorSize = 256
 )
 
 var (
@@ -66,20 +59,6 @@ func RootOwnedStoreConfig() StoreConfig {
 	}
 }
 
-// PolicyVersion is ordered lexicographically by Epoch then Revision. A new
-// epoch may restart Revision at one.
-type PolicyVersion struct {
-	Epoch    uint64
-	Revision uint64
-}
-
-// LoadedBase is one verified, host-bound policy snapshot.
-type LoadedBase struct {
-	Manifest BaseManifest
-	Digest   [sha256.Size]byte
-	Version  PolicyVersion
-}
-
 // Store owns a CLOEXEC duplicate of an already-open policy directory FD. It
 // never resolves the directory by pathname, so renaming or replacing a parent
 // path cannot redirect an existing Store.
@@ -94,11 +73,6 @@ type Store struct {
 	// afterAnchor is an unexported crash-injection seam used by package tests.
 	// Production Stores leave it nil.
 	afterAnchor func() error
-}
-
-type policyAnchor struct {
-	Version PolicyVersion
-	Digest  [sha256.Size]byte
 }
 
 // InitializeStore creates the inode-stable lock file if needed, fsyncs it and
@@ -260,7 +234,10 @@ func (s *Store) ReplaceBase(candidate []byte) (LoadedBase, error) {
 		return verified, nil
 	}
 	if !anchorMatches {
-		encoded := encodeAnchor(policyAnchor{Version: verified.Version, Digest: verified.Digest})
+		encoded, err := EncodeBaseAnchor(candidate, s.pubKey, s.host)
+		if err != nil {
+			return LoadedBase{}, fmt.Errorf("policy: encode verified anchor: %w", err)
+		}
 		if err := s.atomicReplace(anchorFile, encoded); err != nil {
 			return LoadedBase{}, fmt.Errorf("policy: replace anchor: %w", err)
 		}
@@ -306,26 +283,7 @@ func (s *Store) readAndVerifyManifest() (LoadedBase, error) {
 }
 
 func (s *Store) verifyEnvelope(envelope []byte) (LoadedBase, error) {
-	manifest, err := VerifyBaseManifest(envelope, s.pubKey)
-	if err != nil {
-		return LoadedBase{}, fmt.Errorf("policy: verify base manifest: %w", err)
-	}
-	if manifest.Host != s.host {
-		return LoadedBase{}, fmt.Errorf("policy: manifest host %q does not match expected host %q", manifest.Host, s.host)
-	}
-	payload, _, err := DecodeBaseManifestEnvelope(envelope)
-	if err != nil {
-		return LoadedBase{}, fmt.Errorf("policy: decode verified manifest: %w", err)
-	}
-	digest, err := BaseManifestPayloadDigest(payload)
-	if err != nil {
-		return LoadedBase{}, fmt.Errorf("policy: digest verified manifest: %w", err)
-	}
-	return LoadedBase{
-		Manifest: manifest,
-		Digest:   digest,
-		Version:  PolicyVersion{Epoch: manifest.Epoch, Revision: manifest.Revision},
-	}, nil
+	return verifyBaseEnvelope(envelope, s.pubKey, s.host)
 }
 
 func (s *Store) readAnchor() (policyAnchor, error) {
@@ -559,37 +517,6 @@ func writeAll(fd int, body []byte) error {
 		return err
 	}
 	return nil
-}
-
-func encodeAnchor(anchor policyAnchor) []byte {
-	out := make([]byte, anchorSize)
-	offset := copy(out, anchorDomain)
-	binary.BigEndian.PutUint64(out[offset:offset+8], anchor.Version.Epoch)
-	offset += 8
-	binary.BigEndian.PutUint64(out[offset:offset+8], anchor.Version.Revision)
-	offset += 8
-	copy(out[offset:], anchor.Digest[:])
-	return out
-}
-
-func decodeAnchor(raw []byte) (policyAnchor, error) {
-	if len(raw) != anchorSize || !bytes.Equal(raw[:len(anchorDomain)], []byte(anchorDomain)) {
-		return policyAnchor{}, errors.New("non-canonical anchor")
-	}
-	offset := len(anchorDomain)
-	anchor := policyAnchor{}
-	anchor.Version.Epoch = binary.BigEndian.Uint64(raw[offset : offset+8])
-	offset += 8
-	anchor.Version.Revision = binary.BigEndian.Uint64(raw[offset : offset+8])
-	offset += 8
-	copy(anchor.Digest[:], raw[offset:])
-	if anchor.Version.Epoch == 0 || anchor.Version.Revision == 0 {
-		return policyAnchor{}, errors.New("zero epoch or revision")
-	}
-	if anchor.Digest == ([sha256.Size]byte{}) {
-		return policyAnchor{}, errors.New("zero digest")
-	}
-	return anchor, nil
 }
 
 func compareVersion(a, b PolicyVersion) int {

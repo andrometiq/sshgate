@@ -3,6 +3,7 @@ package signerkit
 import (
 	"context"
 	"crypto"
+	"crypto/ed25519"
 	"io"
 	"time"
 
@@ -135,6 +136,18 @@ func (s *Service) Unlock(op Operator) error { return s.daemon.Unlock(op) }
 
 // RotateTo delegates to the frozen one-argument Daemon.RotateTo surface.
 func (s *Service) RotateTo(next crypto.Signer) error { return s.daemon.RotateTo(next) }
+
+// SnapshotBaseManifestSigner exposes the policy-specific custody snapshot to
+// hosted and local authority engines without exposing the raw signer.
+func (s *Service) SnapshotBaseManifestSigner() (ed25519.PublicKey, string, error) {
+	return s.daemon.SnapshotBaseManifestSigner()
+}
+
+// MaterializeBaseManifest routes a human-approved canonical policy payload
+// through the same Lock/RotateTo/HSM custody boundary as ordinary signatures.
+func (s *Service) MaterializeBaseManifest(expectedSignerKeyID, expectedHost string, exactPayload []byte) (BaseManifestMaterialization, error) {
+	return s.daemon.MaterializeBaseManifest(expectedSignerKeyID, expectedHost, exactPayload)
+}
 
 // RotateToWithAudit delegates to Daemon.RotateToWithAudit for callers that
 // can supply the reason and authenticated operator metadata.

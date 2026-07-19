@@ -3,6 +3,8 @@ package signerkit
 import (
 	"context"
 	"time"
+
+	"github.com/karthikeyan5/sshgate/src/policywire"
 )
 
 // ApprovalRequest is the unit of work submitted to a Backend. The
@@ -76,6 +78,50 @@ type RegisterApprovalRequest struct {
 	Label     string
 	BoxPub    string
 	IDPub     string
+}
+
+// BaseManifestApprovalRequest is the dedicated, always-human-reviewed policy
+// unit submitted only through BaseManifestApprovalBackend. Payload is the
+// exact canonical BaseManifest payload; it must never be re-marshaled before
+// review or signing. ExpectedHeadDigest is empty only for Bootstrap.
+//
+// This type is deliberately disjoint from ApprovalRequest and carries no
+// command-signing TTL, grant scope, or sigwire payload.
+type BaseManifestApprovalRequest struct {
+	RequestID           string
+	HostKeyFP           string
+	ExpectedSignerKeyID string
+	Payload             []byte
+	ExpectedHeadDigest  string
+	Bootstrap           bool
+	Submitted           time.Time
+}
+
+// BaseManifestResultKind makes the custody boundary non-zero and explicit. A
+// handler must switch on it and fail closed on BaseManifestResultInvalid.
+type BaseManifestResultKind uint8
+
+const (
+	BaseManifestResultInvalid BaseManifestResultKind = iota
+	// BaseManifestResultLocalDecision means the backend returned only the
+	// human decision; the local daemon materializes an approval through its
+	// own custody method.
+	BaseManifestResultLocalDecision
+	// BaseManifestResultRemoteEnvelope means a hosted authority returned the
+	// approved ManifestEnvelope. Invalid/empty remote material never falls
+	// through to local custody.
+	BaseManifestResultRemoteEnvelope
+)
+
+// BaseManifestApprovalResult is one human policy decision. Kind is the
+// explicit custody boundary. Non-approved results never carry an envelope.
+type BaseManifestApprovalResult struct {
+	Status           policywire.Status
+	ErrorCode        policywire.ErrorCode
+	Retryable        bool
+	ApprovedBy       string
+	Kind             BaseManifestResultKind
+	ManifestEnvelope []byte
 }
 
 // CommandReq is a single command awaiting approval. Server is the human-
@@ -204,4 +250,13 @@ type Backend interface {
 	// prompt — there is no auto path and no MCP tool. A backend that cannot
 	// render the distinct register banner MUST fail closed by returning an error.
 	RequestRegisterKey(ctx context.Context, req RegisterApprovalRequest) (<-chan Result, error)
+}
+
+// BaseManifestApprovalBackend is an additive optional capability. Keeping it
+// separate preserves the public Backend contract and makes unsupported
+// backends fail closed before any policy mint. Implementations must be safe
+// for concurrent calls and deliver one result without stranding a producer if
+// ctx is canceled.
+type BaseManifestApprovalBackend interface {
+	RequestBaseManifest(ctx context.Context, req BaseManifestApprovalRequest) (<-chan BaseManifestApprovalResult, error)
 }

@@ -1,7 +1,6 @@
 package signerkit
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"crypto"
@@ -17,6 +16,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/karthikeyan5/sshgate/internal/lineframe"
+	"github.com/karthikeyan5/sshgate/src/policywire"
 	"github.com/karthikeyan5/sshgate/src/redact"
 	"github.com/karthikeyan5/sshgate/src/sigwire"
 	"github.com/karthikeyan5/sshgate/src/xfer"
@@ -425,8 +426,7 @@ type listGrantsResponse struct {
 // represented in the JSON response and the audit log; they do not
 // surface as a Go error.
 func (d *Daemon) HandleSignRequest(ctx context.Context, conn io.ReadWriter) error {
-	br := bufio.NewReader(conn)
-	line, err := br.ReadBytes('\n')
+	line, err := lineframe.Read(conn, policywire.MaxSocketFrameBytes)
 	if err != nil && (len(line) == 0 || !errors.Is(err, io.EOF)) {
 		// Read errored before we got any input — there's no request
 		// ID we can pin the error to, so surface to the caller.

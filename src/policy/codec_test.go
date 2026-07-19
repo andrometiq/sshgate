@@ -69,6 +69,27 @@ func TestBaseManifestPayload_Golden(t *testing.T) {
 	}
 }
 
+func TestSignerKeyIDDomainAndShape(t *testing.T) {
+	seed := make([]byte, ed25519.SeedSize)
+	for i := range seed {
+		seed[i] = byte(i)
+	}
+	publicKey := ed25519.NewKeyFromSeed(seed).Public().(ed25519.PublicKey)
+	got, err := SignerKeyID(publicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	material := append([]byte("sshgate-policy-key-id-v1\x00"), publicKey...)
+	wantDigest := sha256.Sum256(material)
+	want := hex.EncodeToString(wantDigest[:])
+	if got != want || len(got) != 64 || got != strings.ToLower(got) {
+		t.Fatalf("SignerKeyID = %q; want %q", got, want)
+	}
+	if _, err := SignerKeyID(publicKey[:31]); !errors.Is(err, ErrBadSignature) {
+		t.Fatalf("short key error = %v; want ErrBadSignature", err)
+	}
+}
+
 func TestPermitCertificatePayload_Golden(t *testing.T) {
 	payload, err := MarshalPermitCertificate(sampleCertificate(t))
 	if err != nil {

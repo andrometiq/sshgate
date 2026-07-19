@@ -1,7 +1,6 @@
 package sign
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -13,6 +12,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/karthikeyan5/sshgate/internal/lineframe"
+	"github.com/karthikeyan5/sshgate/src/policywire"
 	"github.com/karthikeyan5/sshgate/src/sigwire"
 )
 
@@ -214,8 +215,7 @@ func (c *Client) Sign(ctx context.Context, requestID string, cmds []CmdReq) (Sig
 		return SignResult{}, fmt.Errorf("sign: write: %w", err)
 	}
 
-	br := bufio.NewReader(conn)
-	line, err := br.ReadBytes('\n')
+	line, err := lineframe.Read(conn, policywire.MaxSocketFrameBytes)
 	if err != nil {
 		// If ctx is the root cause, surface it verbatim so callers
 		// can distinguish cancellation from a malformed reply.
@@ -226,9 +226,9 @@ func (c *Client) Sign(ctx context.Context, requestID string, cmds []CmdReq) (Sig
 		// net/deadline timeout here means the daemon may have decided a
 		// verdict (incl. a human DENY) that never reached us — the outcome
 		// is INDETERMINATE. Return ErrVerdictUnknown so the run/run_batch
-		// layer fails SAFE and does NOT auto-retry. A PARTIAL line (some
-		// bytes arrived then EOF) is a genuine malformed reply, not a lost
-		// verdict, so it stays the generic read-response error below.
+		// layer fails SAFE and does NOT auto-retry. A non-empty EOF frame is
+		// returned without a framing error and the typed JSON decoder below
+		// decides whether it is complete or malformed.
 		if isVerdictLost(err, len(line)) {
 			return SignResult{}, fmt.Errorf("%w: %v", ErrVerdictUnknown, err)
 		}
@@ -346,12 +346,12 @@ func isPermErrno(err error) bool {
 
 // isVerdictLost reports whether a read error that occurred AFTER the request
 // was fully written means the verdict is indeterminate (signer decided but
-// the response did not arrive). nRead is how many bytes ReadBytes returned
+// the response did not arrive). nRead is how many bytes the bounded framer returned
 // before the error. True for a CLEAN EOF (nRead==0 — the peer closed with no
 // reply at all), a net timeout (the client's own read deadline fired while
 // the daemon was wedged), or os.ErrDeadlineExceeded. A PARTIAL line
 // (nRead>0 with EOF) is a genuine malformed/truncated reply, not a lost
-// verdict — bytes DID come back — so it stays the generic read-response wrap.
+// verdict — bytes DID come back — so the framer sends them to typed decoding.
 // Likewise any other read error (e.g. connection reset) is not verdict-lost.
 func isVerdictLost(err error, nRead int) bool {
 	if errors.Is(err, io.EOF) {

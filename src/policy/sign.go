@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,7 +16,22 @@ const (
 	baseManifestDomain      = "sshgate-policy\x00base-manifest-v1\x00"
 	permitCertificateDomain = "sshgate-policy\x00permit-certificate-v1\x00"
 	baseDigestDomain        = "sshgate-policy\x00base-manifest-digest-v1\x00"
+	signerKeyIDDomain       = "sshgate-policy-key-id-v1\x00"
 )
+
+// SignerKeyID returns the frozen policy-authority identifier for an exact raw
+// Ed25519 public key. It is domain-separated from policy payload digests and
+// encoded as 64 lowercase hexadecimal characters for the policy wire.
+func SignerKeyID(publicKey ed25519.PublicKey) (string, error) {
+	if len(publicKey) != ed25519.PublicKeySize {
+		return "", fmt.Errorf("%w: Ed25519 public key is %d bytes; want %d", ErrBadSignature, len(publicKey), ed25519.PublicKeySize)
+	}
+	material := make([]byte, 0, len(signerKeyIDDomain)+len(publicKey))
+	material = append(material, signerKeyIDDomain...)
+	material = append(material, publicKey...)
+	digest := sha256.Sum256(material)
+	return hex.EncodeToString(digest[:]), nil
+}
 
 var (
 	// ErrBadSignature marks an invalid Ed25519 key or signature.

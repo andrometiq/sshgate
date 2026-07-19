@@ -1,6 +1,7 @@
 package signerkit
 
 import (
+	"bytes"
 	"context"
 	"crypto"
 	"crypto/ed25519"
@@ -8,6 +9,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+
+	"github.com/karthikeyan5/sshgate/src/policy"
 )
 
 // Typed sentinels for the custody + construction surface (C12). They are the
@@ -30,7 +33,22 @@ var (
 	// non-nil so a compromised host app cannot silently run without a trail
 	// (the anti-suppression property is hollow if audit is optional).
 	ErrNoAudit = errors.New("audit sink is required (Config.Audit must be non-nil)")
+	// ErrSignerKeyChanged marks a policy approval whose frozen Ed25519 key ID
+	// no longer matches current custody. Callers map it to the dedicated stable
+	// signer_key_changed policy outcome and must never mint under the new key.
+	ErrSignerKeyChanged = errors.New("signer key changed")
+	// ErrInvalidSignerPublicKey marks a crypto.Signer whose Public method does
+	// not return the exact 32-byte ed25519.PublicKey type required by policy.
+	ErrInvalidSignerPublicKey = errors.New("signer public key is not exact Ed25519")
 )
+
+// BaseManifestMaterialization is the custody-atomic result of one policy mint.
+// Every slice is a copy and remains valid after the custody lock is released.
+type BaseManifestMaterialization struct {
+	PublicKey   ed25519.PublicKey
+	SignerKeyID string
+	Envelope    []byte
+}
 
 // Operator identifies the human (or machine principal) behind a custody control
 // or a hosted-plane vote. ID is the stable identifier; DisplayName is what the
@@ -101,6 +119,100 @@ func (d *Daemon) signBytes(msg []byte) ([]byte, error) {
 		return nil, err
 	}
 	return signWithResolved(s, msg)
+}
+
+// SnapshotBaseManifestSigner freezes the current exact Ed25519 public key and
+// its domain-separated policy key ID for a future human prompt. The later
+// MaterializeBaseManifest call must receive this ID and rechecks it while
+// holding custody across parse, signing, encoding, and verification.
+func (d *Daemon) SnapshotBaseManifestSigner() (ed25519.PublicKey, string, error) {
+	d.custodyMu.RLock()
+	defer d.custodyMu.RUnlock()
+
+	signer, err := d.resolveSignerLocked()
+	if err != nil {
+		return nil, "", err
+	}
+	publicKey, err := exactEd25519PublicKey(signer)
+	if err != nil {
+		return nil, "", err
+	}
+	keyID, err := policy.SignerKeyID(publicKey)
+	if err != nil {
+		return nil, "", err
+	}
+	return publicKey, keyID, nil
+}
+
+// MaterializeBaseManifest validates and signs exactPayload while holding
+// custodyMu.RLock for the complete operation. Lock and RotateTo therefore
+// linearize outside the mint, and a post-prompt rotation fails with
+// ErrSignerKeyChanged rather than silently signing with the new identity.
+func (d *Daemon) MaterializeBaseManifest(expectedSignerKeyID, expectedHost string, exactPayload []byte) (BaseManifestMaterialization, error) {
+	d.custodyMu.RLock()
+	defer d.custodyMu.RUnlock()
+
+	signer, err := d.resolveSignerLocked()
+	if err != nil {
+		return BaseManifestMaterialization{}, err
+	}
+	publicKey, err := exactEd25519PublicKey(signer)
+	if err != nil {
+		return BaseManifestMaterialization{}, err
+	}
+	keyID, err := policy.SignerKeyID(publicKey)
+	if err != nil {
+		return BaseManifestMaterialization{}, err
+	}
+	if keyID != expectedSignerKeyID {
+		return BaseManifestMaterialization{}, fmt.Errorf("%w: current %s; expected %s", ErrSignerKeyChanged, keyID, expectedSignerKeyID)
+	}
+
+	manifest, err := policy.ParseBaseManifest(exactPayload)
+	if err != nil {
+		return BaseManifestMaterialization{}, fmt.Errorf("materialize base manifest: parse: %w", err)
+	}
+	if manifest.Host != expectedHost {
+		return BaseManifestMaterialization{}, fmt.Errorf("materialize base manifest: payload host %q does not match expected host %q", manifest.Host, expectedHost)
+	}
+	signingBytes, err := policy.BaseManifestSigningBytes(exactPayload)
+	if err != nil {
+		return BaseManifestMaterialization{}, fmt.Errorf("materialize base manifest: signing bytes: %w", err)
+	}
+	signature, err := signWithResolved(signer, signingBytes)
+	if err != nil {
+		return BaseManifestMaterialization{}, fmt.Errorf("materialize base manifest: sign: %w", err)
+	}
+	envelope, err := policy.EncodeBaseManifestEnvelope(exactPayload, signature)
+	if err != nil {
+		return BaseManifestMaterialization{}, fmt.Errorf("materialize base manifest: encode: %w", err)
+	}
+	// A crypto.Signer can return a correctly-sized signature made by a
+	// different key. Verify against the exact snapshotted Public() result so a
+	// hostile or broken HSM cannot escape an invalid envelope.
+	if _, err := policy.VerifyBaseManifest(envelope, publicKey); err != nil {
+		return BaseManifestMaterialization{}, fmt.Errorf("materialize base manifest: verify signer result: %w", err)
+	}
+	returnedPayload, _, err := policy.DecodeBaseManifestEnvelope(envelope)
+	if err != nil {
+		return BaseManifestMaterialization{}, fmt.Errorf("materialize base manifest: decode signer result: %w", err)
+	}
+	if !bytes.Equal(returnedPayload, exactPayload) {
+		return BaseManifestMaterialization{}, errors.New("materialize base manifest: encoded payload substitution")
+	}
+	return BaseManifestMaterialization{
+		PublicKey:   append(ed25519.PublicKey(nil), publicKey...),
+		SignerKeyID: keyID,
+		Envelope:    append([]byte(nil), envelope...),
+	}, nil
+}
+
+func exactEd25519PublicKey(signer crypto.Signer) (ed25519.PublicKey, error) {
+	publicKey, ok := signer.Public().(ed25519.PublicKey)
+	if !ok || len(publicKey) != ed25519.PublicKeySize {
+		return nil, ErrInvalidSignerPublicKey
+	}
+	return append(ed25519.PublicKey(nil), publicKey...), nil
 }
 
 // signWithResolved invokes one already-resolved Ed25519 crypto.Signer. Custody
