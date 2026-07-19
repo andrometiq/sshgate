@@ -2,6 +2,9 @@ package hosted
 
 import (
 	"bytes"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -379,32 +382,136 @@ func (h *HumanAPI) handleLogout(w http.ResponseWriter, r *http.Request, _ string
 // is DISTINCT from the machine-plane pollResponse/auditEntry shapes — the
 // UI gets its own representation so changing it can never perturb the
 // frozen wire contract.
+//
+// The render-integrity + tally fields (CommandDetails, RequiredApprovals,
+// Tally) are ADDITIVE — every original field keeps its exact JSON name so
+// existing consumers and the loose /ui tests stay valid. Commands (the
+// flattened text slice) is retained verbatim; CommandDetails is the richer
+// per-command view the browser cross-checks (server, host-key FP, exact
+// bytes, per-command SHA-256).
 type uiRequestSummary struct {
-	RequestID  string     `json:"request_id"`
-	Status     string     `json:"status"`
-	ClientID   string     `json:"client_id"`
-	Commands   []string   `json:"commands"`
-	ApprovedBy string     `json:"approved_by_user,omitempty"`
-	CreatedAt  time.Time  `json:"created_at"`
-	ResolvedAt *time.Time `json:"resolved_at,omitempty"`
+	RequestID      string      `json:"request_id"`
+	Status         string      `json:"status"`
+	ClientID       string      `json:"client_id"`
+	Commands       []string    `json:"commands"`
+	CommandDetails []uiCommand `json:"command_details"`
+	ApprovedBy     string      `json:"approved_by_user,omitempty"`
+	CreatedAt      time.Time   `json:"created_at"`
+	ResolvedAt     *time.Time  `json:"resolved_at,omitempty"`
+	// RequiredApprovals is the N threshold stored on the request (the
+	// number of distinct approving operators needed). Mirrored into
+	// Tally.Required for the card.
+	RequiredApprovals int `json:"required_approvals"`
+	// Tally is the N-of-M vote progress, built from the append-only vote
+	// ledger. It is populated with counts on the pending LIST rows (Voters
+	// omitted for leanness) and with the full voter list on the
+	// /ui/request/{id} detail. nil (omitted) where no tally is computed
+	// (e.g. the audit list).
+	Tally *uiTally `json:"tally,omitempty"`
+}
+
+// uiCommand is the per-command render-integrity view. It surfaces the
+// fields summarize() previously dropped (Server, HostKeyFP, TTLSeconds)
+// plus a per-command SHA-256 over the EXACT command bytes — the value a
+// human cross-checks against what the agent showed them. Additive: it sits
+// alongside the retained Commands []string, never replacing it.
+type uiCommand struct {
+	Server     string `json:"server"`                // signRequestCmd.Server (was dropped)
+	Cmd        string `json:"cmd"`                   // exact command text
+	HostKeyFP  string `json:"host_key_fp,omitempty"` // signRequestCmd.HostKeyFP (was dropped)
+	TTLSeconds int64  `json:"ttl_seconds"`           // signRequestCmd.TTLSeconds (was dropped)
+	SHA256     string `json:"sha256"`                // hex sha256([]byte(cmd)) — NEW
+}
+
+// uiTally is the N-of-M vote tally for a request. Required mirrors the
+// stored RequiredApprovals (N); Approvals/Denials are the counts of votes
+// cast so far; Voters is the per-vote list (populated only on the detail
+// view). NOTE (per DESIGN §3b): the store tracks N and the votes actually
+// cast, NOT an eligible-operator pool M — so "M" is rendered as votes
+// cast, never a fabricated eligible count.
+type uiTally struct {
+	Required  int       `json:"required"`  // N (mirror of required_approvals)
+	Approvals int       `json:"approvals"` // count of approve votes
+	Denials   int       `json:"denials"`   // count of deny votes
+	Voters    []uiVoter `json:"voters"`    // who voted (detail view only)
+}
+
+// uiVoter is one row of the vote ledger as surfaced to the UI.
+type uiVoter struct {
+	Operator    string    `json:"operator"`
+	Decision    string    `json:"decision"`     // "approve" | "deny"
+	AuthnMethod string    `json:"authn_method"` // "session" | "totp" | "webauthn"
+	TS          time.Time `json:"ts"`
 }
 
 func summarize(r *store.Request) uiRequestSummary {
 	var cmdObjs []signRequestCmd
 	_ = json.Unmarshal(r.Commands, &cmdObjs)
 	cmds := make([]string, len(cmdObjs))
+	details := make([]uiCommand, len(cmdObjs))
 	for i, c := range cmdObjs {
 		cmds[i] = c.Cmd
+		// Per-command SHA-256 over the EXACT command bytes (not the whole
+		// blob) — this is the fingerprint a human eyeballs against the
+		// agent's prompt.
+		sum := sha256.Sum256([]byte(c.Cmd))
+		details[i] = uiCommand{
+			Server:     c.Server,
+			Cmd:        c.Cmd,
+			HostKeyFP:  c.HostKeyFP,
+			TTLSeconds: c.TTLSeconds,
+			SHA256:     hex.EncodeToString(sum[:]),
+		}
 	}
 	return uiRequestSummary{
-		RequestID:  r.RequestID,
-		Status:     string(r.Status),
-		ClientID:   r.ClientID,
-		Commands:   cmds,
-		ApprovedBy: r.ApprovedBy,
-		CreatedAt:  r.CreatedAt,
-		ResolvedAt: r.ResolvedAt,
+		RequestID:         r.RequestID,
+		Status:            string(r.Status),
+		ClientID:          r.ClientID,
+		Commands:          cmds,
+		CommandDetails:    details,
+		ApprovedBy:        r.ApprovedBy,
+		CreatedAt:         r.CreatedAt,
+		ResolvedAt:        r.ResolvedAt,
+		RequiredApprovals: r.RequiredApprovals,
 	}
+}
+
+// buildTally computes the N-of-M vote tally for a request from the
+// append-only vote ledger (Store.ListVotes). When includeVoters is false
+// (the pending LIST rows) only the counts are populated and the voter list
+// is left empty, keeping the list response lean; when true (the
+// /ui/request/{id} detail) the full voter list is included so an approver
+// sees who has already voted.
+//
+// COST: this issues ONE ListVotes query per call. On the pending list that
+// is O(rows) queries (one per pending row). At v2.0 scale ListPending
+// returns a handful of rows, so this is acceptable; a batched
+// multi-request vote query is a v2.1 optimisation. On a ListVotes error we
+// return nil (the tally is simply omitted) rather than failing the whole
+// summary — the render-integrity fields still render.
+func (h *HumanAPI) buildTally(ctx context.Context, requestID string, required int, includeVoters bool) *uiTally {
+	votes, err := h.Store.ListVotes(ctx, requestID)
+	if err != nil {
+		return nil
+	}
+	t := &uiTally{Required: required, Voters: []uiVoter{}}
+	for _, v := range votes {
+		switch v.Decision {
+		case store.DecisionApprove:
+			t.Approvals++
+		case store.DecisionDeny:
+			t.Denials++
+		}
+		if includeVoters {
+			t.Voters = append(t.Voters, uiVoter{
+				Operator:    v.Operator,
+				Decision:    string(v.Decision),
+				AuthnMethod: v.AuthnMethod,
+				TS:          v.TS,
+			})
+		}
+	}
+	return t
 }
 
 // handleUIPending lists the pending requests awaiting human decision.
@@ -416,7 +523,11 @@ func (h *HumanAPI) handleUIPending(w http.ResponseWriter, r *http.Request, _ str
 	}
 	out := make([]uiRequestSummary, 0, len(rows))
 	for _, row := range rows {
-		out = append(out, summarize(row))
+		sum := summarize(row)
+		// Counts-only tally per row (Voters omitted). One ListVotes per
+		// row — O(rows), acceptable at v2.0 scale (see buildTally).
+		sum.Tally = h.buildTally(r.Context(), row.RequestID, row.RequiredApprovals, false)
+		out = append(out, sum)
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{"pending": out})
 }
@@ -437,7 +548,10 @@ func (h *HumanAPI) handleUIRequest(w http.ResponseWriter, r *http.Request, _ str
 		writeJSONError(w, http.StatusInternalServerError, "get request")
 		return
 	}
-	writeJSON(w, http.StatusOK, summarize(row))
+	sum := summarize(row)
+	// Full tally including the voter list on the detail view.
+	sum.Tally = h.buildTally(r.Context(), row.RequestID, row.RequiredApprovals, true)
+	writeJSON(w, http.StatusOK, sum)
 }
 
 // voteRequest is the body of approve/deny. step_up carries an optional

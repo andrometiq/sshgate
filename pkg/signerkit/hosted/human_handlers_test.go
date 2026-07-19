@@ -5,6 +5,8 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"log"
@@ -464,6 +466,169 @@ func TestHuman_WebAuthnRegisterRoundTripOverHTTP(t *testing.T) {
 	creds, _ := db.ListCredentials(context.Background(), userID)
 	if len(creds) != 1 {
 		t.Fatalf("stored credentials = %d; want 1", len(creds))
+	}
+}
+
+// TestUIPending_RenderIntegrityFields proves the pending LIST rows carry
+// the additive render-integrity payload: per-command server, host-key FP,
+// ttl_seconds and SHA-256, plus the row's required_approvals. These are the
+// fields the browser needs to let a human cross-check the exact request.
+func TestUIPending_RenderIntegrityFields(t *testing.T) {
+	t.Parallel()
+	ts, _, db, am, _ := humanFixture(t)
+	_, secret := seedTOTPUser(t, db, am, "alice")
+	const cmd = "systemctl restart nginx"
+	seedPendingRequest(t, db, "r-int-1", 2, cmd, 120)
+
+	client := loginClient(t, ts, "alice", secret)
+	body := getJSON(t, client, ts.URL+"/ui/pending", http.StatusOK)
+
+	var out struct {
+		Pending []struct {
+			RequestID         string `json:"request_id"`
+			RequiredApprovals int    `json:"required_approvals"`
+			CommandDetails    []struct {
+				Server     string `json:"server"`
+				Cmd        string `json:"cmd"`
+				HostKeyFP  string `json:"host_key_fp"`
+				TTLSeconds int64  `json:"ttl_seconds"`
+				SHA256     string `json:"sha256"`
+			} `json:"command_details"`
+		} `json:"pending"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
+		t.Fatalf("decode /ui/pending: %v (%s)", err, body)
+	}
+	if len(out.Pending) != 1 {
+		t.Fatalf("pending rows = %d; want 1 (%s)", len(out.Pending), body)
+	}
+	row := out.Pending[0]
+	if row.RequestID != "r-int-1" {
+		t.Fatalf("request_id = %q; want r-int-1", row.RequestID)
+	}
+	if row.RequiredApprovals != 2 {
+		t.Errorf("required_approvals = %d; want 2", row.RequiredApprovals)
+	}
+	if len(row.CommandDetails) != 1 {
+		t.Fatalf("command_details len = %d; want 1", len(row.CommandDetails))
+	}
+	cd := row.CommandDetails[0]
+	if cd.Server != "prod" {
+		t.Errorf("command_details[0].server = %q; want prod", cd.Server)
+	}
+	if cd.HostKeyFP == "" {
+		t.Errorf("command_details[0].host_key_fp is empty; want the seeded FP")
+	}
+	if cd.TTLSeconds != 120 {
+		t.Errorf("command_details[0].ttl_seconds = %d; want 120", cd.TTLSeconds)
+	}
+	if cd.SHA256 == "" {
+		t.Errorf("command_details[0].sha256 is empty")
+	}
+	if cd.Cmd != cmd {
+		t.Errorf("command_details[0].cmd = %q; want %q", cd.Cmd, cmd)
+	}
+}
+
+// TestUIRequest_SHA256Matches proves the per-command SHA-256 in the detail
+// view is exactly hex(sha256(exact command bytes)) — the value a human
+// cross-checks against what the agent showed them (the render-integrity
+// rule). If these ever disagree, an approver would be signing bytes that
+// differ from the rendered text.
+func TestUIRequest_SHA256Matches(t *testing.T) {
+	t.Parallel()
+	ts, _, db, am, _ := humanFixture(t)
+	_, secret := seedTOTPUser(t, db, am, "alice")
+	const cmd = "rm -rf /var/tmp/cache && echo done"
+	seedPendingRequest(t, db, "r-sha-1", 1, cmd, 60)
+
+	client := loginClient(t, ts, "alice", secret)
+	body := getJSON(t, client, ts.URL+"/ui/request/r-sha-1", http.StatusOK)
+
+	var out struct {
+		CommandDetails []struct {
+			Cmd    string `json:"cmd"`
+			SHA256 string `json:"sha256"`
+		} `json:"command_details"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
+		t.Fatalf("decode /ui/request: %v (%s)", err, body)
+	}
+	if len(out.CommandDetails) != 1 {
+		t.Fatalf("command_details len = %d; want 1", len(out.CommandDetails))
+	}
+	sum := sha256.Sum256([]byte(cmd))
+	want := hex.EncodeToString(sum[:])
+	if got := out.CommandDetails[0].SHA256; got != want {
+		t.Fatalf("command_details[0].sha256 = %q; want %q", got, want)
+	}
+}
+
+// TestUIRequest_Tally proves the detail view's N-of-M tally: after two
+// approve votes land on an N=2 request, tally.required == 2,
+// tally.approvals == 2, denials == 0, and the voter list carries both
+// operators with their recorded authn methods. Votes are appended directly
+// to the ledger so the tally reflects the raw vote set regardless of the
+// engine's flip decision.
+func TestUIRequest_Tally(t *testing.T) {
+	t.Parallel()
+	ts, _, db, am, _ := humanFixture(t)
+	_, secret := seedTOTPUser(t, db, am, "alice")
+	seedPendingRequest(t, db, "r-tally-1", 2, "uptime", 60)
+
+	ctx := context.Background()
+	if err := db.RecordVote(ctx, &store.Vote{
+		RequestID: "r-tally-1", Operator: "op-a", Decision: store.DecisionApprove,
+		AuthnMethod: "session", TS: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("RecordVote op-a: %v", err)
+	}
+	if err := db.RecordVote(ctx, &store.Vote{
+		RequestID: "r-tally-1", Operator: "op-b", Decision: store.DecisionApprove,
+		AuthnMethod: "totp", TS: time.Now().UTC().Add(time.Second),
+	}); err != nil {
+		t.Fatalf("RecordVote op-b: %v", err)
+	}
+
+	client := loginClient(t, ts, "alice", secret)
+	body := getJSON(t, client, ts.URL+"/ui/request/r-tally-1", http.StatusOK)
+
+	var out struct {
+		Tally struct {
+			Required  int `json:"required"`
+			Approvals int `json:"approvals"`
+			Denials   int `json:"denials"`
+			Voters    []struct {
+				Operator    string `json:"operator"`
+				Decision    string `json:"decision"`
+				AuthnMethod string `json:"authn_method"`
+			} `json:"voters"`
+		} `json:"tally"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
+		t.Fatalf("decode /ui/request: %v (%s)", err, body)
+	}
+	if out.Tally.Required != 2 {
+		t.Errorf("tally.required = %d; want 2", out.Tally.Required)
+	}
+	if out.Tally.Approvals != 2 {
+		t.Errorf("tally.approvals = %d; want 2", out.Tally.Approvals)
+	}
+	if out.Tally.Denials != 0 {
+		t.Errorf("tally.denials = %d; want 0", out.Tally.Denials)
+	}
+	if len(out.Tally.Voters) != 2 {
+		t.Fatalf("tally.voters len = %d; want 2 (%s)", len(out.Tally.Voters), body)
+	}
+	methods := map[string]bool{}
+	for _, v := range out.Tally.Voters {
+		if v.Decision != "approve" {
+			t.Errorf("voter %s decision = %q; want approve", v.Operator, v.Decision)
+		}
+		methods[v.AuthnMethod] = true
+	}
+	if !methods["session"] || !methods["totp"] {
+		t.Errorf("voter authn methods = %v; want session+totp", methods)
 	}
 }
 
