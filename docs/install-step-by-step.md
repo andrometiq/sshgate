@@ -65,13 +65,16 @@ trust you want to delegate.
 
 ### Tier 3 — Hosted server signer
 
-- **NOT YET AVAILABLE (v2.x).** The hosted signer
-  (`src/signer-server`) is scaffolded but the web UI + WebAuthn
-  approval flow is incomplete.
-- Master key lives on a dedicated VPS behind WebAuthn; multiple
-  operators can share approvals. Documented for completeness.
-- **Use when:** v2.x ships and you want to share SSHGate access
-  across a team without each operator running their own signer.
+- **Available as a separate v0.2 deployment.** The hosted signer
+  (`src/signer-server`) ships a hardened systemd installer, embedded approval
+  UI, TOTP/WebAuthn authentication, and N-of-M/deny-veto policy. The local
+  `/sshgate:setup` menu does not automate this tier yet; follow
+  `../src/signer-server/README.md`.
+- The master key lives on a dedicated VPS; multiple operators can share the
+  approval roster. TLS/DNS, backups, reverse-proxy policy, and secure client-key
+  distribution remain operator responsibilities.
+- **Use when:** you need a boundary that still holds if the laptop-side agent
+  can escalate privileges, or you need multi-operator approval.
 
 ---
 

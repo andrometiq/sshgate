@@ -3,6 +3,7 @@ package sqlitestore_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -86,6 +87,39 @@ func TestInsert_Duplicate(t *testing.T) {
 	err := db.Insert(ctx, r)
 	if !errors.Is(err, store.ErrDuplicateID) {
 		t.Errorf("second Insert err = %v; want ErrDuplicateID", err)
+	}
+}
+
+func TestInsert_PendingPerClientQuota(t *testing.T) {
+	t.Parallel()
+	db := newTestDB(t)
+	ctx := context.Background()
+	for i := 0; i < 100; i++ {
+		if err := db.Insert(ctx, &store.Request{
+			RequestID: fmt.Sprintf("r-%03d", i), Status: store.StatusPending,
+			ClientID: "client-a", Commands: []byte(`[]`),
+		}); err != nil {
+			t.Fatalf("insert %d: %v", i, err)
+		}
+	}
+	err := db.Insert(ctx, &store.Request{
+		RequestID: "r-over", Status: store.StatusPending, ClientID: "client-a", Commands: []byte(`[]`),
+	})
+	if !errors.Is(err, store.ErrQueueFull) {
+		t.Fatalf("101st pending insert = %v; want ErrQueueFull", err)
+	}
+	if err := db.Insert(ctx, &store.Request{
+		RequestID: "r-other", Status: store.StatusPending, ClientID: "client-b", Commands: []byte(`[]`),
+	}); err != nil {
+		t.Fatalf("independent client blocked by per-client quota: %v", err)
+	}
+	if err := db.UpdateStatus(ctx, "r-000", store.StatusDenied, nil, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Insert(ctx, &store.Request{
+		RequestID: "r-after-resolution", Status: store.StatusPending, ClientID: "client-a", Commands: []byte(`[]`),
+	}); err != nil {
+		t.Fatalf("resolved row did not release quota: %v", err)
 	}
 }
 

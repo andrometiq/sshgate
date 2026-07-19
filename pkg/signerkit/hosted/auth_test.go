@@ -73,6 +73,10 @@ func TestNewAuthManager_RejectsMisconfig(t *testing.T) {
 		{"empty RPID", db, hosted.AuthConfig{RPOrigins: []string{"https://signer.example.com"}, SessionTTL: time.Minute}},
 		{"no origins", db, hosted.AuthConfig{RPID: "signer.example.com", SessionTTL: time.Minute}},
 		{"zero TTL", db, hosted.AuthConfig{RPID: "signer.example.com", RPOrigins: []string{"https://signer.example.com"}}},
+		{"origin path", db, hosted.AuthConfig{RPID: "signer.example.com", RPOrigins: []string{"https://signer.example.com/"}, SessionTTL: time.Minute}},
+		{"insecure remote origin", db, hosted.AuthConfig{RPID: "signer.example.com", RPOrigins: []string{"http://signer.example.com"}, SessionTTL: time.Minute}},
+		{"noncanonical origin", db, hosted.AuthConfig{RPID: "signer.example.com", RPOrigins: []string{"https://Signer.Example.com"}, SessionTTL: time.Minute}},
+		{"duplicate origin", db, hosted.AuthConfig{RPID: "signer.example.com", RPOrigins: []string{"https://signer.example.com", "https://signer.example.com"}, SessionTTL: time.Minute}},
 	}
 	for _, tc := range cases {
 		tc := tc
@@ -110,6 +114,9 @@ func TestTOTP_EnrollAndVerify(t *testing.T) {
 	}
 	if err := am.VerifyTOTP(ctx, userID, code); err != nil {
 		t.Fatalf("VerifyTOTP(valid) = %v; want nil", err)
+	}
+	if err := am.VerifyTOTP(ctx, userID, code); !errors.Is(err, hosted.ErrAuthFailed) {
+		t.Fatalf("VerifyTOTP(replay) = %v; want ErrAuthFailed", err)
 	}
 
 	// Wrong code fails with ErrAuthFailed.
@@ -373,5 +380,19 @@ func TestStepUp_TOTP(t *testing.T) {
 
 	if _, err := am.StepUp(ctx, userID, hosted.StepUpWebAuthn, ""); err == nil {
 		t.Fatalf("StepUp(webauthn) should error: it is performed via the login ceremony, not StepUp")
+	}
+}
+
+func TestWebAuthn_PerUserChallengeCap(t *testing.T) {
+	t.Parallel()
+	am, _, userID := authFixture(t)
+	ctx := context.Background()
+	for i := 0; i < 8; i++ {
+		if _, _, err := am.BeginRegistration(ctx, userID); err != nil {
+			t.Fatalf("BeginRegistration(%d): %v", i+1, err)
+		}
+	}
+	if _, _, err := am.BeginRegistration(ctx, userID); !errors.Is(err, hosted.ErrAuthRateLimited) {
+		t.Fatalf("ninth live challenge = %v; want ErrAuthRateLimited", err)
 	}
 }

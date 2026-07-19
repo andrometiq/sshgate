@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -15,6 +16,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -72,6 +74,8 @@ func humanFixture(t *testing.T) (*httptest.Server, string, *sqlitestore.DB, *hos
 	logger := log.New(io.Discard, "test: ", 0)
 	srv := hosted.NewServer(apiKey, db, logger)
 	srv.Signer = svc
+	srv.MachineClientID = "karthi-laptop"
+	srv.RequiredApprovals = 1
 	srv.AttachHuman(&hosted.HumanAPI{
 		Auth:   am,
 		Engine: engine,
@@ -109,7 +113,7 @@ func seedTOTPUser(t *testing.T, db *sqlitestore.DB, am *hosted.AuthManager, user
 func loginClient(t *testing.T, ts *httptest.Server, username, totpSecret string) *http.Client {
 	t.Helper()
 	jar, _ := cookiejar.New(nil)
-	client := &http.Client{Jar: jar}
+	client := &http.Client{Jar: jar, Transport: originTransport{base: http.DefaultTransport, origin: waOrigin}}
 
 	code, err := totp.GenerateCode(totpSecret, time.Now())
 	if err != nil {
@@ -126,6 +130,19 @@ func loginClient(t *testing.T, ts *httptest.Server, username, totpSecret string)
 		t.Fatalf("login status = %d (%s); want 200", resp.StatusCode, got)
 	}
 	return client
+}
+
+type originTransport struct {
+	base   http.RoundTripper
+	origin string
+}
+
+func (t originTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	clone := req.Clone(req.Context())
+	if clone.Method == http.MethodPost {
+		clone.Header.Set("Origin", t.origin)
+	}
+	return t.base.RoundTrip(clone)
 }
 
 // seedPendingRequest inserts a pending sign request directly via the
@@ -198,6 +215,25 @@ func TestHuman_UIRequiresSession(t *testing.T) {
 		resp.Body.Close()
 		if resp.StatusCode != http.StatusUnauthorized {
 			t.Errorf("%s %s without session = %d; want 401", g.method, g.path, resp.StatusCode)
+		}
+	}
+}
+
+func TestHumanResponsesAreNeverCacheable(t *testing.T) {
+	t.Parallel()
+	ts, _, _, _, _ := humanFixture(t)
+	for _, path := range []string{"/ui/pending", "/auth/login"} {
+		req, err := http.NewRequest(http.MethodGet, ts.URL+path, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if got := resp.Header.Get("Cache-Control"); got != "no-store" {
+			t.Fatalf("%s Cache-Control=%q; want no-store", path, got)
 		}
 	}
 }
@@ -284,6 +320,211 @@ func TestPlaneSeparation(t *testing.T) {
 	}
 }
 
+func TestHuman_MutationsRequireTrustedOriginAndJSON(t *testing.T) {
+	t.Parallel()
+	ts, _, db, am, _ := humanFixture(t)
+	_, secret := seedTOTPUser(t, db, am, "alice")
+	seedPendingRequest(t, db, "r-csrf-1", 1, "uptime", 60)
+
+	trusted := loginClient(t, ts, "alice", secret)
+	attacker := &http.Client{Jar: trusted.Jar}
+	paths := []string{
+		"/ui/request/r-csrf-1/approve",
+		"/ui/request/r-csrf-1/deny",
+		"/auth/totp/enroll",
+		"/auth/webauthn/register/begin",
+		"/auth/webauthn/register/finish",
+		"/auth/logout",
+	}
+	for _, path := range paths {
+		for _, origin := range []string{"", "https://evil.example"} {
+			req, err := http.NewRequest(http.MethodPost, ts.URL+path, strings.NewReader(`{}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Header.Set("Content-Type", "application/json")
+			if origin != "" {
+				req.Header.Set("Origin", origin)
+			}
+			resp, err := attacker.Do(req)
+			if err != nil {
+				t.Fatalf("POST %s origin %q: %v", path, origin, err)
+			}
+			resp.Body.Close()
+			if resp.StatusCode != http.StatusForbidden {
+				t.Errorf("POST %s origin %q = %d; want 403", path, origin, resp.StatusCode)
+			}
+		}
+	}
+
+	badType, err := http.NewRequest(http.MethodPost, ts.URL+"/auth/logout", strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	badType.Header.Set("Origin", waOrigin)
+	badType.Header.Set("Content-Type", "text/plain")
+	resp, err := attacker.Do(badType)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnsupportedMediaType {
+		t.Fatalf("trusted-origin text/plain logout = %d; want 415", resp.StatusCode)
+	}
+
+	// The rejected requests did not revoke the session or resolve the request.
+	getJSON(t, trusted, ts.URL+"/ui/request/r-csrf-1", http.StatusOK)
+	got, err := db.GetByID(context.Background(), "r-csrf-1")
+	if err != nil || got.Status != store.StatusPending {
+		t.Fatalf("CSRF attempts changed request: status=%v err=%v", got.Status, err)
+	}
+}
+
+func TestHuman_LoginRateLimitIsBoundedAndReturnsRetryAfter(t *testing.T) {
+	t.Parallel()
+	ts, _, _, _, _ := humanFixture(t)
+	client := &http.Client{Transport: originTransport{base: http.DefaultTransport, origin: waOrigin}}
+	for attempt := 1; attempt <= 13; attempt++ {
+		body := strings.NewReader(`{"username":"unknown","totp_code":"000000"}`)
+		resp, err := client.Post(ts.URL+"/auth/login", "application/json", body)
+		if err != nil {
+			t.Fatalf("login attempt %d: %v", attempt, err)
+		}
+		resp.Body.Close()
+		if attempt <= 12 && resp.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("login attempt %d = %d; want 401 before budget exhaustion", attempt, resp.StatusCode)
+		}
+		if attempt == 13 {
+			if resp.StatusCode != http.StatusTooManyRequests {
+				t.Fatalf("login attempt 13 = %d; want 429", resp.StatusCode)
+			}
+			if got := resp.Header.Get("Retry-After"); got != "60" {
+				t.Fatalf("Retry-After = %q; want 60", got)
+			}
+		}
+	}
+}
+
+func TestHuman_PublicAuthRequiresTrustedOriginAndJSON(t *testing.T) {
+	t.Parallel()
+	ts, _, _, _, _ := humanFixture(t)
+	body := `{"username":"unknown","totp_code":"000000"}`
+	for _, origin := range []string{"", "https://evil.example"} {
+		req, err := http.NewRequest(http.MethodPost, ts.URL+"/auth/login", strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		if origin != "" {
+			req.Header.Set("Origin", origin)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusForbidden {
+			t.Fatalf("login origin %q = %d; want 403", origin, resp.StatusCode)
+		}
+	}
+	req, err := http.NewRequest(http.MethodPost, ts.URL+"/auth/login", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Origin", waOrigin)
+	req.Header.Set("Content-Type", "text/plain")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnsupportedMediaType {
+		t.Fatalf("trusted-origin text login = %d; want 415", resp.StatusCode)
+	}
+}
+
+func TestHuman_TrustedProxyRateLimitUsesClosestForwardedIP(t *testing.T) {
+	t.Parallel()
+	ts, _, _, _, _ := humanFixtureWithPolicy(t, hosted.HumanAPIConfig{TrustProxyHeaders: true})
+	client := &http.Client{}
+	login := func(xff, username string) int {
+		body := fmt.Sprintf(`{"username":%q,"totp_code":"000000"}`, username)
+		req, err := http.NewRequest(http.MethodPost, ts.URL+"/auth/login", strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Origin", waOrigin)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Forwarded-For", xff)
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		return resp.StatusCode
+	}
+	for i := 0; i < 12; i++ {
+		if got := login("203.0.113.77", "unknown"); got != http.StatusUnauthorized {
+			t.Fatalf("attempt %d = %d; want 401", i+1, got)
+		}
+	}
+	if got := login("198.51.100.2, 203.0.113.77", "unknown"); got != http.StatusTooManyRequests {
+		t.Fatalf("forged leading XFF bypassed closest-IP budget: %d", got)
+	}
+	if got := login("203.0.113.78", "different-user"); got != http.StatusUnauthorized {
+		t.Fatalf("independent forwarded client inherited proxy-wide budget: %d", got)
+	}
+}
+
+func TestHuman_UntrustedProxyHeaderIsIgnored(t *testing.T) {
+	t.Parallel()
+	ts, _, _, _, _ := humanFixture(t)
+	client := &http.Client{}
+	for i := 0; i < 13; i++ {
+		req, err := http.NewRequest(http.MethodPost, ts.URL+"/auth/login", strings.NewReader(`{"username":"unknown","totp_code":"000000"}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Origin", waOrigin)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Forwarded-For", "203.0.113."+fmt.Sprint(i+1))
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		want := http.StatusUnauthorized
+		if i == 12 {
+			want = http.StatusTooManyRequests
+		}
+		if resp.StatusCode != want {
+			t.Fatalf("attempt %d = %d; want %d", i+1, resp.StatusCode, want)
+		}
+	}
+}
+
+func TestHuman_FactorEnrollmentRequiresCurrentTOTP(t *testing.T) {
+	t.Parallel()
+	ts, _, db, am, _ := humanFixture(t)
+	userID, secret := seedTOTPUser(t, db, am, "alice")
+	client := loginClient(t, ts, "alice", secret)
+
+	for _, body := range []string{`{}`, `{"current_totp":"000000"}`} {
+		resp, err := client.Post(ts.URL+"/auth/totp/enroll", "application/json", strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("enroll body %s = %d; want 401", body, resp.StatusCode)
+		}
+	}
+	got, err := db.GetTOTP(context.Background(), userID)
+	if err != nil || got != secret {
+		t.Fatalf("rejected enrollment changed factor: got=%q err=%v", got, err)
+	}
+}
+
 // TestHuman_ApproveDrivesGateValidSignature is the end-to-end approve
 // proof: a logged-in operator approves a pending request via
 // POST /ui/request/{id}/approve, which drives the Phase-C engine to a
@@ -300,7 +541,7 @@ func TestHuman_ApproveDrivesGateValidSignature(t *testing.T) {
 	client := loginClient(t, ts, "alice", secret)
 
 	// Approve.
-	resp, err := client.Post(ts.URL+"/ui/request/r-approve-1/approve", "application/json", nil)
+	resp, err := client.Post(ts.URL+"/ui/request/r-approve-1/approve", "application/json", bytes.NewReader([]byte(`{}`)))
 	if err != nil {
 		t.Fatalf("approve POST: %v", err)
 	}
@@ -331,7 +572,7 @@ func TestHuman_ApproveDrivesGateValidSignature(t *testing.T) {
 	assertGateValid(t, got.Signatures, pub, cmd)
 
 	// A second approve on the now-resolved request is a no-op → 409.
-	resp2, err := client.Post(ts.URL+"/ui/request/r-approve-1/approve", "application/json", nil)
+	resp2, err := client.Post(ts.URL+"/ui/request/r-approve-1/approve", "application/json", bytes.NewReader([]byte(`{}`)))
 	if err != nil {
 		t.Fatalf("second approve POST: %v", err)
 	}
@@ -352,7 +593,7 @@ func TestHuman_DenyResolves(t *testing.T) {
 	seedPendingRequest(t, db, "r-deny-1", 2, "rm -rf /tmp/x", 60)
 
 	client := loginClient(t, ts, "alice", secret)
-	resp, err := client.Post(ts.URL+"/ui/request/r-deny-1/deny", "application/json", nil)
+	resp, err := client.Post(ts.URL+"/ui/request/r-deny-1/deny", "application/json", bytes.NewReader([]byte(`{}`)))
 	if err != nil {
 		t.Fatalf("deny POST: %v", err)
 	}
@@ -386,7 +627,7 @@ func TestHuman_StepUpEnforced(t *testing.T) {
 	client := loginClient(t, ts, "alice", secret)
 
 	// Approve with no step-up code → 401.
-	resp, err := client.Post(ts.URL+"/ui/request/r-step-1/approve", "application/json", nil)
+	resp, err := client.Post(ts.URL+"/ui/request/r-step-1/approve", "application/json", bytes.NewReader([]byte(`{}`)))
 	if err != nil {
 		t.Fatalf("approve(no step-up): %v", err)
 	}
@@ -396,7 +637,10 @@ func TestHuman_StepUpEnforced(t *testing.T) {
 	}
 
 	// Approve WITH a fresh TOTP code → 200, signed, gate-valid.
-	code, _ := totp.GenerateCode(secret, time.Now())
+	// Login consumed the current TOTP step. Use the next accepted skew step to
+	// prove step-up without a real 30-second sleep; production operators wait
+	// for their authenticator to rotate to a new code.
+	code, _ := totp.GenerateCode(secret, time.Now().Add(30*time.Second))
 	body := mustMarshal(t, map[string]string{"step_up_totp": code})
 	resp2, err := client.Post(ts.URL+"/ui/request/r-step-1/approve", "application/json", bytes.NewReader(body))
 	if err != nil {
@@ -420,6 +664,27 @@ func TestHuman_StepUpEnforced(t *testing.T) {
 	}
 }
 
+func TestUIRequest_ViewerVotePersistsAcrossReload(t *testing.T) {
+	t.Parallel()
+	ts, _, db, am, _ := humanFixture(t)
+	_, secret := seedTOTPUser(t, db, am, "alice")
+	seedPendingRequest(t, db, "r-viewer-vote", 2, "uptime", 60)
+	client := loginClient(t, ts, "alice", secret)
+
+	getJSONPost(t, client, ts.URL+"/ui/request/r-viewer-vote/approve", []byte(`{}`), http.StatusOK)
+	body := getJSON(t, client, ts.URL+"/ui/request/r-viewer-vote", http.StatusOK)
+	var detail struct {
+		Status     string `json:"status"`
+		ViewerVote string `json:"viewer_vote"`
+	}
+	if err := json.Unmarshal(body, &detail); err != nil {
+		t.Fatal(err)
+	}
+	if detail.Status != "pending" || detail.ViewerVote != "approve" {
+		t.Fatalf("detail = %+v; want pending with viewer approve vote", detail)
+	}
+}
+
 // TestHuman_WebAuthnRegisterRoundTripOverHTTP drives the passkey
 // registration ceremony through the actual HTTP routes (begin → software
 // authenticator → finish) for a logged-in operator, proving the route
@@ -432,7 +697,14 @@ func TestHuman_WebAuthnRegisterRoundTripOverHTTP(t *testing.T) {
 	client := loginClient(t, ts, "alice", secret)
 
 	// begin
-	beginResp := getJSONPost(t, client, ts.URL+"/auth/webauthn/register/begin", nil, http.StatusOK)
+	// The login code is one-use across purposes. Generate the next accepted
+	// skew step so the test need not sleep for an authenticator rotation.
+	stepCode, err := totp.GenerateCode(secret, time.Now().Add(30*time.Second))
+	if err != nil {
+		t.Fatalf("GenerateCode(step-up): %v", err)
+	}
+	beginResp := getJSONPost(t, client, ts.URL+"/auth/webauthn/register/begin",
+		mustMarshal(t, map[string]string{"current_totp": stepCode}), http.StatusOK)
 	var begin struct {
 		ChallengeID string          `json:"challenge_id"`
 		Options     json.RawMessage `json:"options"`
@@ -530,6 +802,39 @@ func TestUIPending_RenderIntegrityFields(t *testing.T) {
 	}
 }
 
+func TestUIPending_PaginatesWithoutHidingBacklog(t *testing.T) {
+	t.Parallel()
+	ts, _, db, am, _ := humanFixture(t)
+	_, secret := seedTOTPUser(t, db, am, "alice")
+	for i := 0; i < 55; i++ {
+		seedPendingRequest(t, db, fmt.Sprintf("r-page-%02d", i), 1, "uptime", 60)
+	}
+	client := loginClient(t, ts, "alice", secret)
+	first := getJSON(t, client, ts.URL+"/ui/pending?offset=0", http.StatusOK)
+	var page1 struct {
+		Pending    []json.RawMessage `json:"pending"`
+		HasMore    bool              `json:"has_more"`
+		NextOffset int               `json:"next_offset"`
+	}
+	if err := json.Unmarshal(first, &page1); err != nil {
+		t.Fatal(err)
+	}
+	if len(page1.Pending) != 50 || !page1.HasMore || page1.NextOffset != 50 {
+		t.Fatalf("first page = rows:%d more:%v next:%d", len(page1.Pending), page1.HasMore, page1.NextOffset)
+	}
+	second := getJSON(t, client, ts.URL+"/ui/pending?offset=50", http.StatusOK)
+	var page2 struct {
+		Pending []json.RawMessage `json:"pending"`
+		HasMore bool              `json:"has_more"`
+	}
+	if err := json.Unmarshal(second, &page2); err != nil {
+		t.Fatal(err)
+	}
+	if len(page2.Pending) != 5 || page2.HasMore {
+		t.Fatalf("second page = rows:%d more:%v", len(page2.Pending), page2.HasMore)
+	}
+}
+
 // TestUIRequest_SHA256Matches proves the per-command SHA-256 in the detail
 // view is exactly hex(sha256(exact command bytes)) — the value a human
 // cross-checks against what the agent showed them (the render-integrity
@@ -577,24 +882,31 @@ func TestUIRequest_Tally(t *testing.T) {
 	seedPendingRequest(t, db, "r-tally-1", 2, "uptime", 60)
 
 	ctx := context.Background()
-	if err := db.RecordVote(ctx, &store.Vote{
+	if _, _, err := db.PrepareVote(ctx, &store.Vote{
 		RequestID: "r-tally-1", Operator: "op-a", Decision: store.DecisionApprove,
 		AuthnMethod: "session", TS: time.Now().UTC(),
 	}); err != nil {
-		t.Fatalf("RecordVote op-a: %v", err)
+		t.Fatalf("PrepareVote op-a: %v", err)
 	}
-	if err := db.RecordVote(ctx, &store.Vote{
+	if err := db.MarkVoteAudited(ctx, "r-tally-1", "op-a"); err != nil {
+		t.Fatalf("MarkVoteAudited op-a: %v", err)
+	}
+	if _, _, err := db.PrepareVote(ctx, &store.Vote{
 		RequestID: "r-tally-1", Operator: "op-b", Decision: store.DecisionApprove,
 		AuthnMethod: "totp", TS: time.Now().UTC().Add(time.Second),
 	}); err != nil {
-		t.Fatalf("RecordVote op-b: %v", err)
+		t.Fatalf("PrepareVote op-b: %v", err)
+	}
+	if err := db.MarkVoteAudited(ctx, "r-tally-1", "op-b"); err != nil {
+		t.Fatalf("MarkVoteAudited op-b: %v", err)
 	}
 
 	client := loginClient(t, ts, "alice", secret)
 	body := getJSON(t, client, ts.URL+"/ui/request/r-tally-1", http.StatusOK)
 
 	var out struct {
-		Tally struct {
+		ViewerVote string `json:"viewer_vote"`
+		Tally      struct {
 			Required  int `json:"required"`
 			Approvals int `json:"approvals"`
 			Denials   int `json:"denials"`
@@ -610,6 +922,9 @@ func TestUIRequest_Tally(t *testing.T) {
 	}
 	if out.Tally.Required != 2 {
 		t.Errorf("tally.required = %d; want 2", out.Tally.Required)
+	}
+	if out.ViewerVote != "" {
+		t.Errorf("viewer_vote = %q; alice did not cast either seeded vote", out.ViewerVote)
 	}
 	if out.Tally.Approvals != 2 {
 		t.Errorf("tally.approvals = %d; want 2", out.Tally.Approvals)
@@ -662,6 +977,8 @@ func humanFixtureWithPolicy(t *testing.T, cfg hosted.HumanAPIConfig) (*httptest.
 	}
 	srv := hosted.NewServer(apiKey, db, log.New(io.Discard, "", 0))
 	srv.Signer = svc
+	srv.MachineClientID = "karthi-laptop"
+	srv.RequiredApprovals = 1
 	srv.AttachHuman(&hosted.HumanAPI{Auth: am, Engine: engine, Store: db, Cfg: cfg})
 	ts := httptest.NewServer(srv)
 	t.Cleanup(ts.Close)

@@ -83,6 +83,26 @@ func (s *DB) GetUserByName(ctx context.Context, username string) (*store.User, e
 	return scanUser(row, username)
 }
 
+// CountAuthenticatableUsers returns users with at least one TOTP or WebAuthn
+// factor, optionally excluding one requester ID for self-approval policy
+// validation. It is deployment introspection, not part of the portable Store
+// mechanism interface.
+func (s *DB) CountAuthenticatableUsers(ctx context.Context, excludeID string) (int, error) {
+	var count int
+	err := s.db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM users u
+		WHERE (? = '' OR u.id <> ?)
+		  AND (
+			EXISTS (SELECT 1 FROM totp_secrets t WHERE t.user_id = u.id)
+			OR EXISTS (SELECT 1 FROM webauthn_credentials w WHERE w.user_id = u.id)
+		  )
+	`, excludeID, excludeID).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("count authenticatable users: %w", err)
+	}
+	return count, nil
+}
+
 func scanUser(row rowScanner, key string) (*store.User, error) {
 	var (
 		u           store.User
@@ -181,8 +201,8 @@ func (s *DB) UpdateCredential(ctx context.Context, id int64, blob []byte) error 
 	return nil
 }
 
-// SetTOTP implements Store.SetTOTP. An upsert: a user has at most one
-// TOTP secret, so re-setting replaces it.
+// SetTOTP implements Store.SetTOTP. Replacing a factor and clearing its replay
+// watermark happen in one transaction, so an old factor cannot race a reset.
 func (s *DB) SetTOTP(ctx context.Context, userID, secret string) error {
 	if userID == "" {
 		return errors.New("store: SetTOTP: empty user_id")
@@ -190,12 +210,22 @@ func (s *DB) SetTOTP(ctx context.Context, userID, secret string) error {
 	if secret == "" {
 		return errors.New("store: SetTOTP: empty secret")
 	}
-	_, err := s.db.ExecContext(ctx, `
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("set totp: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO totp_secrets (user_id, secret, created_at) VALUES (?, ?, ?)
 		ON CONFLICT(user_id) DO UPDATE SET secret = excluded.secret, created_at = excluded.created_at
-	`, userID, secret, nowUnix())
-	if err != nil {
+	`, userID, secret, nowUnix()); err != nil {
 		return fmt.Errorf("set totp: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM totp_replay WHERE user_id = ?`, userID); err != nil {
+		return fmt.Errorf("set totp: clear replay state: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("set totp: commit: %w", err)
 	}
 	return nil
 }
@@ -215,7 +245,34 @@ func (s *DB) GetTOTP(ctx context.Context, userID string) (string, error) {
 	return secret, nil
 }
 
-// CreateSession implements Store.CreateSession.
+// ConsumeTOTPStep implements Store.ConsumeTOTPStep as one SQLite upsert. The
+// SELECT binds consumption to the exact secret VerifyTOTP loaded; a concurrent
+// factor rotation therefore returns consumed=false instead of accepting an old
+// code against the new factor's replay state.
+func (s *DB) ConsumeTOTPStep(ctx context.Context, userID, secret string, step int64) (bool, error) {
+	if userID == "" || secret == "" || step < 0 {
+		return false, errors.New("store: ConsumeTOTPStep: invalid input")
+	}
+	res, err := s.db.ExecContext(ctx, `
+		INSERT INTO totp_replay (user_id, last_step)
+		SELECT user_id, ? FROM totp_secrets
+		WHERE user_id = ? AND secret = ?
+		ON CONFLICT(user_id) DO UPDATE SET last_step = excluded.last_step
+		WHERE excluded.last_step > totp_replay.last_step
+	`, step, userID, secret)
+	if err != nil {
+		return false, fmt.Errorf("consume totp step: %w", err)
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("consume totp step: rows affected: %w", err)
+	}
+	return affected == 1, nil
+}
+
+// CreateSession implements Store.CreateSession. Each issue opportunistically
+// removes expired rows first so an attacker cannot grow the session table
+// without bound by repeatedly authenticating.
 func (s *DB) CreateSession(ctx context.Context, sess *store.Session) error {
 	if sess == nil {
 		return errors.New("store: CreateSession: nil session")
@@ -232,7 +289,15 @@ func (s *DB) CreateSession(ctx context.Context, sess *store.Session) error {
 	if sess.CreatedAt.IsZero() {
 		sess.CreatedAt = time.Now().UTC()
 	}
-	_, err := s.db.ExecContext(ctx, `
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("create session: begin cleanup transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM sessions WHERE expires_at <= ?`, time.Now().UTC().Unix()); err != nil {
+		return fmt.Errorf("create session: remove expired sessions: %w", err)
+	}
+	_, err = tx.ExecContext(ctx, `
 		INSERT INTO sessions (id, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)
 	`, sess.ID, sess.UserID, sess.CreatedAt.Unix(), sess.ExpiresAt.Unix())
 	if err != nil {
@@ -241,13 +306,14 @@ func (s *DB) CreateSession(ctx context.Context, sess *store.Session) error {
 		}
 		return fmt.Errorf("create session: %w", err)
 	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("create session: commit: %w", err)
+	}
 	return nil
 }
 
-// GetSession implements Store.GetSession. An expired session reads back
-// as ErrNotFound: the row may still physically exist (sweeping is a
-// future concern), but it is no longer valid, so callers never receive
-// a session they should reject.
+// GetSession implements Store.GetSession. An expired session reads back as
+// ErrNotFound; CreateSession opportunistically removes expired rows.
 func (s *DB) GetSession(ctx context.Context, id string) (*store.Session, error) {
 	var (
 		sess        store.Session
@@ -282,47 +348,129 @@ func (s *DB) RevokeSession(ctx context.Context, id string) error {
 	return nil
 }
 
-// RecordVote implements Store.RecordVote. The composite primary key
-// (request_id, operator) makes a second vote from the same operator on
-// the same request a UNIQUE violation, which surfaces as ErrDuplicate.
-// The existing vote is left untouched — votes are immutable. This is
-// the store-level half of the append-only / one-vote-per-operator
-// guarantee the state machine relies on.
-func (s *DB) RecordVote(ctx context.Context, v *store.Vote) error {
+// PrepareVote implements the first phase of Store's vote/audit protocol.
+// It atomically inserts an immutable unaudited vote only while the request is
+// pending. On a duplicate it returns the canonical stored row: a same-decision
+// retry resumes audit/finalization, while an opposite decision fails with
+// ErrVoteConflict and can never reach the audit sink.
+func (s *DB) PrepareVote(ctx context.Context, v *store.Vote) (*store.Vote, bool, error) {
 	if v == nil {
-		return errors.New("store: RecordVote: nil vote")
+		return nil, false, errors.New("store: PrepareVote: nil vote")
 	}
 	if v.RequestID == "" {
-		return errors.New("store: RecordVote: empty request_id")
+		return nil, false, errors.New("store: PrepareVote: empty request_id")
 	}
 	if v.Operator == "" {
-		return errors.New("store: RecordVote: empty operator")
+		return nil, false, errors.New("store: PrepareVote: empty operator")
 	}
 	if !v.Decision.IsValid() {
-		return fmt.Errorf("store: RecordVote: invalid decision %q", v.Decision)
+		return nil, false, fmt.Errorf("store: PrepareVote: invalid decision %q", v.Decision)
 	}
 	ts := v.TS
 	if ts.IsZero() {
 		ts = time.Now().UTC()
 	}
-	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO approvals (request_id, operator, decision, authn_method, ts)
-		VALUES (?, ?, ?, ?, ?)
-	`, v.RequestID, v.Operator, string(v.Decision), v.AuthnMethod, ts.UTC().Unix())
+	res, err := s.db.ExecContext(ctx, `
+		INSERT INTO approvals (request_id, operator, decision, authn_method, ts, audited)
+		SELECT ?, ?, ?, ?, ?, 0
+		WHERE EXISTS (
+			SELECT 1 FROM requests WHERE request_id = ? AND status = 'pending'
+		)
+	`, v.RequestID, v.Operator, string(v.Decision), v.AuthnMethod, ts.UTC().Unix(), v.RequestID)
 	if err != nil {
 		if isUniqueConstraintErr(err) {
-			return fmt.Errorf("%w: %s already voted on %s", store.ErrDuplicate, v.Operator, v.RequestID)
+			existing, getErr := s.getVote(ctx, v.RequestID, v.Operator)
+			if getErr != nil {
+				return nil, false, getErr
+			}
+			if existing.Decision != v.Decision {
+				return existing, false, fmt.Errorf("%w: %s already voted %s on %s", store.ErrVoteConflict, v.Operator, existing.Decision, v.RequestID)
+			}
+			return existing, !existing.Audited, nil
 		}
-		return fmt.Errorf("record vote: %w", err)
+		return nil, false, fmt.Errorf("prepare vote: %w", err)
 	}
-	return nil
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return nil, false, fmt.Errorf("prepare vote rows affected: %w", err)
+	}
+	if rows == 0 {
+		var status string
+		err := s.db.QueryRowContext(ctx, `SELECT status FROM requests WHERE request_id = ?`, v.RequestID).Scan(&status)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, false, store.ErrNotFound
+		}
+		if err != nil {
+			return nil, false, fmt.Errorf("prepare vote request state: %w", err)
+		}
+		return nil, false, store.ErrRequestResolved
+	}
+	canonical := *v
+	canonical.TS = ts.UTC()
+	canonical.Audited = false
+	return &canonical, true, nil
 }
 
-// ListVotes implements Store.ListVotes, oldest first.
+func (s *DB) getVote(ctx context.Context, requestID, operator string) (*store.Vote, error) {
+	var (
+		v        store.Vote
+		decision string
+		tsUnix   int64
+		audited  int
+	)
+	err := s.db.QueryRowContext(ctx, `
+		SELECT request_id, operator, decision, authn_method, ts, audited
+		FROM approvals WHERE request_id = ? AND operator = ?
+	`, requestID, operator).Scan(&v.RequestID, &v.Operator, &decision, &v.AuthnMethod, &tsUnix, &audited)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, store.ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get vote: %w", err)
+	}
+	v.Decision = store.Decision(decision)
+	v.TS = time.Unix(tsUnix, 0).UTC()
+	v.Audited = audited == 1
+	return &v, nil
+}
+
+// MarkVoteAudited publishes a prepared vote to ListVotes after the external
+// sink succeeds. The update is idempotent so retries after an uncertain DB
+// response are safe.
+func (s *DB) MarkVoteAudited(ctx context.Context, requestID, operator string) error {
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE approvals SET audited = 1
+		WHERE request_id = ? AND operator = ? AND audited = 0
+	`, requestID, operator)
+	if err != nil {
+		return fmt.Errorf("mark vote audited: %w", err)
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("mark vote audited rows affected: %w", err)
+	}
+	if rows != 0 {
+		return nil
+	}
+	existing, err := s.getVote(ctx, requestID, operator)
+	if err != nil {
+		return err
+	}
+	if existing.Audited {
+		return nil
+	}
+	return errors.New("mark vote audited: vote remained unaudited")
+}
+
+// ListVotes implements Store.ListVotes, oldest first. State 2 is a migration-
+// only marker for votes on immutable terminal requests whose pre-migration
+// external-audit outcome is unknowable; it is visible for history but remains
+// Vote.Audited=false. Pending requests can contain only states 0/1, so the
+// approval engine never counts a legacy-unknown vote toward a transition.
 func (s *DB) ListVotes(ctx context.Context, requestID string) ([]*store.Vote, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT request_id, operator, decision, authn_method, ts
-		FROM approvals WHERE request_id = ? ORDER BY ts ASC, operator ASC
+		SELECT request_id, operator, decision, authn_method, ts, audited
+		FROM approvals WHERE request_id = ? AND audited IN (1, 2) ORDER BY ts ASC, operator ASC
 	`, requestID)
 	if err != nil {
 		return nil, fmt.Errorf("list votes: %w", err)
@@ -334,12 +482,14 @@ func (s *DB) ListVotes(ctx context.Context, requestID string) ([]*store.Vote, er
 			v        store.Vote
 			decision string
 			tsUnix   int64
+			audited  int
 		)
-		if err := rows.Scan(&v.RequestID, &v.Operator, &decision, &v.AuthnMethod, &tsUnix); err != nil {
+		if err := rows.Scan(&v.RequestID, &v.Operator, &decision, &v.AuthnMethod, &tsUnix, &audited); err != nil {
 			return nil, fmt.Errorf("scan vote: %w", err)
 		}
 		v.Decision = store.Decision(decision)
 		v.TS = time.Unix(tsUnix, 0).UTC()
+		v.Audited = audited == 1
 		out = append(out, &v)
 	}
 	if err := rows.Err(); err != nil {

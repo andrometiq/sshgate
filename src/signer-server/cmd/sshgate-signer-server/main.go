@@ -1,15 +1,14 @@
 // Command signer-server is the hosted v2 signing service. It serves
 // the HTTPS API described in docs/design.md §"Signed-write wire format"
 // and docs/approval-architecture.md: SSHGate plugins on any machine submit
-// a sign request, a human approves it (v2.1+ adds WebAuthn/TOTP UI),
+// a sign request, a human approves it through the WebAuthn/TOTP UI,
 // and the server returns signed payloads compatible with gate.
 //
 // Flags:
 //
 //	--config <path>          TOML config (default: /etc/signer-server/config.toml
 //	                          or $SSHGATE_SIGNER_SERVER_CONFIG)
-//	--api-key-file <path>    Single bearer-token file (0600). v2.0 only;
-//	                          v2.1 replaces with per-client keys + WebAuthn.
+//	--api-key-file <path>    Single machine bearer-token file (0600).
 //	--signing-key-file <path> 64-byte raw Ed25519 master signing key (0600).
 //	                          The server mints gate-valid SSHGATE_SIG
 //	                          envelopes with this; missing/insecure = fatal.
@@ -17,6 +16,9 @@
 //	                          terminated upstream (Caddy/nginx) in v2.0.
 //	--db <path>              SQLite database path (default:
 //	                          /var/lib/signer-server/state.db)
+//	--ui                     Serve the embedded human approval UI (default off).
+//	--rp-id <domain>         WebAuthn relying-party ID (required with --ui).
+//	--rp-origin <origin>     Allowed WebAuthn origin; repeatable/comma-separated.
 //	--version                Print version and exit
 //
 // On startup:
@@ -27,8 +29,7 @@
 //     for v2.0). Empty file = fatal.
 //  3. Load the Ed25519 master signing key from --signing-key-file
 //     (64-byte raw, 0600). Missing/insecure/wrong-size = fatal.
-//  4. Open the SQLite store (scaffold commit 2 wires this in; commit 1
-//     leaves the field nil and handlers fall through to placeholders).
+//  4. Open the SQLite request, operator, factor, session, and vote store.
 //  5. Build the http.Server and listen.
 //  6. Shut down cleanly on SIGTERM/SIGINT (5s drain window).
 //
@@ -43,26 +44,32 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"regexp"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
 
+	"github.com/pquerna/otp/totp"
+
 	"github.com/karthikeyan5/sshgate/pkg/signerkit"
 	"github.com/karthikeyan5/sshgate/pkg/signerkit/hosted"
+	"github.com/karthikeyan5/sshgate/pkg/signerkit/hosted/refapp"
 	"github.com/karthikeyan5/sshgate/pkg/signerkit/sqlitestore"
+	"github.com/karthikeyan5/sshgate/pkg/signerkit/store"
 )
 
 // version is stamped from the single VERSION file at link time via
 // -ldflags "-X main.version=<VERSION>" (Makefile SIGNER_SERVER_VERSION_FLAGS).
 // Unstamped builds keep "dev"; `make verify-versions` proves the stamp
 // landed. The hosted signer-server is still a v2 scaffold, but its
-// reported version tracks the repo VERSION like every other binary rather
-// than carrying an independently-drifting literal (it read 0.2.0-scaffold-1
-// while VERSION said 0.1.4).
+// reported version tracks the repo VERSION like every other binary.
 var version = "dev"
 
 func main() {
@@ -74,9 +81,27 @@ func run(args []string) int {
 	fs.SetOutput(os.Stderr)
 	apiKeyFile := fs.String("api-key-file", "", "Path to a 0600 file containing the bearer API key")
 	signingKeyFile := fs.String("signing-key-file", "", "Path to a 0600 file containing the 64-byte raw Ed25519 master signing key")
+	signingPublicKeyFile := fs.String("signing-public-key-file", "", "Path for the 32-byte public key written by --init-signing-key")
+	initSigningKey := fs.Bool("init-signing-key", false, "Generate a new signing keypair and exit; refuses to overwrite either file")
+	bootstrapOperatorName := fs.String("bootstrap-operator", "", "Create the first UI operator with a TOTP factor and exit")
+	bootstrapOutputFile := fs.String("bootstrap-output-file", "", "0600 artifact for bootstrap TOTP material (required with --bootstrap-operator)")
+	machineClientID := fs.String("machine-client-id", "", "Stable operator ID bound to the machine bearer credential")
+	requiredApprovals := fs.Int("required-approvals", 1, "Number of distinct eligible approvals required per request")
 	addr := fs.String("addr", ":8443", "Listen address (host:port). Default :8443; TLS terminated upstream.")
 	dbPath := fs.String("db", "/var/lib/signer-server/state.db", "SQLite database path")
-	_ = fs.String("config", defaultConfigPath(), "TOML config file (reserved for v2.1)")
+	uiEnabled := fs.Bool("ui", false, "Serve the embedded human approval UI")
+	rpID := fs.String("rp-id", "", "WebAuthn relying-party ID (required with --ui)")
+	var rpOrigins stringListFlag
+	fs.Var(&rpOrigins, "rp-origin", "Allowed WebAuthn origin (required with --ui; repeatable or comma-separated)")
+	rpDisplayName := fs.String("rp-display-name", "SSHGate Signer", "WebAuthn relying-party display name")
+	sessionTTL := fs.Duration("session-ttl", time.Hour, "Human session lifetime")
+	totpIssuer := fs.String("totp-issuer", "", "TOTP issuer label (defaults to RP display name)")
+	requireStepUp := fs.Bool("require-step-up", false, "Require a fresh TOTP code for every approve or deny")
+	secureCookie := fs.Bool("secure-cookie", true, "Mark the human session cookie Secure (disable only for local plain-HTTP development)")
+	denyVeto := fs.Bool("deny-veto", true, "Let one deny vote veto a request")
+	allowSelfApprove := fs.Bool("allow-self-approve", false, "Allow a requester's own approval vote to count")
+	trustProxyHeaders := fs.Bool("trust-proxy-headers", false, "Trust X-Forwarded-For only from a loopback reverse proxy")
+	_ = fs.String("config", defaultConfigPath(), "TOML config file (reserved for a future release)")
 	showVersion := fs.Bool("version", false, "Print version and exit")
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -86,9 +111,63 @@ func run(args []string) int {
 		return 0
 	}
 
+	if *initSigningKey && strings.TrimSpace(*bootstrapOperatorName) != "" {
+		logf("--init-signing-key and --bootstrap-operator are mutually exclusive")
+		return 1
+	}
+	if *initSigningKey {
+		if strings.TrimSpace(*signingKeyFile) == "" || strings.TrimSpace(*signingPublicKeyFile) == "" {
+			logf("--signing-key-file and --signing-public-key-file are required with --init-signing-key")
+			return 1
+		}
+		if err := signerkit.GenerateKeyPair(*signingKeyFile, *signingPublicKeyFile); err != nil {
+			logf("initialize signing key: %v", err)
+			return 1
+		}
+		fmt.Fprintf(os.Stdout, "signing key initialized\nprivate_key=%s\npublic_key=%s\n", *signingKeyFile, *signingPublicKeyFile)
+		return 0
+	}
 	if err := assertNonRoot(); err != nil {
 		logf("%v", err)
 		return 1
+	}
+	if name := strings.TrimSpace(*bootstrapOperatorName); name != "" {
+		if err := validateUIConfig(true, *rpID, rpOrigins, *sessionTTL); err != nil {
+			logf("bootstrap operator: %v", err)
+			return 1
+		}
+		db, err := sqlitestore.Open(*dbPath)
+		if err != nil {
+			logf("bootstrap operator: open store: %v", err)
+			return 1
+		}
+		defer func() { _ = db.Close() }()
+		err = bootstrapOperator(context.Background(), db, hosted.AuthConfig{
+			RPID:          strings.TrimSpace(*rpID),
+			RPDisplayName: strings.TrimSpace(*rpDisplayName),
+			RPOrigins:     slices.Clone(rpOrigins),
+			SessionTTL:    *sessionTTL,
+			TOTPIssuer:    strings.TrimSpace(*totpIssuer),
+		}, name, strings.TrimSpace(*bootstrapOutputFile))
+		if err != nil {
+			logf("bootstrap operator: %v", err)
+			return 1
+		}
+		return 0
+	}
+	if err := validateUIConfig(*uiEnabled, *rpID, rpOrigins, *sessionTTL); err != nil {
+		logf("%v", err)
+		return 1
+	}
+	if *uiEnabled {
+		if strings.TrimSpace(*machineClientID) == "" {
+			logf("--machine-client-id is required with --ui")
+			return 1
+		}
+		if *requiredApprovals <= 0 {
+			logf("--required-approvals must be greater than zero with --ui")
+			return 1
+		}
 	}
 
 	if *apiKeyFile == "" {
@@ -142,10 +221,43 @@ func run(args []string) int {
 		return 1
 	}
 	defer func() { _ = db.Close() }()
+	if *uiEnabled {
+		if err := validateApprovalRoster(context.Background(), db, strings.TrimSpace(*machineClientID), *requiredApprovals, *allowSelfApprove); err != nil {
+			logf("approval policy: %v", err)
+			return 1
+		}
+	}
 
-	// Machine-plane only (Auth zero): served surface is identical to the
-	// former NewServer + srv.Signer = core wiring.
-	srv, err := hosted.New(hosted.Config{Core: core, Store: db, APIKey: apiKey, Logger: logger})
+	// With --ui off, Auth stays zero and the exact historical machine-only
+	// handler is served. With --ui on, hosted.New mounts the human JSON plane;
+	// an outer mux adds only the embedded static application.
+	hostedCfg := hosted.Config{
+		Core:              core,
+		Store:             db,
+		APIKey:            apiKey,
+		MachineClientID:   strings.TrimSpace(*machineClientID),
+		RequiredApprovals: *requiredApprovals,
+		Logger:            logger,
+	}
+	if *uiEnabled {
+		hostedCfg.Auth = hosted.AuthConfig{
+			RPID:          strings.TrimSpace(*rpID),
+			RPDisplayName: strings.TrimSpace(*rpDisplayName),
+			RPOrigins:     slices.Clone(rpOrigins),
+			SessionTTL:    *sessionTTL,
+			TOTPIssuer:    strings.TrimSpace(*totpIssuer),
+		}
+		hostedCfg.Human = hosted.HumanAPIConfig{
+			ApprovalPolicy: hosted.ApprovalPolicy{
+				DenyVeto:         *denyVeto,
+				AllowSelfApprove: *allowSelfApprove,
+			},
+			RequireStepUp:     *requireStepUp,
+			SecureCookie:      *secureCookie,
+			TrustProxyHeaders: *trustProxyHeaders,
+		}
+	}
+	srv, err := hosted.New(hostedCfg)
 	if err != nil {
 		logf("build hosted server: %v", err)
 		return 1
@@ -153,10 +265,10 @@ func run(args []string) int {
 
 	httpSrv := &http.Server{
 		Addr:              *addr,
-		Handler:           srv,
+		Handler:           hostedHTTPHandler(*uiEnabled, srv, refapp.Handler()),
 		ReadHeaderTimeout: 10 * time.Second,
 		// Long-poll handlers can hold the connection up to ~60s;
-		// budget a comfortable WriteTimeout above that. v2.1 should
+		// budget a comfortable WriteTimeout above that. A future release can
 		// move to per-route timeouts.
 		ReadTimeout:  90 * time.Second,
 		WriteTimeout: 90 * time.Second,
@@ -199,14 +311,209 @@ func run(args []string) int {
 	return 0
 }
 
+// stringListFlag accepts a repeatable flag and comma-separated values while
+// discarding surrounding whitespace and empty entries.
+type stringListFlag []string
+
+func (s *stringListFlag) String() string { return strings.Join(*s, ",") }
+
+func (s *stringListFlag) Set(value string) error {
+	for _, item := range strings.Split(value, ",") {
+		if item = strings.TrimSpace(item); item != "" {
+			*s = append(*s, item)
+		}
+	}
+	return nil
+}
+
+// hostedHTTPHandler keeps the default machine surface literally unchanged:
+// when UI is disabled it returns api itself. UI mode routes only the existing
+// hosted prefixes to api and reserves the catch-all for embedded static files.
+func hostedHTTPHandler(uiEnabled bool, api, ui http.Handler) http.Handler {
+	if !uiEnabled {
+		return api
+	}
+	mux := http.NewServeMux()
+	mux.Handle("/v1/", api)
+	mux.Handle("/auth/", api)
+	mux.Handle("/ui/", api)
+	mux.Handle("/healthz", api)
+	mux.Handle("/", ui)
+	return mux
+}
+
+func validateUIConfig(enabled bool, rpID string, rpOrigins []string, sessionTTL time.Duration) error {
+	if !enabled {
+		return nil
+	}
+	if strings.TrimSpace(rpID) == "" {
+		return errors.New("--rp-id is required with --ui")
+	}
+	if len(rpOrigins) == 0 {
+		return errors.New("at least one --rp-origin is required with --ui")
+	}
+	if sessionTTL <= 0 {
+		return errors.New("--session-ttl must be greater than zero with --ui")
+	}
+	return nil
+}
+
+var operatorNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._@-]{0,127}$`)
+
+func bootstrapOperator(ctx context.Context, db *sqlitestore.DB, authCfg hosted.AuthConfig, username, outputPath string) error {
+	username = strings.TrimSpace(username)
+	if !operatorNamePattern.MatchString(username) {
+		return errors.New("operator must be 1-128 characters: letters, digits, dot, underscore, @, or hyphen")
+	}
+	outputPath = strings.TrimSpace(outputPath)
+	if outputPath == "" {
+		return errors.New("--bootstrap-output-file is required with --bootstrap-operator")
+	}
+	// Validate RP/TOTP configuration through the same constructor used by the
+	// live human plane, without enrolling or persisting anything yet.
+	_, err := hosted.NewAuthManager(db, authCfg)
+	if err != nil {
+		return err
+	}
+	user, err := db.GetUserByName(ctx, username)
+	if errors.Is(err, store.ErrNotFound) {
+		user = &store.User{ID: username, Username: username, Role: "operator"}
+		if err := db.CreateUser(ctx, user); err != nil {
+			return fmt.Errorf("create operator: %w", err)
+		}
+	} else if err != nil {
+		return fmt.Errorf("look up operator: %w", err)
+	}
+
+	existingSecret, factorErr := db.GetTOTP(ctx, user.ID)
+	if factorErr != nil && !errors.Is(factorErr, store.ErrNotFound) {
+		return fmt.Errorf("check existing factor: %w", factorErr)
+	}
+	artifact, artifactErr := readBootstrapArtifact(outputPath)
+	if artifactErr == nil {
+		if artifact.Operator != username {
+			return fmt.Errorf("bootstrap artifact %s belongs to operator %q", outputPath, artifact.Operator)
+		}
+		if factorErr == nil {
+			if artifact.Secret != existingSecret {
+				return fmt.Errorf("bootstrap artifact %s does not match the stored factor", outputPath)
+			}
+			return nil
+		}
+		if err := db.SetTOTP(ctx, user.ID, artifact.Secret); err != nil {
+			return fmt.Errorf("resume stored bootstrap factor: %w", err)
+		}
+		return nil
+	}
+	if !errors.Is(artifactErr, os.ErrNotExist) {
+		return artifactErr
+	}
+	if factorErr == nil {
+		// Idempotent deploy after the one-time artifact was deliberately removed.
+		return nil
+	}
+	issuer := strings.TrimSpace(authCfg.TOTPIssuer)
+	if issuer == "" {
+		issuer = strings.TrimSpace(authCfg.RPDisplayName)
+	}
+	if issuer == "" {
+		issuer = strings.TrimSpace(authCfg.RPID)
+	}
+	key, err := totp.Generate(totp.GenerateOpts{Issuer: issuer, AccountName: user.Username})
+	if err != nil {
+		return fmt.Errorf("generate TOTP enrollment: %w", err)
+	}
+	artifact = bootstrapArtifact{Operator: user.Username, Secret: key.Secret(), URI: key.URL()}
+	if err := writeBootstrapArtifact(outputPath, artifact); err != nil {
+		return err
+	}
+	// Artifact-before-store ordering is intentional: a DB failure leaves a
+	// recoverable 0600 secret that the next invocation resumes, never an
+	// enrolled factor whose only copy vanished into stdout or a failed pipe.
+	if err := db.SetTOTP(ctx, user.ID, artifact.Secret); err != nil {
+		return fmt.Errorf("store bootstrap factor (artifact retained at %s): %w", outputPath, err)
+	}
+	return nil
+}
+
+type bootstrapArtifact struct {
+	Operator string
+	Secret   string
+	URI      string
+}
+
+func readBootstrapArtifact(path string) (bootstrapArtifact, error) {
+	raw, err := readOwnerFile(path, "bootstrap artifact")
+	if err != nil {
+		return bootstrapArtifact{}, err
+	}
+	var out bootstrapArtifact
+	for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
+		key, value, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		switch key {
+		case "operator":
+			out.Operator = value
+		case "totp_secret":
+			out.Secret = value
+		case "totp_uri":
+			out.URI = value
+		}
+	}
+	if out.Operator == "" || out.Secret == "" || out.URI == "" {
+		return bootstrapArtifact{}, fmt.Errorf("bootstrap artifact %s is incomplete", path)
+	}
+	return out, nil
+}
+
+func writeBootstrapArtifact(path string, artifact bootstrapArtifact) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return fmt.Errorf("create bootstrap artifact %s: %w", path, err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = os.Remove(path)
+		}
+	}()
+	content := []byte(fmt.Sprintf("operator=%s\ntotp_secret=%s\ntotp_uri=%s\n", artifact.Operator, artifact.Secret, artifact.URI))
+	if n, err := f.Write(content); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("write bootstrap artifact %s: %w", path, err)
+	} else if n != len(content) {
+		_ = f.Close()
+		return fmt.Errorf("write bootstrap artifact %s: %w", path, io.ErrShortWrite)
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("sync bootstrap artifact %s: %w", path, err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("close bootstrap artifact %s: %w", path, err)
+	}
+	dir, err := os.Open(filepath.Dir(path))
+	if err != nil {
+		return fmt.Errorf("open bootstrap artifact directory: %w", err)
+	}
+	defer dir.Close()
+	if err := dir.Sync(); err != nil {
+		return fmt.Errorf("sync bootstrap artifact directory: %w", err)
+	}
+	committed = true
+	return nil
+}
+
 // loadAPIKey reads path, trims surrounding whitespace, and returns the
 // key. An empty file is treated as a fatal misconfiguration: the
 // daemon refuses to start with an empty bearer token rather than
 // accept all-token-mismatches as a feature.
 func loadAPIKey(path string) (string, error) {
-	raw, err := os.ReadFile(path)
+	raw, err := readOwnerFile(path, "api key file")
 	if err != nil {
-		return "", fmt.Errorf("read %s: %w", path, err)
+		return "", err
 	}
 	key := strings.TrimSpace(string(bytes.TrimSpace(raw)))
 	if key == "" {
@@ -215,9 +522,67 @@ func loadAPIKey(path string) (string, error) {
 	return key, nil
 }
 
+func readOwnerFile(path, kind string) ([]byte, error) {
+	before, err := os.Lstat(path)
+	if err != nil {
+		return nil, fmt.Errorf("inspect %s %s: %w", kind, path, err)
+	}
+	if before.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("%s %s is a symbolic link", kind, path)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("open %s %s: %w", kind, path, err)
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("stat %s %s: %w", kind, path, err)
+	}
+	after, err := os.Lstat(path)
+	if err != nil {
+		return nil, fmt.Errorf("reinspect %s %s: %w", kind, path, err)
+	}
+	if after.Mode()&os.ModeSymlink != 0 || !os.SameFile(info, after) {
+		return nil, fmt.Errorf("%s %s changed or became a symbolic link during open", kind, path)
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s %s is not a regular file", kind, path)
+	}
+	if mode := info.Mode().Perm(); mode&0o077 != 0 {
+		return nil, fmt.Errorf("%s %s has insecure mode %#o (group/world bits must be off)", kind, path, mode)
+	}
+	raw, err := io.ReadAll(f)
+	if err != nil {
+		return nil, fmt.Errorf("read %s %s: %w", kind, path, err)
+	}
+	return raw, nil
+}
+
+func validateApprovalRoster(ctx context.Context, db *sqlitestore.DB, requesterID string, required int, allowSelf bool) error {
+	if _, err := db.GetUser(ctx, requesterID); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return fmt.Errorf("machine client ID %q is not a bootstrapped operator", requesterID)
+		}
+		return fmt.Errorf("load machine client operator: %w", err)
+	}
+	exclude := ""
+	if !allowSelf {
+		exclude = requesterID
+	}
+	eligible, err := db.CountAuthenticatableUsers(ctx, exclude)
+	if err != nil {
+		return err
+	}
+	if eligible < required {
+		return fmt.Errorf("required approvals %d exceed %d authenticatable eligible operators (allow-self-approve=%v)", required, eligible, allowSelf)
+	}
+	return nil
+}
+
 // defaultConfigPath returns the env-overridden default config path.
-// v2.0 doesn't actually parse a config file (all options are flags);
-// the path is reserved for v2.1 when [auth], [tls], and [store]
+// The current server doesn't parse a config file (all options are flags);
+// the path is reserved for a future release when [auth], [tls], and [store]
 // blocks land.
 func defaultConfigPath() string {
 	if p := os.Getenv("SSHGATE_SIGNER_SERVER_CONFIG"); p != "" {

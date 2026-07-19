@@ -63,7 +63,8 @@ func (d *Daemon) signApproved(cmds []HostedSignCommand, approvedAt time.Time) ([
 	}
 	ts := approvedAt.Unix()
 	maxSecs := int64(sigwire.MaxSigValidity / time.Second)
-	out := make([]HostedSignResult, len(cmds))
+	payloads := make([]sigwire.SigPayload, len(cmds))
+	signedPayloads := make([][]byte, len(cmds))
 	for i, c := range cmds {
 		if c.Cmd == "" {
 			return nil, fmt.Errorf("signerkit: commands[%d].cmd is empty", i)
@@ -78,7 +79,7 @@ func (d *Daemon) signApproved(cmds []HostedSignCommand, approvedAt time.Time) ([
 		if err != nil {
 			return nil, fmt.Errorf("signerkit: nonce for commands[%d]: %w", i, err)
 		}
-		payload := sigwire.SigPayload{
+		payloads[i] = sigwire.SigPayload{
 			Cmd:   c.Cmd,
 			TS:    ts,
 			Exp:   ts + c.TTLSeconds,
@@ -89,19 +90,30 @@ func (d *Daemon) signApproved(cmds []HostedSignCommand, approvedAt time.Time) ([
 		}
 		// Sign the exact bytes the gate reconstructs on verify (both sides go
 		// through the same json.Marshal of SigPayload, so the bytes are stable).
-		signedBytes, err := jsonMarshal(payload)
+		signedBytes, err := jsonMarshal(payloads[i])
 		if err != nil {
 			return nil, fmt.Errorf("signerkit: marshal payload for commands[%d]: %w", i, err)
 		}
-		// Route through the single custody choke point (C1/C2/C3/C7): a held
-		// Lock refuses the signature here (row stays pending, retryable after
-		// Unlock — mint-before-flip in the engine makes that safe), and the
-		// crypto.Signer seam keeps a file key byte-identical to ed25519.Sign.
-		sig, err := d.signBytes(signedBytes)
+		signedPayloads[i] = signedBytes
+	}
+
+	// Resolve custody once and hold it across the whole batch. Lock/RotateTo
+	// linearize at the batch boundary, so a two-command approval can never be
+	// split across old and new signing identities.
+	d.custodyMu.RLock()
+	defer d.custodyMu.RUnlock()
+	signer, err := d.resolveSignerLocked()
+	if err != nil {
+		return nil, err
+	}
+
+	out := make([]HostedSignResult, len(cmds))
+	for i, c := range cmds {
+		sig, err := signWithResolved(signer, signedPayloads[i])
 		if err != nil {
 			return nil, err
 		}
-		wire, err := sigwire.EncodeSigned(sig, payload)
+		wire, err := sigwire.EncodeSigned(sig, payloads[i])
 		if err != nil {
 			return nil, fmt.Errorf("signerkit: encode envelope for commands[%d]: %w", i, err)
 		}

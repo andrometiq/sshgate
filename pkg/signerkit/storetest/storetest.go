@@ -214,3 +214,44 @@ func RunConcurrentFlip(t *testing.T, newStore func(t *testing.T) store.Store) {
 		t.Fatalf("a post-resolution UpdateStatus overwrote the winner: %+v -> %+v", first, snapshot(after))
 	}
 }
+
+// RunUnauditedVoteBarrier proves UpdateStatus cannot race a terminal decision
+// past a prepared vote whose external audit write is still in flight. Every
+// Store implementation must provide this database-level barrier; an engine-
+// local mutex is insufficient for multi-replica deployments.
+func RunUnauditedVoteBarrier(t *testing.T, newStore func(t *testing.T) store.Store) {
+	t.Helper()
+	st := newStore(t)
+	ctx := context.Background()
+	const rid = "r-audit-barrier"
+	if err := st.Insert(ctx, &store.Request{
+		RequestID: rid, Status: store.StatusPending, ClientID: "conformance", Commands: []byte(`[]`),
+	}); err != nil {
+		t.Fatalf("Insert: %v", err)
+	}
+	if _, needsAudit, err := st.PrepareVote(ctx, &store.Vote{
+		RequestID: rid, Operator: "op-deny", Decision: store.DecisionDeny, AuthnMethod: "webauthn",
+	}); err != nil || !needsAudit {
+		t.Fatalf("PrepareVote: needsAudit=%v err=%v", needsAudit, err)
+	}
+	if err := st.UpdateStatus(ctx, rid, store.StatusApproved, []byte(`[]`), "op-approve"); err != nil {
+		t.Fatalf("UpdateStatus across barrier: %v", err)
+	}
+	got, err := st.GetByID(ctx, rid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != store.StatusPending {
+		t.Fatalf("terminal transition crossed unaudited vote: %q", got.Status)
+	}
+	if err := st.MarkVoteAudited(ctx, rid, "op-deny"); err != nil {
+		t.Fatalf("MarkVoteAudited: %v", err)
+	}
+	if err := st.UpdateStatus(ctx, rid, store.StatusDenied, nil, "op-deny"); err != nil {
+		t.Fatalf("UpdateStatus after audited vote: %v", err)
+	}
+	got, err = st.GetByID(ctx, rid)
+	if err != nil || got.Status != store.StatusDenied {
+		t.Fatalf("audited vote did not release barrier: status=%q err=%v", got.Status, err)
+	}
+}

@@ -7,6 +7,8 @@ import (
 	"io"
 	"testing"
 	"time"
+
+	"github.com/karthikeyan5/sshgate/src/sigwire"
 )
 
 // hosted_sign_test.go covers the in-package seams the external signer_test
@@ -69,5 +71,77 @@ func TestSignApproved_LockRefuses(t *testing.T) {
 	}
 	if len(res) != 1 || res[0].Sig == "" {
 		t.Fatalf("SignApproved after Unlock returned %+v; want one signed result", res)
+	}
+}
+
+func TestSignApproved_BatchIsAtomicAcrossRotation(t *testing.T) {
+	priv1, pub1 := goldenSignerKey()
+	priv2, pub2 := altSignerKey()
+	blocked := newBlockingSigner(priv1)
+	svc, err := New(Config{Signer: blocked, Audit: NewAppendOnlySink(io.Discard)})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	type batchResult struct {
+		rows []HostedSignResult
+		err  error
+	}
+	batchDone := make(chan batchResult, 1)
+	go func() {
+		rows, err := svc.SignApproved([]HostedSignCommand{
+			{Cmd: "id", TTLSeconds: 60, HostKeyFP: "SHA256:x"},
+			{Cmd: "uptime", TTLSeconds: 60, HostKeyFP: "SHA256:x"},
+		}, time.Unix(1_700_000_000, 0))
+		batchDone <- batchResult{rows: rows, err: err}
+	}()
+	<-blocked.entered
+
+	rotateDone := make(chan error, 1)
+	go func() {
+		rotateDone <- svc.RotateToWithAudit(priv2, "batch boundary", Operator{ID: "op"})
+	}()
+	select {
+	case err := <-rotateDone:
+		t.Fatalf("RotateTo crossed an in-flight hosted batch: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(blocked.release)
+	batch := <-batchDone
+	if batch.err != nil || len(batch.rows) != 2 {
+		t.Fatalf("SignApproved: rows=%+v err=%v", batch.rows, batch.err)
+	}
+	for i, row := range batch.rows {
+		sig, payload, err := sigwire.DecodeSigned(row.Sig)
+		if err != nil {
+			t.Fatalf("decode result %d: %v", i, err)
+		}
+		msg, err := jsonMarshal(payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !ed25519.Verify(pub1, msg, sig) || ed25519.Verify(pub2, msg, sig) {
+			t.Fatalf("batch result %d did not stay on pre-rotation key", i)
+		}
+	}
+	if err := <-rotateDone; err != nil {
+		t.Fatal(err)
+	}
+
+	after, err := svc.SignApproved([]HostedSignCommand{{Cmd: "whoami", TTLSeconds: 60, HostKeyFP: "SHA256:x"}}, time.Unix(1_700_000_001, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sig, payload, err := sigwire.DecodeSigned(after[0].Sig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	msg, err := jsonMarshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ed25519.Verify(pub2, msg, sig) {
+		t.Fatal("post-batch signature did not use rotated key")
 	}
 }

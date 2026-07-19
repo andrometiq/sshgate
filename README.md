@@ -118,7 +118,7 @@ per-client details are in **[docs/install-generic-mcp.md](docs/install-generic-m
 
 **Tier 2 — Local Telegram signer.** The full v1 install. Master keypair under the `sshgatesigner` system user, signer-telegram systemd unit, dedicated Telegram bot for approvals. Writes require a phone tap. This is the default for daily use.
 
-**Tier 3 — Hosted server.** Not yet available. Reserved for the v2 architecture (hosted `sshgate-signer-server` with WebAuthn + TOTP web auth, multi-operator approval rules, central audit). The signer-telegram backend interface is the swap point; gate, the MCP, and the slash commands stay the same.
+**Tier 3 — Hosted server.** The v0.2 hosted `sshgate-signer-server` runs the signing key on a separate system, with an embedded approval UI, TOTP/WebAuthn auth, N-of-M/deny-veto policy, SQLite state, and append-only audit. The signer-telegram backend interface is the swap point; gate, the MCP, and the slash commands stay the same. See [the hosted signer guide](src/signer-server/README.md) for the DNS/TLS and deployment requirements.
 
 **Approval architecture (two tiers):** see [docs/approval-architecture.md](docs/approval-architecture.md).
 
@@ -204,7 +204,7 @@ Tap approve. All four run in order. If any fails, the rest stop.
 
 The provisioning CLI (`sshgate pubkey` / `sshgate add`) and the full eleven-tool agent MCP surface (`run`, `run_batch`, `list_servers`, `status`, `ping`, `revoke_server`, `request_grant`, `revoke_grant`, `list_grants`, `update_gate`, `transfer`) are shipped. Both write tiers work: Tier 1 read-only (gate deployed, writes denied locally) and Tier 2 signed-write (local Telegram signer, one phone tap per approval). Inline secret redaction of command output is live (see *Secret redaction* below). The test suites — a race-enabled unit suite plus a Docker-backed integration suite — run locally via `make test` / `make test-integration` (`make preflight` is the pre-push gate); CI runs the race-enabled unit suite on every push/PR (the `tests` workflow, badged above), and `verify-gate` reproducibly rebuilds and checks the committed gate binary.
 
-The hosted Tier-3 signer (a separate machine the agent cannot reach, with WebAuthn/TOTP web auth and multi-operator approval) is deferred. The backend is scaffolded in `src/signer-server/`; what remains is the web UI, the Telegram channel on the hosted signer, and deployment.
+The hosted Tier-3 signer is available as the v0.2 separate-machine approval boundary. It includes the reference web UI and deployment tooling; TLS/DNS, backups, and secret distribution remain operator responsibilities. Hosted standing grants, secret reveal, and box-to-box transfer continue to fail closed and use the local Telegram signer instead.
 
 - Architecture and threat model: [`docs/THREAT-MODEL.md`](docs/THREAT-MODEL.md) (start here), then [`docs/design.md`](docs/design.md)
 - Roadmap and deferred work: [`docs/ROADMAP.md`](docs/ROADMAP.md)

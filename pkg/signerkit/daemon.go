@@ -97,10 +97,21 @@ type Daemon struct {
 	// through resolveSigner/signBytes (custody.go). It is process-memory only:
 	// a signer restart clears the lock and any rotation, reverting to the
 	// constructed Signer/Key (same posture as grants).
-	custodyMu  sync.RWMutex
-	locked     bool
-	lockReason string
-	rotSigner  crypto.Signer
+	custodyMu sync.RWMutex
+	// lifecycleMu serializes the complete transition→audit sequence. Audit is
+	// still best-effort/fail-open, but concurrent Lock/Unlock/Rotate calls can
+	// never be recorded in a different order from the states they installed.
+	lifecycleMu sync.Mutex
+	locked      bool
+	lockReason  string
+	rotSigner   crypto.Signer
+	// lifecycleSink receives Lock/Unlock/RotateTo audit events for a Daemon
+	// constructed by New(Config). It is deliberately separate from Audit: the
+	// socket path still needs the concrete *AuditLog, while custody controls must
+	// reach any configured AuditSink. auditLifecycle uses this sink first and
+	// falls back to Audit only for legacy struct-literal Daemons, so a local
+	// *AuditLog wired into both fields is never double-written.
+	lifecycleSink AuditSink
 
 	// grants is the in-memory standing-grant table, keyed by server
 	// alias (one grant per alias — a new grant for an alias replaces the

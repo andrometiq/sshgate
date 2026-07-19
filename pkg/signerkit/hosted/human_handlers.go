@@ -8,7 +8,11 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
+	"strconv"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/karthikeyan5/sshgate/pkg/signerkit/store"
@@ -58,6 +62,9 @@ type HumanAPI struct {
 	Engine *ApprovalEngine
 	Store  store.Store
 	Cfg    HumanAPIConfig
+
+	limitOnce sync.Once
+	limits    *authRateLimiter
 }
 
 // HumanAPIConfig is the per-deploy POLICY the human plane applies. Every
@@ -89,6 +96,12 @@ type HumanAPIConfig struct {
 	// It is a deploy property, not a policy: the mechanism is identical
 	// either way.
 	SecureCookie bool
+
+	// TrustProxyHeaders permits X-Forwarded-For for abuse-control identity,
+	// but only when the immediate TCP peer is loopback. Production enables it
+	// when the signer is bound behind a same-host reverse proxy that overwrites
+	// or appends X-Forwarded-For; direct/public deployments leave it false.
+	TrustProxyHeaders bool
 }
 
 // withSession is the HUMAN-PLANE middleware, the parallel to withAuth. It
@@ -117,6 +130,49 @@ func (h *HumanAPI) withSession(next func(http.ResponseWriter, *http.Request, str
 	})
 }
 
+// withSessionAuthLimit adds bounded per-IP and per-principal throttling to a
+// session-gated authentication action (factor enrollment). UI reads are not
+// throttled; vote step-up applies the same limiter in handleVote.
+func (h *HumanAPI) withSessionAuthLimit(next func(http.ResponseWriter, *http.Request, string)) http.Handler {
+	return h.withSession(func(w http.ResponseWriter, r *http.Request, userID string) {
+		if !h.allowMutation(w, r) {
+			return
+		}
+		if !h.allowAuth(w, r, userID, "session") {
+			return
+		}
+		next(w, r, userID)
+	})
+}
+
+// withSessionMutation guards a cookie-authenticated state change with an
+// exact Origin check and a JSON content-type requirement. SameSite cookies
+// alone do not protect against a compromised or malicious same-site sibling
+// origin; binding mutations to the configured RP origins closes that gap.
+func (h *HumanAPI) withSessionMutation(next func(http.ResponseWriter, *http.Request, string)) http.Handler {
+	return h.withSession(func(w http.ResponseWriter, r *http.Request, userID string) {
+		if !h.allowMutation(w, r) {
+			return
+		}
+		next(w, r, userID)
+	})
+}
+
+// withPublicAuthLimit applies an IP budget before parsing an unauthenticated
+// login/verification request. Handlers add the principal budget after strict
+// JSON decoding, so rotating usernames cannot bypass the IP ceiling.
+func (h *HumanAPI) withPublicAuthLimit(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !h.allowMutation(w, r) {
+			return
+		}
+		if !h.allowAuth(w, r, "", "public") {
+			return
+		}
+		next(w, r)
+	}
+}
+
 // registerHumanRoutes mounts the human-plane routes on mux. It is called
 // from Server.routes when a HumanAPI is configured. The /auth/enroll and
 // /auth/webauthn/register|login/begin|finish and /auth/login routes are
@@ -137,22 +193,22 @@ func (h *HumanAPI) withSession(next func(http.ResponseWriter, *http.Request, str
 // or-passkey login and a session-gated approve.
 func (h *HumanAPI) registerHumanRoutes(mux *http.ServeMux) {
 	// --- auth: session-establishing (public) ---
-	mux.HandleFunc("POST /auth/login", h.handleLogin)
-	mux.HandleFunc("POST /auth/totp/verify", h.handleTOTPVerify)
-	mux.HandleFunc("POST /auth/webauthn/login/begin", h.handleWebAuthnLoginBegin)
-	mux.HandleFunc("POST /auth/webauthn/login/finish", h.handleWebAuthnLoginFinish)
+	mux.HandleFunc("POST /auth/login", h.withPublicAuthLimit(h.handleLogin))
+	mux.HandleFunc("POST /auth/totp/verify", h.withPublicAuthLimit(h.handleTOTPVerify))
+	mux.HandleFunc("POST /auth/webauthn/login/begin", h.withPublicAuthLimit(h.handleWebAuthnLoginBegin))
+	mux.HandleFunc("POST /auth/webauthn/login/finish", h.withPublicAuthLimit(h.handleWebAuthnLoginFinish))
 
 	// --- auth: session-gated (enroll a factor / log out while logged in) ---
-	mux.Handle("POST /auth/totp/enroll", h.withSession(h.handleTOTPEnroll))
-	mux.Handle("POST /auth/webauthn/register/begin", h.withSession(h.handleWebAuthnRegisterBegin))
-	mux.Handle("POST /auth/webauthn/register/finish", h.withSession(h.handleWebAuthnRegisterFinish))
-	mux.Handle("POST /auth/logout", h.withSession(h.handleLogout))
+	mux.Handle("POST /auth/totp/enroll", h.withSessionAuthLimit(h.handleTOTPEnroll))
+	mux.Handle("POST /auth/webauthn/register/begin", h.withSessionAuthLimit(h.handleWebAuthnRegisterBegin))
+	mux.Handle("POST /auth/webauthn/register/finish", h.withSessionAuthLimit(h.handleWebAuthnRegisterFinish))
+	mux.Handle("POST /auth/logout", h.withSessionMutation(h.handleLogout))
 
 	// --- ui: all session-gated ---
 	mux.Handle("GET /ui/pending", h.withSession(h.handleUIPending))
 	mux.Handle("GET /ui/request/{id}", h.withSession(h.handleUIRequest))
-	mux.Handle("POST /ui/request/{id}/approve", h.withSession(h.handleUIApprove))
-	mux.Handle("POST /ui/request/{id}/deny", h.withSession(h.handleUIDeny))
+	mux.Handle("POST /ui/request/{id}/approve", h.withSessionMutation(h.handleUIApprove))
+	mux.Handle("POST /ui/request/{id}/deny", h.withSessionMutation(h.handleUIDeny))
 	mux.Handle("GET /ui/audit", h.withSession(h.handleUIAudit))
 }
 
@@ -178,6 +234,9 @@ func (h *HumanAPI) handleLogin(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
+	if !h.allowPrincipal(w, req.Username, "public") {
+		return
+	}
 	if req.Username == "" || req.TOTPCode == "" {
 		writeJSONError(w, http.StatusBadRequest, "username and totp_code are required")
 		return
@@ -195,11 +254,32 @@ func (h *HumanAPI) handleLogin(w http.ResponseWriter, r *http.Request) {
 	h.issueSessionCookie(w, r, user.ID)
 }
 
-// handleTOTPEnroll (session-gated) generates a TOTP secret for the
-// logged-in operator and returns the provisioning URI. The user id comes
-// from the session, NOT the request body — an operator can only enroll
-// their own factor.
+// enrollmentAuthRequest carries a fresh proof of an EXISTING factor. HTTP
+// self-bootstrap is deliberately absent: the first factor is provisioned
+// out-of-band by the operator/deployer, after which factor additions and
+// rotations require this step-up.
+type enrollmentAuthRequest struct {
+	CurrentTOTP string `json:"current_totp"`
+}
+
+// handleTOTPEnroll rotates a TOTP secret only after a fresh proof of the
+// existing TOTP factor. A session alone is insufficient: a stolen long-lived
+// cookie must not be able to replace every factor. Users with no factor must
+// be bootstrapped out-of-band; the reference app intentionally has no
+// self-enrollment flow.
 func (h *HumanAPI) handleTOTPEnroll(w http.ResponseWriter, r *http.Request, userID string) {
+	var auth enrollmentAuthRequest
+	if !decodeJSON(w, r, &auth) {
+		return
+	}
+	if auth.CurrentTOTP == "" {
+		writeJSONError(w, http.StatusUnauthorized, "factor step-up required")
+		return
+	}
+	if _, err := h.Auth.StepUp(r.Context(), userID, StepUpTOTP, auth.CurrentTOTP); err != nil {
+		writeJSONError(w, http.StatusUnauthorized, "factor step-up required")
+		return
+	}
 	user, err := h.Store.GetUser(r.Context(), userID)
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "load user")
@@ -232,6 +312,9 @@ func (h *HumanAPI) handleTOTPVerify(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
+	if !h.allowPrincipal(w, req.Username, "public") {
+		return
+	}
 	if req.Username == "" || req.Code == "" {
 		writeJSONError(w, http.StatusBadRequest, "username and code are required")
 		return
@@ -253,8 +336,24 @@ func (h *HumanAPI) handleTOTPVerify(w http.ResponseWriter, r *http.Request) {
 // (for navigator.credentials.create) and an opaque challenge_id the
 // client returns on finish.
 func (h *HumanAPI) handleWebAuthnRegisterBegin(w http.ResponseWriter, r *http.Request, userID string) {
+	var auth enrollmentAuthRequest
+	if !decodeJSON(w, r, &auth) {
+		return
+	}
+	if auth.CurrentTOTP == "" {
+		writeJSONError(w, http.StatusUnauthorized, "factor step-up required")
+		return
+	}
+	if _, err := h.Auth.StepUp(r.Context(), userID, StepUpTOTP, auth.CurrentTOTP); err != nil {
+		writeJSONError(w, http.StatusUnauthorized, "factor step-up required")
+		return
+	}
 	options, challengeID, err := h.Auth.BeginRegistration(r.Context(), userID)
 	if err != nil {
+		if errors.Is(err, ErrAuthRateLimited) {
+			writeRateLimited(w)
+			return
+		}
 		writeJSONError(w, http.StatusInternalServerError, "begin registration")
 		return
 	}
@@ -311,6 +410,9 @@ func (h *HumanAPI) handleWebAuthnLoginBegin(w http.ResponseWriter, r *http.Reque
 	if !decodeJSON(w, r, &req) {
 		return
 	}
+	if !h.allowPrincipal(w, req.Username, "public") {
+		return
+	}
 	if req.Username == "" {
 		writeJSONError(w, http.StatusBadRequest, "username is required")
 		return
@@ -322,6 +424,10 @@ func (h *HumanAPI) handleWebAuthnLoginBegin(w http.ResponseWriter, r *http.Reque
 	}
 	options, challengeID, err := h.Auth.BeginLogin(r.Context(), user.ID)
 	if err != nil {
+		if errors.Is(err, ErrAuthRateLimited) {
+			writeRateLimited(w)
+			return
+		}
 		// No credentials registered, etc. — opaque to avoid an oracle.
 		writeJSONError(w, http.StatusUnauthorized, "unauthorized")
 		return
@@ -346,6 +452,9 @@ type webauthnLoginFinishRequest struct {
 func (h *HumanAPI) handleWebAuthnLoginFinish(w http.ResponseWriter, r *http.Request) {
 	var req webauthnLoginFinishRequest
 	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if !h.allowPrincipal(w, req.Username, "public") {
 		return
 	}
 	if req.Username == "" || req.ChallengeID == "" || len(req.Response) == 0 {
@@ -402,6 +511,11 @@ type uiRequestSummary struct {
 	// number of distinct approving operators needed). Mirrored into
 	// Tally.Required for the card.
 	RequiredApprovals int `json:"required_approvals"`
+	// ViewerVote is populated only on the detail route when the authenticated
+	// operator has already cast an audited vote. It lets the reference app keep
+	// controls disabled across reloads without exposing any new machine-plane
+	// state.
+	ViewerVote string `json:"viewer_vote,omitempty"`
 	// Tally is the N-of-M vote progress, built from the append-only vote
 	// ledger. It is populated with counts on the pending LIST rows (Voters
 	// omitted for leanness) and with the full voter list on the
@@ -516,10 +630,44 @@ func (h *HumanAPI) buildTally(ctx context.Context, requestID string, required in
 
 // handleUIPending lists the pending requests awaiting human decision.
 func (h *HumanAPI) handleUIPending(w http.ResponseWriter, r *http.Request, _ string) {
-	rows, err := h.Store.ListPending(r.Context())
+	const pageSize = 50
+	offset := 0
+	if raw := r.URL.Query().Get("offset"); raw != "" {
+		var err error
+		offset, err = strconv.Atoi(raw)
+		if err != nil || offset < 0 || offset > 1_000_000 {
+			writeJSONError(w, http.StatusBadRequest, "invalid offset")
+			return
+		}
+	}
+	var (
+		rows []*store.Request
+		err  error
+	)
+	if pager, ok := h.Store.(interface {
+		ListPendingPage(context.Context, int, int) ([]*store.Request, error)
+	}); ok {
+		rows, err = pager.ListPendingPage(r.Context(), pageSize+1, offset)
+	} else {
+		// Compatibility path for an external Store written before pagination.
+		// Its ListPending implementation owns retrieval bounds; slice the result
+		// before rendering so the HTTP response itself remains bounded.
+		rows, err = h.Store.ListPending(r.Context())
+		if err == nil {
+			if offset >= len(rows) {
+				rows = nil
+			} else {
+				rows = rows[offset:]
+			}
+		}
+	}
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "list pending")
 		return
+	}
+	hasMore := len(rows) > pageSize
+	if hasMore {
+		rows = rows[:pageSize]
 	}
 	out := make([]uiRequestSummary, 0, len(rows))
 	for _, row := range rows {
@@ -529,11 +677,15 @@ func (h *HumanAPI) handleUIPending(w http.ResponseWriter, r *http.Request, _ str
 		sum.Tally = h.buildTally(r.Context(), row.RequestID, row.RequiredApprovals, false)
 		out = append(out, sum)
 	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{"pending": out})
+	response := map[string]interface{}{"pending": out, "has_more": hasMore}
+	if hasMore {
+		response["next_offset"] = offset + len(out)
+	}
+	writeJSON(w, http.StatusOK, response)
 }
 
 // handleUIRequest returns one request's detail by id.
-func (h *HumanAPI) handleUIRequest(w http.ResponseWriter, r *http.Request, _ string) {
+func (h *HumanAPI) handleUIRequest(w http.ResponseWriter, r *http.Request, userID string) {
 	id := r.PathValue("id")
 	if id == "" {
 		writeJSONError(w, http.StatusBadRequest, "missing request id")
@@ -551,6 +703,14 @@ func (h *HumanAPI) handleUIRequest(w http.ResponseWriter, r *http.Request, _ str
 	sum := summarize(row)
 	// Full tally including the voter list on the detail view.
 	sum.Tally = h.buildTally(r.Context(), row.RequestID, row.RequiredApprovals, true)
+	if sum.Tally != nil {
+		for _, vote := range sum.Tally.Voters {
+			if vote.Operator == userID {
+				sum.ViewerVote = vote.Decision
+				break
+			}
+		}
+	}
 	writeJSON(w, http.StatusOK, sum)
 }
 
@@ -586,8 +746,10 @@ func (h *HumanAPI) handleVote(w http.ResponseWriter, r *http.Request, userID str
 		return
 	}
 	var req voteRequest
-	// The body is optional (a vote with no step-up code is valid when
-	// step-up is off); tolerate an empty body.
+	// The frozen human contract permits an empty body when step-up is disabled.
+	// The mutation middleware still requires an exact trusted Origin and an
+	// application/json content type, closing CSRF without changing that body
+	// contract. Non-empty bodies are decoded strictly and size-capped.
 	if r.ContentLength != 0 {
 		if !decodeJSON(w, r, &req) {
 			return
@@ -599,6 +761,9 @@ func (h *HumanAPI) handleVote(w http.ResponseWriter, r *http.Request, userID str
 	// proof; with it on, the fresh factor is.
 	authnMethod := "session"
 	if h.Cfg.RequireStepUp {
+		if !h.allowAuth(w, r, userID, "vote") {
+			return
+		}
 		// Per-action step-up enforcement (the #2 product flag). We support
 		// a TOTP step-up inline; the mechanism's StepUp verb is the seam.
 		if _, err := h.Auth.StepUp(r.Context(), userID, StepUpTOTP, req.StepUpTOTP); err != nil {
@@ -611,10 +776,12 @@ func (h *HumanAPI) handleVote(w http.ResponseWriter, r *http.Request, userID str
 	outcome, err := h.Engine.SubmitVote(r.Context(), id, userID, decision, authnMethod, h.Cfg.ApprovalPolicy)
 	if err != nil {
 		switch {
-		case errors.Is(err, store.ErrNotFound):
+		case errors.Is(err, ErrRequestNotFound):
 			writeJSONError(w, http.StatusNotFound, "unknown request_id")
 		case errors.Is(err, ErrAlreadyResolved):
 			writeJSONError(w, http.StatusConflict, "request already resolved")
+		case errors.Is(err, store.ErrVoteConflict):
+			writeJSONError(w, http.StatusConflict, "operator already voted")
 		default:
 			writeJSONError(w, http.StatusInternalServerError, "submit vote")
 		}
@@ -685,6 +852,20 @@ func (h *HumanAPI) clearCookie() *http.Cookie {
 	}
 }
 
+func (h *HumanAPI) allowMutation(w http.ResponseWriter, r *http.Request) bool {
+	origin := strings.TrimSpace(r.Header.Get("Origin"))
+	if origin == "" || !h.Auth.allowsOrigin(origin) {
+		writeJSONError(w, http.StatusForbidden, "forbidden origin")
+		return false
+	}
+	contentType := strings.ToLower(strings.TrimSpace(strings.Split(r.Header.Get("Content-Type"), ";")[0]))
+	if contentType != "application/json" {
+		writeJSONError(w, http.StatusUnsupportedMediaType, "application/json required")
+		return false
+	}
+	return true
+}
+
 // decodeJSON reads a size-capped JSON body into v with unknown fields
 // rejected. On a malformed/oversize body it writes 400 and returns false
 // so the caller can return early.
@@ -694,13 +875,30 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, v interface{}) bool {
 		writeJSONError(w, http.StatusBadRequest, "read body: "+err.Error())
 		return false
 	}
-	dec := json.NewDecoder(bytes.NewReader(body))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(v); err != nil {
+	if err := decodeStrictJSON(body, v); err != nil {
 		writeJSONError(w, http.StatusBadRequest, "malformed request: "+err.Error())
 		return false
 	}
 	return true
+}
+
+// decodeStrictJSON accepts exactly one JSON value. Decoder.Decode alone
+// silently accepts a valid object followed by another JSON value, which is a
+// request-smuggling ambiguity between middleware and handlers.
+func decodeStrictJSON(body []byte, v interface{}) error {
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(v); err != nil {
+		return err
+	}
+	var trailing interface{}
+	if err := dec.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("multiple JSON values")
+		}
+		return err
+	}
+	return nil
 }
 
 // readLimited reads up to limit+1 bytes from rc and errors if the body
@@ -717,4 +915,112 @@ func readLimited(rc io.ReadCloser, limit int64) ([]byte, error) {
 		return nil, errors.New("request body too large")
 	}
 	return b, nil
+}
+
+const (
+	authRateWindow  = time.Minute
+	authRateMax     = 12
+	authRateEntries = 4096
+)
+
+type authRateBucket struct {
+	windowStart time.Time
+	count       int
+}
+
+// authRateLimiter is a bounded fixed-window limiter. It intentionally fails
+// closed for a new key when its bounded table is full of live buckets; an
+// attacker cannot turn spoofed usernames into unbounded server memory.
+type authRateLimiter struct {
+	mu      sync.Mutex
+	buckets map[string]authRateBucket
+	now     func() time.Time
+}
+
+func newAuthRateLimiter() *authRateLimiter {
+	return &authRateLimiter{buckets: make(map[string]authRateBucket), now: time.Now}
+}
+
+func (l *authRateLimiter) allow(key string) bool {
+	now := l.now().UTC()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if b, ok := l.buckets[key]; ok {
+		if now.Sub(b.windowStart) >= authRateWindow {
+			l.buckets[key] = authRateBucket{windowStart: now, count: 1}
+			return true
+		}
+		if b.count >= authRateMax {
+			return false
+		}
+		b.count++
+		l.buckets[key] = b
+		return true
+	}
+	if len(l.buckets) >= authRateEntries {
+		for k, b := range l.buckets {
+			if now.Sub(b.windowStart) >= authRateWindow {
+				delete(l.buckets, k)
+			}
+		}
+		if len(l.buckets) >= authRateEntries {
+			return false
+		}
+	}
+	l.buckets[key] = authRateBucket{windowStart: now, count: 1}
+	return true
+}
+
+func (h *HumanAPI) authLimiter() *authRateLimiter {
+	h.limitOnce.Do(func() { h.limits = newAuthRateLimiter() })
+	return h.limits
+}
+
+func (h *HumanAPI) allowAuth(w http.ResponseWriter, r *http.Request, principal, scope string) bool {
+	host := h.authClientIP(r)
+	if !h.authLimiter().allow(scope + ":ip:" + host) {
+		writeRateLimited(w)
+		return false
+	}
+	if principal != "" && !h.allowPrincipal(w, principal, scope) {
+		return false
+	}
+	return true
+}
+
+func (h *HumanAPI) authClientIP(r *http.Request) string {
+	host := r.RemoteAddr
+	if parsed, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		host = parsed
+	}
+	peer := net.ParseIP(strings.TrimSpace(host))
+	if peer != nil {
+		host = peer.String()
+	}
+	if !h.Cfg.TrustProxyHeaders || peer == nil || !peer.IsLoopback() {
+		return host
+	}
+	parts := strings.Split(r.Header.Get("X-Forwarded-For"), ",")
+	for i := len(parts) - 1; i >= 0; i-- {
+		if ip := net.ParseIP(strings.TrimSpace(parts[i])); ip != nil {
+			return ip.String()
+		}
+	}
+	return host
+}
+
+func (h *HumanAPI) allowPrincipal(w http.ResponseWriter, principal, scope string) bool {
+	// Hash attacker-controlled names before using them as map keys: the table is
+	// count-bounded and each key is fixed-size.
+	sum := sha256.Sum256([]byte(strings.ToLower(strings.TrimSpace(principal))))
+	if !h.authLimiter().allow(scope + ":principal:" + hex.EncodeToString(sum[:])) {
+		writeRateLimited(w)
+		return false
+	}
+	return true
+}
+
+func writeRateLimited(w http.ResponseWriter) {
+	w.Header().Set("Retry-After", "60")
+	writeJSONError(w, http.StatusTooManyRequests, "too many authentication attempts")
 }

@@ -1,6 +1,7 @@
 .PHONY: all build install-local test test-integration vet clean sshgate-gate-linux \
 	sshgate-mcp-darwin sshgate-signer-telegram-darwin darwin cross sshgate-signer-server \
-	preflight e2e smoke gitleaks release-gate verify-dist verify-repro verify-versions mcpb
+	preflight e2e smoke gitleaks release-gate verify-dist verify-repro verify-versions mcpb \
+	test-refapp-js
 
 # ---------------------------------------------------------------------------
 # Verified release channel (spec §11)
@@ -163,12 +164,16 @@ install-local: build
 test:
 	go test -race ./...
 
+test-refapp-js:
+	@command -v node >/dev/null 2>&1 || { echo "test-refapp-js: node is required to verify the hosted WebAuthn browser adapter" >&2; exit 1; }
+	node --test pkg/signerkit/hosted/refapp/test/app.test.js
+
 # Phase-1 e2e against a real Docker SSH target. Skipped automatically
 # if `docker compose` is unavailable. Excluded from `make test` so
 # contributor machines without Docker still get a green per-package
 # suite.
 test-integration:
-	go test -race -tags=integration ./tests/integration/... -timeout=180s -v
+	go test -race -tags=integration ./internal/redteam ./tests/integration/... -timeout=300s -v
 
 # `go vet ./...` errors with "matched no packages" while the module is empty
 # (Phase 0). Guard with `go list` so vet is a no-op until source exists.
@@ -194,7 +199,7 @@ clean:
 # unit suite, a secret scan of the commits about to be pushed, a clean build,
 # the CHEAP verified-release-channel checks, and the two-build reproducibility
 # assertion. No Docker, so it runs anywhere in well under a minute.
-preflight: vet test gitleaks build verify-dist verify-versions verify-repro verify-no-sqlite-local verify-no-humanauth-local
+preflight: vet test test-refapp-js gitleaks build verify-dist verify-versions verify-repro verify-no-sqlite-local verify-no-humanauth-local
 	@echo "preflight: OK — safe to push"
 
 # verify-no-sqlite-local proves the SQLite-containment invariant (D10 / spec
@@ -208,7 +213,8 @@ preflight: vet test gitleaks build verify-dist verify-versions verify-repro veri
 # gate fails the build if that ever happens. It is an import-graph check (no
 # build needed): `go list -deps` enumerates every transitive dependency.
 verify-no-sqlite-local:
-	@if go list -deps ./src/signer/cmd/sshgate-signer-telegram/... | grep -q '^modernc.org/sqlite'; then \
+	@deps="$$(go list -deps ./src/signer/cmd/sshgate-signer-telegram/...)" || { echo "verify-no-sqlite-local: FAIL — go list could not resolve the local signer dependency graph" >&2; exit 1; }; \
+	if printf '%s\n' "$$deps" | grep -q '^modernc.org/sqlite'; then \
 		echo "verify-no-sqlite-local: FAIL — the local signer links modernc.org/sqlite (D10 violation: the sqlite impl must stay contained in pkg/signerkit/sqlitestore)" >&2; exit 1; \
 	fi
 	@echo "verify-no-sqlite-local: OK — local Telegram signer does not link SQLite"
@@ -225,7 +231,8 @@ verify-no-sqlite-local:
 # ever happens. Like verify-no-sqlite-local it is an import-graph check (no
 # build needed): `go list -deps` enumerates every transitive dependency.
 verify-no-humanauth-local:
-	@if go list -deps ./src/signer/cmd/sshgate-signer-telegram/... | grep -qE '^github.com/go-webauthn/|^github.com/pquerna/otp'; then \
+	@deps="$$(go list -deps ./src/signer/cmd/sshgate-signer-telegram/...)" || { echo "verify-no-humanauth-local: FAIL — go list could not resolve the local signer dependency graph" >&2; exit 1; }; \
+	if printf '%s\n' "$$deps" | grep -qE '^github.com/go-webauthn/|^github.com/pquerna/otp'; then \
 		echo "verify-no-humanauth-local: FAIL — the local signer links the human-plane auth stack (go-webauthn/pquerna-otp must stay contained in pkg/signerkit/hosted)" >&2; exit 1; \
 	fi
 	@echo "verify-no-humanauth-local: OK — local Telegram signer does not link the human-auth (WebAuthn/TOTP) stack"

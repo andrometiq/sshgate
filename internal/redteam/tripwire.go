@@ -125,7 +125,7 @@ var watchExcludes = []string{
 	// dropping a key in /config/.ssh/authorized_keys, or any other file under
 	// .sshgate-gate) is NOT masked.
 	containerHome + "/\\.sshgate-gate/audit\\.log",
-	"/etc/s6-overlay", // linuxserver s6 supervision runtime (mid-run tick guard)
+	"/etc/s6-overlay",            // linuxserver s6 supervision runtime (mid-run tick guard)
 	"/etc/services\\.d",          // s6 service dir (mid-run tick guard)
 	"/etc/cont-init\\.d",         // s6 init scripts (mid-run tick guard)
 	"/etc/ssh/ssh_host_",         // host keys (boot-regenerated; guard)
@@ -426,11 +426,12 @@ chmod 666 %[4]s
 		return "", fmt.Errorf("tripwire mkdir: %w\n%s", err, out)
 	}
 
-	// 2. Try to install inotify-tools. apk may be offline; tolerate
-	//    failure and fall back.
+	// 2. Try to install inotify-tools, but never let an offline package
+	//    mirror stall the integration gate. Images without `timeout` skip
+	//    the network attempt and use the documented snapshot fallback.
 	haveInotify := false
 	if out, ierr := dockerExec(ctx, composeFile, nil,
-		"command -v inotifywait >/dev/null 2>&1 || apk add --no-cache inotify-tools >/dev/null 2>&1; command -v inotifywait >/dev/null 2>&1 && echo yes || echo no",
+		"if command -v inotifywait >/dev/null 2>&1; then echo yes; elif command -v timeout >/dev/null 2>&1 && timeout 15 apk add --no-cache inotify-tools >/dev/null 2>&1 && command -v inotifywait >/dev/null 2>&1; then echo yes; else echo no; fi",
 	); ierr == nil && strings.Contains(string(out), "yes") {
 		haveInotify = true
 	}

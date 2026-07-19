@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Pending · SSHGate Signer</title>
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+  <header>
+    <span class="brand">SSHGate Signer</span>
+    <nav><a class="active" href="pending.html">Pending</a><a href="audit.html">Audit</a><a href="#" id="logout">Log out</a></nav>
+  </header>
+  <main>
+    <h1>Pending requests</h1>
+    <p class="sub">Cross-check the server, host-key fingerprint, exact command and SHA-256 before approving. <button id="refresh" type="button">Refresh</button></p>
+    <p class="status" id="status" aria-live="polite"></p>
+    <div id="list"></div>
+    <p><button id="load-more" type="button" hidden>Load more</button></p>
+  </main>
+  <script src="app.js"></script>
+  <script src="pending.js"></script>
+</body>
+</html>

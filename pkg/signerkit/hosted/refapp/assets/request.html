@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Request · SSHGate Signer</title>
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+  <header>
+    <span class="brand">SSHGate Signer</span>
+    <nav><a href="pending.html">Pending</a><a href="audit.html">Audit</a><a href="#" id="logout">Log out</a></nav>
+  </header>
+  <main>
+    <h1>Review request</h1>
+    <p class="sub" id="request-id"></p>
+    <p class="status" id="status" aria-live="polite"></p>
+    <div id="integrity"></div>
+    <section class="card" id="detail" hidden>
+      <div class="row"><span class="k">requester</span><span id="requester"></span></div>
+      <div class="row"><span class="k">submitted</span><span id="submitted"></span></div>
+      <div class="row"><span class="k">status</span><span id="request-status"></span></div>
+      <h2>Approvals</h2><div id="tally"></div>
+    </section>
+    <section id="step-up" hidden>
+      <label for="step-up-code">Step-up confirmation code</label>
+      <input id="step-up-code" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="6-digit code">
+      <p class="sub">Use a new authenticator code. A code already used to sign in or approve cannot be reused; wait for it to rotate if needed.</p>
+    </section>
+    <div class="actions" id="actions" hidden>
+      <button class="primary" id="approve" type="button">Approve</button>
+      <button class="danger" id="deny" type="button">Deny</button>
+    </div>
+  </main>
+  <script src="app.js"></script>
+  <script src="request.js"></script>
+</body>
+</html>

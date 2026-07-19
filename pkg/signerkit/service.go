@@ -87,12 +87,13 @@ func New(cfg Config) (*Service, error) {
 		return nil, ErrNoAudit
 	}
 	d := &Daemon{
-		Signer:       cfg.Signer,
-		Backend:      cfg.Backend,
-		NowFunc:      cfg.NowFunc,
-		RedactSalt:   cfg.RedactSalt,
-		RedactRules:  cfg.RedactRules,
-		XferRegistry: cfg.XferRegistry,
+		Signer:        cfg.Signer,
+		Backend:       cfg.Backend,
+		NowFunc:       cfg.NowFunc,
+		RedactSalt:    cfg.RedactSalt,
+		RedactRules:   cfg.RedactRules,
+		XferRegistry:  cfg.XferRegistry,
+		lifecycleSink: cfg.Audit,
 	}
 	// The concrete local-audit path (socket daemon: sign/grant/transfer rows)
 	// writes AuditEvents through a *AuditLog, which stays concrete and is NOT
@@ -132,8 +133,14 @@ func (s *Service) Lock(reason string, op Operator) error { return s.daemon.Lock(
 // Unlock delegates to the inner Daemon (custody.go). See Daemon.Unlock.
 func (s *Service) Unlock(op Operator) error { return s.daemon.Unlock(op) }
 
-// RotateTo delegates to the inner Daemon (custody.go). See Daemon.RotateTo.
+// RotateTo delegates to the frozen one-argument Daemon.RotateTo surface.
 func (s *Service) RotateTo(next crypto.Signer) error { return s.daemon.RotateTo(next) }
+
+// RotateToWithAudit delegates to Daemon.RotateToWithAudit for callers that
+// can supply the reason and authenticated operator metadata.
+func (s *Service) RotateToWithAudit(next crypto.Signer, reason string, op Operator) error {
+	return s.daemon.RotateToWithAudit(next, reason, op)
+}
 
 // Compile-time proof: a *Service is a drop-in socket Handler (C6) — the frozen
 // API adds no socket-serving types.

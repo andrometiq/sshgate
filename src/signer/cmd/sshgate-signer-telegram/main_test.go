@@ -232,6 +232,20 @@ func TestBuildHosted_EmptyKeyFile(t *testing.T) {
 	}
 }
 
+func TestBuildHosted_RefusesGroupOrWorldReadableKey(t *testing.T) {
+	t.Parallel()
+	path := writeKeyFile(t, "secret")
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := buildHostedBackend(hostedConfig{
+		BaseURL: "https://signer.example.com", APIKeyFile: path, ClientID: "laptop-1",
+	})
+	if err == nil || !strings.Contains(err.Error(), "group/world bits must be off") {
+		t.Fatalf("buildHostedBackend(0644) err=%v; want insecure-mode refusal", err)
+	}
+}
+
 func TestBuildTelegram_MissingFields(t *testing.T) {
 	t.Parallel()
 	tokenFile := writeKeyFile(t, "123:abc")

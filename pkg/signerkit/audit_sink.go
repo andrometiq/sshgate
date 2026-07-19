@@ -9,10 +9,12 @@ import (
 )
 
 // AuditSink is the integrator-facing audit seam for the hosted (Tier-3) plane
-// (C5). Unlike the local daemon's concrete *AuditLog — which stays concrete and
-// is NOT re-plumbed through this interface — AuditSink is what an embedding web
-// app supplies so EVERY incoming sign request (Call) and EVERY vote/verdict
-// (Verdict) is recorded. Both methods return error on purpose: a sink that
+// (C5). The local daemon's ordinary sign/grant/transfer rows stay on its
+// concrete *AuditLog; only additive custody lifecycle events are also routed
+// through this seam. AuditSink is what an embedding web
+// app supplies so EVERY incoming sign request or custody lifecycle transition
+// (Call) and EVERY vote/verdict (Verdict) is recorded. Both methods return error
+// on purpose: a sink that
 // cannot even report a write failure makes the required-non-nil-audit property
 // hollow. The hosted vote path (phase 5) emits Verdict BEFORE flipping request
 // state and fails CLOSED on a sink error — a compromised host app cannot
@@ -23,8 +25,9 @@ import (
 // append-only anchor over any io.Writer) and *AuditLog (the local JSON-Lines
 // file adapts to this interface via its Call/Verdict methods below).
 type AuditSink interface {
-	// Call records an incoming Submit / POST /v1/sign — the request entered the
-	// approval queue. It carries no signature (none exists yet at submit time).
+	// Call records either an incoming Submit / POST /v1/sign (the zero-value
+	// Lifecycle field) or a custody lifecycle transition. See AuditCall for the
+	// discriminated-union contract. Neither variant carries a signature.
 	Call(ctx context.Context, e AuditCall) error
 	// Verdict records a single operator's resolution of a request: who, over
 	// which command (by SHA-256, never the raw bytes on this ledger), how they
@@ -32,13 +35,32 @@ type AuditSink interface {
 	Verdict(ctx context.Context, e AuditVerdict) error
 }
 
-// AuditCall is the event recorded for every incoming sign request on the hosted
-// machine plane, before any human has voted.
+// AuditCall is a backwards-compatible discriminated union. Lifecycle == "" is
+// an incoming hosted sign request on the machine plane, before any human has
+// voted; RequestID, HostKeyFP, and Command carry that request. A non-empty
+// Lifecycle is a custody transition ("lock", "unlock", or "rotate"); Reason and
+// Operator carry the authorization context and the request fields are empty.
+// Existing AuditSink implementations that only understand hosted calls remain
+// source-compatible and see zero values for the additive lifecycle fields.
 type AuditCall struct {
 	Time      time.Time `json:"time"`
-	RequestID string    `json:"request_id"`
-	HostKeyFP string    `json:"host_key_fp"`
-	Command   string    `json:"command"`
+	RequestID string    `json:"request_id,omitempty"`
+	HostKeyFP string    `json:"host_key_fp,omitempty"`
+	Command   string    `json:"command,omitempty"`
+	// CommandSHA256 is the hosted submission fingerprint. Production callers
+	// use it instead of Command so command-embedded secrets never reach the
+	// append-only system journal.
+	CommandSHA256 string `json:"command_sha256,omitempty"`
+	// CommandsSHA256 fingerprints the canonical JSON command array for one
+	// submission attempt. Production emits one atomic attempt event rather than
+	// partially auditing a multi-command request command-by-command.
+	CommandsSHA256 string    `json:"commands_sha256,omitempty"`
+	CommandCount   int       `json:"command_count,omitempty"`
+	HostKeyFPs     []string  `json:"host_key_fps,omitempty"`
+	Phase          string    `json:"phase,omitempty"`
+	Lifecycle      string    `json:"lifecycle,omitempty"`
+	Reason         string    `json:"reason,omitempty"`
+	Operator       *Operator `json:"operator,omitempty"`
 }
 
 // AuditVerdict is the event recorded for every vote on the hosted human plane.
@@ -76,7 +98,11 @@ type auditLine struct {
 }
 
 func (s *appendOnlySink) Call(_ context.Context, e AuditCall) error {
-	return s.write(auditLine{Kind: "call", Event: e})
+	kind := "call"
+	if e.Lifecycle != "" {
+		kind = "lifecycle"
+	}
+	return s.write(auditLine{Kind: kind, Event: e})
 }
 
 func (s *appendOnlySink) Verdict(_ context.Context, e AuditVerdict) error {
@@ -91,24 +117,62 @@ func (s *appendOnlySink) write(v auditLine) error {
 	b = append(b, '\n')
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_, err = s.w.Write(b)
+	n, err := s.w.Write(b)
+	if err == nil && n != len(b) {
+		return io.ErrShortWrite
+	}
 	return err
 }
 
 // Call adapts the local append-only *AuditLog to AuditSink (C5): the shapes
 // differ (AuditLog speaks AuditEvent, the sink speaks Call/Verdict), so this is
 // a thin adapter, not a coincidental match. It lets an integrator pass the
-// local JSON-Lines log as Config.Audit and get one unified trail. The daemon's
-// own local rows still go through AuditLog.Write directly — this adapter is only
-// exercised on the hosted plane.
+// local JSON-Lines log as Config.Audit and get one unified trail. A lifecycle
+// variant preserves the legacy lock/unlock/rotate AuditEvent status while a
+// normal call keeps the hosted-plane shape below.
 func (a *AuditLog) Call(_ context.Context, e AuditCall) error {
+	if e.Lifecycle != "" {
+		op := Operator{}
+		if e.Operator != nil {
+			op = *e.Operator
+		}
+		who := op.DisplayName
+		if who == "" {
+			who = op.ID
+		}
+		desc := "custody: " + e.Lifecycle
+		if e.Reason != "" {
+			desc += " (" + e.Reason + ")"
+		}
+		return a.Write(AuditEvent{
+			TS:         e.Time.UTC(),
+			Status:     e.Lifecycle,
+			Commands:   []string{desc},
+			ApprovedBy: who,
+			AuthMode:   op.AuthnMethod,
+		})
+	}
+	servers := e.HostKeyFPs
+	if len(servers) == 0 && e.HostKeyFP != "" {
+		servers = []string{e.HostKeyFP}
+	}
 	return a.Write(AuditEvent{
 		TS:        e.Time.UTC(),
 		RequestID: e.RequestID,
 		Status:    "call",
-		Commands:  []string{e.Command},
-		Servers:   []string{e.HostKeyFP},
+		Commands:  []string{auditCallCommand(e)},
+		Servers:   servers,
 	})
+}
+
+func auditCallCommand(e AuditCall) string {
+	if e.CommandsSHA256 != "" {
+		return "sha256:" + e.CommandsSHA256
+	}
+	if e.CommandSHA256 != "" {
+		return "sha256:" + e.CommandSHA256
+	}
+	return e.Command
 }
 
 // Verdict adapts *AuditLog to AuditSink.Verdict (C5). The approver's display

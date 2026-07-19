@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sign in · SSHGate Signer</title>
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+  <main>
+    <section class="card card--login">
+      <h1>SSHGate Signer</h1>
+      <p class="sub">Sign in to review pending signing requests.</p>
+      <label for="username">Operator</label>
+      <input id="username" type="text" autocomplete="username" autocapitalize="off" spellcheck="false">
+      <div class="actions">
+        <button class="primary" id="passkey" type="button">Sign in with passkey</button>
+      </div>
+      <hr class="divider">
+      <label for="totp">One-time code</label>
+      <input id="totp" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="6-digit code">
+      <div class="actions"><button id="code" type="button">Sign in with code</button></div>
+      <p class="status" id="status" aria-live="polite"></p>
+    </section>
+  </main>
+  <script src="app.js"></script>
+  <script src="login.js"></script>
+</body>
+</html>

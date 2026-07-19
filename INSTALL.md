@@ -86,9 +86,11 @@ cryptographic gate is enforced on each remote server independently.
 ### Choose the tier when prompted
 
 Pick **Tier 1** first if you want to try SSHGate without committing to the
-phone-tap flow. **Tier 2** is the upgrade path — re-run `/sshgate:setup`
-any time to add the signer. **Tier 3** (hosted server signer) is scaffolded
-but not yet deployable; the menu will tell you so.
+phone-tap flow. **Tier 2** is the local upgrade path — re-run `/sshgate:setup`
+any time to add the signer. **Tier 3** is separately deployable on a systemd
+host with the embedded approval UI; it is not yet automated by the local setup
+menu. Follow `src/signer-server/README.md` for its DNS, TLS, roster, and key
+distribution steps.
 
 **Proceed with install?** *(default: yes — just hit enter)*
 
@@ -263,11 +265,13 @@ Tell the user:
 >   - **Tier 2 (local Telegram signer)** — full v1. Master keypair under
 >     `sshgatesigner` system user, systemd unit, Telegram bot for
 >     approvals. Writes need a phone tap. Adds ~10 min and a sudo run.
->   - **Tier 3 (hosted server signer)** — NOT YET AVAILABLE (v2.x).
+>   - **Tier 3 (hosted server signer)** — separately deployable; this local
+>     setup command points to `src/signer-server/README.md` rather than
+>     provisioning the VPS itself.
 >
 > Pick Tier 1 first if you want to try SSHGate without committing to the
 > phone-tap flow. You can upgrade to Tier 2 later by re-running this same
-> command."
+> command, or deploy Tier 3 separately when you need the hard boundary."
 
 The setup command walks every step itself. For Tier 2 it will:
 

@@ -96,6 +96,14 @@ func TestRoutes_TableDriven(t *testing.T) {
 			wantStatus: http.StatusBadRequest,
 		},
 		{
+			name:       "v1/sign trailing json -> 400",
+			method:     http.MethodPost,
+			path:       "/v1/sign",
+			auth:       "Bearer " + key,
+			body:       `{"client_id":"x","commands":[{"server":"s","cmd":"echo","ttl_seconds":60}]} {}`,
+			wantStatus: http.StatusBadRequest,
+		},
+		{
 			// TTL above sigwire.MaxSigValidity (300s) must be refused at
 			// the door, not accepted and left approvable-but-unmintable.
 			name:             "v1/sign ttl over cap -> 400",
@@ -196,6 +204,66 @@ func TestSign_GeneratesUniqueRequestIDs(t *testing.T) {
 	b := postSign()
 	if a == b {
 		t.Errorf("request_ids should differ across calls; both = %q", a)
+	}
+}
+
+func TestSign_RejectsOversizeBody(t *testing.T) {
+	t.Parallel()
+	ts, key := newTestServer(t)
+	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/v1/sign", strings.NewReader(strings.Repeat("x", (1<<20)+1)))
+	req.Header.Set("Authorization", "Bearer "+key)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("oversize status = %d; want 400", resp.StatusCode)
+	}
+}
+
+func TestSign_RejectsCommandCountAndSizeAmplification(t *testing.T) {
+	t.Parallel()
+	ts, key := newTestServer(t)
+	commands := make([]map[string]interface{}, 65)
+	for i := range commands {
+		commands[i] = map[string]interface{}{"server": "s", "cmd": "x", "ttl_seconds": 60}
+	}
+	body, err := json.Marshal(map[string]interface{}{"client_id": "c", "commands": commands})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/v1/sign", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+key)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("65-command sign status = %d; want 400", resp.StatusCode)
+	}
+}
+
+func TestSign_MachineRateLimitBoundsAuthenticatedAuditAmplification(t *testing.T) {
+	t.Parallel()
+	ts, key := newTestServer(t)
+	for i := 1; i <= 121; i++ {
+		req, _ := http.NewRequest(http.MethodPost, ts.URL+"/v1/sign",
+			bytes.NewBufferString(`{"client_id":"c","commands":[{"server":"s","cmd":"x","ttl_seconds":60}]}`))
+		req.Header.Set("Authorization", "Bearer "+key)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		want := http.StatusAccepted
+		if i == 121 {
+			want = http.StatusTooManyRequests
+		}
+		if resp.StatusCode != want {
+			t.Fatalf("attempt %d = %d; want %d", i, resp.StatusCode, want)
+		}
 	}
 }
 

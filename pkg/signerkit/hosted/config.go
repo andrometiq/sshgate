@@ -24,6 +24,12 @@ var (
 	// ErrNoAPIKey is returned by New when Config.APIKey is empty — the machine
 	// plane is bearer-gated and an empty key would authenticate every request.
 	ErrNoAPIKey = errors.New("hosted: New: APIKey is required")
+	// ErrNoMachineClientID prevents a shared bearer holder from choosing a
+	// different requester identity per call and bypassing self-approval policy.
+	ErrNoMachineClientID = errors.New("hosted: New: MachineClientID is required")
+	// ErrInvalidRequiredApprovals prevents an implicit or impossible quorum
+	// policy from reaching production request intake.
+	ErrInvalidRequiredApprovals = errors.New("hosted: New: RequiredApprovals must be greater than zero")
 )
 
 // Config composes a complete hosted server in one call. It is the integrator /
@@ -44,6 +50,17 @@ type Config struct {
 	// APIKey is the machine-plane bearer token. REQUIRED non-empty — "" yields
 	// ErrNoAPIKey.
 	APIKey string
+
+	// MachineClientID is the immutable requester identity bound to APIKey.
+	// POST /v1/sign must carry this exact client_id. For the current single-key
+	// deployment, set it to the same stable operator ID used at bootstrap when
+	// self-approval must be prohibited. Per-client credentials are future work.
+	MachineClientID string
+
+	// RequiredApprovals is the immutable quorum threshold copied onto every
+	// request at intake. It must be positive; changing the deploy flag affects
+	// new requests only because pending rows retain their stored N.
+	RequiredApprovals int
 
 	// Auth configures the HUMAN plane. Its zero value (RPID == "") leaves the
 	// human plane UNMOUNTED — machine-plane only. When RPID != "", New builds
@@ -84,12 +101,26 @@ func New(cfg Config) (*Server, error) {
 	if cfg.APIKey == "" {
 		return nil, ErrNoAPIKey
 	}
+	if cfg.Auth.RPID != "" {
+		if cfg.MachineClientID == "" {
+			return nil, ErrNoMachineClientID
+		}
+		if cfg.RequiredApprovals <= 0 {
+			return nil, ErrInvalidRequiredApprovals
+		}
+	}
 
 	// NewServer registers the machine plane, defaults the logger (nil ⇒
 	// log.Default()) and PollWait (30s). It panics only on an empty APIKey,
 	// which we have already rejected above with a typed error.
 	s := NewServer(cfg.APIKey, cfg.Store, cfg.Logger)
 	s.Signer = cfg.Core
+	if cfg.MachineClientID != "" {
+		s.MachineClientID = cfg.MachineClientID
+	}
+	if cfg.RequiredApprovals > 0 {
+		s.RequiredApprovals = cfg.RequiredApprovals
+	}
 	if cfg.PollWait != 0 {
 		s.PollWait = cfg.PollWait
 	}
@@ -97,6 +128,7 @@ func New(cfg Config) (*Server, error) {
 	// Human plane is opt-in. A zero AuthConfig (RPID == "") leaves it
 	// unmounted — the machine-only shape today's binary ships.
 	if cfg.Auth.RPID != "" {
+		s.RequireHostKeyFP = true
 		am, err := NewAuthManager(cfg.Store, cfg.Auth)
 		if err != nil {
 			return nil, fmt.Errorf("hosted: New: auth: %w", err)

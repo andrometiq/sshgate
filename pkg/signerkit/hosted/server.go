@@ -5,6 +5,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/karthikeyan5/sshgate/pkg/signerkit"
@@ -21,10 +22,27 @@ import (
 // http.Server or httptest. cmd/signer-server wires the production
 // server; handlers_test.go wires an httptest.Server in-process.
 type Server struct {
-	// APIKey is the single bearer token that gates /v1/* routes. v2.0
-	// uses one shared key file (managed by ops); v2.1 introduces
-	// per-client keys + WebAuthn/TOTP for the human approval surface.
+	// APIKey is the single bearer token that gates /v1/* routes. The current
+	// release uses one shared key file (managed by ops). Per-client machine keys
+	// are future work; WebAuthn/TOTP protect the separate human surface today.
 	APIKey string
+
+	// MachineClientID is the immutable requester identity bound to APIKey.
+	// Empty preserves the low-level NewServer compatibility surface; hosted.New
+	// requires and sets it for production composition.
+	MachineClientID string
+
+	// RequiredApprovals is copied onto each accepted request. Zero preserves
+	// low-level compatibility and is treated as one; hosted.New requires a
+	// positive explicit value.
+	RequiredApprovals int
+
+	// RequireHostKeyFP rejects Host-less requests at intake so an approver can
+	// never resolve a request whose envelope the gate will inevitably reject.
+	// hosted.New enables it for production composition; false preserves the
+	// frozen low-level fixture (including its manually attached human plane)
+	// until that owner-gated wire revision is ratified.
+	RequireHostKeyFP bool
 
 	// Store is the persistence layer. Scaffold commit 2 wires this to
 	// a sqlite-backed implementation in store/sqlite.go. When nil,
@@ -45,7 +63,7 @@ type Server struct {
 	Signer *signerkit.Service
 
 	// PollWait bounds the long-poll wait inside /v1/poll/{id}. The
-	// HTTP client may pass a shorter wait via ?wait= (v2.1); for now
+	// HTTP client may pass a shorter wait via ?wait= in a future release; today
 	// this is the only knob. Defaults to 30s in NewServer.
 	PollWait time.Duration
 
@@ -67,7 +85,9 @@ type Server struct {
 	// machine plane's counterpart to the s.Human != nil guard in
 	// AttachHuman. Set true the first time AttachMachine registers the
 	// /v1/* + /healthz routes.
-	machineAttached bool
+	machineAttached    bool
+	machineSubmitLimit *machineRateLimiter
+	machinePollLimit   *machineRateLimiter
 }
 
 // NewServer builds a Server with routes registered. The Server's
@@ -84,11 +104,14 @@ func NewServer(auth string, st store.Store, logger *log.Logger) *Server {
 		logger = log.Default()
 	}
 	s := &Server{
-		APIKey:   auth,
-		Store:    st,
-		PollWait: 30 * time.Second,
-		Logger:   logger,
-		mux:      http.NewServeMux(),
+		APIKey:             auth,
+		Store:              st,
+		RequiredApprovals:  1,
+		PollWait:           30 * time.Second,
+		Logger:             logger,
+		mux:                http.NewServeMux(),
+		machineSubmitLimit: &machineRateLimiter{},
+		machinePollLimit:   &machineRateLimiter{},
 	}
 	s.AttachMachine()
 	return s
@@ -120,9 +143,42 @@ func (s *Server) AttachMachine() {
 	// Bearer-token-gated routes. We wrap each handler in withAuth so
 	// the auth check sits next to the route registration and cannot
 	// drift across handler files.
-	s.mux.Handle("POST /v1/sign", s.withAuth(http.HandlerFunc(s.handleSign)))
-	s.mux.Handle("GET /v1/poll/{request_id}", s.withAuth(http.HandlerFunc(s.handlePoll)))
+	s.mux.Handle("POST /v1/sign", s.withAuth(s.withMachineLimit(s.machineSubmitLimit, 120, http.HandlerFunc(s.handleSign))))
+	s.mux.Handle("GET /v1/poll/{request_id}", s.withAuth(s.withMachineLimit(s.machinePollLimit, 600, http.HandlerFunc(s.handlePoll))))
 	s.mux.Handle("GET /v1/audit", s.withAuth(http.HandlerFunc(s.handleAudit)))
+}
+
+type machineRateLimiter struct {
+	mu          sync.Mutex
+	windowStart time.Time
+	count       int
+}
+
+func (l *machineRateLimiter) allow(max int) bool {
+	now := time.Now().UTC()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.windowStart.IsZero() || now.Sub(l.windowStart) >= time.Minute {
+		l.windowStart = now
+		l.count = 1
+		return true
+	}
+	if l.count >= max {
+		return false
+	}
+	l.count++
+	return true
+}
+
+func (s *Server) withMachineLimit(limiter *machineRateLimiter, max int, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !limiter.allow(max) {
+			w.Header().Set("Retry-After", "60")
+			writeJSONError(w, http.StatusTooManyRequests, "too many machine requests")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // AttachHuman mounts the human-plane (Phase E) routes onto the server's
@@ -141,14 +197,23 @@ func (s *Server) AttachHuman(h *HumanAPI) {
 	if s.Human != nil {
 		panic("hosted: AttachHuman: human plane already attached")
 	}
+	if strings.TrimSpace(s.MachineClientID) == "" {
+		panic("hosted: AttachHuman: MachineClientID must bind the bearer credential before mounting human approval")
+	}
+	if s.RequiredApprovals <= 0 {
+		panic("hosted: AttachHuman: RequiredApprovals must be greater than zero")
+	}
 	s.Human = h
 	h.registerHumanRoutes(s.mux)
 }
 
-// ServeHTTP makes Server an http.Handler. The wrapping logRequest
-// produces one line per request — minimal observability for v2.0 (full
-// metrics + tracing land in v2.1).
+// ServeHTTP makes Server an http.Handler. The wrapping logRequest produces one
+// line per request; full metrics and tracing remain future work.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if strings.HasPrefix(r.URL.Path, "/auth/") || strings.HasPrefix(r.URL.Path, "/ui/") {
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Pragma", "no-cache")
+	}
 	s.logRequest(w, r, s.mux.ServeHTTP)
 }
 

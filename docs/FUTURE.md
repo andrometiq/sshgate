@@ -34,9 +34,8 @@ For the active, sequenced, priority-ordered work, see [`ROADMAP.md`](ROADMAP.md)
 
 ### v2 hosted sshgate-signer-server (WebAuthn + TOTP + Web UI)
 - **Why:** v1 ships Telegram-bot-as-signer; v2 vision is a self-hosted HTTP signer service so the approval path isn't tied to a single chat platform. Lets operators bring their own auth (WebAuthn passkey + TOTP), see history in a browser, and federate across multiple operators.
-- **Status:** scaffolded in `src/signer-server/` from v1 cascade; full implementation deferred indefinitely.
-- **Estimated scope:** large. HTTP API (POST /v1/sign, GET /v1/poll, GET /v1/audit); Postgres or SQLite state; WebAuthn + TOTP libs; minimal static-HTML + htmx UI; deploy script with VPS setup notes; `HostedServerBackend` implementation in `signer` so the swap is one line.
-- **Trigger condition:** request from a second operator (or the maintainer's own use of two signing devices).
+- **Status:** pulled into v0.2 and implemented as one embeddable signerkit core plus the `sshgate-signer-server` reference app: machine/human plane separation, SQLite, TOTP/WebAuthn, approval policy, embedded UI, audit, and deployment tooling. See [`src/signer-server/README.md`](../src/signer-server/README.md).
+- **Still future:** per-client machine credentials, operator-facing threshold/policy management, hosted standing grants/reveal/transfer, HA storage, readiness/metrics, and a first-class WebAuthn enrollment page.
 - See the decided two-tier approval architecture: [approval-architecture.md](approval-architecture.md).
 
 ### macOS native install (launchd plist)
@@ -115,8 +114,8 @@ SSHGate is a Claude Code plugin and should ship to the Anthropic marketplace eve
 - Reproducible builds — **shipped**: `make release-gate` pins the Go toolchain from `go.mod` and locks the build env; CI rebuilds and compares hashes. A separate build-attestation artifact per release remains open.
 - Discoverability: keywords in `plugin.json`, a polished screenshot/demo in the README, a one-paragraph elevator pitch tested against operators outside the inner circle.
 
-### v2 deployment harness
-v2 vision requires a hosted server; a deployment harness (Docker image + compose file + VPS setup script + WebAuthn registration flow) is in scope for the v2 cascade but not started.
+### Hosted deployment extensions
+The v0.2 hosted server ships a hardened systemd VPS installer, recoverable TOTP bootstrap artifacts, and WebAuthn registration APIs. A Docker image/Compose profile, first-class browser passkey-enrollment page, backup automation, and HA deployment remain future extensions.
 
 ### Empirical questions to answer post-ship
 - Real-world FPR/FNR on command output across `journalctl`, `env`, `docker inspect`, `kubectl describe`. No public benchmark exists for streaming scanners on command output; SSHGate will publish the first.
@@ -134,7 +133,7 @@ These are the conditions under which a deferred item gets promoted to active wor
 - **`thorough` mode** — condition (a) **FIRED 2026-07-02** (a production run reported missed-secret categories named-format-only didn't catch). The response shipped the bounded generic net + live `Rule.Entropy` into `standard` rather than a whole mode; `thorough`'s remaining promotion trigger is (b) audit-workflow demand (someone running SSHGate manually to scan a corpus, where the looser 1-/2-class + lower-floor gates and depth-3 decode earn their false-positive cost).
 - **`verified` mode** — promoted only when (a) `thorough` is already shipped AND (b) a verified-mode use case appears (audit team wants "this AWS key — is it actually live?"). Otherwise it stays parked indefinitely; the value-per-engineering-week is low.
 - **BPE token scoring** — promoted if `thorough` ships and FPR is still too high for audit use. Otherwise parked.
-- **v2 hosted signer** — promoted when a second operator appears, OR the maintainer wants two signing devices (phone + tablet).
+- **Hosted signer extensions** — the core/web deployment is promoted and shipped for v0.2; promote per-client credentials, hosted Telegram, or HA when a concrete multi-client/notification/replica need appears.
 - **macOS install** — promoted on first macOS operator request. Small enough to do reactively.
 - **`redact.list` UX** — promoted once a v1.2 host crosses ~50 redactlist entries and the operator says "I can't see what's in there." Cheap to ship.
 - **Read-only gate hardening** — promoted *immediately* upon any confirmed in-the-wild bypass. The MAJORs from [`security-readonly-bypass.md`](security-readonly-bypass.md) are tracked separately as a hardening sprint, not as feature releases.

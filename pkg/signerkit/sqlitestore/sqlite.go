@@ -5,8 +5,14 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"github.com/karthikeyan5/sshgate/pkg/signerkit/store"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
+
+	"github.com/karthikeyan5/sshgate/pkg/signerkit/store"
 
 	// Register the CGO-free SQLite driver under the name "sqlite".
 	// modernc.org/sqlite is a pure-Go transpilation of upstream
@@ -30,26 +36,99 @@ import (
 // thousands. v2.1 should replace this with a per-row channel wakeup.
 const pollInterval = 100 * time.Millisecond
 
+const (
+	maxPendingGlobal    = 1000
+	maxPendingPerClient = 100
+)
+
+// memoryDBSeq gives each Open(":memory:") call a private shared-cache URI.
+// Shared cache keeps the schema visible if the driver ever uses another
+// connection; the unique name prevents two independent stores in one process
+// from accidentally sharing state.
+var memoryDBSeq atomic.Uint64
+
 // DB is the SQLite-backed Store. It wraps *sql.DB; all methods are
 // safe for concurrent use (sql.DB is, and our SQL is bounded queries
 // only — no transactions that span calls).
 type DB struct {
-	db *sql.DB
+	// db is immutable after Open. database/sql permits Close concurrently with
+	// queries; keeping the pointer stable avoids the data race/nil panic caused
+	// by clearing it while another method was loading it.
+	db        *sql.DB
+	closeOnce sync.Once
+	closeErr  error
 }
 
 // Open opens (or creates) a SQLite database at path and runs every
-// pending schema migration (see store/migrations.go). Path may be
-// ":memory:" for tests; the journal mode is set to WAL so concurrent
-// readers don't block the writer. busy_timeout is set to 5s to absorb
-// transient lock contention without surfacing SQLITE_BUSY errors to
-// handlers.
+// pending schema migration (see store/migrations.go). Path may be ":memory:"
+// for tests. File-backed stores use WAL so concurrent readers don't block the
+// writer. SQLite cannot use WAL for a purely in-memory database, so that mode
+// gets a private shared-cache URI and a single pooled connection instead; it is
+// safe for concurrent callers but serializes their database work. busy_timeout
+// is set to 5s in both modes to absorb transient lock contention without
+// surfacing SQLITE_BUSY errors to handlers.
 //
 // Open is idempotent with respect to schema: re-opening an already-
 // migrated database re-runs runMigrations, which finds every version
 // already recorded in schema_migrations and applies nothing. Calling
 // Open twice against the same path is a safe no-op on the second call.
 func Open(path string) (*DB, error) {
-	// modernc.org/sqlite accepts a DSN with `_pragma` query params
+	if path == "" {
+		return nil, errors.New("open sqlite: empty path")
+	}
+	if path != ":memory:" {
+		if strings.ContainsAny(path, "%?#\x00") {
+			return nil, fmt.Errorf("open sqlite: path contains a reserved URI delimiter")
+		}
+		absPath, err := filepath.Abs(path)
+		if err != nil {
+			return nil, fmt.Errorf("resolve sqlite path %s: %w", path, err)
+		}
+		path = absPath
+		before, lstatErr := os.Lstat(path)
+		flags := os.O_RDWR
+		switch {
+		case lstatErr == nil:
+			if before.Mode()&os.ModeSymlink != 0 {
+				return nil, fmt.Errorf("sqlite path %s is a symbolic link", path)
+			}
+		case errors.Is(lstatErr, os.ErrNotExist):
+			flags |= os.O_CREATE | os.O_EXCL
+		default:
+			return nil, fmt.Errorf("inspect sqlite path %s: %w", path, lstatErr)
+		}
+		f, err := os.OpenFile(path, flags, 0o600)
+		if err != nil {
+			return nil, fmt.Errorf("open %s securely: %w", path, err)
+		}
+		info, statErr := f.Stat()
+		after, afterErr := os.Lstat(path)
+		closeErr := f.Close()
+		if statErr != nil {
+			return nil, fmt.Errorf("stat %s: %w", path, statErr)
+		}
+		if closeErr != nil {
+			return nil, fmt.Errorf("close %s after permission check: %w", path, closeErr)
+		}
+		if afterErr != nil {
+			return nil, fmt.Errorf("reinspect sqlite path %s: %w", path, afterErr)
+		}
+		if after.Mode()&os.ModeSymlink != 0 || !os.SameFile(info, after) {
+			return nil, fmt.Errorf("sqlite path %s changed or became a symbolic link during open", path)
+		}
+		if !info.Mode().IsRegular() {
+			return nil, fmt.Errorf("sqlite path %s is not a regular file", path)
+		}
+		if mode := info.Mode().Perm(); mode&0o077 != 0 {
+			return nil, fmt.Errorf("sqlite file %s has insecure mode %#o (group/world bits must be off)", path, mode)
+		}
+	}
+	// modernc.org/sqlite accepts a DSN with `_pragma` query params. The secure
+	// preflight above closes its checked descriptor before database/sql opens
+	// the same absolute path, so the containing directory remains part of the
+	// trust boundary: deployments must keep it non-writable by other users. The
+	// deploy script provisions a service-private state directory and refuses
+	// symlinks before ownership/permission maintenance.
 	// for one-shot startup configuration. We set:
 	//   journal_mode=WAL      — concurrent readers + one writer.
 	//   busy_timeout=5000     — wait up to 5s on a locked DB before
@@ -57,9 +136,20 @@ func Open(path string) (*DB, error) {
 	//   foreign_keys=on       — defensive; we don't use FKs yet but
 	//                            future schema may.
 	dsn := fmt.Sprintf("file:%s?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(on)", path)
+	memory := path == ":memory:"
+	if memory {
+		name := memoryDBSeq.Add(1)
+		dsn = fmt.Sprintf("file:sshgate-memory-%d?mode=memory&cache=shared&_pragma=busy_timeout(5000)&_pragma=foreign_keys(on)", name)
+	}
 	d, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open %s: %w", path, err)
+	}
+	if memory {
+		// A single durable pooled connection makes :memory: semantics honest:
+		// every method sees the same database for this DB's lifetime.
+		d.SetMaxOpenConns(1)
+		d.SetMaxIdleConns(1)
 	}
 	if err := d.Ping(); err != nil {
 		_ = d.Close()
@@ -72,15 +162,18 @@ func Open(path string) (*DB, error) {
 	return &DB{db: d}, nil
 }
 
-// Close closes the underlying *sql.DB. Idempotent: subsequent calls
-// return nil.
+// Close closes the underlying *sql.DB. It is safe to race with database
+// operations and with other Close calls. The first call performs the close;
+// every caller receives that same result. Operations that start after closure
+// return database/sql's closed-handle error rather than panicking.
 func (s *DB) Close() error {
-	if s.db == nil {
+	if s == nil || s.db == nil {
 		return nil
 	}
-	err := s.db.Close()
-	s.db = nil
-	return err
+	s.closeOnce.Do(func() {
+		s.closeErr = s.db.Close()
+	})
+	return s.closeErr
 }
 
 // Insert implements Store.Insert. The UNIQUE constraint on request_id
@@ -112,13 +205,19 @@ func (s *DB) Insert(ctx context.Context, r *store.Request) error {
 	if reqApprovals <= 0 {
 		reqApprovals = 1
 	}
-	_, err := s.db.ExecContext(ctx, `
+	res, err := s.db.ExecContext(ctx, `
 		INSERT INTO requests (request_id, status, client_id, commands, signatures, created_at, resolved_at, approved_by, required_approvals)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?
+		WHERE ? <> ? OR (
+			(SELECT COUNT(*) FROM requests WHERE status = ?) < ?
+			AND (SELECT COUNT(*) FROM requests WHERE status = ? AND client_id = ?) < ?
+		)
 	`,
 		r.RequestID, string(r.Status), r.ClientID, string(r.Commands),
 		nullableString(r.Signatures), r.CreatedAt.Unix(),
 		nullableTime(r.ResolvedAt), nullableEmpty(r.ApprovedBy), reqApprovals,
+		string(r.Status), string(store.StatusPending), string(store.StatusPending), maxPendingGlobal,
+		string(store.StatusPending), r.ClientID, maxPendingPerClient,
 	)
 	if err != nil {
 		// modernc.org/sqlite surfaces unique-violation as a generic
@@ -129,6 +228,20 @@ func (s *DB) Insert(ctx context.Context, r *store.Request) error {
 			return fmt.Errorf("%w: %s", store.ErrDuplicateID, r.RequestID)
 		}
 		return fmt.Errorf("insert: %w", err)
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("insert rows affected: %w", err)
+	}
+	if rows == 0 {
+		var exists int
+		if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM requests WHERE request_id = ?`, r.RequestID).Scan(&exists); err != nil {
+			return fmt.Errorf("check rejected insert: %w", err)
+		}
+		if exists != 0 {
+			return fmt.Errorf("%w: %s", store.ErrDuplicateID, r.RequestID)
+		}
+		return fmt.Errorf("%w: global=%d per_client=%d", store.ErrQueueFull, maxPendingGlobal, maxPendingPerClient)
 	}
 	return nil
 }
@@ -162,9 +275,13 @@ func (s *DB) UpdateStatus(ctx context.Context, id string, status store.Status, s
 		UPDATE requests
 		SET status = ?, signatures = ?, resolved_at = ?, approved_by = ?
 		WHERE request_id = ? AND status = ?
+		  AND NOT EXISTS (
+			SELECT 1 FROM approvals
+			WHERE request_id = ? AND audited = 0
+		  )
 	`,
 		string(status), nullableString(signatures), now,
-		nullableEmpty(approvedBy), id, string(store.StatusPending),
+		nullableEmpty(approvedBy), id, string(store.StatusPending), id,
 	)
 	if err != nil {
 		return fmt.Errorf("update %s: %w", id, err)
@@ -217,10 +334,32 @@ func (s *DB) WaitForResolution(ctx context.Context, id string, timeout time.Dura
 func (s *DB) ListPending(ctx context.Context) ([]*store.Request, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT request_id, status, client_id, commands, signatures, created_at, resolved_at, approved_by, required_approvals
-		FROM requests WHERE status = ? ORDER BY created_at ASC
+		FROM requests WHERE status = ? ORDER BY created_at ASC, request_id ASC
 	`, string(store.StatusPending))
 	if err != nil {
 		return nil, fmt.Errorf("list pending: %w", err)
+	}
+	defer rows.Close()
+	return scanRequests(rows)
+}
+
+// ListPendingPage is an optional bounded extension used by the shipped human
+// UI. It leaves Store.ListPending source-compatible for external stores while
+// preventing the SQLite-backed HTTP response from materializing an unbounded
+// queue. limit is capped at 101 so callers can fetch one look-ahead row.
+func (s *DB) ListPendingPage(ctx context.Context, limit, offset int) ([]*store.Request, error) {
+	if limit <= 0 || limit > 101 {
+		limit = 101
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT request_id, status, client_id, commands, signatures, created_at, resolved_at, approved_by, required_approvals
+		FROM requests WHERE status = ? ORDER BY created_at ASC, request_id ASC LIMIT ? OFFSET ?
+	`, string(store.StatusPending), limit, offset)
+	if err != nil {
+		return nil, fmt.Errorf("list pending page: %w", err)
 	}
 	defer rows.Close()
 	return scanRequests(rows)

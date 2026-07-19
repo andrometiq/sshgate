@@ -1,6 +1,7 @@
 package signerkit
 
 import (
+	"context"
 	"crypto"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -43,17 +44,15 @@ type Operator struct {
 	AuthnMethod string
 }
 
-// resolveSigner returns the active signing identity, honoring Lock and
-// rotation under custodyMu. Precedence (C7): a live RotateTo target wins, else
+// resolveSignerLocked returns the active signing identity while the caller holds
+// custodyMu for reading. Precedence (C7): a live RotateTo target wins, else
 // the exported Signer, else the exported Key; all nil ⇒ ErrNoSigner. A held
 // Lock short-circuits to ErrLocked before any identity is consulted, so a
 // locked signer refuses even when a valid key is present.
-func (d *Daemon) resolveSigner() (crypto.Signer, error) {
-	d.custodyMu.RLock()
+func (d *Daemon) resolveSignerLocked() (crypto.Signer, error) {
 	locked := d.locked
 	reason := d.lockReason
 	rot := d.rotSigner
-	d.custodyMu.RUnlock()
 
 	if locked {
 		if reason == "" {
@@ -89,10 +88,26 @@ func (d *Daemon) resolveSigner() (crypto.Signer, error) {
 // crypto.Signer must likewise implement standard Ed25519 for its envelopes to
 // verify on the gate.
 func (d *Daemon) signBytes(msg []byte) ([]byte, error) {
-	s, err := d.resolveSigner()
+	// Keep the read lock across the external crypto.Signer call. Lock and
+	// RotateTo take the write lock, so when either control returns every mint
+	// that began under the prior custody state has completed. Releasing the lock
+	// before Sign would let an HSM/KMS call finish successfully after Lock had
+	// already reported success, violating the control's linearized semantics.
+	d.custodyMu.RLock()
+	defer d.custodyMu.RUnlock()
+
+	s, err := d.resolveSignerLocked()
 	if err != nil {
 		return nil, err
 	}
+	return signWithResolved(s, msg)
+}
+
+// signWithResolved invokes one already-resolved Ed25519 crypto.Signer. Custody
+// callers hold custodyMu across this call; splitting resolution from minting
+// lets a hosted multi-command batch resolve once and stay on one key for the
+// entire batch while preserving the single-command choke point above.
+func signWithResolved(s crypto.Signer, msg []byte) ([]byte, error) {
 	sig, err := s.Sign(rand.Reader, msg, crypto.Hash(0))
 	if err != nil {
 		return nil, err
@@ -118,6 +133,8 @@ func (d *Daemon) signBytes(msg []byte) ([]byte, error) {
 // durable kill-switch means removing/rotating the key at construction, not
 // relying on Lock surviving a restart.
 func (d *Daemon) Lock(reason string, op Operator) error {
+	d.lifecycleMu.Lock()
+	defer d.lifecycleMu.Unlock()
 	d.custodyMu.Lock()
 	d.locked = true
 	d.lockReason = reason
@@ -130,6 +147,8 @@ func (d *Daemon) Lock(reason string, op Operator) error {
 // already-unlocked signer is a no-op that still records the actor. op
 // identifies the actor for the audit trail, symmetric with Lock (C12).
 func (d *Daemon) Unlock(op Operator) error {
+	d.lifecycleMu.Lock()
+	defer d.lifecycleMu.Unlock()
 	d.custodyMu.Lock()
 	d.locked = false
 	d.lockReason = ""
@@ -157,43 +176,58 @@ func (d *Daemon) Unlock(op Operator) error {
 // wiring/config. A held Lock is independent: RotateTo does not clear it, and a
 // locked signer stays locked on the new identity until Unlock.
 func (d *Daemon) RotateTo(next crypto.Signer) error {
+	return d.rotateTo(next, "", Operator{})
+}
+
+// RotateToWithAudit is the additive metadata-rich rotation surface. RotateTo
+// retains the frozen one-argument API; callers that have an authenticated
+// operator and reason use this method so the generic lifecycle sink records
+// them without breaking existing integrators.
+func (d *Daemon) RotateToWithAudit(next crypto.Signer, reason string, op Operator) error {
+	return d.rotateTo(next, reason, op)
+}
+
+func (d *Daemon) rotateTo(next crypto.Signer, reason string, op Operator) error {
 	if next == nil {
 		return errors.New("RotateTo: next signer is nil (use Lock to disable signing)")
 	}
+	d.lifecycleMu.Lock()
+	defer d.lifecycleMu.Unlock()
 	d.custodyMu.Lock()
 	d.rotSigner = next
 	d.custodyMu.Unlock()
-	d.auditLifecycle("rotate", "", Operator{})
+	d.auditLifecycle("rotate", reason, op)
 	return nil
 }
 
-// auditLifecycle records a custody-control transition (lock/unlock/rotate) as a
-// best-effort row on the local AuditLog, so the kill-switch and rotation leave
-// a trail (the whole reason Lock/Unlock carry an Operator — C12). It is
-// deliberately best-effort and nil-safe: a struct-literal Daemon need not have
-// wired an Audit, and a custody control must never panic. Errors go to stderr,
-// matching the daemon's fail-open grant/transfer audit posture. These rows use
-// dedicated statuses ("lock"/"unlock"/"rotate"), disjoint from the sign-path
-// verdict statuses, so no existing audit consumer or golden is affected.
+// auditLifecycle records a custody-control transition through the generic sink
+// wired by New(Config). A legacy struct-literal Daemon has no lifecycleSink, so
+// it falls back to its concrete AuditLog. The branches are deliberately
+// exclusive: New wires both fields when Config.Audit is an *AuditLog, but each
+// transition still produces exactly one row.
+//
+// Local custody lifecycle audit remains deliberately best-effort and fail-open,
+// matching the frozen local-daemon contract: the state transition is already
+// applied, sink failures are surfaced on stderr, and no failure can re-enable a
+// locked signer or block an operator's recovery action. lifecycleMu surrounds
+// transition + emission so concurrent controls cannot reorder their rows.
+// Hosted votes retain their separate fail-closed Verdict contract.
 func (d *Daemon) auditLifecycle(event, reason string, op Operator) {
-	if d.Audit == nil {
+	e := AuditCall{
+		Time:      d.now().UTC(),
+		Lifecycle: event,
+		Reason:    reason,
+		Operator:  &op,
+	}
+	if d.lifecycleSink != nil {
+		if err := d.lifecycleSink.Call(context.Background(), e); err != nil {
+			fmt.Fprintf(os.Stderr, "signer: audit custody %s failed: %v\n", event, err)
+		}
 		return
 	}
-	who := op.DisplayName
-	if who == "" {
-		who = op.ID
-	}
-	desc := "custody: " + event
-	if reason != "" {
-		desc += " (" + reason + ")"
-	}
-	ev := AuditEvent{
-		TS:         d.now().UTC(),
-		Status:     event,
-		Commands:   []string{desc},
-		ApprovedBy: who,
-	}
-	if err := d.Audit.Write(ev); err != nil {
-		fmt.Fprintf(os.Stderr, "signer: audit write failed: %v\n", err)
+	if d.Audit != nil {
+		if err := d.Audit.Call(context.Background(), e); err != nil {
+			fmt.Fprintf(os.Stderr, "signer: audit custody %s failed: %v\n", event, err)
+		}
 	}
 }

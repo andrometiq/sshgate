@@ -3,14 +3,17 @@ package signerkit
 import (
 	"bytes"
 	"context"
+	"crypto"
 	"crypto/ed25519"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // altSignerKey returns a distinct fixed-seed Ed25519 key (seed ramp offset
@@ -191,7 +194,8 @@ func TestCustody_RotateTo(t *testing.T) {
 		t.Fatal("pre-rotate signature verifies under the rotation target — impossible")
 	}
 
-	if err := d.RotateTo(priv2); err != nil {
+	rotateOp := Operator{ID: "op2", DisplayName: "Op Two", AuthnMethod: "webauthn"}
+	if err := d.RotateToWithAudit(priv2, "scheduled key rollover", rotateOp); err != nil {
 		t.Fatalf("RotateTo: %v", err)
 	}
 	sig2, err := d.signBytes(msg)
@@ -278,12 +282,118 @@ func TestCustody_ConcurrentRotateLockSign(t *testing.T) {
 		op := Operator{ID: "racer"}
 		for i := 0; i < rounds; i++ {
 			_ = d.Lock("rotating", op)
-			_ = d.RotateTo(priv2)
+			_ = d.RotateToWithAudit(priv2, "race to second", op)
 			_ = d.Unlock(op)
-			_ = d.RotateTo(priv1)
+			_ = d.RotateToWithAudit(priv1, "race to first", op)
 		}
 		close(stop)
 	}()
 
 	wg.Wait()
+}
+
+// blockingSigner holds Sign until release is closed, modeling a slow HSM/KMS.
+// It lets the tests observe whether custody controls wait for a mint that began
+// under the previous state.
+type blockingSigner struct {
+	key     ed25519.PrivateKey
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func newBlockingSigner(key ed25519.PrivateKey) *blockingSigner {
+	return &blockingSigner{key: key, entered: make(chan struct{}), release: make(chan struct{})}
+}
+
+func (s *blockingSigner) Public() crypto.PublicKey { return s.key.Public() }
+
+func (s *blockingSigner) Sign(_ io.Reader, digest []byte, opts crypto.SignerOpts) ([]byte, error) {
+	s.once.Do(func() { close(s.entered) })
+	<-s.release
+	return s.key.Sign(nil, digest, opts)
+}
+
+// TestCustody_LockLinearizesWithInFlightSign proves Lock cannot report success
+// while an earlier crypto.Signer.Sign call is still capable of completing. Once
+// Lock returns, all prior mints are done and every later mint sees ErrLocked.
+func TestCustody_LockLinearizesWithInFlightSign(t *testing.T) {
+	priv, _ := goldenSignerKey()
+	blocked := newBlockingSigner(priv)
+	d := &Daemon{Signer: blocked}
+
+	signDone := make(chan error, 1)
+	go func() {
+		_, err := d.signBytes([]byte("in flight"))
+		signDone <- err
+	}()
+	<-blocked.entered
+
+	lockDone := make(chan error, 1)
+	go func() { lockDone <- d.Lock("incident", Operator{ID: "op-lock"}) }()
+	select {
+	case err := <-lockDone:
+		t.Fatalf("Lock returned before in-flight Sign completed: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(blocked.release)
+	if err := <-signDone; err != nil {
+		t.Fatalf("in-flight sign: %v", err)
+	}
+	if err := <-lockDone; err != nil {
+		t.Fatalf("Lock: %v", err)
+	}
+	if _, err := d.signBytes([]byte("after lock")); !errors.Is(err, ErrLocked) {
+		t.Fatalf("post-Lock sign err=%v; want ErrLocked", err)
+	}
+}
+
+// TestCustody_RotateLinearizesWithInFlightSign proves RotateTo waits for an old
+// signer invocation to finish. After it returns, every new mint uses next.
+func TestCustody_RotateLinearizesWithInFlightSign(t *testing.T) {
+	priv1, pub1 := goldenSignerKey()
+	priv2, pub2 := altSignerKey()
+	blocked := newBlockingSigner(priv1)
+	d := &Daemon{Signer: blocked}
+	msg := []byte("rotation boundary")
+
+	type signResult struct {
+		sig []byte
+		err error
+	}
+	signDone := make(chan signResult, 1)
+	go func() {
+		sig, err := d.signBytes(msg)
+		signDone <- signResult{sig: sig, err: err}
+	}()
+	<-blocked.entered
+
+	rotateDone := make(chan error, 1)
+	op := Operator{ID: "op-rotate", AuthnMethod: "webauthn"}
+	go func() { rotateDone <- d.RotateToWithAudit(priv2, "compromise response", op) }()
+	select {
+	case err := <-rotateDone:
+		t.Fatalf("RotateTo returned before old Sign completed: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(blocked.release)
+	old := <-signDone
+	if old.err != nil {
+		t.Fatalf("old in-flight sign: %v", old.err)
+	}
+	if !ed25519.Verify(pub1, msg, old.sig) {
+		t.Fatal("in-flight signature did not use old signer")
+	}
+	if err := <-rotateDone; err != nil {
+		t.Fatalf("RotateTo: %v", err)
+	}
+	newSig, err := d.signBytes(msg)
+	if err != nil {
+		t.Fatalf("post-rotate sign: %v", err)
+	}
+	if !ed25519.Verify(pub2, msg, newSig) || ed25519.Verify(pub1, msg, newSig) {
+		t.Fatal("post-rotate signature did not cut over exclusively to new signer")
+	}
 }

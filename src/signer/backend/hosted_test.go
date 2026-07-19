@@ -36,6 +36,9 @@ type fakeServer struct {
 	// signatureCmd populates the "cmd" field of the approved
 	// signature so tests can assert end-to-end payload flow.
 	signatureCmd string
+	// pollEmptySignatures emits an approved response with no signatures.
+	// The client must fail closed rather than trigger local signing.
+	pollEmptySignatures bool
 
 	// --- knobs for the poll matrix / failure-injection tests ---
 
@@ -82,6 +85,7 @@ func (f *fakeServer) handle(w http.ResponseWriter, r *http.Request) {
 		action := f.pollAction
 		delay := f.pollDelay
 		sigCmd := f.signatureCmd
+		emptySignatures := f.pollEmptySignatures
 		httpStatus := f.pollHTTPStatus
 		malformed := f.pollMalformed
 		rawStatus := f.pollRawStatus
@@ -147,10 +151,14 @@ func (f *fakeServer) handle(w http.ResponseWriter, r *http.Request) {
 		switch action {
 		case "approved":
 			now := time.Now().UTC()
+			signatures := []map[string]string{{"cmd": sigCmd, "sig": "SSHGATE_SIG:fake"}}
+			if emptySignatures {
+				signatures = nil
+			}
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"request_id":       strings.TrimPrefix(r.URL.Path, "/v1/poll/"),
 				"status":           "approved",
-				"signatures":       []map[string]string{{"cmd": sigCmd, "sig": "SSHGATE_SIG:fake"}},
+				"signatures":       signatures,
 				"approved_by_user": "karthi",
 				"approved_at":      now,
 			})
@@ -242,6 +250,39 @@ func TestHostedServerBackend_Approved(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("Request did not resolve within 3s")
+	}
+}
+
+func TestHostedServerBackend_MalformedApprovalFailsClosed(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		fs      *fakeServer
+		wantCmd string
+	}{
+		{name: "empty signatures", fs: &fakeServer{reqID: "r_empty", pollAction: "approved", pollEmptySignatures: true}, wantCmd: "echo hi"},
+		{name: "wrong command", fs: &fakeServer{reqID: "r_wrong", pollAction: "approved", signatureCmd: "different command"}, wantCmd: "echo hi"},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			hb, _ := newFakeServerBackend(t, tc.fs)
+			ch, err := hb.Request(context.Background(), signerkit.ApprovalRequest{
+				RequestID: "local-request",
+				Commands:  []signerkit.CommandReq{{Server: "prod", Cmd: tc.wantCmd, TTLSec: 60}},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case res := <-ch:
+				if res.Status != signerkit.StatusTimeout || len(res.Signatures) != 0 {
+					t.Fatalf("malformed approval = %+v; want fail-closed timeout without signatures", res)
+				}
+			case <-time.After(3 * time.Second):
+				t.Fatal("malformed approval did not resolve")
+			}
+		})
 	}
 }
 
@@ -356,6 +397,8 @@ func TestHostedServerBackend_ValidatesConfig(t *testing.T) {
 		{"no BaseURL", signerkit.HostedServerBackend{APIKey: "k", ClientID: "c"}},
 		{"no APIKey", signerkit.HostedServerBackend{BaseURL: "http://x", ClientID: "c"}},
 		{"no ClientID", signerkit.HostedServerBackend{BaseURL: "http://x", APIKey: "k"}},
+		{"remote HTTP", signerkit.HostedServerBackend{BaseURL: "http://signer.example.com", APIKey: "k", ClientID: "c"}},
+		{"URL credentials", signerkit.HostedServerBackend{BaseURL: "https://user@signer.example.com", APIKey: "k", ClientID: "c"}},
 	}
 	for _, tc := range cases {
 		tc := tc

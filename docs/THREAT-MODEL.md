@@ -85,9 +85,10 @@ headers, which currently number the opposite way — see the redline draft).
 - **Install Tier 3 — hosted signer (= Approval Tier 2).** The signer runs on a
   separate machine the agent cannot touch, so the agent can only *ask* it to
   sign — it cannot read the key or forge an approval. **This is the only tier
-  that is a hard boundary against a privileged rogue agent.** Its backend exists;
-  the web UI + deployment remain unshipped. (`design.md:251-291`, `FUTURE.md` §v2
-  hosted signer.)
+  that is a hard boundary against a privileged rogue laptop agent.** v0.2 ships
+  the hosted backend, embedded TOTP/WebAuthn UI, SQLite approval policy, and
+  systemd deployment; TLS/DNS, backups, and secret distribution remain operator
+  responsibilities. (`design.md:251-291`, `src/signer-server/README.md`.)
 
 ## What SSHGate does NOT protect against (be honest)
 

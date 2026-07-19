@@ -230,8 +230,9 @@ func TestEngine_SelfApproveOnVsOff(t *testing.T) {
 	// Self-approve OFF: requester's approve does not count; stays pending.
 	eng, db, _ := engineFixture(t)
 	seedRequest(t, db, "rs", 1, cmdJSON{Server: "prod", Cmd: "id", TTLSeconds: 60})
-	out, err := eng.SubmitVote(ctx, "rs", "alice", store.DecisionApprove, "webauthn",
-		hosted.ApprovalPolicy{AllowSelfApprove: false, Requester: "alice"})
+	out, err := eng.SubmitVote(ctx, "rs", "karthi-laptop", store.DecisionApprove, "webauthn",
+		// Deliberately lie in policy.Requester: the stored ClientID must win.
+		hosted.ApprovalPolicy{AllowSelfApprove: false, Requester: "someone-else"})
 	if err != nil {
 		t.Fatalf("SubmitVote(self off): %v", err)
 	}
@@ -242,8 +243,8 @@ func TestEngine_SelfApproveOnVsOff(t *testing.T) {
 	// Self-approve ON: requester's approve counts; approved.
 	eng2, db2, pub := engineFixture(t)
 	seedRequest(t, db2, "rs2", 1, cmdJSON{Server: "prod", Cmd: "id", TTLSeconds: 60})
-	out2, err := eng2.SubmitVote(ctx, "rs2", "alice", store.DecisionApprove, "webauthn",
-		hosted.ApprovalPolicy{AllowSelfApprove: true, Requester: "alice"})
+	out2, err := eng2.SubmitVote(ctx, "rs2", "karthi-laptop", store.DecisionApprove, "webauthn",
+		hosted.ApprovalPolicy{AllowSelfApprove: true, Requester: "someone-else"})
 	if err != nil {
 		t.Fatalf("SubmitVote(self on): %v", err)
 	}
@@ -303,14 +304,14 @@ func TestEngine_DuplicateVoteIdempotent(t *testing.T) {
 	}
 }
 
-// TestEngine_NotFound proves a vote on a non-existent request surfaces
-// store.ErrNotFound and records nothing.
+// TestEngine_NotFound proves a vote on a non-existent request surfaces the
+// hosted-level sentinel without leaking the persistence implementation.
 func TestEngine_NotFound(t *testing.T) {
 	t.Parallel()
 	eng, db, _ := engineFixture(t)
 	ctx := context.Background()
-	if _, err := eng.SubmitVote(ctx, "ghost", "alice", store.DecisionApprove, "webauthn", hosted.ApprovalPolicy{}); !errors.Is(err, store.ErrNotFound) {
-		t.Fatalf("SubmitVote(missing) = %v; want ErrNotFound", err)
+	if _, err := eng.SubmitVote(ctx, "ghost", "alice", store.DecisionApprove, "webauthn", hosted.ApprovalPolicy{}); !errors.Is(err, hosted.ErrRequestNotFound) {
+		t.Fatalf("SubmitVote(missing) = %v; want ErrRequestNotFound", err)
 	}
 	if v, _ := db.ListVotes(ctx, "ghost"); len(v) != 0 {
 		t.Fatalf("a vote was recorded for a missing request")
@@ -487,5 +488,137 @@ func TestEngine_VerdictFailClosed(t *testing.T) {
 	}
 	if len(got.Signatures) != 0 {
 		t.Fatalf("row has signatures after a fail-closed vote")
+	}
+	votes, err := db.ListVotes(context.Background(), "r-fc-1")
+	if err != nil {
+		t.Fatalf("ListVotes: %v", err)
+	}
+	if len(votes) != 0 {
+		t.Fatalf("unaudited failed vote became decision-visible: %+v", votes)
+	}
+}
+
+type verdictCaptureSink struct {
+	mu        sync.Mutex
+	verdicts  []signerkit.AuditVerdict
+	failFirst bool
+}
+
+func (s *verdictCaptureSink) Call(context.Context, signerkit.AuditCall) error { return nil }
+func (s *verdictCaptureSink) Verdict(_ context.Context, v signerkit.AuditVerdict) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.failFirst {
+		s.failFirst = false
+		return errors.New("transient audit failure")
+	}
+	s.verdicts = append(s.verdicts, v)
+	return nil
+}
+
+func engineWithAuditSink(t *testing.T, sink signerkit.AuditSink) (*hosted.ApprovalEngine, *sqlitestore.DB) {
+	t.Helper()
+	db, err := sqlitestore.Open(filepath.Join(t.TempDir(), "audit-engine.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	core, err := signerkit.New(signerkit.Config{Signer: priv, Audit: sink})
+	if err != nil {
+		t.Fatalf("signerkit.New: %v", err)
+	}
+	eng, err := hosted.NewApprovalEngine(db, core)
+	if err != nil {
+		t.Fatalf("NewApprovalEngine: %v", err)
+	}
+	return eng, db
+}
+
+func TestEngine_AuditRetryPublishesPreparedVote(t *testing.T) {
+	t.Parallel()
+	sink := &verdictCaptureSink{failFirst: true}
+	eng, db := engineWithAuditSink(t, sink)
+	seedRequest(t, db, "r-audit-retry", 2, cmdJSON{Server: "prod", Cmd: "uptime", TTLSeconds: 60})
+
+	_, err := eng.SubmitVote(context.Background(), "r-audit-retry", "alice", store.DecisionApprove, "totp", hosted.ApprovalPolicy{})
+	if err == nil {
+		t.Fatal("first SubmitVote succeeded; want transient audit failure")
+	}
+	if votes, _ := db.ListVotes(context.Background(), "r-audit-retry"); len(votes) != 0 {
+		t.Fatalf("failed audit exposed votes: %+v", votes)
+	}
+	out, err := eng.SubmitVote(context.Background(), "r-audit-retry", "alice", store.DecisionApprove, "totp", hosted.ApprovalPolicy{})
+	if err != nil {
+		t.Fatalf("retry SubmitVote: %v", err)
+	}
+	if out.Decision != hosted.DecisionPending {
+		t.Fatalf("retry decision = %q; want pending", out.Decision)
+	}
+	votes, err := db.ListVotes(context.Background(), "r-audit-retry")
+	if err != nil || len(votes) != 1 || !votes[0].Audited {
+		t.Fatalf("audited votes = %+v err=%v; want one", votes, err)
+	}
+}
+
+func TestEngine_OppositeDuplicateNeverAuditsConflictingDecision(t *testing.T) {
+	t.Parallel()
+	sink := &verdictCaptureSink{}
+	eng, db := engineWithAuditSink(t, sink)
+	seedRequest(t, db, "r-conflict", 2, cmdJSON{Server: "prod", Cmd: "uptime", TTLSeconds: 60})
+	if _, err := eng.SubmitVote(context.Background(), "r-conflict", "alice", store.DecisionApprove, "webauthn", hosted.ApprovalPolicy{}); err != nil {
+		t.Fatalf("first vote: %v", err)
+	}
+	if _, err := eng.SubmitVote(context.Background(), "r-conflict", "alice", store.DecisionDeny, "totp", hosted.ApprovalPolicy{}); !errors.Is(err, store.ErrVoteConflict) {
+		t.Fatalf("opposite duplicate = %v; want ErrVoteConflict", err)
+	}
+	sink.mu.Lock()
+	defer sink.mu.Unlock()
+	if len(sink.verdicts) != 1 || !sink.verdicts[0].Approved {
+		t.Fatalf("verdict audit = %+v; want exactly one approve", sink.verdicts)
+	}
+}
+
+func TestEngine_ConcurrentOppositeVotesAuditOnlyStoredWinner(t *testing.T) {
+	t.Parallel()
+	sink := &verdictCaptureSink{}
+	eng, db := engineWithAuditSink(t, sink)
+	seedRequest(t, db, "r-conflict-race", 2, cmdJSON{Server: "prod", Cmd: "uptime", TTLSeconds: 60})
+
+	var wg sync.WaitGroup
+	errs := make(chan error, 2)
+	for _, decision := range []store.Decision{store.DecisionApprove, store.DecisionDeny} {
+		decision := decision
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := eng.SubmitVote(context.Background(), "r-conflict-race", "alice", decision, "webauthn", hosted.ApprovalPolicy{})
+			errs <- err
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	conflicts := 0
+	for err := range errs {
+		if errors.Is(err, store.ErrVoteConflict) {
+			conflicts++
+		} else if err != nil {
+			t.Fatalf("unexpected vote error: %v", err)
+		}
+	}
+	if conflicts != 1 {
+		t.Fatalf("conflicts = %d; want 1", conflicts)
+	}
+	votes, err := db.ListVotes(context.Background(), "r-conflict-race")
+	if err != nil || len(votes) != 1 {
+		t.Fatalf("votes = %+v err=%v; want one", votes, err)
+	}
+	sink.mu.Lock()
+	defer sink.mu.Unlock()
+	if len(sink.verdicts) != 1 || sink.verdicts[0].Approved != (votes[0].Decision == store.DecisionApprove) {
+		t.Fatalf("audit=%+v vote=%+v; inconsistent", sink.verdicts, votes[0])
 	}
 }

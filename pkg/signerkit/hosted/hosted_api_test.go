@@ -1,6 +1,7 @@
 package hosted_test
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
 	"errors"
@@ -80,6 +81,8 @@ func TestNew_ValidationMatrix(t *testing.T) {
 		{"nil core", hosted.Config{Store: db, APIKey: "k"}, hosted.ErrNoCore},
 		{"nil store", hosted.Config{Core: core, APIKey: "k"}, hosted.ErrNoStore},
 		{"empty api key", hosted.Config{Core: core, Store: db}, hosted.ErrNoAPIKey},
+		{"empty machine client", hosted.Config{Core: core, Store: db, APIKey: "k", RequiredApprovals: 1, Auth: hosted.AuthConfig{RPID: "rp"}}, hosted.ErrNoMachineClientID},
+		{"invalid quorum", hosted.Config{Core: core, Store: db, APIKey: "k", MachineClientID: "client", Auth: hosted.AuthConfig{RPID: "rp"}}, hosted.ErrInvalidRequiredApprovals},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -92,6 +95,17 @@ func TestNew_ValidationMatrix(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestAttachHumanRefusesUnboundMachineIdentity(t *testing.T) {
+	t.Parallel()
+	srv := hosted.NewServer("key", nil, log.New(io.Discard, "", 0))
+	defer func() {
+		if recover() == nil {
+			t.Fatal("AttachHuman accepted an unbound caller-controlled client_id")
+		}
+	}()
+	srv.AttachHuman(&hosted.HumanAPI{})
 }
 
 // TestNew_MachineOnly proves a zero-Auth Config mounts the MACHINE plane only:
@@ -139,10 +153,12 @@ func TestNew_WithAuth_BothPlanesAndSeparation(t *testing.T) {
 	const apiKey = "both-planes-key"
 
 	srv, err := hosted.New(hosted.Config{
-		Core:   core,
-		Store:  db,
-		APIKey: apiKey,
-		Logger: log.New(io.Discard, "", 0),
+		Core:              core,
+		Store:             db,
+		APIKey:            apiKey,
+		MachineClientID:   "both-planes",
+		RequiredApprovals: 1,
+		Logger:            log.New(io.Discard, "", 0),
 		Auth: hosted.AuthConfig{
 			RPID:          waRPID,
 			RPDisplayName: waRPName,
@@ -156,6 +172,24 @@ func TestNew_WithAuth_BothPlanesAndSeparation(t *testing.T) {
 	}
 	ts := httptest.NewServer(srv)
 	t.Cleanup(ts.Close)
+
+	// Production composition enforces C11 at intake: a human-approvable
+	// request without the target host fingerprint is rejected before queueing.
+	body := []byte(`{"client_id":"both-planes","commands":[{"server":"prod","cmd":"echo hi","ttl_seconds":60}]}`)
+	req, err := http.NewRequest(http.MethodPost, ts.URL+"/v1/sign", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("host-less production sign = %d; want 400", resp.StatusCode)
+	}
 
 	// Machine plane mounted: /healthz public 200.
 	if code := getStatus(t, ts.URL+"/healthz", ""); code != http.StatusOK {

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -299,6 +300,46 @@ func TestTOTP_SetGetReplace(t *testing.T) {
 	if got2 != "SECRET2" {
 		t.Fatalf("GetTOTP after replace = %q; want SECRET2", got2)
 	}
+
+	consumed, err := db.ConsumeTOTPStep(ctx, "u1", "SECRET2", 100)
+	if err != nil || !consumed {
+		t.Fatalf("ConsumeTOTPStep(first) = %v,%v; want true,nil", consumed, err)
+	}
+	for name, step := range map[string]int64{"same": 100, "older": 99} {
+		if consumed, err := db.ConsumeTOTPStep(ctx, "u1", "SECRET2", step); err != nil || consumed {
+			t.Fatalf("ConsumeTOTPStep(%s) = %v,%v; want false,nil", name, consumed, err)
+		}
+	}
+	if consumed, err := db.ConsumeTOTPStep(ctx, "u1", "SECRET1", 101); err != nil || consumed {
+		t.Fatalf("ConsumeTOTPStep(rotated secret) = %v,%v; want false,nil", consumed, err)
+	}
+
+	// Rotation resets only the new factor's watermark. Concurrent consumers of
+	// one timestep still have exactly one winner.
+	if err := db.SetTOTP(ctx, "u1", "SECRET3"); err != nil {
+		t.Fatal(err)
+	}
+	const contenders = 16
+	var winners atomic.Int32
+	var wg sync.WaitGroup
+	for i := 0; i < contenders; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ok, err := db.ConsumeTOTPStep(ctx, "u1", "SECRET3", 100)
+			if err != nil {
+				t.Errorf("ConsumeTOTPStep(concurrent): %v", err)
+				return
+			}
+			if ok {
+				winners.Add(1)
+			}
+		}()
+	}
+	wg.Wait()
+	if got := winners.Load(); got != 1 {
+		t.Fatalf("concurrent TOTP consumers won=%d; want 1", got)
+	}
 }
 
 // --- sessions ---
@@ -335,6 +376,15 @@ func TestSessions_LifecycleAndExpiry(t *testing.T) {
 		t.Fatalf("GetSession(expired) = %v; want ErrNotFound", err)
 	}
 
+	// Issuing another session sweeps expired rows. Reusing the expired ID
+	// succeeds only if the old physical row was removed before insert.
+	if err := db.CreateSession(ctx, &store.Session{ID: "s_old", UserID: "u1", ExpiresAt: time.Now().Add(time.Hour)}); err != nil {
+		t.Fatalf("CreateSession(reuse expired id after sweep): %v", err)
+	}
+	if _, err := db.GetSession(ctx, "s_old"); err != nil {
+		t.Fatalf("GetSession(reissued id): %v", err)
+	}
+
 	// Revoke removes the live session; subsequent get is ErrNotFound.
 	if err := db.RevokeSession(ctx, "s_live"); err != nil {
 		t.Fatalf("RevokeSession: %v", err)
@@ -359,23 +409,37 @@ func TestApprovals_AppendOnlyOnePerOperator(t *testing.T) {
 	t.Parallel()
 	db := newTestDB(t)
 	ctx := context.Background()
+	if err := db.Insert(ctx, &store.Request{RequestID: "r1", Status: store.StatusPending, ClientID: "c", Commands: []byte(`[]`)}); err != nil {
+		t.Fatalf("seed request: %v", err)
+	}
 
 	v1 := &store.Vote{RequestID: "r1", Operator: "alice", Decision: store.DecisionApprove, AuthnMethod: "webauthn"}
-	if err := db.RecordVote(ctx, v1); err != nil {
-		t.Fatalf("RecordVote: %v", err)
+	canonical, needsAudit, err := db.PrepareVote(ctx, v1)
+	if err != nil || !needsAudit || canonical.Decision != store.DecisionApprove {
+		t.Fatalf("PrepareVote = (%+v,%v,%v); want approve/needs-audit", canonical, needsAudit, err)
+	}
+	// Prepared votes are invisible until the external audit phase completes.
+	if got, _ := db.ListVotes(ctx, "r1"); len(got) != 0 {
+		t.Fatalf("unaudited vote became visible: %+v", got)
+	}
+	if err := db.MarkVoteAudited(ctx, "r1", "alice"); err != nil {
+		t.Fatalf("MarkVoteAudited: %v", err)
 	}
 	// A second vote from the SAME operator on the SAME request is
 	// rejected as a duplicate (append-only, one-per-operator); the
 	// original is NOT mutated.
 	v1b := &store.Vote{RequestID: "r1", Operator: "alice", Decision: store.DecisionDeny, AuthnMethod: "totp"}
-	if err := db.RecordVote(ctx, v1b); !errors.Is(err, store.ErrDuplicate) {
-		t.Fatalf("duplicate vote = %v; want ErrDuplicate", err)
+	if _, _, err := db.PrepareVote(ctx, v1b); !errors.Is(err, store.ErrVoteConflict) {
+		t.Fatalf("opposite duplicate vote = %v; want ErrVoteConflict", err)
 	}
 
 	// A different operator on the same request is allowed.
 	v2 := &store.Vote{RequestID: "r1", Operator: "bob", Decision: store.DecisionApprove, AuthnMethod: "webauthn"}
-	if err := db.RecordVote(ctx, v2); err != nil {
-		t.Fatalf("RecordVote bob: %v", err)
+	if _, needs, err := db.PrepareVote(ctx, v2); err != nil || !needs {
+		t.Fatalf("PrepareVote bob: needs=%v err=%v", needs, err)
+	}
+	if err := db.MarkVoteAudited(ctx, "r1", "bob"); err != nil {
+		t.Fatalf("MarkVoteAudited bob: %v", err)
 	}
 
 	votes, err := db.ListVotes(ctx, "r1")
@@ -394,8 +458,8 @@ func TestApprovals_AppendOnlyOnePerOperator(t *testing.T) {
 	}
 
 	// Invalid decision rejected.
-	if err := db.RecordVote(ctx, &store.Vote{RequestID: "r1", Operator: "carol", Decision: "maybe"}); err == nil {
-		t.Fatalf("RecordVote(invalid decision) = nil; want error")
+	if _, _, err := db.PrepareVote(ctx, &store.Vote{RequestID: "r1", Operator: "carol", Decision: "maybe"}); err == nil {
+		t.Fatalf("PrepareVote(invalid decision) = nil; want error")
 	}
 
 	// A request with no votes -> empty slice.
@@ -408,6 +472,102 @@ func TestApprovals_AppendOnlyOnePerOperator(t *testing.T) {
 	}
 }
 
+func TestUpdateStatus_BlockedByUnauditedVote(t *testing.T) {
+	t.Parallel()
+	db := newTestDB(t)
+	ctx := context.Background()
+	if err := db.Insert(ctx, &store.Request{
+		RequestID: "r_barrier", Status: store.StatusPending, ClientID: "c", Commands: []byte(`[]`),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := db.PrepareVote(ctx, &store.Vote{
+		RequestID: "r_barrier", Operator: "alice", Decision: store.DecisionDeny, AuthnMethod: "webauthn",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// A concurrent approval/timeout path must not cross the unaudited vote.
+	if err := db.UpdateStatus(ctx, "r_barrier", store.StatusApproved, []byte(`[]`), "bob"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := db.GetByID(ctx, "r_barrier")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != store.StatusPending {
+		t.Fatalf("status crossed unaudited-vote barrier: %q", got.Status)
+	}
+
+	if err := db.MarkVoteAudited(ctx, "r_barrier", "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.UpdateStatus(ctx, "r_barrier", store.StatusDenied, nil, ""); err != nil {
+		t.Fatal(err)
+	}
+	got, err = db.GetByID(ctx, "r_barrier")
+	if err != nil || got.Status != store.StatusDenied {
+		t.Fatalf("audited vote did not release barrier: status=%q err=%v", got.Status, err)
+	}
+}
+
+func TestMigration3_PublishesOnlyHistoricalTerminalVotes(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "migration2.db")
+	raw, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = raw.Exec(`
+		CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at INTEGER NOT NULL);
+		INSERT INTO schema_migrations VALUES (1, 'baseline_requests', 1), (2, 'operators_auth_and_approvals', 1);
+		CREATE TABLE requests (
+		  request_id TEXT PRIMARY KEY, status TEXT NOT NULL, client_id TEXT NOT NULL,
+		  commands TEXT NOT NULL, signatures TEXT, created_at INTEGER NOT NULL,
+		  resolved_at INTEGER, approved_by TEXT, required_approvals INTEGER NOT NULL DEFAULT 1
+		);
+		CREATE TABLE approvals (
+		  request_id TEXT NOT NULL, operator TEXT NOT NULL, decision TEXT NOT NULL,
+		  authn_method TEXT NOT NULL, ts INTEGER NOT NULL, PRIMARY KEY (request_id, operator)
+		);
+		CREATE TABLE sessions (
+		  id TEXT PRIMARY KEY, user_id TEXT NOT NULL, created_at INTEGER NOT NULL,
+		  expires_at INTEGER NOT NULL
+		);
+		INSERT INTO requests (request_id,status,client_id,commands,created_at) VALUES
+		  ('terminal','denied','c','[]',1), ('pending','pending','c','[]',2);
+		INSERT INTO approvals VALUES
+		  ('terminal','alice','deny','webauthn',1), ('pending','bob','approve','totp',2);
+	`)
+	if err != nil {
+		_ = raw.Close()
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err := sqlitestore.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	terminalVotes, err := db.ListVotes(context.Background(), "terminal")
+	if err != nil || len(terminalVotes) != 1 {
+		t.Fatalf("terminal historical vote hidden: votes=%+v err=%v", terminalVotes, err)
+	}
+	if terminalVotes[0].Audited {
+		t.Fatal("migration claimed legacy terminal vote reached the external audit sink")
+	}
+	pendingVotes, err := db.ListVotes(context.Background(), "pending")
+	if err != nil || len(pendingVotes) != 0 {
+		t.Fatalf("pending historical vote published without audit: votes=%+v err=%v", pendingVotes, err)
+	}
+}
+
 // TestApprovals_ConcurrentVotesRaceSafe fires many goroutines recording
 // votes — distinct operators succeed, duplicate operators collapse to
 // exactly one stored row — without corruption or lost rows. Run with
@@ -416,13 +576,15 @@ func TestApprovals_ConcurrentVotesRaceSafe(t *testing.T) {
 	t.Parallel()
 	db := newTestDB(t)
 	ctx := context.Background()
+	if err := db.Insert(ctx, &store.Request{RequestID: "r_race", Status: store.StatusPending, ClientID: "c", Commands: []byte(`[]`)}); err != nil {
+		t.Fatalf("seed request: %v", err)
+	}
 
 	const operators = 16
 	const dupAttempts = 8 // each operator votes dupAttempts times concurrently
 	var (
 		wg        sync.WaitGroup
 		okCount   atomic.Int64
-		dupCount  atomic.Int64
 		failCount atomic.Int64
 	)
 	for op := 0; op < operators; op++ {
@@ -431,15 +593,19 @@ func TestApprovals_ConcurrentVotesRaceSafe(t *testing.T) {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				err := db.RecordVote(ctx, &store.Vote{
+				canonical, needsAudit, err := db.PrepareVote(ctx, &store.Vote{
 					RequestID: "r_race", Operator: operator,
 					Decision: store.DecisionApprove, AuthnMethod: "webauthn",
 				})
 				switch {
+				case err == nil && needsAudit:
+					okCount.Add(1)
+					if err := db.MarkVoteAudited(ctx, canonical.RequestID, canonical.Operator); err != nil {
+						failCount.Add(1)
+						t.Errorf("MarkVoteAudited: %v", err)
+					}
 				case err == nil:
 					okCount.Add(1)
-				case errors.Is(err, store.ErrDuplicate):
-					dupCount.Add(1)
 				default:
 					failCount.Add(1)
 					t.Errorf("unexpected RecordVote error: %v", err)
@@ -452,12 +618,8 @@ func TestApprovals_ConcurrentVotesRaceSafe(t *testing.T) {
 	if failCount.Load() != 0 {
 		t.Fatalf("had %d unexpected failures", failCount.Load())
 	}
-	// Exactly `operators` first-wins inserts succeed; the rest are dups.
-	if okCount.Load() != operators {
-		t.Fatalf("successful inserts = %d; want %d", okCount.Load(), operators)
-	}
-	if dupCount.Load() != operators*(dupAttempts-1) {
-		t.Fatalf("duplicate rejections = %d; want %d", dupCount.Load(), operators*(dupAttempts-1))
+	if okCount.Load() != operators*dupAttempts {
+		t.Fatalf("successful/idempotent prepares = %d; want %d", okCount.Load(), operators*dupAttempts)
 	}
 	votes, err := db.ListVotes(ctx, "r_race")
 	if err != nil {

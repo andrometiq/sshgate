@@ -675,18 +675,14 @@ anchor above and are marked *(subsumed)*.
 ## Deferred
 
 - **Tier-3 hosted signer (the real boundary). — PULLED INTO v0.2 (owner, 2026-07-11),
-  reshaped:** ship as an **embeddable library** callable by any web application plus a
-  **simple reference web app** as the usable default surface; see *Release status &
-  versioning* and *Work ordering* step 6. The remaining-work list below still applies
-  (UI, Telegram channel, HTTPS hostname, deployment), now shaped library-first.
-  The headless backend exists — a
-  signing engine, N-of-M approval, WebAuthn/TOTP auth, and a plane-separated API.
-  What remains to ship it as a product: the rendered web UI (the backend serves
-  JSON only), the Telegram channel on the hosted signer, a stable HTTPS hostname
-  (passkeys are origin-bound), and deployment. This is the larger, recommended
-  investment for anyone who needs an approval boundary that holds against a
-  privileged rogue agent on the operating machine. See
-  [approval-architecture.md](approval-architecture.md).
+  implemented library-first:** the shared `pkg/signerkit` core, plane-separated hosted
+  HTTP package, SQLite approval state, TOTP/WebAuthn authentication, N-of-M engine,
+  embedded reference UI, lifecycle/call/verdict audit, bootstrap commands, and hardened
+  systemd deployment are now present. A stable HTTPS hostname remains a deployment
+  prerequisite because passkeys and mutation-origin checks are origin-bound. Deferred
+  extensions are per-client credentials, hosted Telegram/grants/reveal/transfer, HA,
+  policy-management UI, and metrics. See [approval-architecture.md](approval-architecture.md)
+  and [the deployment guide](../src/signer-server/README.md).
 
 - **Redaction scanner performance work.** An Aho-Corasick / keyword-prefilter
   rewrite of the redaction scanner for large outputs. Security-sensitive, so

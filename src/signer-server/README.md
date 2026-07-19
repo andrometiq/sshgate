@@ -1,147 +1,96 @@
-# sshgate-signer-server (v2 scaffold)
+# sshgate-signer-server
 
-The hosted signer: a centralized signing service that SSHGate plugins
-across any number of laptops can hit over HTTPS. v2.0 is a SCAFFOLD that
-establishes the architecture, the wire protocol surface, and a SQLite
-state store. The human-approval surface (WebAuthn + TOTP + web UI) is
-v2.1 work.
+The hosted SSHGate signer is a separate approval boundary for laptops using the `hosted` signer backend. It queues bearer-authenticated signing requests in SQLite, serves an embedded human approval UI, authenticates operators with TOTP or WebAuthn, applies N-of-M/deny-veto policy, signs only after approval, and writes an append-only audit stream.
 
-## Why
+The server listens on private HTTP. A reverse proxy must provide the stable public HTTPS origin used by WebAuthn and the session-CSRF boundary.
 
-v1's local signer + Telegram backend works well for one operator on
-one laptop. v2 is the answer to "what happens when":
+## Fresh VPS install
 
-- A second laptop needs to request signatures against the same trust
-  anchor.
-- The approval channel needs to look professional (web UI > Telegram
-  message) for a team-shared tool.
-- Audit history needs to survive a single-laptop failure.
-- Multi-operator approval rules ("two reviewers must approve any prod
-  write") become a hard requirement.
-- An LLM explainer renders better in a web page than in a Telegram chat.
-
-Full motivation is in `docs/design.md`
-§"Approval Tier 2 — separate hosted signer" and `docs/approval-architecture.md`.
-
-## Architecture
-
-```
-   ┌──────────────────────────┐         ┌──────────────────────────┐
-   │ SSHGate plugin (laptop)  │  HTTPS  │ sshgate-signer-server (VPS)   │
-   │                          │ ──────► │                          │
-   │ signer daemon         │ POST    │ POST /v1/sign      ──┐   │
-   │   backend = "hosted"     │ /v1/    │ GET  /v1/poll/{id} ──┤   │
-   │   ↳ HostedServerBackend  │   sign  │ GET  /v1/audit       │   │
-   │     │ long-polls /v1/    │ ◄────── │ GET  /healthz        │   │
-   │     │   poll/{id}        │  202    │                      │   │
-   │     ▼                    │         │ ┌──────────────────┐ │   │
-   │ MCP server (Claude Code) │         │ │ SQLite           │ │   │
-   └──────────────────────────┘         │ │ requests table   │◄┘   │
-                                        │ └──────────────────┘     │
-                                        │                          │
-                                        │ Approval UI (v2.1)       │
-                                        │   WebAuthn + TOTP        │
-                                        └──────────────────────────┘
-```
-
-## Quick start
-
-On a fresh VPS (Linux, systemd, Go toolchain installed):
+Prerequisites: Linux with systemd, Go, OpenSSL, a public DNS name, and an HTTPS reverse proxy configuration ready for that name.
 
 ```bash
 git clone https://github.com/karthikeyan5/SSHGate.git
 cd SSHGate/src/signer-server
-sudo ./install/deploy.sh
+sudo env \
+  SIGNER_SERVER_RP_ID=signer.example.com \
+  SIGNER_SERVER_RP_ORIGIN=https://signer.example.com \
+  SIGNER_SERVER_BOOTSTRAP_OPERATORS=alice,bob \
+  SIGNER_SERVER_MACHINE_CLIENT_ID=alice \
+  SIGNER_SERVER_REQUIRED_APPROVALS=1 \
+  ./install/deploy.sh
 ```
 
-The deploy script:
-- creates a `sshgate-signer-server` system user (no login shell)
-- builds the binary with `go build`
-- generates a bearer API key at `/etc/sshgate-signer-server/keys/api-key.txt`
-- installs a systemd unit and starts the service
-- exposes the daemon on `127.0.0.1:8443` (TLS is the reverse proxy's job)
+The installer creates an unprivileged service account, a private SQLite database, a 0600 bearer token, a 0600 Ed25519 signing key, the initial TOTP operators, and a hardened systemd unit with the approval UI enabled. With self-approval disabled (the default), the requester and at least one other operator are required for a one-approval policy. Each new operator's TOTP URI and secret are written once to a 0600 `bootstrap-<operator>.txt` artifact under the state directory. Read it directly into the operator's authenticator, then securely remove it; never copy it to shell history, chat, or source control.
 
-The script prints the API key path on completion; copy it to each laptop
-that will speak to this server and reference it from the signer
-config:
+The installer deliberately does not configure TLS. Route the exact `SIGNER_SERVER_RP_ORIGIN` to `127.0.0.1:8443`, then open that origin in a browser and sign in with the bootstrapped TOTP code.
+
+Important generated files:
+
+- `/etc/sshgate-signer-server/keys/api-key.txt` — copy securely to each approved laptop.
+- `/etc/sshgate-signer-server/keys/signing-key.ed25519` — master private key; never copy to a laptop.
+- `/etc/sshgate-signer-server/keys/signing-key.ed25519.pub` — copy to the laptop path used as SSHGate's gate signing public key before provisioning hosts.
+- `/var/lib/sshgate-signer-server/state.db` — approval, operator, factor, session, and audit-index state.
+- `/var/lib/sshgate-signer-server/bootstrap-<operator>.txt` — one-time 0600 TOTP enrollment artifact; remove after enrollment.
+
+Re-running the installer preserves all keys and the database. An incomplete signing-key pair is a hard failure rather than an implicit rotation.
+
+## Add an operator
+
+Run the offline bootstrap command as the service account. It creates a new operator but refuses to rotate an existing operator's factor.
+
+```bash
+sudo -u sshgate-signer-server \
+  /usr/local/bin/sshgate-signer-server \
+  --bootstrap-operator bob \
+  --bootstrap-output-file /var/lib/sshgate-signer-server/bootstrap-bob.txt \
+  --db /var/lib/sshgate-signer-server/state.db \
+  --rp-id signer.example.com \
+  --rp-origin https://signer.example.com
+```
+
+Factor changes after bootstrap require an authenticated session plus a fresh current TOTP proof. Successful TOTP timesteps are one-use across login, factor changes, and approval step-up; after signing in, wait for the authenticator code to rotate before re-authenticating. HTTP self-bootstrap is intentionally absent.
+
+## Laptop backend
+
+Copy the API token to a 0600 local file, then select the hosted backend in the signer configuration:
 
 ```toml
 [backend]
 type = "hosted"
 
 [backend.hosted]
-base_url      = "https://sshgate-signer-server.example.com"
-api_key_file  = "/var/lib/sshgatesigner/tokens/hosted-api.key"
-client_id     = "my-laptop"
+base_url = "https://signer.example.com"
+api_key_file = "/path/to/hosted-api.key"
+client_id = "alice"
 poll_wait_sec = 30
-timeout_sec   = 60
+timeout_sec = 60
 ```
 
-After editing the config, restart `sshgate-signer-telegram.service` on the laptop.
+`client_id` must exactly match the server's `SIGNER_SERVER_MACHINE_CLIENT_ID`; the bearer credential is bound to that requester identity at intake, persisted with the request, and shown to approvers. The current release still has one shared bearer token rather than a different credential per laptop, so distribute that token only within the intended requester boundary. Per-client credentials remain follow-up work.
 
-## What v2.0 does NOT do
+The gate on every writable server must trust the hosted signer's public key. Place the generated 32-byte public-key file at the configured local `gate.pub` path before running the human-only `sshgate add` flow.
 
-This is the SCAFFOLD. The following are deliberately deferred to v2.1+:
+## HTTP planes
 
-1. **WebAuthn + TOTP login.** v2.0 uses a single shared bearer token.
-   Anyone with the token can submit sign requests, and once a request is
-   in the store, anything that can call `UpdateStatus` can approve it.
-   The human approval gate is v2.1 work.
-2. **Web UI.** No HTML, no JS. v2.0 is API-only. v2.1 ships the approval
-   page.
-3. **Multi-operator approval rules.** v2.0's data model has one
-   approving user per row. Reviewer-count rules ("2 of N must approve")
-   are v2.1 schema + handler work.
-4. **Server-side LLM explainer.** v1.1's Telegram-backed explainer runs
-   client-side against an OpenAI-compatible endpoint; v2.0 ships no
-   equivalent. v2.1 adds it as a render-time call in the web UI.
-5. **Per-client API keys.** v2.0 has one shared bearer token for the
-   whole deployment. v2.1 introduces a clients table with per-laptop
-   keys + rotation.
-6. **Monitoring / metrics.** No /metrics endpoint, no structured logs.
-   v2.1 adds Prometheus + slog.
-7. **TLS termination.** v2.0 binds plain HTTP on a private interface; a
-   reverse proxy (Caddy/nginx) handles 443.
-8. **Multi-instance HA.** v2.0 uses single-node SQLite. Horizontal
-   scaling needs Postgres (or rqlite); on the v2.x roadmap when it's
-   actually justified.
+The credentials are structurally separated:
 
-## Packages
+| Plane | Routes | Authentication |
+|---|---|---|
+| Machine | `POST /v1/sign`, `GET /v1/poll/{id}`, `GET /v1/audit` | Bearer API key |
+| Human | `/auth/*`, `/ui/*` | Opaque HttpOnly session cookie; mutations also require the exact configured Origin and JSON content type |
+| Static UI | `/`, `/*.html`, `/*.js`, `/app.css` | Login page is public; data APIs remain session-gated |
+| Health | `GET /healthz` | Public liveness only |
 
-- `src/signer-server/`            — HTTP server + handlers (Server, routes)
-- `src/signer-server/cmd/`        — entry point (`sshgate-signer-server` binary)
-- `src/signer-server/store/`      — SQLite-backed Store + interface
-- `src/signer-server/install/`    — deploy.sh + systemd unit template
+The embedded UI has no external assets and enforces a restrictive Content Security Policy. It renders the exact command, command SHA-256, target server, host-key fingerprint, validity, tally, voters, and final audit rows.
 
-The matching client (`HostedServerBackend`) lives in
-`src/signer/backend/hosted.go`; it shares the wire shape exactly so a
-single config swap (`backend.type = "hosted"` + `[backend.hosted]`
-block) redirects approval traffic.
+## Current scope and limits
 
-## Wire protocol
+- SQLite is single-node; do not run multiple server replicas against one local database file.
+- TLS termination, DNS, backups, and log shipping remain operator responsibilities.
+- `SIGNER_SERVER_REQUIRED_APPROVALS` sets the positive N copied into each new request. The installer rejects a fresh roster that cannot satisfy N after self-approval policy is applied. There is no operator-facing policy-management screen yet.
+- The machine plane uses one shared bearer token. Per-client keys and cryptographic client-to-operator binding are follow-up work.
+- Hosted standing grants, secret reveal, box-to-box transfer, and transfer-key registration fail closed; use the local Telegram signer for those features.
+- WebAuthn registration is supported by the authenticated API, while the minimal reference UI focuses on login and approval. TOTP bootstrap is the complete default path.
+- `/healthz` is liveness, not dependency readiness; production monitoring should also exercise an authenticated workflow.
 
-Full reference: `docs/design.md` §"Signed-write wire format." Summary:
-
-| Method | Path                  | Auth   | Status codes              |
-|--------|-----------------------|--------|---------------------------|
-| GET    | `/healthz`            | none   | 200                       |
-| POST   | `/v1/sign`            | Bearer | 202 / 400 / 401           |
-| GET    | `/v1/poll/{id}`       | Bearer | 200 / 401 / 404           |
-| GET    | `/v1/audit`           | Bearer | 200 / 401                 |
-
-`/v1/poll/{id}` long-polls server-side for up to `PollWait` (30s default)
-before returning. Clients should re-poll until a non-pending status or
-their own per-request budget elapses.
-
-## v2.1 follow-up issues
-
-Tracked here (doc-side; there are no TODO markers in the Go source); condensed list:
-
-- WebAuthn registration + login (library: `github.com/go-webauthn/webauthn`)
-- TOTP enrollment + verification (library: `github.com/pquerna/otp`)
-- Web UI (Go templates + minimal JS, no framework)
-- Per-client API keys + rotation
-- Multi-operator approval rules
-- Server-side LLM explainer integration
-- Monitoring / metrics (Prometheus, structured logging)
-- Real-deployment e2e tests (VPS + DNS + TLS)
+The embeddable implementation lives under `pkg/signerkit` and `pkg/signerkit/hosted`; this binary is the reference deployment surface over the same signing core used by the local signer.

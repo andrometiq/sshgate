@@ -41,6 +41,10 @@ import (
 // error so the HTTP layer can answer 409/200 as it sees fit.
 var ErrAlreadyResolved = errors.New("hosted: request already resolved")
 
+// ErrRequestNotFound is the hosted API's public missing-request sentinel.
+// Store implementation sentinels stay behind the persistence seam (C12).
+var ErrRequestNotFound = errors.New("hosted: request not found")
+
 // VoteOutcome is what SubmitVote returns: the recomputed decision after
 // the vote, plus whether THIS call was the one that performed the
 // terminal side effect (minted signatures / flipped the row). Exactly
@@ -107,9 +111,10 @@ func NewApprovalEngine(st store.Store, core HostedCore) (*ApprovalEngine, error)
 // Flow:
 //  1. Read the request. ErrNotFound -> store.ErrNotFound. Non-pending
 //     -> ErrAlreadyResolved (vote is a no-op).
-//  2. RecordVote. A duplicate (same operator already voted) is collapsed
-//     to a no-op: we proceed to recompute over the existing vote set so
-//     a retried request is idempotent.
+//  2. PrepareVote claims an immutable, initially-unaudited vote. An
+//     opposite-decision duplicate is rejected without an audit write.
+//  3. Audit the canonical stored vote, then MarkVoteAudited. ListVotes cannot
+//     see a prepared vote before this completes, so audit failure is fail-closed.
 //  3. ListVotes, Decide over the full set using the STORED N.
 //  4. On DecisionApproved: mint signatures (approval time = now), then
 //     UpdateStatus(approved, sigs, approvers). On DecisionDenied:
@@ -134,56 +139,69 @@ func (e *ApprovalEngine) SubmitVote(
 
 	req, err := e.Store.GetByID(ctx, requestID)
 	if err != nil {
-		return VoteOutcome{}, err // store.ErrNotFound or infra error
+		if errors.Is(err, store.ErrNotFound) {
+			return VoteOutcome{}, ErrRequestNotFound
+		}
+		return VoteOutcome{}, fmt.Errorf("load request: %w", err)
 	}
 	if req.Status != store.StatusPending {
 		// Vote after a terminal decision: no-op. Do not record.
 		return VoteOutcome{}, ErrAlreadyResolved
 	}
 
-	// Record the vote. A duplicate from the same operator collapses to a
-	// no-op (the append-only ledger already has their vote); any other
-	// error is fatal.
-	vote := &store.Vote{
+	// Claim the immutable vote before touching the external audit sink. The
+	// store persists it as unaudited and hides it from ListVotes until the
+	// audit succeeds. This two-phase protocol closes both bad orderings:
+	// audit-first could record a losing opposite-decision race, while
+	// vote-first previously let a sink failure leave a countable unaudited row.
+	prepared, needsAudit, err := e.Store.PrepareVote(ctx, &store.Vote{
 		RequestID:   requestID,
 		Operator:    operator,
 		Decision:    decision,
 		AuthnMethod: authnMethod,
 		TS:          time.Now().UTC(),
-	}
-	if err := e.Store.RecordVote(ctx, vote); err != nil && !errors.Is(err, store.ErrDuplicate) {
-		return VoteOutcome{}, fmt.Errorf("record vote: %w", err)
+	})
+	if err != nil {
+		if errors.Is(err, store.ErrRequestResolved) {
+			return VoteOutcome{}, ErrAlreadyResolved
+		}
+		if errors.Is(err, store.ErrNotFound) {
+			return VoteOutcome{}, ErrRequestNotFound
+		}
+		return VoteOutcome{}, fmt.Errorf("prepare vote: %w", err)
 	}
 
-	// Emit the verdict on the required audit sink BEFORE any state flip, and
-	// FAIL CLOSED on a sink error (C5 hosted contract — the opposite of the
-	// local daemon's fail-open, post-delivery audit). If the trail cannot be
-	// written, the vote is aborted before any terminal transition: the row
-	// stays pending and is retryable, so a compromised or misconfigured host
-	// app cannot flip a request to approved/denied without a durable record of
-	// who decided it. We emit on every call (not only the first, non-duplicate
-	// record) so a retry AFTER a transient sink failure still writes a verdict
-	// before it is allowed to flip — audit repetition is strictly safer here
-	// than a fail-open gap.
-	if err := e.Core.Verdict(ctx, signerkit.AuditVerdict{
-		Time:      time.Now().UTC(),
-		RequestID: requestID,
-		Operator: signerkit.Operator{
-			ID:          operator,
-			DisplayName: operator,
-			Verified:    true,
-			AuthnMethod: authnMethod,
-		},
-		CommandSHA256: commandsSHA256(req.Commands),
-		Approved:      decision == store.DecisionApprove,
-	}); err != nil {
-		return VoteOutcome{}, fmt.Errorf("audit verdict (fail-closed): %w", err)
+	if needsAudit {
+		// Always audit the canonical stored decision/authentication metadata,
+		// never the retry's input. Thus even concurrent opposite-decision calls
+		// can produce at most the winner's decision in the audit stream.
+		if err := e.Core.Verdict(ctx, signerkit.AuditVerdict{
+			Time:      prepared.TS,
+			RequestID: requestID,
+			Operator: signerkit.Operator{
+				ID:          prepared.Operator,
+				DisplayName: prepared.Operator,
+				Verified:    true,
+				AuthnMethod: prepared.AuthnMethod,
+			},
+			CommandSHA256: commandsSHA256(req.Commands),
+			Approved:      prepared.Decision == store.DecisionApprove,
+		}); err != nil {
+			return VoteOutcome{}, fmt.Errorf("audit verdict (fail-closed): %w", err)
+		}
+		if err := e.Store.MarkVoteAudited(ctx, requestID, operator); err != nil {
+			return VoteOutcome{}, fmt.Errorf("mark vote audited: %w", err)
+		}
 	}
 
 	// Recompute the decision over the FULL vote set, using the request's
 	// stored N (not whatever was passed in policy).
 	effPolicy := policy
 	effPolicy.RequiredApprovals = req.RequiredApprovals
+	// The machine-plane bearer identity stored with the request is the only
+	// authoritative requester. Never trust a caller-supplied policy.Requester:
+	// doing so lets route wiring accidentally disable the self-approval ban.
+	effPolicy.Requester = req.ClientID
 
 	voteRows, err := e.Store.ListVotes(ctx, requestID)
 	if err != nil {
@@ -197,15 +215,35 @@ func (e *ApprovalEngine) SubmitVote(
 		if err != nil {
 			return VoteOutcome{}, err
 		}
-		return VoteOutcome{Decision: DecisionApproved, Flipped: flipped}, nil
+		return e.persistedOutcome(ctx, requestID, DecisionApproved, flipped)
 
 	case DecisionDenied:
 		flipped, err := e.deny(ctx, requestID)
 		if err != nil {
 			return VoteOutcome{}, err
 		}
-		return VoteOutcome{Decision: DecisionDenied, Flipped: flipped}, nil
+		return e.persistedOutcome(ctx, requestID, DecisionDenied, flipped)
 
+	default:
+		return VoteOutcome{Decision: DecisionPending, Flipped: false}, nil
+	}
+}
+
+// persistedOutcome prevents a losing approve-vs-deny racer from reporting a
+// decision that contradicts the immutable stored terminal state.
+func (e *ApprovalEngine) persistedOutcome(ctx context.Context, requestID string, attempted ApprovalDecision, flipped bool) (VoteOutcome, error) {
+	if flipped {
+		return VoteOutcome{Decision: attempted, Flipped: true}, nil
+	}
+	got, err := e.Store.GetByID(ctx, requestID)
+	if err != nil {
+		return VoteOutcome{}, err
+	}
+	switch got.Status {
+	case store.StatusApproved:
+		return VoteOutcome{Decision: DecisionApproved, Flipped: false}, nil
+	case store.StatusDenied:
+		return VoteOutcome{Decision: DecisionDenied, Flipped: false}, nil
 	default:
 		return VoteOutcome{Decision: DecisionPending, Flipped: false}, nil
 	}

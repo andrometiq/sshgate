@@ -46,31 +46,33 @@ one machine it isn't one.
 The signer runs as a **hosted service on a separate machine the agent cannot
 touch**. This is the recommended path for anyone who needs an actual guarantee.
 
-- **One package, pluggable approval channels: a web UI and Telegram.** The
+- **One shared core, pluggable approval channels.** The shipped hosted reference
+  app uses a web UI; hosted Telegram remains a future notification/channel
+  adapter. The
   cryptographic operator factor (WebAuthn / passkey, and N-of-M approval) lives
-  **in the server**; Telegram is a notification + approval channel for it, not
-  the root of trust.
+  **in the server**, not in the laptop-side agent.
 - Because the key and the approval check live on a host the agent has no access
   to, theft of a bot token or compromise of any channel reduces to denial of
   service (the request just doesn't get approved) — never to a forged approval.
 
-The hosted-signer backend already exists (signing engine, N-of-M approval,
-WebAuthn/TOTP auth, plane-separated API on `feat/v2-hosted-signer`). What
-remains is the web UI, the Telegram channel, and deployment.
+The hosted signer ships as the shared signing engine, N-of-M/deny-veto approval,
+TOTP/WebAuthn authentication, plane-separated API, embedded reference UI, and
+systemd deployment. Per-client credentials, hosted Telegram, HA storage,
+readiness/metrics, and a first-class browser enrollment page remain future work.
 
 ## Shared core, pluggable channels
 
 Both tiers share **one signer core** — the approval logic, the signed-command
-wire format, the timeout chain (`sigwire/timeouts.go`), and the audit log. What
-differs is only the **channel**: the existing-Telegram channel for Tier 1; web UI
-+ Telegram for Tier 2. This is the same channel-pluggable shape the underlying
-approval transport itself uses.
+wire format, the timeout chain (`sigwire/timeouts.go`), and the audit seam. What
+differs is the front end: existing Telegram for the same-machine tier and the
+web UI for the shipped hosted tier. Hosted Telegram can be added as another
+channel without forking the custody/signing core.
 
 ## Build status
 
 - **Tier 1 build** is small: an existing-Telegram approval channel plus the caveat banner.
-- **Tier 2 build** is the larger, recommended investment: web UI + a Telegram
-  channel on the hosted signer + deployment.
+- **Tier 2 build** now ships the hosted web approval path and deployment;
+  hosted Telegram remains an optional future channel.
 - **The current same-machine signer** is a working same-machine implementation.
   It is adequate as a *trusted-agent review UX*, where the human simply taps to
   approve each batch. The existing-Telegram route is the direction to adopt for

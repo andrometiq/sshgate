@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -154,7 +155,9 @@ func (h *HostedServerBackend) Request(ctx context.Context, req ApprovalRequest) 
 		ClientID: h.ClientID,
 		Commands: make([]signRequestCmdV2, len(req.Commands)),
 	}
+	expectedCommands := make([]string, len(req.Commands))
 	for i, c := range req.Commands {
+		expectedCommands[i] = c.Cmd
 		body.Commands[i] = signRequestCmdV2{
 			Server:     c.Server,
 			Cmd:        c.Cmd,
@@ -207,7 +210,7 @@ func (h *HostedServerBackend) Request(ctx context.Context, req ApprovalRequest) 
 	pollURL := strings.TrimRight(h.BaseURL, "/") + "/v1/poll/" + url.PathEscape(accepted.RequestID)
 
 	ch := make(chan Result, 1)
-	go h.pollLoop(ctx, pollURL, totalTimeout, pollWait, ch)
+	go h.pollLoop(ctx, pollURL, accepted.RequestID, expectedCommands, totalTimeout, pollWait, ch)
 	return ch, nil
 }
 
@@ -218,7 +221,7 @@ func (h *HostedServerBackend) Request(ctx context.Context, req ApprovalRequest) 
 // The total budget is bounded by `totalTimeout`. Each individual
 // HTTP request is bounded by pollWait + a small slop so a slow
 // upstream surfaces as a transient error rather than hanging us.
-func (h *HostedServerBackend) pollLoop(parentCtx context.Context, pollURL string, totalTimeout, pollWait time.Duration, out chan<- Result) {
+func (h *HostedServerBackend) pollLoop(parentCtx context.Context, pollURL, requestID string, expectedCommands []string, totalTimeout, pollWait time.Duration, out chan<- Result) {
 	defer close(out)
 	deadline := time.Now().Add(totalTimeout)
 	client := h.client()
@@ -298,16 +301,22 @@ func (h *HostedServerBackend) pollLoop(parentCtx context.Context, pollURL string
 
 		switch body.Status {
 		case "approved":
-			// Convert wire-shape signedSig → SignedCmd so the
-			// daemon's signing path can pass these through verbatim
-			// instead of re-signing with its (now-vestigial-in-this-
-			// mode) local key.
-			var sigs []SignedCmd
-			if len(body.Signatures) > 0 {
-				sigs = make([]SignedCmd, len(body.Signatures))
-				for i, s := range body.Signatures {
-					sigs[i] = SignedCmd{Cmd: s.Cmd, Sig: s.Sig}
+			// A remote approval is valid only with one non-empty signature per
+			// submitted command, in the same order. Returning StatusApproved with
+			// nil signatures would make Daemon.respond take its intentional LOCAL
+			// signing path, crossing custody boundaries. Treat every malformed
+			// remote approval as a terminal fail-closed timeout instead.
+			if body.RequestID != requestID || len(body.Signatures) != len(expectedCommands) || len(body.Signatures) == 0 {
+				out <- Result{Status: StatusTimeout}
+				return
+			}
+			sigs := make([]SignedCmd, len(body.Signatures))
+			for i, s := range body.Signatures {
+				if s.Cmd != expectedCommands[i] || strings.TrimSpace(s.Sig) == "" {
+					out <- Result{Status: StatusTimeout}
+					return
 				}
+				sigs[i] = SignedCmd{Cmd: s.Cmd, Sig: s.Sig}
 			}
 			out <- Result{Status: StatusApproved, ApprovedBy: body.ApprovedBy, Signatures: sigs}
 			return
@@ -378,7 +387,21 @@ func (h *HostedServerBackend) validate() error {
 	if h.ClientID == "" {
 		return errors.New("hosted: ClientID is required")
 	}
-	return nil
+	u, err := url.Parse(h.BaseURL)
+	if err != nil || u.Host == "" || u.User != nil || (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" {
+		return errors.New("hosted: BaseURL must be an origin without credentials, path, query, or fragment")
+	}
+	if u.Scheme == "https" {
+		return nil
+	}
+	if u.Scheme == "http" {
+		host := strings.ToLower(u.Hostname())
+		ip := net.ParseIP(host)
+		if host == "localhost" || strings.HasSuffix(host, ".localhost") || (ip != nil && ip.IsLoopback()) {
+			return nil
+		}
+	}
+	return errors.New("hosted: BaseURL must use HTTPS (plain HTTP is allowed only for localhost testing)")
 }
 
 func (h *HostedServerBackend) client() *http.Client {

@@ -126,6 +126,9 @@ type Vote struct {
 	Decision    Decision
 	AuthnMethod string
 	TS          time.Time
+	// Audited is true only after the external AuditSink has durably accepted
+	// the immutable vote. Decision readers MUST ignore unaudited rows.
+	Audited bool
 }
 
 // Store is the persistence interface. All methods MUST be safe for
@@ -158,6 +161,9 @@ type Store interface {
 	// it does NOT overwrite the signatures or approver of the winning
 	// transition). The SQLite ref impl satisfies this with a single
 	// `UPDATE ... WHERE request_id = ? AND status = 'pending'`.
+	// It MUST also refuse the transition while any prepared vote for that
+	// request remains Audited=false. That barrier ensures a terminal approve
+	// cannot race past a deny whose durable audit write is still in flight.
 	//
 	// A read-then-write implementation (SELECT status; if pending then UPDATE)
 	// is NON-CONFORMANT: two operators casting the final approve concurrently,
@@ -233,6 +239,14 @@ type Store interface {
 	// GetTOTP returns the user's TOTP secret. ErrNotFound if unset.
 	GetTOTP(ctx context.Context, userID string) (string, error)
 
+	// ConsumeTOTPStep atomically records step as the latest successfully used
+	// TOTP timestep for userID, but only if secret still matches the enrolled
+	// factor and step is strictly newer than the previously consumed step.
+	// It returns true for the single winning consumer and false for a replay,
+	// stale step, or factor rotated concurrently. All authentication purposes
+	// share this boundary so a login code cannot be reused for a vote.
+	ConsumeTOTPStep(ctx context.Context, userID, secret string, step int64) (bool, error)
+
 	// --- Sessions ---
 
 	// CreateSession inserts s. A duplicate ID returns ErrDuplicate.
@@ -248,15 +262,28 @@ type Store interface {
 
 	// --- Approvals (append-only vote ledger) ---
 
-	// RecordVote appends an operator's vote. The (request_id, operator)
-	// pair is unique: a second vote from the same operator on the same
-	// request returns ErrDuplicate and does NOT mutate the existing
-	// row (votes are immutable). The state machine collapses the
-	// duplicate by treating ErrDuplicate as "already counted".
-	RecordVote(ctx context.Context, v *Vote) error
+	// PrepareVote atomically claims an immutable (request_id, operator) vote
+	// while the request is pending. The returned Vote is the canonical stored
+	// row. needsAudit is true until MarkVoteAudited succeeds. A same-decision
+	// retry returns the existing row; an opposite-decision retry returns
+	// ErrVoteConflict and never changes it. Implementations must persist new
+	// votes as Audited=false.
+	PrepareVote(ctx context.Context, v *Vote) (canonical *Vote, needsAudit bool, err error)
 
-	// ListVotes returns every vote on requestID, oldest first. An empty
-	// slice when there are none.
+	// MarkVoteAudited makes a prepared vote visible to ListVotes. It is an
+	// idempotent compare-and-set from unaudited to audited. The approval engine
+	// calls it only after AuditSink.Verdict succeeds, so an unaudited vote can
+	// never contribute to a decision. A crash after the sink write but before
+	// this CAS may duplicate the same audit event on retry (at-least-once), but
+	// can never audit or count an opposite decision.
+	MarkVoteAudited(ctx context.Context, requestID, operator string) error
+
+	// ListVotes returns every audited vote on requestID, oldest first.
+	// Prepared-but-unaudited rows on a pending request are deliberately
+	// invisible. An implementation migrating a pre-audit schema may also return
+	// immutable votes for an already-terminal request with Audited=false to
+	// preserve honest history without claiming the external sink accepted them;
+	// such rows must never exist on a pending request.
 	ListVotes(ctx context.Context, requestID string) ([]*Vote, error)
 
 	// Close releases the underlying database handle. Idempotent.
@@ -272,8 +299,21 @@ var ErrNotFound = errors.New("store: request not found")
 // with an existing row.
 var ErrDuplicateID = errors.New("store: duplicate request_id")
 
+// ErrQueueFull is returned when a pending-request intake quota is exhausted.
+// Callers should surface it as bounded backpressure (429/Retry-After), not an
+// internal error or an unbounded allocation.
+var ErrQueueFull = errors.New("store: pending request queue full")
+
 // ErrDuplicate is the general "row already exists" sentinel for the
 // multi-operator tables (users, credentials, sessions, votes). Insert
 // keeps its own ErrDuplicateID for backward compatibility; new ops use
 // ErrDuplicate. Both are checked with errors.Is.
 var ErrDuplicate = errors.New("store: duplicate row")
+
+// ErrVoteConflict means an operator already prepared an immutable vote with
+// the opposite decision. The stored vote remains authoritative and unchanged.
+var ErrVoteConflict = errors.New("store: conflicting duplicate vote")
+
+// ErrRequestResolved means a vote claim raced with or followed a terminal
+// transition. No vote row was inserted.
+var ErrRequestResolved = errors.New("store: request already resolved")

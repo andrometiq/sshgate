@@ -37,6 +37,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"io/fs"
 	"net/http"
 	"os"
@@ -369,7 +370,7 @@ func buildHostedBackend(c hostedConfig) (signerkit.Backend, error) {
 	if c.ClientID == "" {
 		return nil, errors.New(`config missing backend.hosted.client_id`)
 	}
-	keyRaw, err := os.ReadFile(c.APIKeyFile)
+	keyRaw, err := readOwnerSecretFile(c.APIKeyFile)
 	if err != nil {
 		return nil, fmt.Errorf("read hosted api key %s: %w", c.APIKeyFile, err)
 	}
@@ -411,7 +412,7 @@ func buildTelegramBackend(ctx context.Context, c telegramConfig, redactSalt [32]
 		return nil, errors.New(`config missing backend.telegram.chatstore_path`)
 	}
 
-	tokenRaw, err := os.ReadFile(c.TokenPath)
+	tokenRaw, err := readOwnerSecretFile(c.TokenPath)
 	if err != nil {
 		return nil, fmt.Errorf("read token: %w", err)
 	}
@@ -493,7 +494,7 @@ func buildExplainer(c explainerConfig) (backend.Explainer, error) {
 	if c.APIKeyPath == "" {
 		return nil, errors.New("config missing backend.telegram.explainer.api_key_path")
 	}
-	keyRaw, err := os.ReadFile(c.APIKeyPath)
+	keyRaw, err := readOwnerSecretFile(c.APIKeyPath)
 	if err != nil {
 		return nil, fmt.Errorf("read explainer api key %s: %w", c.APIKeyPath, err)
 	}
@@ -512,6 +513,39 @@ func buildExplainer(c explainerConfig) (backend.Explainer, error) {
 		HTTPClient: &http.Client{Timeout: timeout},
 		Timeout:    timeout,
 	}, nil
+}
+
+func readOwnerSecretFile(path string) ([]byte, error) {
+	before, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if before.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("secret file is a symbolic link")
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	after, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if after.Mode()&os.ModeSymlink != 0 || !os.SameFile(info, after) {
+		return nil, fmt.Errorf("secret file changed or became a symbolic link during open")
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("secret file is not a regular file")
+	}
+	if mode := info.Mode().Perm(); mode&0o077 != 0 {
+		return nil, fmt.Errorf("secret file has insecure mode %#o (group/world bits must be off)", mode)
+	}
+	return io.ReadAll(f)
 }
 
 // defaultConfigPath returns the value of $SSHGATE_SIGNER_CONFIG if set,

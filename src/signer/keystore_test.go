@@ -7,6 +7,8 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 
 	"github.com/karthikeyan5/sshgate/pkg/signerkit"
@@ -43,11 +45,37 @@ func TestLoadKey_ValidPrivateKey(t *testing.T) {
 	}
 }
 
+func TestLoadKey_RefusesSymlink(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(dir, "target")
+	writeKeyFile(t, target, priv, 0o600)
+	link := filepath.Join(dir, "link")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := signerkit.LoadKey(link); err == nil || !strings.Contains(err.Error(), "symbolic link") {
+		t.Fatalf("LoadKey(symlink) err=%v; want refusal", err)
+	}
+}
+
 func TestLoadKey_MissingFile(t *testing.T) {
 	t.Parallel()
 	_, err := signerkit.LoadKey(filepath.Join(t.TempDir(), "nope.key"))
 	if err == nil {
 		t.Fatal("expected error for missing file")
+	}
+}
+
+func TestLoadKey_RefusesNonRegularFile(t *testing.T) {
+	t.Parallel()
+	_, err := signerkit.LoadKey(t.TempDir())
+	if err == nil || !strings.Contains(err.Error(), "not a regular file") {
+		t.Fatalf("LoadKey(directory) err=%v; want non-regular refusal", err)
 	}
 }
 
@@ -153,6 +181,48 @@ func TestGenerateKeyPair_RefusesOverwrite(t *testing.T) {
 	}
 	if err := signerkit.GenerateKeyPair(priv2, pub2); err == nil {
 		t.Fatal("expected refusal when pub exists")
+	}
+}
+
+func TestGenerateKeyPair_ConcurrentPublishHasOneWinner(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	privPath := filepath.Join(dir, "gate.key")
+	pubPath := filepath.Join(dir, "gate.pub")
+	const workers = 32
+	start := make(chan struct{})
+	results := make(chan error, workers)
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			results <- signerkit.GenerateKeyPair(privPath, pubPath)
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+	winners := 0
+	for err := range results {
+		if err == nil {
+			winners++
+		}
+	}
+	if winners != 1 {
+		t.Fatalf("concurrent keypair publishers = %d winners; want exactly 1", winners)
+	}
+	priv, err := signerkit.LoadKey(privPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub, err := os.ReadFile(pubPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(priv.Public().(ed25519.PublicKey), pub) {
+		t.Fatal("winning private/public files do not form one keypair")
 	}
 }
 

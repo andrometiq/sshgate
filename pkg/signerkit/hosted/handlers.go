@@ -2,13 +2,28 @@ package hosted
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 	"time"
 
+	"github.com/karthikeyan5/sshgate/pkg/signerkit"
 	"github.com/karthikeyan5/sshgate/pkg/signerkit/store"
 	"github.com/karthikeyan5/sshgate/src/sigwire"
+)
+
+// maxMachineBody bounds the bearer-gated submission envelope. One MiB is
+// ample for a bulk command request while preventing an authenticated client
+// from making the server buffer an unbounded JSON body.
+const (
+	maxMachineBody     = 256 << 10
+	maxCommandsPerSign = 64
+	maxCommandBytes    = 16 << 10
+	maxServerBytes     = 256
+	maxHostKeyFPBytes  = 512
 )
 
 // signRequest is the body shape of POST /v1/sign. It mirrors the
@@ -70,8 +85,8 @@ type signedCmd struct {
 	Sig string `json:"sig"`
 }
 
-// auditResponse is the body of GET /v1/audit. v2.0 returns an empty
-// list; v2.1 wires it to the SQLite store's RecentAudit query.
+// auditResponse is the body of GET /v1/audit, backed by the Store's bounded
+// RecentAudit query when persistence is configured.
 type auditResponse struct {
 	Entries []auditEntry `json:"entries"`
 }
@@ -88,8 +103,8 @@ type auditEntry struct {
 	ResolvedAt *time.Time `json:"resolved_at,omitempty"`
 }
 
-// handleHealthz returns 200 with a one-line "ok" body. Liveness only;
-// readiness (DB-up, key-loaded) is a v2.1 concern.
+// handleHealthz returns 200 with a one-line "ok" body. It is liveness only;
+// dependency readiness remains future work.
 func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	_, _ = w.Write([]byte("ok\n"))
@@ -99,15 +114,17 @@ func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {
 // a pending row in the store, returns 202 with the poll URL. When
 // Store is nil the handler skips persistence (commit-1 fallback).
 //
-// Approval itself is OUT of scope for v2.0 scaffold: there is no
-// human-in-the-loop yet (no web UI, no WebAuthn). Rows stay pending
-// until either an external mechanism flips them via UpdateStatus or
-// /v1/poll times out. v2.1 wires the approval UI.
+// Human-plane composition resolves accepted rows through authenticated
+// operator votes. Low-level machine-only composition may deliberately leave
+// them pending for an external policy actor.
 func (s *Server) handleSign(w http.ResponseWriter, r *http.Request) {
 	var req signRequest
-	dec := json.NewDecoder(r.Body)
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&req); err != nil {
+	body, err := readLimited(r.Body, maxMachineBody)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, "read body: "+err.Error())
+		return
+	}
+	if err := decodeStrictJSON(body, &req); err != nil {
 		writeJSONError(w, http.StatusBadRequest, "malformed request: "+err.Error())
 		return
 	}
@@ -115,8 +132,16 @@ func (s *Server) handleSign(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "client_id is required")
 		return
 	}
+	if s.MachineClientID != "" && req.ClientID != s.MachineClientID {
+		writeJSONError(w, http.StatusForbidden, "client_id is not bound to this credential")
+		return
+	}
 	if len(req.Commands) == 0 {
 		writeJSONError(w, http.StatusBadRequest, "commands must be non-empty")
+		return
+	}
+	if len(req.Commands) > maxCommandsPerSign {
+		writeJSONError(w, http.StatusBadRequest, "too many commands")
 		return
 	}
 	for i, c := range req.Commands {
@@ -124,8 +149,24 @@ func (s *Server) handleSign(w http.ResponseWriter, r *http.Request) {
 			writeJSONError(w, http.StatusBadRequest, "commands["+itoa(i)+"].cmd is empty")
 			return
 		}
+		if len([]byte(c.Cmd)) > maxCommandBytes {
+			writeJSONError(w, http.StatusBadRequest, "commands["+itoa(i)+"].cmd is too large")
+			return
+		}
+		if c.Server == "" || len([]byte(c.Server)) > maxServerBytes {
+			writeJSONError(w, http.StatusBadRequest, "commands["+itoa(i)+"].server is required and must be at most 256 bytes")
+			return
+		}
+		if len([]byte(c.HostKeyFP)) > maxHostKeyFPBytes {
+			writeJSONError(w, http.StatusBadRequest, "commands["+itoa(i)+"].host_key_fp is too large")
+			return
+		}
 		if c.TTLSeconds <= 0 {
 			writeJSONError(w, http.StatusBadRequest, "commands["+itoa(i)+"].ttl_seconds must be > 0")
+			return
+		}
+		if s.RequireHostKeyFP && strings.TrimSpace(c.HostKeyFP) == "" {
+			writeJSONError(w, http.StatusBadRequest, "commands["+itoa(i)+"].host_key_fp is required")
 			return
 		}
 		// Cap the requested TTL at the door. The mint-time path
@@ -144,27 +185,63 @@ func (s *Server) handleSign(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rid := generateRequestID()
+	// Canonicalize once before both audit and persistence. The audit row is a
+	// submission ATTEMPT: a later queue failure leaves one honest attempt event,
+	// never a partial per-command trail.
+	blob, err := json.Marshal(req.Commands)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "marshal commands: "+err.Error())
+		return
+	}
+
+	// The hosted audit contract is fail-closed: every accepted sign request
+	// is anchored BEFORE it becomes visible in the approval queue. New()
+	// always supplies Signer; the nil-store compatibility fixture has no queue
+	// and therefore retains its historical synthetic behaviour.
+	if s.Store != nil {
+		if s.Signer == nil {
+			writeJSONError(w, http.StatusInternalServerError, "audit unavailable")
+			return
+		}
+		commandsHash := sha256.Sum256(blob)
+		hostFPs := make([]string, len(req.Commands))
+		for i, c := range req.Commands {
+			hostFPs[i] = c.HostKeyFP
+		}
+		if err := s.Signer.Call(r.Context(), signerkit.AuditCall{
+			Time:           time.Now().UTC(),
+			RequestID:      rid,
+			CommandsSHA256: hex.EncodeToString(commandsHash[:]),
+			CommandCount:   len(req.Commands),
+			HostKeyFPs:     hostFPs,
+			Phase:          "submit_attempt",
+		}); err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "audit call")
+			return
+		}
+	}
 
 	if s.Store != nil {
 		// Re-encode the commands as canonical JSON so the stored
 		// blob matches what /v1/audit will serve back. We use the
 		// validated req.Commands rather than r.Body so any
 		// pretty-printed/whitespace-laden inputs normalise.
-		blob, err := json.Marshal(req.Commands)
-		if err != nil {
-			writeJSONError(w, http.StatusInternalServerError, "marshal commands: "+err.Error())
-			return
-		}
 		insertCtx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 		defer cancel()
 		ins := &store.Request{
-			RequestID: rid,
-			Status:    store.StatusPending,
-			ClientID:  req.ClientID,
-			Commands:  blob,
-			CreatedAt: time.Now().UTC(),
+			RequestID:         rid,
+			Status:            store.StatusPending,
+			ClientID:          req.ClientID,
+			Commands:          blob,
+			CreatedAt:         time.Now().UTC(),
+			RequiredApprovals: s.RequiredApprovals,
 		}
 		if err := s.Store.Insert(insertCtx, ins); err != nil {
+			if errors.Is(err, store.ErrQueueFull) {
+				w.Header().Set("Retry-After", "60")
+				writeJSONError(w, http.StatusTooManyRequests, "pending request queue full")
+				return
+			}
 			writeJSONError(w, http.StatusInternalServerError, "store insert: "+err.Error())
 			return
 		}
@@ -180,8 +257,8 @@ func (s *Server) handleSign(w http.ResponseWriter, r *http.Request) {
 // When Store is nil the handler returns {status: "timeout"} after a
 // short synthetic wait (kept for commit-1 fallback test fixtures).
 //
-// The wait window is s.PollWait (default 30s) for now; v2.1 will
-// honour a ?wait= query param per spec §"v2 vision → Wire protocol".
+// The wait window is s.PollWait (default 30s). A future release may honour a
+// shorter ?wait= query parameter.
 func (s *Server) handlePoll(w http.ResponseWriter, r *http.Request) {
 	rid := r.PathValue("request_id")
 	if rid == "" {

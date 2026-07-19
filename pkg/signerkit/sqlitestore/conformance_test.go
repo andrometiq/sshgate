@@ -25,3 +25,15 @@ func TestSQLiteStore_Conformance(t *testing.T) {
 		return db
 	})
 }
+
+func TestSQLiteStore_UnauditedVoteBarrierConformance(t *testing.T) {
+	t.Parallel()
+	storetest.RunUnauditedVoteBarrier(t, func(t *testing.T) store.Store {
+		db, err := sqlitestore.Open(filepath.Join(t.TempDir(), "conformance-audit-barrier.db"))
+		if err != nil {
+			t.Fatalf("Open: %v", err)
+		}
+		t.Cleanup(func() { _ = db.Close() })
+		return db
+	})
+}

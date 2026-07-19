@@ -1,19 +1,16 @@
-# systemd unit for sshgate-signer-server (v2 scaffold).
+# systemd unit for sshgate-signer-server.
 #
 # Installed by install/deploy.sh at /etc/systemd/system/sshgate-signer-server.service.
-# The deploy script substitutes ${BIN}, ${USER}, ${API_KEY_FILE}, ${DB_PATH},
-# and ${LISTEN_ADDR} before writing this file — see deploy.sh for the
-# values it expects.
+# The deploy script substitutes every __PLACEHOLDER__ before writing this
+# file; see deploy.sh for the values it expects.
 #
 # Design notes:
 #   - Runs under a dedicated, unprivileged user (User=). Never root.
 #   - Hardening directives (NoNewPrivileges, ProtectSystem, etc.) match the
-#     spirit of the v1 sshgate-signer-telegram unit; tighten further once v2.1 lands and
-#     the full filesystem layout settles.
+#     spirit of the local sshgate-signer-telegram unit.
 #   - Restart=on-failure with a 5s back-off gives operators a moment to
 #     spot a crash loop without thrash-restarting on a real bug.
-#   - WatchdogSec is intentionally unset for v2.0; we wire it in v2.1 when
-#     the server learns to ping sd_notify.
+#   - WatchdogSec is intentionally unset until the server supports sd_notify.
 
 [Unit]
 Description=sshgate-signer-server (SSHGate v2 hosted approval service)
@@ -27,10 +24,23 @@ User=__USER__
 Group=__USER__
 ExecStart=__BIN__ \
   --api-key-file __API_KEY_FILE__ \
+  --signing-key-file __SIGNING_KEY_FILE__ \
   --db __DB_PATH__ \
-  --addr __LISTEN_ADDR__
+  --addr __LISTEN_ADDR__ \
+  --ui \
+  --rp-id __RP_ID__ \
+  --rp-origin __RP_ORIGIN__ \
+  --rp-display-name "__RP_DISPLAY_NAME__" \
+  --session-ttl __SESSION_TTL__ \
+	--machine-client-id __MACHINE_CLIENT_ID__ \
+	--required-approvals __REQUIRED_APPROVALS__ \
+	--trust-proxy-headers=__TRUST_PROXY_HEADERS__ \
+  --require-step-up=__REQUIRE_STEP_UP__ \
+  --deny-veto=__DENY_VETO__ \
+  --allow-self-approve=__ALLOW_SELF_APPROVE__
 Restart=on-failure
 RestartSec=5
+UMask=0077
 
 # Hardening — defence in depth for a daemon that owns approval state.
 NoNewPrivileges=true
@@ -47,6 +57,8 @@ LockPersonality=true
 MemoryDenyWriteExecute=true
 RestrictRealtime=true
 RestrictSUIDSGID=true
+CapabilityBoundingSet=
+AmbientCapabilities=
 ReadWritePaths=__STATE_DIR__
 
 [Install]

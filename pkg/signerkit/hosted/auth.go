@@ -8,6 +8,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
+	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -112,6 +115,19 @@ type AuthManager struct {
 	randRead func([]byte) (int, error)
 }
 
+// allowsOrigin reports whether origin exactly matches one of the configured
+// WebAuthn relying-party origins. Human-plane cookie-authenticated mutations
+// use the same allow-list as a CSRF boundary, so passkey and session trust
+// cannot drift apart.
+func (m *AuthManager) allowsOrigin(origin string) bool {
+	for _, allowed := range m.cfg.RPOrigins {
+		if origin == allowed {
+			return true
+		}
+	}
+	return false
+}
+
 // NewAuthManager builds an AuthManager. It refuses every misconfiguration
 // that would weaken the mechanism: a nil store, an empty RP-ID/origin
 // (origin-bound passkeys need both), or a non-positive session TTL (so
@@ -127,6 +143,16 @@ func NewAuthManager(st store.Store, cfg AuthConfig) (*AuthManager, error) {
 	}
 	if len(cfg.RPOrigins) == 0 {
 		return nil, errors.New("hosted: NewAuthManager: at least one RPOrigin is required")
+	}
+	seenOrigins := make(map[string]struct{}, len(cfg.RPOrigins))
+	for _, origin := range cfg.RPOrigins {
+		if err := validateRPOrigin(origin); err != nil {
+			return nil, fmt.Errorf("hosted: NewAuthManager: invalid RPOrigin %q: %w", origin, err)
+		}
+		if _, duplicate := seenOrigins[origin]; duplicate {
+			return nil, fmt.Errorf("hosted: NewAuthManager: duplicate RPOrigin %q", origin)
+		}
+		seenOrigins[origin] = struct{}{}
 	}
 	if cfg.SessionTTL <= 0 {
 		return nil, errors.New("hosted: NewAuthManager: SessionTTL must be > 0 (the lifetime is the caller's choice, not a baked default)")
@@ -157,6 +183,33 @@ func NewAuthManager(st store.Store, cfg AuthConfig) (*AuthManager, error) {
 		now:        time.Now,
 		randRead:   rand.Read,
 	}, nil
+}
+
+func validateRPOrigin(origin string) error {
+	u, err := url.Parse(origin)
+	if err != nil {
+		return err
+	}
+	if u.Scheme == "" || u.Host == "" || u.User != nil || u.Path != "" || u.RawQuery != "" || u.Fragment != "" {
+		return errors.New("must be a canonical scheme://host[:port] origin without credentials, path, query, or fragment")
+	}
+	canonical := strings.ToLower(u.Scheme) + "://" + strings.ToLower(u.Host)
+	if origin != canonical {
+		return fmt.Errorf("must use canonical lowercase form %q", canonical)
+	}
+	switch u.Scheme {
+	case "https":
+		return nil
+	case "http":
+		host := strings.ToLower(u.Hostname())
+		ip := net.ParseIP(host)
+		if host == "localhost" || strings.HasSuffix(host, ".localhost") || (ip != nil && ip.IsLoopback()) {
+			return nil
+		}
+		return errors.New("plain HTTP is allowed only for localhost or a loopback address")
+	default:
+		return errors.New("scheme must be https (or http for localhost development)")
+	}
 }
 
 // ---------------------------------------------------------------------
@@ -211,11 +264,16 @@ var ErrTOTPNotEnrolled = errors.New("hosted: TOTP not enrolled for user")
 // 401 without leaking which factor failed or why.
 var ErrAuthFailed = errors.New("hosted: authentication failed")
 
-// VerifyTOTP checks code against the user's stored secret using the
-// standard 30s period with ±1 period of skew (the RFC-6238 reflex: a
-// single step of clock drift on either side is tolerated, more is not).
-// Returns nil on a valid code, ErrAuthFailed on a wrong/expired code,
-// ErrTOTPNotEnrolled if the user has no secret.
+// ErrAuthRateLimited is returned when the bounded WebAuthn challenge store
+// refuses another live ceremony. Routes map it to 429 without exposing user
+// existence or challenge details.
+var ErrAuthRateLimited = errors.New("hosted: authentication rate limited")
+
+// VerifyTOTP checks and atomically consumes a code against the user's stored
+// factor. The standard 30s period with ±1 period of skew is accepted, but a
+// successful timestep is globally one-use per user across login and step-up.
+// Returns nil on the single winning use, ErrAuthFailed on a wrong, expired, or
+// replayed code, and ErrTOTPNotEnrolled if the user has no secret.
 func (m *AuthManager) VerifyTOTP(ctx context.Context, userID, code string) error {
 	if userID == "" {
 		return errors.New("hosted: VerifyTOTP: empty user_id")
@@ -227,17 +285,38 @@ func (m *AuthManager) VerifyTOTP(ctx context.Context, userID, code string) error
 		}
 		return fmt.Errorf("hosted: VerifyTOTP: load secret: %w", err)
 	}
-	// Explicit Digits/Algorithm: ValidateCustom does NOT default Digits
-	// (a zero Digits validates against a 0-digit code and always fails),
-	// so we pin the standard Google-Authenticator-compatible parameters
-	// that totp.Generate produced the secret under.
-	ok, err := totp.ValidateCustom(code, secret, m.now().UTC(), totp.ValidateOpts{
-		Period:    30,
-		Skew:      1,
-		Digits:    otp.DigitsSix,
-		Algorithm: otp.AlgorithmSHA1,
-	})
-	if err != nil || !ok {
+	// Find the exact accepted counter so the store can consume it atomically.
+	// Explicit Digits/Algorithm are required because ValidateCustom does not
+	// default Digits.
+	const period int64 = 30
+	nowStep := m.now().UTC().Unix() / period
+	matchedStep := int64(-1)
+	for _, step := range []int64{nowStep, nowStep - 1, nowStep + 1} {
+		if step < 0 {
+			continue
+		}
+		ok, validateErr := totp.ValidateCustom(code, secret, time.Unix(step*period, 0).UTC(), totp.ValidateOpts{
+			Period:    uint(period),
+			Skew:      0,
+			Digits:    otp.DigitsSix,
+			Algorithm: otp.AlgorithmSHA1,
+		})
+		if validateErr != nil {
+			return ErrAuthFailed
+		}
+		if ok {
+			matchedStep = step
+			break
+		}
+	}
+	if matchedStep < 0 {
+		return ErrAuthFailed
+	}
+	consumed, err := m.store.ConsumeTOTPStep(ctx, userID, secret, matchedStep)
+	if err != nil {
+		return fmt.Errorf("hosted: VerifyTOTP: consume replay state: %w", err)
+	}
+	if !consumed {
 		return ErrAuthFailed
 	}
 	return nil
@@ -575,6 +654,11 @@ type challengeStore struct {
 	m  map[string]challengeEntry
 }
 
+const (
+	maxActiveChallenges        = 4096
+	maxActiveChallengesPerUser = 8
+)
+
 func newChallengeStore() *challengeStore {
 	return &challengeStore{m: make(map[string]challengeEntry)}
 }
@@ -591,6 +675,18 @@ func (c *challengeStore) put(session *webauthn.SessionData, kind ceremonyKind, u
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.sweepLocked(now)
+	if len(c.m) >= maxActiveChallenges {
+		return "", ErrAuthRateLimited
+	}
+	perUser := 0
+	for _, e := range c.m {
+		if e.userID == userID {
+			perUser++
+		}
+	}
+	if perUser >= maxActiveChallengesPerUser {
+		return "", ErrAuthRateLimited
+	}
 	c.m[id] = challengeEntry{session: session, ceremony: kind, userID: userID, expires: expiresAt}
 	return id, nil
 }
