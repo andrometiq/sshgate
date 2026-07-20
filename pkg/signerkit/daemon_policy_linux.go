@@ -15,6 +15,7 @@ import (
 	"io"
 	"time"
 
+	"github.com/karthikeyan5/sshgate/internal/securestate"
 	"github.com/karthikeyan5/sshgate/src/policy"
 	"github.com/karthikeyan5/sshgate/src/policywire"
 )
@@ -45,6 +46,9 @@ func (h *localPolicyDecisionHooks) Activate(_ context.Context) error {
 
 func (h *localPolicyDecisionHooks) CommitVerdict(_ context.Context, result BaseManifestApprovalResult) error {
 	_, err := h.journal.commitLocalVerdict(h.requestID, h.challenge, result)
+	if errors.Is(err, securestate.ErrCommitUncertain) {
+		return fmt.Errorf("%w: %v", ErrPolicyVerdictCommitUncertain, err)
+	}
 	return err
 }
 
@@ -253,6 +257,12 @@ func (d *Daemon) processPolicyRecord(ctx context.Context, requestID string, back
 					// POST/GET may already be durable remotely; preserve notifying or
 					// pending so the exact ID can reconcile later.
 					return nil, fmt.Errorf("hosted policy reconciliation unavailable: %w", err)
+				}
+				if errors.Is(err, ErrPolicyVerdictCommitUncertain) {
+					// The backend disabled its live callback entry. Do not invent an
+					// opposite timeout/interruption: the journal is the only authority
+					// on whether the attempted verdict became durable.
+					return nil, err
 				}
 				current, loadErr := d.policyJournal.record(requestID)
 				if loadErr != nil {
@@ -495,6 +505,11 @@ func (d *Daemon) requestPolicyDecision(ctx context.Context, record policyRequest
 		Submitted:           time.Unix(0, record.SubmittedUnixNano),
 	}
 	if record.Mode == policyModeLocalTelegram {
+		trustedHead, err := d.policyJournal.trustedHeadEnvelopeForRequest(record.RequestID)
+		if err != nil {
+			return BaseManifestApprovalResult{}, fmt.Errorf("load trusted policy head for review: %w", err)
+		}
+		request.TrustedHeadEnvelope = trustedHead
 		request.DecisionHooks = &localPolicyDecisionHooks{
 			journal: d.policyJournal, requestID: record.RequestID, challenge: record.CallbackChallenge,
 		}
@@ -529,12 +544,19 @@ func (d *Daemon) requestPolicyDecision(ctx context.Context, record policyRequest
 			}
 			return timeout, nil
 		}
+		if result.BackendError != nil {
+			return BaseManifestApprovalResult{}, result.BackendError
+		}
 		return result, nil
 	case <-ctx.Done():
 		if record.Mode == policyModeHosted {
 			return BaseManifestApprovalResult{}, ctx.Err()
 		}
-		timeout := BaseManifestApprovalResult{Status: policywire.StatusTimeout, Kind: BaseManifestResultLocalDecision}
+		status := policywire.StatusTimeout
+		if errors.Is(ctx.Err(), context.Canceled) {
+			status = policywire.StatusInterrupted
+		}
+		timeout := BaseManifestApprovalResult{Status: status, Kind: BaseManifestResultLocalDecision}
 		current, loadErr := d.policyJournal.record(record.RequestID)
 		if loadErr != nil {
 			return BaseManifestApprovalResult{}, loadErr

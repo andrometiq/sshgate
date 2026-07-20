@@ -48,8 +48,8 @@ func (b *hostedPolicyTestBackend) RequestBaseManifest(_ context.Context, request
 	b.requests++
 	call := b.requests
 	b.mu.Unlock()
-	if request.DecisionHooks != nil || len(request.FrozenPublicKey) != ed25519.PublicKeySize {
-		return nil, errors.New("hosted request carried local hooks or missing frozen key")
+	if request.DecisionHooks != nil || len(request.TrustedHeadEnvelope) != 0 || len(request.FrozenPublicKey) != ed25519.PublicKeySize {
+		return nil, errors.New("hosted request carried local review state or missing frozen key")
 	}
 	if b.stallFirst && call == 1 {
 		close(b.firstStarted)
@@ -67,6 +67,66 @@ func (b *hostedPolicyTestBackend) RequestBaseManifest(_ context.Context, request
 	ch <- BaseManifestApprovalResult{Status: policywire.StatusApproved, Kind: BaseManifestResultRemoteEnvelope, ManifestEnvelope: envelope}
 	close(ch)
 	return ch, nil
+}
+
+func TestLocalPolicyBackendReceivesExactSignerOwnedHead(t *testing.T) {
+	publicKey, privateKey, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend := &localPolicyTestBackend{status: policywire.StatusApproved}
+	service, err := New(Config{
+		Signer: privateKey, Backend: backend, Audit: &policyTestAuditSink{},
+		PolicyJournalRoot: t.TempDir() + "/policy-requests",
+		NowFunc:           func() time.Time { return time.Unix(410, 0) },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = service.Close() })
+	host := testPolicyFingerprint(0x54)
+	bootstrapManifest := testBootstrapManifest(host)
+	bootstrap := testPolicyDecoded(t, privateKey, "pm_54000000000000000000000000000001", host, bootstrapManifest, "", true)
+	bootstrapLine, err := policywire.MarshalRequestLine(bootstrap.Wire)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runPolicyRequest(t, service, bootstrapLine); err != nil {
+		t.Fatal(err)
+	}
+	_, headDigest, err := policywire.PayloadDigests(bootstrap.Payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	successorManifest := bootstrapManifest
+	successorManifest.Revision = 2
+	successorManifest.MissAction = policy.MissActionAsk
+	successorManifest.Growth = policy.GrowthOutOfBand
+	successor := testPolicyDecoded(t, privateKey, "pm_54000000000000000000000000000002", host, successorManifest, headDigest, false)
+	successorLine, err := policywire.MarshalRequestLine(successor.Wire)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runPolicyRequest(t, service, successorLine); err != nil {
+		t.Fatal(err)
+	}
+	backend.mu.Lock()
+	requests := append([]BaseManifestApprovalRequest(nil), backend.requests...)
+	backend.mu.Unlock()
+	if len(requests) != 2 {
+		t.Fatalf("backend requests = %d, want bootstrap and successor", len(requests))
+	}
+	if len(requests[0].TrustedHeadEnvelope) != 0 {
+		t.Fatal("bootstrap received a predecessor envelope")
+	}
+	verified, err := policy.VerifyBaseManifest(requests[1].TrustedHeadEnvelope, publicKey)
+	if err != nil || verified.Revision != 1 || verified.Host != host {
+		t.Fatalf("trusted predecessor verification = %#v, %v", verified, err)
+	}
+	headPayload, _, err := policy.DecodeBaseManifestEnvelope(requests[1].TrustedHeadEnvelope)
+	if err != nil || !bytes.Equal(headPayload, bootstrap.Payload) {
+		t.Fatalf("trusted predecessor payload changed: equal=%t err=%v", bytes.Equal(headPayload, bootstrap.Payload), err)
+	}
 }
 
 func (b *hostedPolicyTestBackend) requestCount() int {

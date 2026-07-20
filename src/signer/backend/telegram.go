@@ -93,6 +93,14 @@ type TelegramBackend struct {
 
 	// Pending requests keyed by RequestID.
 	pending sync.Map // map[string]*pendingState
+
+	// Policy approvals use a disjoint callback namespace and a separate state
+	// machine. Ordinary approve:/deny: behavior above must remain untouched.
+	policyPending sync.Map // map[policyPendingKey]*policyPendingState
+	// policyNotifyMu keeps each multipart policy review + sole decision card a
+	// contiguous Telegram burst. It is released as soon as the card is active;
+	// independent human decision waits remain concurrent.
+	policyNotifyMu sync.Mutex
 }
 
 // pendingState is the per-request bookkeeping. once guards the
@@ -457,6 +465,10 @@ func (t *TelegramBackend) handleCallback(cb *tgbotapi.CallbackQuery) {
 			fromID = cb.From.ID
 		}
 		t.logger.Printf("callback from unauthorized user_id=%d ignored", fromID)
+		return
+	}
+	if strings.HasPrefix(cb.Data, "p:") {
+		t.handlePolicyCallback(cb)
 		return
 	}
 

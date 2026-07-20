@@ -46,6 +46,17 @@ type fakeTelegram struct {
 	// JSON `ok` field (not the HTTP status), so we encode the failure in
 	// the body.
 	sendMessageFailCode int
+	// sendMessageFailAt limits the scripted API failure to one 1-based send;
+	// zero preserves sendMessageFailCode's historical fail-every-send behavior.
+	sendMessageFailAt int
+	sendMessageCalls  int
+	// sendMessageDropAt records a successful upstream acceptance on this
+	// 1-based call, then drops the response body. The client observes an
+	// uncertain transport error even though Telegram may display the message.
+	sendMessageDropAt int
+	// sendMessageHook runs after a successful acceptance and before the fake
+	// response. Policy tests use it to cancel between multipart sends.
+	sendMessageHook func(call int)
 
 	// getUpdatesFailCodes is a FIFO queue of API error_codes that
 	// respondGetUpdates returns (as {"ok":false,...}) before falling back
@@ -196,8 +207,13 @@ func (f *fakeTelegram) respondSendMessage(w http.ResponseWriter, r *http.Request
 	rm := r.FormValue("reply_markup")
 	f.mu.Lock()
 	failCode := f.sendMessageFailCode
+	f.sendMessageCalls++
+	call := f.sendMessageCalls
+	failAt := f.sendMessageFailAt
+	dropAt := f.sendMessageDropAt
+	hook := f.sendMessageHook
 	f.mu.Unlock()
-	if failCode != 0 {
+	if failCode != 0 && (failAt == 0 || failAt == call) {
 		// Record nothing as "sent" — the upstream rejected the send.
 		writeAPIError(w, failCode, "scripted sendMessage failure")
 		return
@@ -207,6 +223,12 @@ func (f *fakeTelegram) respondSendMessage(w http.ResponseWriter, r *http.Request
 	f.nextMessageID++
 	f.sentMessages = append(f.sentMessages, sentMessage{ChatID: chatID, Text: text, ReplyMarkup: rm})
 	f.mu.Unlock()
+	if hook != nil {
+		hook(call)
+	}
+	if dropAt == call {
+		return
+	}
 	body := fmt.Sprintf(`{"message_id":%d,"chat":{"id":%d,"type":"private"},"date":%d,"text":%q}`, mid, chatID, time.Now().Unix(), text)
 	writeAPIResult(w, json.RawMessage(body))
 }

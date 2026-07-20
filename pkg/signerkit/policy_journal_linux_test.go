@@ -179,6 +179,87 @@ func TestPolicyJournalLocalApprovalIsDurableAndIdempotent(t *testing.T) {
 	}
 }
 
+func TestPolicyJournalTrustedHeadEnvelopeIsExactAndLocalOnly(t *testing.T) {
+	journal, _ := testPolicyJournal(t)
+	publicKey, privateKey, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	host := testPolicyFingerprint(0x31)
+	bootstrap := testBootstrapManifest(host)
+	first := testPolicyDecoded(t, privateKey, "pm_31000000000000000000000000000001", host, bootstrap, "", true)
+	if _, err := journal.begin(first, policyModeLocalTelegram, publicKey, time.Unix(10, 0)); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := journal.trustedHeadEnvelopeForRequest(first.Wire.RequestID); err != nil || got != nil {
+		t.Fatalf("bootstrap predecessor = %x, %v; want nil", got, err)
+	}
+	challenge := "3131313131313131"
+	if _, err := journal.markNotifying(first.Wire.RequestID, challenge); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := journal.activateLocal(first.Wire.RequestID, challenge); err != nil {
+		t.Fatal(err)
+	}
+	approved := BaseManifestApprovalResult{Status: policywire.StatusApproved, Kind: BaseManifestResultLocalDecision, ApprovedBy: "id:1", OperatorAuthMethod: "telegram"}
+	if _, err := journal.commitLocalVerdict(first.Wire.RequestID, challenge, approved); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := journal.setApprovedMaterializing(first.Wire.RequestID); err != nil {
+		t.Fatal(err)
+	}
+	envelope, err := policy.SignBaseManifest(privateKey, bootstrap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := journal.persistApprovedUnexposed(first.Wire.RequestID, envelope); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := journal.commitApproved(first.Wire.RequestID); err != nil {
+		t.Fatal(err)
+	}
+	payload, _, err := policy.DecodeBaseManifestEnvelope(envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, headDigest, err := policywire.PayloadDigests(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	successor := bootstrap
+	successor.Revision = 2
+	successor.MissAction = policy.MissActionDeny
+	second := testPolicyDecoded(t, privateKey, "pm_31000000000000000000000000000002", host, successor, headDigest, false)
+	if _, err := journal.begin(second, policyModeLocalTelegram, publicKey, time.Unix(11, 0)); err != nil {
+		t.Fatal(err)
+	}
+	got, err := journal.trustedHeadEnvelopeForRequest(second.Wire.RequestID)
+	if err != nil || !bytes.Equal(got, envelope) {
+		t.Fatalf("local predecessor changed: equal=%t err=%v", bytes.Equal(got, envelope), err)
+	}
+	secondChallenge := "3232323232323232"
+	if _, err := journal.markNotifying(second.Wire.RequestID, secondChallenge); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := journal.activateLocal(second.Wire.RequestID, secondChallenge); err != nil {
+		t.Fatal(err)
+	}
+	denied := BaseManifestApprovalResult{Status: policywire.StatusDenied, Kind: BaseManifestResultLocalDecision, ApprovedBy: "id:1", OperatorAuthMethod: "telegram"}
+	if _, err := journal.commitLocalVerdict(second.Wire.RequestID, secondChallenge, denied); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := journal.finalizeNoMint(second.Wire.RequestID); err != nil {
+		t.Fatal(err)
+	}
+	third := testPolicyDecoded(t, privateKey, "pm_31000000000000000000000000000003", host, successor, headDigest, false)
+	if _, err := journal.begin(third, policyModeHosted, publicKey, time.Unix(12, 0)); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := journal.trustedHeadEnvelopeForRequest(third.Wire.RequestID); err != nil || got != nil {
+		t.Fatalf("hosted request received local predecessor = %x, %v", got, err)
+	}
+}
+
 func TestPolicyJournalSameIDConflictAndOneNonterminalPerHost(t *testing.T) {
 	journal, _ := testPolicyJournal(t)
 	publicKey, privateKey, err := ed25519.GenerateKey(nil)

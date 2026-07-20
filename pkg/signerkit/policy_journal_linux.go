@@ -1195,6 +1195,35 @@ func (j *localPolicyJournal) record(requestID string) (policyRequestRecord, erro
 	return out, err
 }
 
+// trustedHeadEnvelopeForRequest returns the exact validated signer-owned head
+// bound to requestID. Bootstrap requests have no predecessor and return nil.
+// Hosted pass-through deliberately receives no local mirror: only the hosted
+// authority may classify a new hosted request against its current head.
+func (j *localPolicyJournal) trustedHeadEnvelopeForRequest(requestID string) ([]byte, error) {
+	var out []byte
+	err := j.view(func(disk *policyJournalDisk) error {
+		record, ok := disk.request(requestID)
+		if !ok {
+			return securestate.ErrNotFound
+		}
+		if record.Mode != policyModeLocalTelegram || record.TrustedHeadDigest == "" {
+			return nil
+		}
+		head, ok := disk.head(record.HostKeyFP)
+		if !ok || head.BaseDigest != record.TrustedHeadDigest || record.ExpectedHeadDigest != record.TrustedHeadDigest ||
+			head.SignerKeyID != record.ExpectedSignerKeyID || head.SignerPublicKeyB64 != record.FrozenPublicKeyB64 {
+			return errPolicyConflict
+		}
+		envelope, err := policyHeadEnvelope(head)
+		if err != nil {
+			return err
+		}
+		out = append([]byte(nil), envelope...)
+		return nil
+	})
+	return out, err
+}
+
 func (j *localPolicyJournal) mutateRequest(requestID string, allowed []policyRequestState, mutate func(*policyRequestRecord) error) (policyRequestRecord, error) {
 	var out policyRequestRecord
 	err := j.update(func(disk *policyJournalDisk) error {

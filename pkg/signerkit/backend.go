@@ -2,6 +2,7 @@ package signerkit
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/karthikeyan5/sshgate/src/policywire"
@@ -92,6 +93,11 @@ type BaseManifestApprovalRequest struct {
 	HostKeyFP           string
 	ExpectedSignerKeyID string
 	Payload             []byte
+	// TrustedHeadEnvelope is the exact signer-owned predecessor envelope used
+	// for local human review. It is empty for bootstrap and hosted pass-through.
+	// The daemon sources it only from the validated secure journal; callers must
+	// never substitute a requester-provided base.
+	TrustedHeadEnvelope []byte
 	// FrozenPublicKey is the exact 32-byte authority key snapshotted into the
 	// secure journal. Hosted recovery must verify under this persisted key,
 	// never silently reinterpret an old request under current config.
@@ -147,7 +153,17 @@ type BaseManifestApprovalResult struct {
 	OperatorAuthMethod string
 	Kind               BaseManifestResultKind
 	ManifestEnvelope   []byte
+	// BackendError reports an asynchronous local approval-transport failure
+	// after notification succeeded (notably an uncertain durable verdict
+	// commit). It is never a policy terminal and must not trigger a synthetic
+	// opposite verdict; the exact request remains recoverable from the journal.
+	BackendError error
 }
+
+// ErrPolicyVerdictCommitUncertain marks a local human verdict whose durable
+// hook did not return a result the backend can safely classify. Callers must
+// expose no terminal response and must never replace it with another verdict.
+var ErrPolicyVerdictCommitUncertain = errors.New("policy verdict durable commit uncertain")
 
 // HostedBaseManifestApprovalBackend is an additive marker for the P6-backed
 // pass-through mode. BaseManifestApprovalBackend implementations without this
