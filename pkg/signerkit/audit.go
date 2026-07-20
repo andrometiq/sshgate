@@ -41,6 +41,9 @@ type AuditEvent struct {
 	Servers    []string  `json:"servers"`
 	ApprovedBy string    `json:"approved_by,omitempty"`
 	AuthMode   string    `json:"auth_mode,omitempty"`
+	// Policy is nil for every frozen ordinary audit row. Dedicated policy
+	// events populate it without changing ordinary JSON bytes.
+	Policy *PolicyAuditMetadata `json:"policy,omitempty"`
 }
 
 // AuditLog is an append-only JSON-Lines file with fsync per record.

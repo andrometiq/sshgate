@@ -37,6 +37,11 @@ var (
 	ErrTooLarge = errors.New("securestate: object too large")
 	// ErrClosed marks use after Store.Close.
 	ErrClosed = errors.New("securestate: store closed")
+	// ErrCommitUncertain marks a replacement whose rename succeeded but whose
+	// post-rename validation or directory fsync did not. The new complete inode
+	// may already be visible, so callers must not treat the write as either
+	// definitely committed or definitely absent.
+	ErrCommitUncertain = errors.New("securestate: commit durability uncertain")
 	// ErrInactiveTransaction marks a retained Transaction used after its
 	// callback returned.
 	ErrInactiveTransaction = errors.New("securestate: inactive transaction")
@@ -56,6 +61,12 @@ type Store struct {
 	// beforeRename is an unexported failure-injection seam for package tests.
 	// Production stores leave it nil.
 	beforeRename func() error
+	// afterRename is the corresponding uncertainty seam: the replacement is
+	// already installed when it runs, but directory durability is not confirmed.
+	afterRename func() error
+	// beforeTransactionSync is a test-only seam for the durability confirmation
+	// every transaction performs after taking the inode-stable flock.
+	beforeTransactionSync func() error
 }
 
 // Transaction is valid only during a View or Update callback. View exposes
@@ -136,6 +147,12 @@ func OpenDirectory(dirFD int, expectedUID uint32, initialize bool) (*Store, erro
 	if err := s.validatePinnedLock(); err != nil {
 		return nil, err
 	}
+	// Besides validating the reopened directory, confirm any rename installed
+	// by a prior process whose final fsync result was uncertain. A successful
+	// reopen therefore establishes the durability boundary callers rely on.
+	if err := unix.Fsync(s.dirFD); err != nil {
+		return nil, fmt.Errorf("securestate: fsync directory on open: %w", err)
+	}
 	closeOnError = false
 	return s, nil
 }
@@ -200,6 +217,19 @@ func (s *Store) withLock(operation int, writable bool, fn func(*Transaction) err
 	// a blocking flock cannot split cooperating processes across lock inodes.
 	if err := s.validatePinnedLock(); err != nil {
 		return err
+	}
+	// Confirm directory durability while holding the shared/exclusive flock and
+	// before exposing any object. This closes the cross-instance uncertainty
+	// case: if another process renamed a complete replacement but lost the final
+	// fsync acknowledgement, an already-open peer either makes that rename
+	// durable here or returns without invoking the transaction callback.
+	if s.beforeTransactionSync != nil {
+		if err := s.beforeTransactionSync(); err != nil {
+			return fmt.Errorf("%w: injected transaction directory sync: %v", ErrCommitUncertain, err)
+		}
+	}
+	if err := unix.Fsync(s.dirFD); err != nil {
+		return fmt.Errorf("%w: confirm directory before transaction: %v", ErrCommitUncertain, err)
 	}
 	tx := &Transaction{store: s, writable: writable, active: true}
 	defer func() { tx.active = false }()
@@ -388,15 +418,20 @@ func (tx *Transaction) atomicReplace(name string, body []byte) error {
 			return fmt.Errorf("securestate: rename temp: %w", err)
 		}
 		cleanup = false
+		if tx.store.afterRename != nil {
+			if err := tx.store.afterRename(); err != nil {
+				return fmt.Errorf("%w: injected after rename: %v", ErrCommitUncertain, err)
+			}
+		}
 		installed, err := tx.store.statPath(name)
 		if err != nil {
-			return err
+			return fmt.Errorf("%w: validate installed %s: %v", ErrCommitUncertain, name, err)
 		}
 		if !sameInode(created, installed) {
-			return fmt.Errorf("%w: installed %s is not the written inode", ErrUnsafe, name)
+			return fmt.Errorf("%w: %v: installed %s is not the written inode", ErrCommitUncertain, ErrUnsafe, name)
 		}
 		if err := unix.Fsync(tx.store.dirFD); err != nil {
-			return fmt.Errorf("securestate: fsync directory: %w", err)
+			return fmt.Errorf("%w: fsync directory: %v", ErrCommitUncertain, err)
 		}
 		return nil
 	}

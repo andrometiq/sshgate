@@ -61,6 +61,9 @@ type AuditCall struct {
 	Lifecycle      string    `json:"lifecycle,omitempty"`
 	Reason         string    `json:"reason,omitempty"`
 	Operator       *Operator `json:"operator,omitempty"`
+	// Policy carries the dedicated policy-authority event metadata. It is nil
+	// for every ordinary/custody event, preserving their frozen encodings.
+	Policy *PolicyAuditMetadata `json:"policy,omitempty"`
 }
 
 // AuditVerdict is the event recorded for every vote on the hosted human plane.
@@ -73,6 +76,39 @@ type AuditVerdict struct {
 	Operator      Operator  `json:"operator"`
 	CommandSHA256 string    `json:"command_sha256"`
 	Approved      bool      `json:"approved"`
+	// Policy is non-nil only for the dedicated base-manifest human-verdict
+	// phase. Ordinary hosted verdict encodings remain byte-identical.
+	Policy *PolicyAuditMetadata `json:"policy,omitempty"`
+}
+
+// PolicyAuditMetadata is the payload-free, additive policy-authority audit
+// shape. Digests are lowercase hexadecimal; it never carries manifest bytes,
+// command literals, signatures, or envelopes.
+type PolicyAuditMetadata struct {
+	EventID            string `json:"event_id"`
+	Purpose            string `json:"purpose"`
+	Principal          string `json:"principal"`
+	TupleDigest        string `json:"tuple_digest"`
+	Phase              string `json:"phase"`
+	StateVersion       uint64 `json:"state_version"`
+	RequestID          string `json:"request_id"`
+	HostKeyFP          string `json:"host_key_fp"`
+	PayloadSHA256      string `json:"payload_sha256"`
+	CandidateDigest    string `json:"candidate_digest"`
+	HeadDigest         string `json:"head_digest,omitempty"`
+	Epoch              uint64 `json:"epoch"`
+	Revision           uint64 `json:"revision"`
+	MissAction         string `json:"miss_action"`
+	Growth             string `json:"growth"`
+	EntryCount         int    `json:"entry_count"`
+	RevocationCount    int    `json:"revocation_count"`
+	SignerKeyID        string `json:"signer_key_id"`
+	ResultSHA256       string `json:"result_sha256,omitempty"`
+	Outcome            string `json:"outcome,omitempty"`
+	ErrorCode          string `json:"error_code,omitempty"`
+	NoOp               bool   `json:"no_op,omitempty"`
+	VerifiedOperator   string `json:"verified_operator,omitempty"`
+	OperatorAuthMethod string `json:"operator_auth_method,omitempty"`
 }
 
 // NewAppendOnlySink returns an AuditSink that appends one JSON line per event to
@@ -131,6 +167,16 @@ func (s *appendOnlySink) write(v auditLine) error {
 // variant preserves the legacy lock/unlock/rotate AuditEvent status while a
 // normal call keeps the hosted-plane shape below.
 func (a *AuditLog) Call(_ context.Context, e AuditCall) error {
+	if e.Policy != nil {
+		return a.Write(AuditEvent{
+			TS:        e.Time.UTC(),
+			RequestID: e.Policy.RequestID,
+			Status:    "policy-" + e.Policy.Phase,
+			Commands:  []string{},
+			Servers:   []string{e.Policy.HostKeyFP},
+			Policy:    e.Policy,
+		})
+	}
 	if e.Lifecycle != "" {
 		op := Operator{}
 		if e.Operator != nil {
@@ -179,6 +225,22 @@ func auditCallCommand(e AuditCall) string {
 // name lands in ApprovedBy and the authn method in AuthMode, mirroring the
 // local sign-row schema so a grep over one file surfaces both planes.
 func (a *AuditLog) Verdict(_ context.Context, e AuditVerdict) error {
+	if e.Policy != nil {
+		status := "policy-denied"
+		if e.Approved {
+			status = "policy-approved"
+		}
+		return a.Write(AuditEvent{
+			TS:         e.Time.UTC(),
+			RequestID:  e.Policy.RequestID,
+			Status:     status,
+			Commands:   []string{},
+			Servers:    []string{e.Policy.HostKeyFP},
+			ApprovedBy: e.Operator.DisplayName,
+			AuthMode:   e.Operator.AuthnMethod,
+			Policy:     e.Policy,
+		})
+	}
 	status := "denied"
 	if e.Approved {
 		status = "approved"

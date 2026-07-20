@@ -330,6 +330,75 @@ func TestStoreAtomicReplaceIsOldOrNewAndCleansTempOnFailure(t *testing.T) {
 	}
 }
 
+func TestStorePostRenameFailureIsCommitUncertainAndInstallsCompleteNewBody(t *testing.T) {
+	store, path, _ := openTestStore(t)
+	oldBody := []byte("old-complete-body")
+	newBody := []byte("new-complete-body")
+	if err := store.Update(func(tx *Transaction) error {
+		return tx.WriteFile("record", oldBody, 1024)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	injected := errors.New("injected after rename")
+	store.afterRename = func() error { return injected }
+	err := store.Update(func(tx *Transaction) error {
+		return tx.WriteFile("record", newBody, 1024)
+	})
+	if !errors.Is(err, ErrCommitUncertain) {
+		t.Fatalf("post-rename error = %v; want ErrCommitUncertain", err)
+	}
+	if got, readErr := os.ReadFile(filepath.Join(path, "record")); readErr != nil || !bytes.Equal(got, newBody) {
+		t.Fatalf("uncertain replacement body = %q, %v; want complete new body", got, readErr)
+	}
+}
+
+func TestStorePeerConfirmsUncertainRenameBeforeExposingIt(t *testing.T) {
+	writer, _, parentFD := openTestStore(t)
+	oldBody := []byte("old-complete-body")
+	newBody := []byte("new-complete-body")
+	if err := writer.Update(func(tx *Transaction) error {
+		return tx.WriteFile("record", oldBody, 1024)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	peer, err := OpenAt(parentFD, "state", uint32(os.Getuid()), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer peer.Close()
+
+	writer.afterRename = func() error { return errors.New("lost directory fsync acknowledgement") }
+	if err := writer.Update(func(tx *Transaction) error {
+		return tx.WriteFile("record", newBody, 1024)
+	}); !errors.Is(err, ErrCommitUncertain) {
+		t.Fatalf("writer error = %v; want ErrCommitUncertain", err)
+	}
+
+	confirmationFailed := errors.New("directory durability still unconfirmed")
+	peer.beforeTransactionSync = func() error { return confirmationFailed }
+	callbackInvoked := false
+	err = peer.View(func(*Transaction) error {
+		callbackInvoked = true
+		return nil
+	})
+	if !errors.Is(err, ErrCommitUncertain) || callbackInvoked {
+		t.Fatalf("peer view = %v, callback=%t; want uncertainty before exposure", err, callbackInvoked)
+	}
+
+	peer.beforeTransactionSync = nil
+	var got []byte
+	if err := peer.View(func(tx *Transaction) error {
+		var readErr error
+		got, readErr = tx.ReadFile("record", 1024)
+		return readErr
+	}); err != nil {
+		t.Fatalf("peer could not confirm and read replacement: %v", err)
+	}
+	if !bytes.Equal(got, newBody) {
+		t.Fatalf("confirmed peer body = %q; want %q", got, newBody)
+	}
+}
+
 func TestStoreTransactionScopeNamesAndClose(t *testing.T) {
 	store, _, _ := openTestStore(t)
 	var retained *Transaction

@@ -3,7 +3,6 @@ package signerkit
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"strings"
 	"testing"
 
@@ -65,11 +64,11 @@ func TestBaseManifestKindCannotReachOrdinaryBackend(t *testing.T) {
 	if pending != 0 {
 		t.Fatalf("policy kind reached ordinary backend: %d pending requests", pending)
 	}
-	var response signResponse
-	if err := json.Unmarshal(rw.writer.Bytes(), &response); err != nil {
+	response, err := policywire.DecodeResponseLine(rw.writer.Bytes())
+	if err != nil {
 		t.Fatal(err)
 	}
-	if response.Status != "error" || !strings.Contains(response.Error, "unsupported kind") {
-		t.Fatalf("response = %#v; want safe unsupported-kind rejection", response)
+	if response.Wire.Status != policywire.StatusError || response.Wire.ErrorCode != policywire.ErrorPolicyNotSupported {
+		t.Fatalf("response = %#v; want typed policy_not_supported rejection", response)
 	}
 }

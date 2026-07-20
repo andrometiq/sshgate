@@ -4,11 +4,11 @@ import (
 	"context"
 	"crypto"
 	"crypto/ed25519"
+	"fmt"
 	"io"
 	"time"
 
 	"github.com/karthikeyan5/sshgate/src/redact"
-	"github.com/karthikeyan5/sshgate/src/sigwire"
 )
 
 // Config is the single constructor input for New. It carries everything the
@@ -39,6 +39,10 @@ type Config struct {
 	// every transfer fails closed at lookup (today's behavior for a daemon with
 	// no registry configured).
 	XferRegistry *XferRegistry
+	// PolicyJournalRoot enables the dedicated local policy authority journal.
+	// Empty preserves compatibility for hosted-only/legacy constructors; the
+	// shipped local front-end always supplies its configured or safe default.
+	PolicyJournalRoot string
 	// RedactSalt + RedactRules are the single-sourced secret-redaction pair (D8).
 	// The library carries them so the audit log and any front-end message text
 	// cannot desynchronize; the invariant is single-sourced by construction only
@@ -95,6 +99,7 @@ func New(cfg Config) (*Service, error) {
 		RedactRules:   cfg.RedactRules,
 		XferRegistry:  cfg.XferRegistry,
 		lifecycleSink: cfg.Audit,
+		policySink:    cfg.Audit,
 	}
 	// The concrete local-audit path (socket daemon: sign/grant/transfer rows)
 	// writes AuditEvents through a *AuditLog, which stays concrete and is NOT
@@ -104,6 +109,18 @@ func New(cfg Config) (*Service, error) {
 	// Service and the socket path reports a typed error.
 	if log, ok := cfg.Audit.(*AuditLog); ok {
 		d.Audit = log
+	}
+	if cfg.PolicyJournalRoot != "" {
+		journal, err := openLocalPolicyJournal(cfg.PolicyJournalRoot)
+		if err != nil {
+			return nil, fmt.Errorf("open policy journal: %w", err)
+		}
+		d.policyJournal = journal
+		if err := d.initializePolicyRecovery(context.Background()); err != nil {
+			// Audit/recovery unavailability disables only policy. The durable
+			// received state remains retriable and ordinary signing can serve.
+			d.policyRecoveryErr = err
+		}
 	}
 	return &Service{daemon: d, audit: cfg.Audit}, nil
 }
@@ -115,17 +132,25 @@ func New(cfg Config) (*Service, error) {
 // a nil Backend. When both are wired (the local front-end), it is a transparent
 // pass-through — byte-for-byte the same behavior as calling the Daemon directly.
 func (s *Service) HandleSignRequest(ctx context.Context, conn io.ReadWriter) error {
-	if s.daemon.Audit == nil {
-		return writeJSONLine(conn, signResponse{
-			Status:       "error",
-			Error:        "signer: RequestHandler needs Config.Audit to be a *signerkit.AuditLog (local front-end); this Service is hosted-plane only",
-			ProtoVersion: sigwire.ProtoVersion,
-		})
-	}
-	if s.daemon.Backend == nil {
-		return s.daemon.respondError(conn, "", "signer: no approval backend configured (Config.Backend was nil)")
-	}
 	return s.daemon.HandleSignRequest(ctx, conn)
+}
+
+// Close releases the optional policy journal's pinned descriptors. It is safe
+// to call more than once. Other Service resources remain caller-owned.
+func (s *Service) Close() error {
+	if s == nil || s.daemon == nil || s.daemon.policyJournal == nil {
+		return nil
+	}
+	return s.daemon.policyJournal.Close()
+}
+
+// PolicyRecoveryError reports why the dedicated policy RPC is temporarily
+// unavailable after startup. Ordinary signing remains usable.
+func (s *Service) PolicyRecoveryError() error {
+	if s == nil || s.daemon == nil {
+		return nil
+	}
+	return s.daemon.policyRecoveryStatus()
 }
 
 // Lock delegates to the inner Daemon (custody.go). See Daemon.Lock.

@@ -15,12 +15,13 @@ func TestResolveInitPaths_NonDev(t *testing.T) {
 		t.Fatalf("resolveInitPaths: %v", err)
 	}
 	want := initPaths{
-		Root:       "/var/lib/sshgatesigner",
-		KeyPath:    "/var/lib/sshgatesigner/keys/gate.key",
-		PubPath:    "/var/lib/sshgatesigner/keys/gate.pub",
-		AuditPath:  "/var/lib/sshgatesigner/log/approvals.log",
-		SockPath:   "/run/sshgatesigner/sock",
-		ConfigPath: "/var/lib/sshgatesigner/config/config.toml",
+		Root:              "/var/lib/sshgatesigner",
+		KeyPath:           "/var/lib/sshgatesigner/keys/gate.key",
+		PubPath:           "/var/lib/sshgatesigner/keys/gate.pub",
+		AuditPath:         "/var/lib/sshgatesigner/log/approvals.log",
+		SockPath:          "/run/sshgatesigner/sock",
+		PolicyJournalPath: "/var/lib/sshgatesigner/keys/policy-requests",
+		ConfigPath:        "/var/lib/sshgatesigner/config/config.toml",
 	}
 	if got != want {
 		t.Errorf("resolveInitPaths(non-dev) =\n  %+v\nwant\n  %+v", got, want)
@@ -40,12 +41,13 @@ func TestResolveInitPaths_Dev(t *testing.T) {
 		t.Fatalf("resolveInitPaths: %v", err)
 	}
 	want := initPaths{
-		Root:       tmp,
-		KeyPath:    filepath.Join(tmp, "gate.key"),
-		PubPath:    filepath.Join(tmp, "gate.pub"),
-		AuditPath:  filepath.Join(tmp, "approvals.log"),
-		SockPath:   filepath.Join(tmp, "sock"),
-		ConfigPath: configPath,
+		Root:              tmp,
+		KeyPath:           filepath.Join(tmp, "gate.key"),
+		PubPath:           filepath.Join(tmp, "gate.pub"),
+		AuditPath:         filepath.Join(tmp, "approvals.log"),
+		SockPath:          filepath.Join(tmp, "sock"),
+		PolicyJournalPath: filepath.Join(tmp, "policy-requests"),
+		ConfigPath:        configPath,
 	}
 	if got != want {
 		t.Errorf("resolveInitPaths(dev) =\n  %+v\nwant\n  %+v", got, want)
@@ -58,5 +60,19 @@ func TestResolveInitPaths_Dev(t *testing.T) {
 func TestResolveInitPaths_NonAbsoluteErrors(t *testing.T) {
 	if _, err := resolveInitPaths("config/config.toml", false /* dev */); err == nil {
 		t.Error("resolveInitPaths(relative path) = nil error; want non-nil")
+	}
+}
+
+func TestResolvePolicyJournalRootConfiguredAndSafeDefault(t *testing.T) {
+	var cfg tomlConfig
+	cfg.Paths.Key = "/var/lib/sshgatesigner/keys/gate.key"
+	got, usedDefault := resolvePolicyJournalRoot(cfg)
+	if got != "/var/lib/sshgatesigner/keys/policy-requests" || !usedDefault {
+		t.Fatalf("default policy journal = %q, default=%t", got, usedDefault)
+	}
+	cfg.Paths.PolicyJournal = "/srv/sshgate/policy-journal"
+	got, usedDefault = resolvePolicyJournalRoot(cfg)
+	if got != cfg.Paths.PolicyJournal || usedDefault {
+		t.Fatalf("configured policy journal = %q, default=%t", got, usedDefault)
 	}
 }

@@ -159,6 +159,70 @@ func TestService_NonLocalAuditSink_SocketRefused(t *testing.T) {
 	}
 }
 
+func TestService_NonLocalAuditSink_MalformedAndProtoSkewStayTyped(t *testing.T) {
+	t.Parallel()
+	priv, _ := goldenSignerKey()
+	svc, err := New(Config{Signer: priv, Backend: NewMockBackend(), Audit: NewAppendOnlySink(&bytes.Buffer{})})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	for name, body := range map[string]string{
+		"malformed":  "{",
+		"proto-skew": `{"kind":"sign","request_id":"r_skew","proto_version":999,"commands":[]}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			conn := &rwBuf{in: bytes.NewReader([]byte(body + "\n")), out: &bytes.Buffer{}}
+			if err := svc.HandleSignRequest(context.Background(), conn); err != nil {
+				t.Fatalf("HandleSignRequest hard error: %v", err)
+			}
+			var resp struct{ Status, Error string }
+			if err := json.Unmarshal(bytes.TrimSpace(conn.out.Bytes()), &resp); err != nil {
+				t.Fatalf("decode typed refusal: %v (%q)", err, conn.out.Bytes())
+			}
+			if resp.Status != "error" || !strings.Contains(resp.Error, "AuditLog") {
+				t.Fatalf("response = %#v; want typed AuditLog refusal", resp)
+			}
+		})
+	}
+}
+
+func TestFrameDeclaresPolicyKindScansTopLevelOnly(t *testing.T) {
+	const policyKind = "base_manifest_sign_v1"
+	tests := []struct {
+		name string
+		body string
+		want bool
+	}{
+		{"canonical", `{"kind":"` + policyKind + `","request_id":"x"`, true},
+		{"reordered-truncated", `{"request_id":"x", "kind" : "` + policyKind + `", "payload_b64":"`, true},
+		{"duplicate-policy", `{"kind":"sign","kind":"` + policyKind + `"}`, true},
+		{"nested-command-only", `{"kind":"sign","commands":[{"cmd":"{\"kind\":\"` + policyKind + `\"}"}]}`, false},
+		{"ordinary", `{"kind":"sign"}`, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := frameDeclaresPolicyKind([]byte(tc.body)); got != tc.want {
+				t.Fatalf("frameDeclaresPolicyKind(%q) = %t; want %t", tc.body, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestOrdinaryAuditEventJSONRemainsByteFrozen(t *testing.T) {
+	event := AuditEvent{
+		TS: time.Date(2026, time.July, 20, 1, 2, 3, 0, time.UTC), RequestID: "r_frozen", Status: "approved",
+		Commands: []string{"echo safe"}, Servers: []string{"prod"}, ApprovedBy: "operator", AuthMode: "human",
+	}
+	got, err := json.Marshal(event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const want = `{"ts":"2026-07-20T01:02:03Z","request_id":"r_frozen","status":"approved","commands":["echo safe"],"servers":["prod"],"approved_by":"operator","auth_mode":"human"}`
+	if string(got) != want {
+		t.Fatalf("ordinary audit JSON drifted:\n got  %s\n want %s", got, want)
+	}
+}
+
 // TestService_CustodyDelegation: Lock/Unlock/RotateTo on *Service reach the
 // inner daemon (so a locked Service refuses to sign, then recovers).
 func TestService_CustodyDelegation(t *testing.T) {

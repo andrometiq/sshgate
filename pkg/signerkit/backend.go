@@ -92,9 +92,33 @@ type BaseManifestApprovalRequest struct {
 	HostKeyFP           string
 	ExpectedSignerKeyID string
 	Payload             []byte
-	ExpectedHeadDigest  string
-	Bootstrap           bool
-	Submitted           time.Time
+	// FrozenPublicKey is the exact 32-byte authority key snapshotted into the
+	// secure journal. Hosted recovery must verify under this persisted key,
+	// never silently reinterpret an old request under current config.
+	FrozenPublicKey    []byte
+	ExpectedHeadDigest string
+	Bootstrap          bool
+	// CallbackChallenge is the daemon-minted, journaled 64-bit challenge as
+	// exactly 16 lowercase hexadecimal characters. A real Telegram backend uses
+	// it in the policy-only callback namespace; fake backends may echo/assert it.
+	CallbackChallenge string
+	// DecisionHooks are present only for the local-Telegram mode. The backend
+	// activates the durable challenge after its final card is usable, commits a
+	// verdict before publishing it on the result channel, and may acknowledge
+	// that exact durable commit before updating its UI. Hosted backends leave it
+	// nil because their own P6 store is authoritative.
+	DecisionHooks BaseManifestDecisionHooks
+	Submitted     time.Time
+}
+
+// BaseManifestDecisionHooks bind one local Telegram card to the owner-only
+// authority journal. They are deliberately callback-data neutral: the daemon
+// already bound the request and random challenge when it constructed them.
+// A backend must commit before it sends the same result on its result channel.
+type BaseManifestDecisionHooks interface {
+	Activate(context.Context) error
+	CommitVerdict(context.Context, BaseManifestApprovalResult) error
+	AcknowledgeVerdict(context.Context, BaseManifestApprovalResult) error
 }
 
 // BaseManifestResultKind makes the custody boundary non-zero and explicit. A
@@ -116,12 +140,23 @@ const (
 // BaseManifestApprovalResult is one human policy decision. Kind is the
 // explicit custody boundary. Non-approved results never carry an envelope.
 type BaseManifestApprovalResult struct {
-	Status           policywire.Status
-	ErrorCode        policywire.ErrorCode
-	Retryable        bool
-	ApprovedBy       string
-	Kind             BaseManifestResultKind
-	ManifestEnvelope []byte
+	Status             policywire.Status
+	ErrorCode          policywire.ErrorCode
+	Retryable          bool
+	ApprovedBy         string
+	OperatorAuthMethod string
+	Kind               BaseManifestResultKind
+	ManifestEnvelope   []byte
+}
+
+// HostedBaseManifestApprovalBackend is an additive marker for the P6-backed
+// pass-through mode. BaseManifestApprovalBackend implementations without this
+// marker are treated as local human backends, preserving the frozen optional
+// interface while making restart semantics explicit.
+type HostedBaseManifestApprovalBackend interface {
+	BaseManifestApprovalBackend
+	HostedBaseManifestAuthority()
+	BaseManifestAuthorityPublicKey() ([]byte, error)
 }
 
 // CommandReq is a single command awaiting approval. Server is the human-

@@ -67,10 +67,11 @@ var version = "dev"
 
 type tomlConfig struct {
 	Paths struct {
-		Key      string `toml:"key"`
-		PubKey   string `toml:"pubkey"`
-		AuditLog string `toml:"audit_log"`
-		Socket   string `toml:"socket"`
+		Key           string `toml:"key"`
+		PubKey        string `toml:"pubkey"`
+		AuditLog      string `toml:"audit_log"`
+		Socket        string `toml:"socket"`
+		PolicyJournal string `toml:"policy_journal"`
 	} `toml:"paths"`
 	Backend struct {
 		Type     string         `toml:"type"`
@@ -246,6 +247,10 @@ func run(args []string) int {
 		logf("load xfer registry: %v", err)
 		return 1
 	}
+	policyJournalRoot, usedPolicyDefault := resolvePolicyJournalRoot(cfg)
+	if usedPolicyDefault {
+		logf("config paths.policy_journal omitted; using safe default %s", policyJournalRoot)
+	}
 
 	// One codebase (signerkit phase 4): the local signer constructs its core
 	// through signerkit.New instead of a signerkit.Daemon struct literal, so this
@@ -262,16 +267,25 @@ func run(args []string) int {
 	// proven in new_unreachable_test.go). The error is still checked so no
 	// future wiring change can construct a broken Service silently.
 	svc, err := signerkit.New(signerkit.Config{
-		Signer:       priv,
-		Backend:      bk,
-		Audit:        audit,
-		XferRegistry: xferReg,
-		RedactSalt:   redactSalt,
-		RedactRules:  redactRules,
+		Signer:            priv,
+		Backend:           bk,
+		Audit:             audit,
+		XferRegistry:      xferReg,
+		PolicyJournalRoot: policyJournalRoot,
+		RedactSalt:        redactSalt,
+		RedactRules:       redactRules,
 	})
 	if err != nil {
 		logf("construct signer: %v", err)
 		return 1
+	}
+	defer func() {
+		if err := svc.Close(); err != nil {
+			logf("close policy journal: %v", err)
+		}
+	}()
+	if err := svc.PolicyRecoveryError(); err != nil {
+		logf("policy authority temporarily unavailable after startup recovery: %v (ordinary signing remains available)", err)
 	}
 	// HandlerTimeout bounds the WHOLE connection (request read + approval
 	// wait + response write) under serveOne's single absolute deadline.
@@ -330,6 +344,13 @@ func loadConfig(path string) (tomlConfig, error) {
 		return cfg, errors.New("config missing backend.type")
 	}
 	return cfg, nil
+}
+
+func resolvePolicyJournalRoot(cfg tomlConfig) (string, bool) {
+	if cfg.Paths.PolicyJournal != "" {
+		return cfg.Paths.PolicyJournal, false
+	}
+	return filepath.Join(filepath.Dir(cfg.Paths.Key), "policy-requests"), true
 }
 
 // buildBackend returns the Backend implementation for the configured
@@ -601,7 +622,7 @@ func flockOrFail(lockPath string) (func(), error) {
 
 // initPaths holds the resolved on-disk locations for `--init`.
 type initPaths struct {
-	Root, KeyPath, PubPath, AuditPath, SockPath, ConfigPath string
+	Root, KeyPath, PubPath, AuditPath, SockPath, PolicyJournalPath, ConfigPath string
 }
 
 // resolveInitPaths computes the init layout from the --config path. It
@@ -633,12 +654,13 @@ func resolveInitPaths(configPath string, dev bool) (initPaths, error) {
 			root = filepath.Join(runtime, "signer-"+strconv.Itoa(os.Getpid()))
 		}
 		return initPaths{
-			Root:       root,
-			KeyPath:    filepath.Join(root, "gate.key"),
-			PubPath:    filepath.Join(root, "gate.pub"),
-			AuditPath:  filepath.Join(root, "approvals.log"),
-			SockPath:   filepath.Join(root, "sock"),
-			ConfigPath: configPath,
+			Root:              root,
+			KeyPath:           filepath.Join(root, "gate.key"),
+			PubPath:           filepath.Join(root, "gate.pub"),
+			AuditPath:         filepath.Join(root, "approvals.log"),
+			SockPath:          filepath.Join(root, "sock"),
+			PolicyJournalPath: filepath.Join(root, "policy-requests"),
+			ConfigPath:        configPath,
 		}, nil
 	}
 
@@ -653,10 +675,11 @@ func resolveInitPaths(configPath string, dev bool) (initPaths, error) {
 	}
 	root := filepath.Dir(filepath.Dir(configPath))
 	return initPaths{
-		Root:      root,
-		KeyPath:   filepath.Join(root, "keys", "gate.key"),
-		PubPath:   filepath.Join(root, "keys", "gate.pub"),
-		AuditPath: filepath.Join(root, "log", "approvals.log"),
+		Root:              root,
+		KeyPath:           filepath.Join(root, "keys", "gate.key"),
+		PubPath:           filepath.Join(root, "keys", "gate.pub"),
+		AuditPath:         filepath.Join(root, "log", "approvals.log"),
+		PolicyJournalPath: filepath.Join(root, "keys", "policy-requests"),
 		// Socket is a fixed runtime path provisioned by the systemd unit
 		// (RuntimeDirectory=sshgatesigner) — audit B5.
 		SockPath:   "/run/sshgatesigner/sock",
@@ -678,13 +701,14 @@ func doInitFlow(configPath string, dev bool) error {
 	if err != nil {
 		return err
 	}
-	keyPath, pubPath, auditPath, sockPath := p.KeyPath, p.PubPath, p.AuditPath, p.SockPath
+	keyPath, pubPath, auditPath, sockPath, policyJournalPath := p.KeyPath, p.PubPath, p.AuditPath, p.SockPath, p.PolicyJournalPath
 
 	// Make the directories the daemon will need.
 	dirs := []string{
 		filepath.Dir(keyPath),
 		filepath.Dir(auditPath),
 		filepath.Dir(sockPath),
+		filepath.Dir(policyJournalPath),
 		filepath.Dir(configPath),
 	}
 	for _, d := range dirs {
@@ -715,13 +739,14 @@ key       = %q
 pubkey    = %q
 audit_log = %q
 socket    = %q
+policy_journal = %q
 
 [backend]
 # "stub" denies every request; used by the phase-1 e2e test that proves
 # the cryptographic loop without a human in the loop. Switch to
 # "telegram" once task 2.1 lands.
 type = "stub"
-`, keyPath, pubPath, auditPath, sockPath)
+`, keyPath, pubPath, auditPath, sockPath, policyJournalPath)
 
 	// 0600: the daemon runs as sshgatesigner and reads this as the file owner
 	// (systemd User=sshgatesigner; --init runs under `sudo -u sshgatesigner`), so

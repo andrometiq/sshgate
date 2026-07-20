@@ -145,6 +145,27 @@ type Daemon struct {
 	// built without it (tests, legacy config) is nil; handleTransfer /
 	// handleRegisterXferKey fail closed on nil rather than nil-panicking.
 	XferRegistry *XferRegistry
+
+	// policySink and policyJournal are the dedicated fail-closed authority
+	// plane. Ordinary sign/grant/transfer audit and wire paths never use them.
+	// policyJournal is one owner-only atomic snapshot; nil means the optional
+	// policy purpose is disabled while ordinary requests remain available.
+	policySink    AuditSink
+	policyJournal *localPolicyJournal
+
+	// Same-ID retries join one in-process flight. Durable journal idempotency
+	// remains authoritative across processes and restarts.
+	policyFlightsMu sync.Mutex
+	policyFlights   map[string]chan struct{}
+
+	// A startup reconciliation audit failure disables only policy RPC until a
+	// later policy request successfully retries recovery. Ordinary signing keeps
+	// its frozen availability contract.
+	policyRecoveryMu  sync.Mutex
+	policyRecoveryErr error
+	// policyBeforeCommit is a test-only seam invoked while custody is pinned
+	// immediately before the journal head/result transaction.
+	policyBeforeCommit func()
 }
 
 // transferRequest is the wire-format "transfer" request: one human approval
@@ -415,16 +436,14 @@ type listGrantsResponse struct {
 
 // HandleSignRequest implements the one-request-per-connection protocol:
 // read one JSON line, dispatch to the Backend, sign each command on
-// approval, write one JSON line back. The function always writes a
-// response and always records an audit event (the "error" status
-// covers malformed input so operators can spot mischief at the
-// protocol layer).
+// approval, and write one JSON line back. Ordinary local-plane outcomes write
+// the existing response/audit pair. The dedicated policy purpose uses its own
+// strict wire, journal, and fail-closed audit lifecycle.
 //
-// The returned error is non-nil only on a hard I/O failure where no
-// response was written (e.g. read EOF before any bytes, or a write
-// failed mid-response). All protocol- and policy-level outcomes are
-// represented in the JSON response and the audit log; they do not
-// surface as a Go error.
+// The returned error is non-nil when no trustworthy/audited response can be
+// exposed: hard I/O failure, noncanonical policy input, or policy
+// journal/audit/recovery unavailability. Ordinary protocol outcomes and fully
+// audited policy terminals are represented on their respective JSON wires.
 func (d *Daemon) HandleSignRequest(ctx context.Context, conn io.ReadWriter) error {
 	line, err := lineframe.Read(conn, policywire.MaxSocketFrameBytes)
 	if err != nil && (len(line) == 0 || !errors.Is(err, io.EOF)) {
@@ -438,12 +457,32 @@ func (d *Daemon) HandleSignRequest(ctx context.Context, conn io.ReadWriter) erro
 	// below re-decodes the same line strictly, so an unknown field is
 	// still rejected for the kind it belongs to (e.g. the daemon_reject
 	// "unknown extra json field" case still fails on the sign path).
+	// Route any top-level occurrence of the policy discriminant before the
+	// ordinary error/audit path. The token scan deliberately works on a prefix
+	// of malformed JSON, so reordered, duplicated, whitespace-altered, or
+	// truncated intended-policy input still reaches the strict canonical policy
+	// decoder and can never become an ordinary sign response/audit row.
+	if frameDeclaresPolicyKind(line) {
+		return d.handleBaseManifestPolicy(ctx, conn, line)
+	}
 	var peek kindPeek
 	if jerr := json.Unmarshal(line, &peek); jerr != nil {
+		if d.Audit == nil {
+			return d.respondLocalAuditRequired(conn)
+		}
 		// Malformed: respond with "error", audit with "error". Echo
 		// peek.RequestID (it may have decoded even when another field
 		// didn't) so a correlatable id is returned when available.
 		return d.respondError(conn, peek.RequestID, fmt.Sprintf("malformed request: %v", jerr))
+	}
+	if peek.Kind == policywire.Kind {
+		// The policy purpose has its own strict canonical decoder, journal,
+		// approval capability, custody path, response, and fail-closed audit.
+		// It must never reach ordinary validation, grants, or Backend.Request.
+		return d.handleBaseManifestPolicy(ctx, conn, line)
+	}
+	if d.Audit == nil {
+		return d.respondLocalAuditRequired(conn)
 	}
 	// Protocol-version skew guard. This runs in the LENIENT pre-pass, BEFORE
 	// any strict per-kind decode, so an old daemon's DisallowUnknownFields
@@ -453,6 +492,9 @@ func (d *Daemon) HandleSignRequest(ctx context.Context, conn io.ReadWriter) erro
 		return d.respondError(conn, peek.RequestID, fmt.Sprintf(
 			"proto_version mismatch: client v%d vs daemon v%d — signer and MCP are different builds; rebuild and restart both",
 			peek.ProtoVersion, sigwire.ProtoVersion))
+	}
+	if d.Backend == nil {
+		return d.respondError(conn, peek.RequestID, "signer: no approval backend configured (Config.Backend was nil)")
 	}
 	switch peek.Kind {
 	case "request_grant":
@@ -576,6 +618,48 @@ func (d *Daemon) HandleSignRequest(ctx context.Context, conn io.ReadWriter) erro
 	}
 
 	return d.respond(conn, req, result)
+}
+
+// frameDeclaresPolicyKind scans only top-level object members and returns as
+// soon as any exact policy kind value is complete. It intentionally does not
+// search raw bytes, which would misclassify an ordinary command string that
+// merely mentions the discriminant.
+func frameDeclaresPolicyKind(frame []byte) bool {
+	dec := json.NewDecoder(bytes.NewReader(frame))
+	first, err := dec.Token()
+	if err != nil || first != json.Delim('{') {
+		return false
+	}
+	for dec.More() {
+		keyToken, err := dec.Token()
+		if err != nil {
+			return false
+		}
+		key, ok := keyToken.(string)
+		if !ok {
+			return false
+		}
+		var raw json.RawMessage
+		if err := dec.Decode(&raw); err != nil {
+			return false
+		}
+		if key != "kind" {
+			continue
+		}
+		var kind string
+		if json.Unmarshal(raw, &kind) == nil && kind == policywire.Kind {
+			return true
+		}
+	}
+	return false
+}
+
+func (d *Daemon) respondLocalAuditRequired(conn io.Writer) error {
+	return writeJSONLine(conn, signResponse{
+		Status:       "error",
+		Error:        "signer: RequestHandler needs Config.Audit to be a *signerkit.AuditLog (local front-end); this Service is hosted-plane only",
+		ProtoVersion: sigwire.ProtoVersion,
+	})
 }
 
 // respond produces the appropriate signed-or-not response based on the
