@@ -231,6 +231,21 @@ func TestFrameBoundsAreDerivedFromPolicyMaxima(t *testing.T) {
 	}
 }
 
+func TestDecodeCanonicalBase64BoundExactAndPlusOne(t *testing.T) {
+	exact := bytes.Repeat([]byte{'x'}, policy.MaxPolicyPayloadBytes)
+	decoded, err := decodeCanonicalBase64(base64.StdEncoding.EncodeToString(exact), policy.MaxPolicyPayloadBytes, "payload_b64")
+	if err != nil {
+		t.Fatalf("exact %d-byte payload rejected: %v", policy.MaxPolicyPayloadBytes, err)
+	}
+	if !bytes.Equal(decoded, exact) {
+		t.Fatal("exact-limit payload changed during decode")
+	}
+	plusOne := bytes.Repeat([]byte{'x'}, policy.MaxPolicyPayloadBytes+1)
+	if _, err := decodeCanonicalBase64(base64.StdEncoding.EncodeToString(plusOne), policy.MaxPolicyPayloadBytes, "payload_b64"); err == nil {
+		t.Fatal("payload bound +1 accepted")
+	}
+}
+
 func TestPayloadDigestsRejectNonCanonicalPayload(t *testing.T) {
 	sha, base, err := PayloadDigests([]byte(testPayload))
 	if err != nil || len(sha) != 64 || len(base) != 64 {

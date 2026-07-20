@@ -307,7 +307,10 @@ func decodeCanonicalBase64(encoded string, maxDecoded int, field string) ([]byte
 		return nil, fmt.Errorf("%s is required", field)
 	}
 	maxEncoded := base64.StdEncoding.EncodedLen(maxDecoded)
-	if len(encoded) > maxEncoded || base64.StdEncoding.DecodedLen(len(encoded)) > maxDecoded {
+	// DecodedLen is intentionally an upper bound and counts bytes removed by
+	// padding. The canonical encoded-length bound prevents pre-decode
+	// over-allocation; the exact decoded bound is checked after DecodeString.
+	if len(encoded) > maxEncoded {
 		return nil, fmt.Errorf("%s exceeds %d decoded bytes", field, maxDecoded)
 	}
 	decoded, err := base64.StdEncoding.DecodeString(encoded)

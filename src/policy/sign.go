@@ -216,7 +216,11 @@ func decodeEnvelope(envelope []byte) ([]byte, []byte, error) {
 	if w.PayloadB64 == "" || w.SignatureB64 == "" {
 		return nil, nil, fmt.Errorf("%w: payload_b64 and signature_b64 are required", ErrInvalidEnvelope)
 	}
-	if base64.StdEncoding.DecodedLen(len(w.PayloadB64)) > MaxPolicyPayloadBytes {
+	// DecodedLen includes bytes later removed by padding, so comparing it to
+	// the decoded maximum rejects a valid exact-limit payload when the limit is
+	// not divisible by three. Bound the canonical encoded representation first;
+	// checkPayloadSize below enforces the exact decoded size after decoding.
+	if len(w.PayloadB64) > base64.StdEncoding.EncodedLen(MaxPolicyPayloadBytes) {
 		return nil, nil, fmt.Errorf("%w: encoded payload exceeds %d decoded bytes", ErrTooLarge, MaxPolicyPayloadBytes)
 	}
 	payload, err := base64.StdEncoding.DecodeString(w.PayloadB64)

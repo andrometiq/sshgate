@@ -437,6 +437,31 @@ func TestSignedEnvelope_StrictAndTamperResistant(t *testing.T) {
 	}
 }
 
+func TestSignedEnvelopePayloadBoundExactAndPlusOne(t *testing.T) {
+	envelopeFor := func(size int) []byte {
+		t.Helper()
+		raw, err := json.Marshal(signedEnvelopeWire{
+			PayloadB64:   base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{'x'}, size)),
+			SignatureB64: base64.StdEncoding.EncodeToString(make([]byte, ed25519.SignatureSize)),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return raw
+	}
+
+	payload, _, err := decodeEnvelope(envelopeFor(MaxPolicyPayloadBytes))
+	if err != nil {
+		t.Fatalf("exact %d-byte payload rejected: %v", MaxPolicyPayloadBytes, err)
+	}
+	if len(payload) != MaxPolicyPayloadBytes {
+		t.Fatalf("decoded payload length = %d, want %d", len(payload), MaxPolicyPayloadBytes)
+	}
+	if _, _, err := decodeEnvelope(envelopeFor(MaxPolicyPayloadBytes + 1)); !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("%d-byte payload error = %v, want ErrTooLarge", MaxPolicyPayloadBytes+1, err)
+	}
+}
+
 func TestSigningAndEnvelopeKeyLengthChecks(t *testing.T) {
 	if _, err := SignBaseManifest(ed25519.PrivateKey{1}, sampleManifest(t)); !errors.Is(err, ErrBadSignature) {
 		t.Fatalf("private key error = %v", err)
