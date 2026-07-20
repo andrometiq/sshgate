@@ -236,7 +236,12 @@ func decodeIdentity(w identityWire) (CommandIdentity, error) {
 	if w.LiteralB64 == "" {
 		return CommandIdentity{}, fmt.Errorf("%w: literal_b64 is empty", ErrInvalidIdentity)
 	}
-	if base64.StdEncoding.DecodedLen(len(w.LiteralB64)) > MaxLiteralBytes {
+	// DecodedLen is an upper bound and includes bytes removed by base64
+	// padding. Comparing it directly rejects valid literals at the exact
+	// maximum whenever their length is not divisible by three. Bound the
+	// canonical encoded representation instead, then let DecodeString and the
+	// identity validator enforce the exact decoded limit below.
+	if len(w.LiteralB64) > base64.StdEncoding.EncodedLen(MaxLiteralBytes) {
 		return CommandIdentity{}, fmt.Errorf("%w: encoded literal exceeds %d decoded bytes", ErrTooLarge, MaxLiteralBytes)
 	}
 	literal, err := base64.StdEncoding.DecodeString(w.LiteralB64)

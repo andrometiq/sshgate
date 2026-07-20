@@ -151,6 +151,29 @@ func TestBaseManifestParser_RejectsMalformedIdentityEncodings(t *testing.T) {
 	}
 }
 
+func TestDecodeIdentityLiteralBoundExactAndPlusOne(t *testing.T) {
+	wireFor := func(size int) identityWire {
+		literal := bytes.Repeat([]byte{'x'}, size)
+		digest := ShellExactDigest(literal)
+		return identityWire{
+			Codec:      CodecShellExactV1,
+			LiteralB64: base64.StdEncoding.EncodeToString(literal),
+			SHA256:     hex.EncodeToString(digest[:]),
+		}
+	}
+
+	identity, err := decodeIdentity(wireFor(MaxLiteralBytes))
+	if err != nil {
+		t.Fatalf("exact %d-byte literal rejected: %v", MaxLiteralBytes, err)
+	}
+	if len(identity.Literal) != MaxLiteralBytes {
+		t.Fatalf("decoded literal length = %d, want %d", len(identity.Literal), MaxLiteralBytes)
+	}
+	if _, err := decodeIdentity(wireFor(MaxLiteralBytes + 1)); !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("%d-byte literal error = %v, want ErrTooLarge", MaxLiteralBytes+1, err)
+	}
+}
+
 func TestBaseManifestPayload_CanonicalizesSetOrdering(t *testing.T) {
 	m := sampleManifest(t)
 	m.RevokedPermitIDs = []string{"pa_z", "pa_b"}
