@@ -54,11 +54,13 @@ and one concrete next step.
 - **Tier 2 — Local Telegram signer:** master keypair under the
   `sshgatesigner` system user, `sshgate-signer-telegram` systemd
   unit, Telegram bot for approvals. Writes get a phone-tap
-  approval. gate.pub pushed to every already-registered server
-  (tier-1 → tier-2 upgrade).
-- **Tier 3 — Hosted server signer:** NOT YET AVAILABLE. The hosted
-  signer (`src/signer-server`) needs the v2.x web UI + WebAuthn
-  flow to ship before this can be wired in.
+  approval. `gate.pub` is staged locally; each existing Tier-1 alias
+  must be manually de-provisioned and re-added before it becomes
+  signed-write.
+- **Tier 3 — Hosted server signer:** source foundation present, but its v0.2
+  policy-authority and release gates remain open. This local setup command does
+  not configure it; hand off to `src/signer-server/README.md` for current
+  engineering/deployment requirements.
 
 **Naming bridge (used throughout the rest of this file):** the Unix
 user is `sshgatesigner` (no hyphen). The binary, the `/usr/local/bin`
@@ -169,7 +171,7 @@ Tell the user the detected tier in one line, e.g.
 ### Branch A: FRESH install
 
 Use `AskUserQuestion` to offer the three tiers. Question:
-`"Which install tier do you want? You can upgrade from tier 1 to tier 2 later by re-running this command."`
+`"Which install tier do you want? You can add the local Tier-2 signer later by re-running this command; existing Tier-1 aliases stay read-only until you manually de-provision and re-add them."`
 
 Options (header / description):
 
@@ -179,17 +181,18 @@ Options (header / description):
 2. `"Local Telegram signer"` / `"Tier 2 — install sshgate-signer-telegram +  master
    key + Telegram bot. Writes require a phone-tap approval. Adds
    ~10 minutes of setup."`
-3. `"Hosted server signer"` / `"Tier 3 — NOT YET AVAILABLE. The
-   hosted signer needs the v2.x web UI + WebAuthn flow. Pick read-only
-   or local-telegram for now."`
+3. `"Hosted server signer"` / `"Tier 3 — source foundation present, but not
+   yet release-ready. This local setup menu does not provision it; follow the
+   hosted signer guide for current engineering/deployment requirements."`
 
 Branch on the answer:
 
 - Tier 1 → continue to **Tier 1 flow**.
 - Tier 2 → continue to **Tier 2 flow** (do tier-1 prep first, then tier-2 add-ons).
 - Tier 3 → print:
-  `Hosted server signer is not yet available (waiting on web UI + WebAuthn auth — tracked in src/signer-server/README.md). Pick read-only or local-telegram for now.`
-  Stop.
+  `Hosted server signer is not release-ready: its v0.2 policy-authority and release gates remain open. This local setup command does not configure it. Follow src/signer-server/README.md for the current engineering/deployment requirements.`
+  Stop; do not run hosted deployment commands from this local setup flow or
+  imply that the current branch is an installable hosted release.
 
 ### Branch B: TIER-1 PRESENT (re-run)
 
@@ -199,14 +202,14 @@ Use `AskUserQuestion` with:
 Options:
 
 1. `"Verify"` / `"Re-check on-disk state, confirm the SSHGate SSH key is intact."`
-2. `"Add local Telegram signer"` / `"Upgrade tier 1 → tier 2. Generate the master key, install sshgate-signer-telegram, configure Telegram bot, push gate.pub to all registered servers."`
-3. `"Add hosted server signer"` / `"Tier 3 — NOT YET AVAILABLE."`
+2. `"Add local Telegram signer"` / `"Add the local signer and Telegram approval. Existing Tier-1 aliases remain read-only until you manually de-provision and re-add each one."`
+3. `"Hosted server signer status"` / `"Tier 3 is not release-ready; open the hosted signer guide for current engineering status."`
 
 Branch on the answer:
 
 - Verify → run **Verify flow**.
 - Tier 2 → continue to **Tier 2 flow**.
-- Tier 3 → print the not-available message from Branch A and stop.
+- Tier 3 → print the hosted-guide handoff from Branch A and stop.
 
 ### Branch C: TIER-2 PRESENT (re-run)
 
@@ -217,13 +220,13 @@ Options:
 
 1. `"Verify"` / `"Re-check on-disk state, confirm sshgate-signer-telegram is active and the Telegram link works."`
 2. `"Reconfigure Telegram"` / `"Re-prompt for the bot token and/or allowed_user_id. Useful if you rotated the bot."`
-3. `"Add hosted server signer"` / `"Tier 3 — NOT YET AVAILABLE."`
+3. `"Hosted server signer status"` / `"Tier 3 is not release-ready; open the hosted signer guide for current engineering status."`
 
 Branch on the answer:
 
 - Verify → run **Verify flow**.
 - Reconfigure → jump to **Tier 2 — Telegram configure** section.
-- Tier 3 → print the not-available message and stop.
+- Tier 3 → print the hosted-guide handoff from Branch A and stop.
 
 ### Branch D: PARTIAL
 
@@ -485,11 +488,12 @@ If still not present after 30s, tell the user to double-check they
 sent `/start` to the right bot, then re-poll once. If still nothing,
 stop and surface `journalctl -u sshgate-signer-telegram -n 30 --no-pager`.
 
-### T2.4 — Push gate.pub to all registered servers
+### T2.4 — Stage gate.pub; manually re-provision each existing alias
 
-The signer is now live with a new master key. Every server registered
-in tier 1 has gate but NO gate.pub on it — pushing the pubkey
-flips each one from "read-only" to "signed-write."
+The signer is now live with a new master key. Stage its public key for the
+human-only provisioning CLI. This does **not** alter any existing Tier-1
+server: each remains read-only until the user manually de-provisions and
+re-adds that exact alias.
 
 Make the pubkey available to the MCP layer at the canonical local
 path:
@@ -501,13 +505,15 @@ sudo chown "$USER" "${HOME}/.config/sshgate/pubkey-distrib/gate.pub"
 chmod 644 "${HOME}/.config/sshgate/pubkey-distrib/gate.pub"
 ```
 
-Then enumerate the servers in the registry:
+Then enumerate the existing aliases so the user can explicitly re-provision
+each one:
 
 ```bash
 jq -r 'keys[]' "${HOME}/.config/sshgate/servers.json" 2>/dev/null || echo "(no servers registered)"
 ```
 
-If the list is empty, skip to T2.5 — there's nothing to upgrade.
+If the list is empty, skip to T2.5 — there are no existing aliases to
+re-provision.
 
 > ⚠️ **There is no in-place tier-1 → tier-2 upgrade — by design.**
 > Re-running `sshgate add <alias> <user@host>` on an already-registered
@@ -523,6 +529,10 @@ If the list is empty, skip to T2.5 — there's nothing to upgrade.
 > (`~/.config/sshgate/servers.json`), then `sshgate add <alias> <user@host>`
 > without `--read-only` (with the signer already set up), which finds the
 > staged `gate.pub` and deploys signed-write.
+
+Do not claim an alias is upgraded until the user has completed those manual
+steps for that alias. If the user does not want to re-provision an alias now,
+leave it unchanged and read-only.
 
 ### T2.5 — Final summary
 
@@ -547,7 +557,8 @@ Print verbatim:
 > - Socket: /run/sshgatesigner/sock
 > - Audit log: /var/lib/sshgatesigner/log/approvals.log
 > - Telegram bot chat_id captured: <N>
-> - gate.pub distributed to: <list of registered aliases>
+> - gate.pub staged locally: ~/.config/sshgate/pubkey-distrib/gate.pub
+> - Explicit aliases re-provisioned as signed-write: <list supplied by the user, or none>
 >
 > Reads route directly; writes will buzz your phone for approval.
 >

@@ -440,6 +440,13 @@ func TestDoInitFlow_DevHappyPath(t *testing.T) {
 	if ci.Mode().Perm()&0o007 != 0 {
 		t.Errorf("config mode = %#o; world bits must be off", ci.Mode().Perm())
 	}
+	configBody, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read generated config: %v", err)
+	}
+	if !strings.HasPrefix(string(configBody), "# signer "+version+" configuration\n") {
+		t.Errorf("generated config header = %q; want it to use runtime version %q", strings.SplitN(string(configBody), "\n", 2)[0], version)
+	}
 
 	// The config must parse and round-trip through loadConfig.
 	cfg, err := loadConfig(configPath)

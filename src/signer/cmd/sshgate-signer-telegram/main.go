@@ -732,7 +732,7 @@ func doInitFlow(configPath string, dev bool) error {
 		return fmt.Errorf("stat config: %w", err)
 	}
 
-	body := fmt.Sprintf(`# signer v0.1.4 configuration
+	body := fmt.Sprintf(`# signer %s configuration
 
 [paths]
 key       = %q
@@ -744,9 +744,10 @@ policy_journal = %q
 [backend]
 # "stub" denies every request; used by the phase-1 e2e test that proves
 # the cryptographic loop without a human in the loop. Switch to
-# "telegram" once task 2.1 lands.
+# "telegram" after adding a complete [backend.telegram] block; the one-pass
+# installer does this interactively for Tier 2.
 type = "stub"
-`, keyPath, pubPath, auditPath, sockPath, policyJournalPath)
+`, version, keyPath, pubPath, auditPath, sockPath, policyJournalPath)
 
 	// 0600: the daemon runs as sshgatesigner and reads this as the file owner
 	// (systemd User=sshgatesigner; --init runs under `sudo -u sshgatesigner`), so
