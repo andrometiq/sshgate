@@ -171,9 +171,11 @@ test-refapp-js:
 # Phase-1 e2e against a real Docker SSH target. Skipped automatically
 # if `docker compose` is unavailable. Excluded from `make test` so
 # contributor machines without Docker still get a green per-package
-# suite.
+# suite. Both Docker-backed packages own host port 2222, so package
+# serialization prevents competing test targets during the release gate.
+# This live-environment gate must never reuse a cached pass or skip.
 test-integration:
-	go test -race -tags=integration ./internal/redteam ./tests/integration/... -timeout=300s -v
+	go test -count=1 -p=1 -race -tags=integration ./internal/redteam ./tests/integration/... -timeout=300s -v
 
 # `go vet ./...` errors with "matched no packages" while the module is empty
 # (Phase 0). Guard with `go list` so vet is a no-op until source exists.
@@ -260,18 +262,39 @@ verify-dist:
 	if [ -z "$$pv" ]; then echo "verify-dist: could not read version from .claude-plugin/plugin.json" >&2; exit 1; fi; \
 	if [ "$$pv" != "$$vf" ]; then \
 		echo "verify-dist: plugin.json version '$$pv' != VERSION '$$vf' (manifest must follow VERSION, sans leading v)" >&2; exit 1; fi
-	@# Same drift guard for the other published manifests that carry a hand-set
-	@# version (server.json for the MCP Registry, gemini-extension.json for the
-	@# Gemini gallery). The mcpb manifest is NOT listed here — `make mcpb` stamps
-	@# its version from VERSION at pack time, so its committed value is a template.
+	@# MCP Registry pre-tag guard: server.json has exactly two release versions:
+	@# its top-level value and packages[0].version. A loose "first version" scan
+	@# would miss a stale package value or a duplicate key, so this deliberately
+	@# accepts only the canonical two-field layout and fails closed otherwise. No
+	@# jq dependency: this fast local gate must run on contributor machines too.
 	@vf=$$(sed 's/^v//' VERSION); \
-	for f in server.json gemini-extension.json; do \
-		fv=$$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$$f" | head -1); \
-		if [ -z "$$fv" ]; then echo "verify-dist: could not read version from $$f" >&2; exit 1; fi; \
-		if [ "$$fv" != "$$vf" ]; then \
-			echo "verify-dist: $$f version '$$fv' != VERSION '$$vf' (manifest must follow VERSION, sans leading v)" >&2; exit 1; fi; \
-	done
-	@echo "verify-dist: OK — committed gate matches its .sha256; plugin.json / server.json / gemini-extension.json versions match VERSION (source↔binary is CI's job, §11.4)"
+	version_lines=$$(sed -n '/^[[:space:]]*"version"[[:space:]]*:/p' server.json | wc -l | tr -d '[:space:]'); \
+	versions=$$(sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)"[[:space:]]*,\{0,1\}[[:space:]]*$$/\1/p' server.json); \
+	version_values=$$(printf '%s\n' "$$versions" | sed '/^$$/d' | wc -l | tr -d '[:space:]'); \
+	top_versions=$$(sed -n '1,/"packages"[[:space:]]*:/ { s/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)"[[:space:]]*,\{0,1\}[[:space:]]*$$/\1/p; }' server.json); \
+	package_versions=$$(sed -n '/"packages"[[:space:]]*:/,$$ { s/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)"[[:space:]]*,\{0,1\}[[:space:]]*$$/\1/p; }' server.json); \
+	top_count=$$(printf '%s\n' "$$top_versions" | sed '/^$$/d' | wc -l | tr -d '[:space:]'); \
+	package_count=$$(printf '%s\n' "$$package_versions" | sed '/^$$/d' | wc -l | tr -d '[:space:]'); \
+	if [ "$$version_lines" != 2 ] || [ "$$version_values" != 2 ] || [ "$$top_count" != 1 ] || [ "$$package_count" != 1 ]; then \
+		echo "verify-dist: server.json must contain exactly one parseable top-level version and one parseable packages[0] version (exactly two version fields total)" >&2; exit 1; \
+	fi; \
+	if [ "$$top_versions" != "$$vf" ] || [ "$$package_versions" != "$$vf" ]; then \
+		echo "verify-dist: server.json versions (top='$$top_versions', package='$$package_versions') must both equal VERSION '$$vf' (sans leading v)" >&2; exit 1; \
+	fi; \
+	identifier_lines=$$(sed -n '/^[[:space:]]*"identifier"[[:space:]]*:/p' server.json | wc -l | tr -d '[:space:]'); \
+	identifier=$$(sed -n 's/^[[:space:]]*"identifier"[[:space:]]*:[[:space:]]*"\([^"]*\)"[[:space:]]*,\{0,1\}[[:space:]]*$$/\1/p' server.json); \
+	expected_identifier="https://github.com/karthikeyan5/SSHGate/releases/download/$(VERSION)/sshgate-mcp.mcpb"; \
+	if [ "$$identifier_lines" != 1 ] || [ -z "$$identifier" ] || [ "$$identifier" != "$$expected_identifier" ]; then \
+		echo "verify-dist: server.json packages[0].identifier must be exactly '$$expected_identifier' (release tag + sshgate-mcp.mcpb asset)" >&2; exit 1; \
+	fi
+	@# Gemini carries one ordinary hand-set version; MCPB's committed manifest is
+	@# a template because `make mcpb` stamps it from VERSION at pack time.
+	@vf=$$(sed 's/^v//' VERSION); \
+	fv=$$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' gemini-extension.json | head -1); \
+	if [ -z "$$fv" ]; then echo "verify-dist: could not read version from gemini-extension.json" >&2; exit 1; fi; \
+	if [ "$$fv" != "$$vf" ]; then \
+		echo "verify-dist: gemini-extension.json version '$$fv' != VERSION '$$vf' (manifest must follow VERSION, sans leading v)" >&2; exit 1; fi
+	@echo "verify-dist: OK — committed gate matches its .sha256; plugin.json, both server.json release versions, the server MCPB release URL, and gemini-extension.json match VERSION (source↔binary is CI's job, §11.4)"
 
 # verify-versions: the T4 version-stamp drift guard. verify-dist proves the
 # plugin.json↔VERSION pair; this proves the three -X-stamped Go binaries
