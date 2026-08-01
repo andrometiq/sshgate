@@ -14,7 +14,7 @@ import (
 func TestMockBackendDoubleResolvePanics(t *testing.T) {
 	t.Parallel()
 	m := NewMockBackend()
-	m.Approve("r_dup", "karthi")
+	m.Approve("r_dup", "operator")
 
 	defer func() {
 		r := recover()

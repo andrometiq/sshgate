@@ -74,7 +74,7 @@ func humanFixture(t *testing.T) (*httptest.Server, string, *sqlitestore.DB, *hos
 	logger := log.New(io.Discard, "test: ", 0)
 	srv := hosted.NewServer(apiKey, db, logger)
 	srv.Signer = svc
-	srv.MachineClientID = "karthi-laptop"
+	srv.MachineClientID = "client-1"
 	srv.RequiredApprovals = 1
 	srv.AttachHuman(&hosted.HumanAPI{
 		Auth:   am,
@@ -153,7 +153,7 @@ func seedPendingRequest(t *testing.T, db *sqlitestore.DB, id string, n int, cmd 
 	if err := db.Insert(context.Background(), &store.Request{
 		RequestID:         id,
 		Status:            store.StatusPending,
-		ClientID:          "karthi-laptop",
+		ClientID:          "client-1",
 		Commands:          blob,
 		RequiredApprovals: n,
 	}); err != nil {
@@ -977,7 +977,7 @@ func humanFixtureWithPolicy(t *testing.T, cfg hosted.HumanAPIConfig) (*httptest.
 	}
 	srv := hosted.NewServer(apiKey, db, log.New(io.Discard, "", 0))
 	srv.Signer = svc
-	srv.MachineClientID = "karthi-laptop"
+	srv.MachineClientID = "client-1"
 	srv.RequiredApprovals = 1
 	srv.AttachHuman(&hosted.HumanAPI{Auth: am, Engine: engine, Store: db, Cfg: cfg})
 	ts := httptest.NewServer(srv)

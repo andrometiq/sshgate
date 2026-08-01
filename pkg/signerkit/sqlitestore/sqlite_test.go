@@ -36,7 +36,7 @@ func TestInsertAndGetByID(t *testing.T) {
 	r := &store.Request{
 		RequestID: "r_abc",
 		Status:    store.StatusPending,
-		ClientID:  "karthi-laptop",
+		ClientID:  "client-1",
 		Commands:  []byte(`[{"server":"prod","cmd":"echo hi","ttl_seconds":60}]`),
 		CreatedAt: time.Date(2026, 5, 19, 9, 14, 22, 0, time.UTC),
 	}
@@ -148,7 +148,7 @@ func TestUpdateStatus_Approved(t *testing.T) {
 	}
 
 	sigs := []byte(`[{"cmd":"echo","sig":"SSHGATE_SIG:..."}]`)
-	if err := db.UpdateStatus(ctx, "r_upd", store.StatusApproved, sigs, "karthi"); err != nil {
+	if err := db.UpdateStatus(ctx, "r_upd", store.StatusApproved, sigs, "operator"); err != nil {
 		t.Fatalf("UpdateStatus: %v", err)
 	}
 	got, err := db.GetByID(ctx, "r_upd")
@@ -161,8 +161,8 @@ func TestUpdateStatus_Approved(t *testing.T) {
 	if string(got.Signatures) != string(sigs) {
 		t.Errorf("Signatures = %q; want %q", got.Signatures, sigs)
 	}
-	if got.ApprovedBy != "karthi" {
-		t.Errorf("ApprovedBy = %q; want karthi", got.ApprovedBy)
+	if got.ApprovedBy != "operator" {
+		t.Errorf("ApprovedBy = %q; want operator", got.ApprovedBy)
 	}
 	if got.ResolvedAt == nil {
 		t.Error("ResolvedAt = nil; want non-nil after resolution")
@@ -215,7 +215,7 @@ func TestWaitForResolution_Approved(t *testing.T) {
 	// Resolve in a goroutine after 250ms.
 	go func() {
 		time.Sleep(250 * time.Millisecond)
-		_ = db.UpdateStatus(ctx, "r_wait", store.StatusApproved, []byte(`[]`), "karthi")
+		_ = db.UpdateStatus(ctx, "r_wait", store.StatusApproved, []byte(`[]`), "operator")
 	}()
 
 	got, err := db.WaitForResolution(ctx, "r_wait", 2*time.Second)
@@ -349,7 +349,7 @@ func TestConcurrentInsertAndUpdate(t *testing.T) {
 				t.Errorf("Insert %s: %v", id, err)
 				return
 			}
-			_ = db.UpdateStatus(ctx, id, store.StatusApproved, []byte(`[]`), "karthi")
+			_ = db.UpdateStatus(ctx, id, store.StatusApproved, []byte(`[]`), "operator")
 		}(i)
 	}
 	wg.Wait()

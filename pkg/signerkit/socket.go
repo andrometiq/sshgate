@@ -32,7 +32,7 @@ type RequestHandler interface {
 // not interpret the protocol — that's Handler's job.
 //
 // The socket file is created with mode 0660 (owner + group rw). The
-// daemon expects the karthi user to be in the sshgatesigner group on the
+// daemon expects the operator user to be in the sshgatesigner group on the
 // real install so it can dial without being root; tests bind in a
 // t.TempDir() and verify the mode bits.
 type Server struct {

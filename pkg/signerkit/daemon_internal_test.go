@@ -39,7 +39,7 @@ func TestSignAll_NonceFailure(t *testing.T) {
 	defer audit.Close()
 
 	mock := NewMockBackend()
-	mock.Approve("r_nonce", "karthi")
+	mock.Approve("r_nonce", "operator")
 	d := &Daemon{
 		Key:     priv,
 		Backend: mock,

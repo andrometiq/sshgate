@@ -80,7 +80,7 @@ func TestSignerAuditRedactsCommandString(t *testing.T) {
 			{Server: "prod", Cmd: "ls -la", TTLSec: 60}, // benign, must survive
 		},
 	}
-	if err := d.audit(req, "approved", "karthi"); err != nil {
+	if err := d.audit(req, "approved", "operator"); err != nil {
 		t.Fatalf("audit: %v", err)
 	}
 
@@ -138,7 +138,7 @@ func TestSignerAuditNoRulesPassThrough(t *testing.T) {
 		RequestID: "r_nilrules",
 		Commands:  []signRequestCmd{{Server: "prod", Cmd: cmd, TTLSec: 60}},
 	}
-	if err := d.audit(req, "approved", "karthi"); err != nil {
+	if err := d.audit(req, "approved", "operator"); err != nil {
 		t.Fatalf("audit: %v", err)
 	}
 	evs := readAuditEvents(t, path)

@@ -75,7 +75,7 @@ func TestRoutes_TableDriven(t *testing.T) {
 			method:           http.MethodPost,
 			path:             "/v1/sign",
 			auth:             "Bearer " + key,
-			body:             `{"client_id":"karthi-laptop","commands":[{"server":"prod","cmd":"systemctl restart nginx","ttl_seconds":60}]}`,
+			body:             `{"client_id":"client-1","commands":[{"server":"prod","cmd":"systemctl restart nginx","ttl_seconds":60}]}`,
 			wantStatus:       http.StatusAccepted,
 			wantBodyContains: `"request_id":"r_`,
 		},

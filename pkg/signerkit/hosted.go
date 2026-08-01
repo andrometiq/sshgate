@@ -46,7 +46,7 @@ type HostedServerBackend struct {
 	APIKey string
 
 	// ClientID identifies this laptop in the server's audit log
-	// (e.g. "karthi-laptop"). Required.
+	// (e.g. "client-1"). Required.
 	ClientID string
 
 	// HTTPClient is the transport used for both sign + poll. When

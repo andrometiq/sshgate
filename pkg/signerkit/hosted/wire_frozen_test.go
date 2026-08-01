@@ -43,7 +43,7 @@ func TestWireFrozen_HostedClientStillDecodesV1(t *testing.T) {
 	client := &signerkit.HostedServerBackend{
 		BaseURL:  ts.URL,
 		APIKey:   apiKey,
-		ClientID: "karthi-laptop",
+		ClientID: "client-1",
 		PollWait: 2 * time.Second,
 		Timeout:  6 * time.Second,
 	}
@@ -109,7 +109,7 @@ func TestWireFrozen_SignResponseShape(t *testing.T) {
 	t.Parallel()
 	ts, apiKey, _, _, _ := humanFixture(t)
 
-	body := []byte(`{"client_id":"karthi-laptop","commands":[{"server":"prod","cmd":"echo hi","ttl_seconds":60}]}`)
+	body := []byte(`{"client_id":"client-1","commands":[{"server":"prod","cmd":"echo hi","ttl_seconds":60}]}`)
 	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/v1/sign", readerOf(body))
 	req.Header.Set("Authorization", "Bearer "+apiKey)
 	req.Header.Set("Content-Type", "application/json")

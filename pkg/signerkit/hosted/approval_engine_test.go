@@ -85,7 +85,7 @@ func seedRequest(t *testing.T, db *sqlitestore.DB, id string, n int, cmds ...cmd
 	err = db.Insert(context.Background(), &store.Request{
 		RequestID:         id,
 		Status:            store.StatusPending,
-		ClientID:          "karthi-laptop",
+		ClientID:          "client-1",
 		Commands:          blob,
 		RequiredApprovals: n,
 	})
@@ -230,7 +230,7 @@ func TestEngine_SelfApproveOnVsOff(t *testing.T) {
 	// Self-approve OFF: requester's approve does not count; stays pending.
 	eng, db, _ := engineFixture(t)
 	seedRequest(t, db, "rs", 1, cmdJSON{Server: "prod", Cmd: "id", TTLSeconds: 60})
-	out, err := eng.SubmitVote(ctx, "rs", "karthi-laptop", store.DecisionApprove, "webauthn",
+	out, err := eng.SubmitVote(ctx, "rs", "client-1", store.DecisionApprove, "webauthn",
 		// Deliberately lie in policy.Requester: the stored ClientID must win.
 		hosted.ApprovalPolicy{AllowSelfApprove: false, Requester: "someone-else"})
 	if err != nil {
@@ -243,7 +243,7 @@ func TestEngine_SelfApproveOnVsOff(t *testing.T) {
 	// Self-approve ON: requester's approve counts; approved.
 	eng2, db2, pub := engineFixture(t)
 	seedRequest(t, db2, "rs2", 1, cmdJSON{Server: "prod", Cmd: "id", TTLSeconds: 60})
-	out2, err := eng2.SubmitVote(ctx, "rs2", "karthi-laptop", store.DecisionApprove, "webauthn",
+	out2, err := eng2.SubmitVote(ctx, "rs2", "client-1", store.DecisionApprove, "webauthn",
 		hosted.ApprovalPolicy{AllowSelfApprove: true, Requester: "someone-else"})
 	if err != nil {
 		t.Fatalf("SubmitVote(self on): %v", err)
