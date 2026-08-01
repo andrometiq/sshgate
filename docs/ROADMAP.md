@@ -18,33 +18,37 @@ the bar is "as unremarkable to run in production as the OS itself," not "it work
 for us." Until then every release is `v0.x`, and the version number must never
 imply the product is finished.
 
-**The next release is v0.2** — the "daily-usable" milestone. Its scope is already
-built: everything under **Already shipped**, plus the box-to-box encrypted transfer
-feature and the 2026-07 release-polish pass (security floor, a large classifier
-false-positive reduction, `ping` / per-command output cap / read-batch ergonomics,
-a single-pass installer, redaction fixes, a CI test suite, THREAT-MODEL.md, a
-README restructure, and a CHANGELOG). All committed and green.
+**The next release is v0.2** — the "daily-usable" milestone — but it is **not cut**.
+The shipped baseline includes the transfer feature and the 2026-07 release-polish
+work (security floor, classifier reduction, ergonomics, installer, redaction, CI,
+documentation, and changelog). That baseline is not a claim that the full v0.2
+scope is built, integrated, or release-green.
 
-**The one thing still blocking v0.2 is #22 — the argv-exec structural classifier
-fix plus kernel confinement** (promoted from a later release to a v0.2 blocker on
-2026-07-10). The read/write classifier is a fail-closed *heuristic*, and repeated
-adversarial review keeps surfacing read-as-write bypass classes (short-flag
-bundling, long-option abbreviation, environment-variable program injection). On a
-Tier-1 read-only host the classifier is the only gate, so each such gap is a real
-bypass. #22 replaces the heuristic with execution from a parsed `argv` — the
-classifier's view becomes exactly what executes — plus kernel-level confinement, a
-structural cure rather than another per-tool patch. See THREAT-MODEL.md for the
-honest current posture ("the classifier only routes; it is not a proof").
+**v0.2 still has several release-critical chains.** #80's hosted policy authority
+(Units 3/4) remains design and implementation work. #76 approval-assist and #65
+async approval await ratification of their shared contract, then implementation
+after #80. Isolated release-truth, test, and public-hygiene fixes also still need
+cross-review, integration, and the combined release gates; the final coordinated
+version, changelog, and distribution cut comes only after that work is settled.
+
+**#22 — the argv-exec structural classifier fix plus kernel confinement — remains a
+safeguard-gated v0.2 blocker** (promoted from a later release on 2026-07-10). The
+read/write classifier is a fail-closed *heuristic*, and adversarial review has found
+read-as-write bypass classes. On a Tier-1 read-only host the classifier is the only
+gate, so each such gap is a real bypass. #22 replaces the heuristic with execution
+from a parsed `argv` — the classifier's view becomes exactly what executes — plus
+kernel-level confinement, a structural cure rather than another per-tool patch. The
+dependent tail follows #22: the background-job verb, #26 explain rendering, #76 risk
+annotations, then #24 → #81 → #25. See THREAT-MODEL.md for the honest current
+posture ("the classifier only routes; it is not a proof").
 
 **Scope ruling (owner, 2026-07-11, from the feature-table review):** v0.2 keeps its
-definition — everything built **plus #22** — and is **not tagged until #22 clears the
-safeguard hold**. No interim release is cut. While #22 waits, the safeguard-neutral
-queue (see *Work ordering* below) executes and lands in v0.2 by construction. Two
-scope additions pulled into v0.2 explicitly: (a) the **hosted signer as an embeddable
-library** callable from any web application, and (b) a **simple reference web
-application** as the usable default surface — together a reshaping of the deferred
-Tier-3 hosted-signer ship item. Everything not in the ordered v0.2 queue under
-*Work ordering* is post-v0.2 (v0.3+).
+declared scope — the shipped baseline, the ordered v0.2 queue, and #22 — and is **not
+tagged until #22 clears the safeguard hold and all preceding release gates pass**. No
+interim release is cut. Two explicit scope additions are (a) the **hosted signer as
+an embeddable library** callable from any web application, and (b) a **simple
+reference web application** as the usable default surface. Everything not in the
+ordered v0.2 queue under *Work ordering* is post-v0.2 (v0.3+).
 
 ---
 
@@ -52,9 +56,8 @@ Tier-3 hosted-signer ship item. Everything not in the ordered v0.2 queue under
 
 A full competitive sweep of the SSHGate-class landscape was run before this freeze
 (code-grounded teardown of every same-class repo + an adversarially-verified web
-sweep of the broader products). Full report, with `file:line` and source citations,
-lives outside the public tree at `local-workspace/release-2026-07-04/
-COMPETITIVE-RESEARCH-2026-07-11.md`.
+sweep of the broader products). The full cited report is retained in the
+project's private research record; the public conclusions are captured below.
 
 **Positioning result (informs #74 product shape):** no surveyed tool does true
 *per-command* human approval for SSH — Teleport/StrongDM gate at role/resource/
@@ -137,8 +140,9 @@ safeguard being cleared, and do everything that does *not* trip it first.
   the operational-hardening tail; branch revivals **#82** (redactor port) / **#83**
   (hosted-signer ship).
 
-**Consequence for v0.2:** v0.2 was defined as "everything already built **+** #22."
-With #22 deferred to last, that definition now ships last too. The
+**Consequence for v0.2:** v0.2 was originally framed as "everything already built
+**+** #22." With #22 deferred to last, that definition now ships last too; the
+current declared scope and release status are stated above. The
 **feature-table review** (see *Release status & versioning*) had to resolve the central
 question: re-scope v0.2 to a safeguard-neutral interim milestone, or keep the
 definition and let v0.2's ship wait on the safeguard.
@@ -239,17 +243,18 @@ is rejected).
 
 These are the highest-priority forward items.
 
-> **✅ RESOLVED — the anchor decision (Karthi, 2026-07-12): do NOT route approvals through
-> the shared messaging layer. Drop C3 consumption entirely — "forget it."** The #74 design
+> **✅ RESOLVED — the anchor decision (owner, 2026-07-12): do NOT route approvals through
+> a shared messaging layer. Drop that integration entirely — "forget it."** The #74 design
 > pass (security judge finding, re-verified against both trees) established that the signer
-> runs as an isolated `sshgatesigner` uid but C3's broker socket (0600, login-user), bot
-> token, and allowlist (`mappings.json`, SIGHUP-reload) all live in the *agent's* uid — so a
-> compromised on-machine agent could edit the allowlist / bind a fake broker and self-approve,
+> runs as an isolated `sshgatesigner` uid but the login-user-owned approval allowlist
+> configuration, its delivery-channel credentials, and its reload control all live in the
+> *agent's* uid — so a compromised on-machine agent could edit the allowlist / bind a fake
+> delivery endpoint and self-approve,
 > making the "off-machine human" verdict a rogue-controlled oracle. That violates the hard
 > constraint below (a grant must never replace the signature; the approver must be an
 > authenticated off-machine human). **Ruling:** the signer keeps its OWN Telegram poller
-> exactly as today — the *stronger*, isolated-domain channel — and C3 is not pursued, not even
-> as a later signer-owned-broker variant. Follow-up task: audit the current poller/signer
+> exactly as today — the *stronger*, isolated-domain channel — and the shared-layer variant is
+> not pursued, not even as a later signer-owned equivalent. Follow-up task: audit the current poller/signer
 > channel and confirm it needs no improvement; leave it as-is if so. *Audit done (2026-07-13):
 > the channel's reliability + authz model holds up as-is — one real gap (unbounded Telegram
 > HTTP client could wedge the poll goroutine for hours on a black-holed connection) fixed in
@@ -296,7 +301,7 @@ These are the highest-priority forward items.
 
 - **Final product shape — component decomposition & packaging (owner direction,
   filed 2026-07-10).**
-  > **✅ RESOLVED (#74 design pass + Karthi rulings, 2026-07-12).** One repo; six packageable
+  > **✅ RESOLVED (#74 design pass + owner rulings, 2026-07-12).** One repo; six packageable
   > parts, names/binaries UNCHANGED (no rename of the live signer unit): **A1** the whole
   > Claude Code plugin, **A2** the MCP server binary (also its own registry artifact — the
   > cheap seam that buys Codex/Gemini/Cursor reach), **A3** the `sshgate` CLI binary
@@ -306,7 +311,7 @@ These are the highest-priority forward items.
   > app (BUILD THIS — see the one-codebase requirement below), **A6** the gate (never
   > user-installed; pushed by provisioning). Install story = three roles: agent kit (Tier-1) →
   > + local signer (Tier-2) → + hosted signer (Tier-3). Provisioning stays human-only (no
-  > `add_server`). **Q4 one-codebase requirement (Karthi, hard):** `signerkit` is the SHARED
+  > `add_server`). **Q4 one-codebase requirement (owner, hard):** `signerkit` is the SHARED
   > signing core and the existing local `sshgate-signer-telegram` is refactored to consume it —
   > local + hosted are two thin front-ends over ONE signer codebase, not a fork. Build key
   > custody as `crypto.Signer` (KMS/HSM-able), required audit sink, Lock/RotateTo, from a rebase
@@ -320,12 +325,12 @@ These are the highest-priority forward items.
   > window; that gate-side change is deferred to a future item. Until then, rotation is a
   > planned-maintenance action, not a live hot-swap.
   >
-  > **Q6 marketplace (Karthi):** publish to the top ~10
+  > **Q6 marketplace (owner):** publish to the top ~10
   > agent marketplaces/registries; a separate research pass enumerates per-surface requirements,
   > the easy first win, the repo-readiness checklist, and the submission/email contacts so the
-  > ball leaves Karthi's court (deliver as an HTML file). Verification (T1–T7 on Codex/Gemini)
-  > gates the uploads; push stays Karthi-gated + PII audit. Full record:
-  > `local-workspace/release-2026-07-04/design-74/SYNTHESIS.md`.
+  > ball leaves the owner's court (deliver as an HTML file). Verification (T1–T7 on Codex/Gemini)
+  > gates the uploads; push stays owner-gated + PII audit. The full design record
+  > remains in the project's private research archive.
 
   Before the public release push, pin down the parts a user
   actually installs and where each management surface lives. The parts as
@@ -351,7 +356,7 @@ These are the highest-priority forward items.
   `debugging-remote-servers` skill, so any agent using SSHGate has an efficient,
   opinionated playbook out of the box.
 
-- **Argv-exec structural classifier fix (#22) — the sole remaining V1 blocker**
+- **Argv-exec structural classifier fix (#22) — a safeguard-gated v0.2 blocker**
   (promoted 2026-07-10; see *Release status & versioning* above). Replace the fail-closed
   shell heuristic on the read path with direct execution from a parsed `argv`
   (`execve`, no intervening `/bin/sh`), so the classifier's view of a command is
@@ -674,14 +679,13 @@ anchor above and are marked *(subsumed)*.
 
 ## Deferred
 
-- **Tier-3 hosted signer (the real boundary). — PULLED INTO v0.2 (owner, 2026-07-11),
-  implemented library-first:** the shared `pkg/signerkit` core, plane-separated hosted
-  HTTP package, SQLite approval state, TOTP/WebAuthn authentication, N-of-M engine,
-  embedded reference UI, lifecycle/call/verdict audit, bootstrap commands, and hardened
-  systemd deployment are now present. A stable HTTPS hostname remains a deployment
-  prerequisite because passkeys and mutation-origin checks are origin-bound. Deferred
-  extensions are per-client credentials, hosted Telegram/grants/reveal/transfer, HA,
-  policy-management UI, and metrics. See [approval-architecture.md](approval-architecture.md)
+- **Tier-3 hosted signer foundation (policy authority still pending). — PULLED INTO v0.2 (owner, 2026-07-11),
+  library-first:** the `pkg/signerkit` and hosted-server work provide a foundation, but
+  the hosted policy authority (Units 3/4) remains design and implementation work before
+  it can be a release-ready approval boundary. A stable HTTPS hostname is also a
+  deployment prerequisite because passkeys and mutation-origin checks are origin-bound.
+  Deferred extensions are per-client credentials, hosted Telegram/grants/reveal/transfer,
+  HA, policy-management UI, and metrics. See [approval-architecture.md](approval-architecture.md)
   and [the deployment guide](../src/signer-server/README.md).
 
 - **Redaction scanner performance work.** An Aho-Corasick / keyword-prefilter

@@ -32,7 +32,7 @@ an opaque `request_id "" != r_…`. Two fixes kill that masking at both ends:
 
 | Fork | Decision |
 |------|----------|
-| **F2** grant re-query | **Add an 8th MCP tool `list_grants`** (Karthi ratified an 8-tool surface; update CLAUDE.md/AGENTS.md + the MCP server-instructions). Read-only, no approval. |
+| **F2** grant re-query | **Add an 8th MCP tool `list_grants`** (the owner ratified an 8-tool surface; update CLAUDE.md/AGENTS.md + the MCP server-instructions). Read-only, no approval. |
 | **F5** gate forensic audit | **Redact command strings everywhere, including the gate-side `audit.log`.** Never persist a secret; operator sees a correlatable marker. |
 | **F1** fail-safe direction | **Strict**: a lost verdict = possible-deny → stop, do NOT auto-retry, surface to the human. Matches "if denied, don't resubmit." |
 | **F4** live-log vocabulary | Full `auth_mode: "human" \| "grant:<id>"` (the agent already gets its own grant_id from `request_grant`). Add a first-class `auth_mode` to the signer audit too (decouple from the `approved_by` prefix). |
@@ -111,7 +111,7 @@ shipped):
 - MCP live-log run + run_batch (new per-process salt + `Combined()` on `Server`);
 - signer `audit()` (new per-process salt + `Combined()` on `Daemon`);
 - Telegram approval **and** grant-approval message (`formatApprovalMessage` /
-  `formatGrantApprovalMessage`) — **shipped 2026-06-24, the 4th sink** (Karthi's decision, same date).
+  `formatGrantApprovalMessage`) — **shipped 2026-06-24, the 4th sink** (the owner's decision, same date).
   Redaction is **secret-only**: only the matched secret substring is replaced by the per-session marker,
   the command SHAPE stays visible, so the human approver still sees WHAT runs (and that a secret is
   present) — just not the literal secret, which therefore never reaches Telegram's servers. It is
@@ -156,4 +156,4 @@ Fix:
 After each group: orchestrator runs `make vet && go test -race ./... && make build`, reviews the diff,
 runs spec + quality review, commits. After all three: triple-lens review (correctness +
 spec-conformance + security) over the full diff, fix real findings, final `make preflight`, then merge
-`--no-ff` into local `main`. **No push** (batched per Karthi).
+`--no-ff` into local `main`. **No push** (batched per owner direction).
