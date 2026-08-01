@@ -103,7 +103,7 @@ func TestAuditEvent_AuthModeOnDisk(t *testing.T) {
 		Status:     "approved",
 		Commands:   []string{"rm /tmp/x"},
 		Servers:    []string{"prod"},
-		ApprovedBy: "karthi",
+		ApprovedBy: "operator",
 		AuthMode:   "human",
 	}
 	denied := signerkit.AuditEvent{
@@ -151,8 +151,8 @@ func TestAuditEvent_AuthModeOnDisk(t *testing.T) {
 	if raw[1]["auth_mode"] != "human" {
 		t.Errorf("human auth_mode = %v; want human", raw[1]["auth_mode"])
 	}
-	if raw[1]["approved_by"] != "karthi" {
-		t.Errorf("human approved_by = %v; want karthi", raw[1]["approved_by"])
+	if raw[1]["approved_by"] != "operator" {
+		t.Errorf("human approved_by = %v; want operator", raw[1]["approved_by"])
 	}
 	// Denied row: auth_mode omitted (omitempty).
 	if v, ok := raw[2]["auth_mode"]; ok {

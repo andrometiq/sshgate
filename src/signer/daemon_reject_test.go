@@ -147,7 +147,7 @@ func TestDaemon_TTLBoundaryExactMaxAllowed(t *testing.T) {
 	mock := signerkit.NewMockBackend()
 	d, _, audit, _ := newDaemon(t, mock)
 	defer audit.Close()
-	mock.Approve("r_ttlmax", "karthi")
+	mock.Approve("r_ttlmax", "operator")
 
 	req := `{"kind":"sign","request_id":"r_ttlmax","commands":[{"server":"p","cmd":"ls","ttl_seconds":300}]}`
 	conn := &memConn{in: bytes.NewReader([]byte(req + "\n")), out: &bytes.Buffer{}}

@@ -42,7 +42,7 @@ func TestServer_TimeoutAtDeadline_DeliversTimeoutLine(t *testing.T) {
 	// timeout line is DELIVERED, which is exactly the write-grace guarantee.
 	bk := delayedBackend{
 		delay:  10 * time.Second,
-		result: signerkit.Result{Status: signerkit.StatusApproved, ApprovedBy: "karthi"},
+		result: signerkit.Result{Status: signerkit.StatusApproved, ApprovedBy: "operator"},
 	}
 	sockPath, stop := newServerWithDaemon(t, bk, handlerTimeout)
 	defer stop()
@@ -75,7 +75,7 @@ func TestServer_DenyNearDeadline_DeliversDeniedLine(t *testing.T) {
 	// deliver "denied".
 	bk := delayedBackend{
 		delay:  250 * time.Millisecond,
-		result: signerkit.Result{Status: signerkit.StatusDenied, ApprovedBy: "karthi"},
+		result: signerkit.Result{Status: signerkit.StatusDenied, ApprovedBy: "operator"},
 	}
 	sockPath, stop := newServerWithDaemon(t, bk, handlerTimeout)
 	defer stop()

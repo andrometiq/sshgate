@@ -59,7 +59,7 @@ func TestTelegram_RequestTransfer_LabelAndApprove(t *testing.T) {
 		t.Errorf("reply markup missing approve callback: %q", sent.ReplyMarkup)
 	}
 
-	fake.pushCallback(allowedUserID, "karthi", "approve:x_t1", 2000, allowedChatID)
+	fake.pushCallback(allowedUserID, "operator", "approve:x_t1", 2000, allowedChatID)
 	select {
 	case got := <-ch:
 		if got.Status != signerkit.StatusApproved {
@@ -109,7 +109,7 @@ func TestTelegram_RequestRegisterKey_Label(t *testing.T) {
 		t.Errorf("reply markup missing the register approve label: %q", sent.ReplyMarkup)
 	}
 
-	fake.pushCallback(allowedUserID, "karthi", "approve:x_r1", 2001, allowedChatID)
+	fake.pushCallback(allowedUserID, "operator", "approve:x_r1", 2001, allowedChatID)
 	select {
 	case got := <-ch:
 		if got.Status != signerkit.StatusApproved {

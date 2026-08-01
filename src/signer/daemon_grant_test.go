@@ -99,7 +99,7 @@ func authModeFor(t *testing.T, auditPath, reqID string) string {
 
 // createGrant drives the real request_grant path through the daemon and
 // returns the decoded response. The backend approval for reqID must be
-// pre-armed by the caller (e.g. mock.Approve(reqID, "karthi")).
+// pre-armed by the caller (e.g. mock.Approve(reqID, "operator")).
 func createGrant(t *testing.T, d *signerkit.Daemon, reqID, alias, scope string, commands []string, durationSec int64) grantResp {
 	t.Helper()
 	body := map[string]any{
@@ -165,7 +165,7 @@ func signOne(t *testing.T, d *signerkit.Daemon, reqID, alias, cmd, host string, 
 
 // approverFor scans the audit log for the row matching reqID and returns
 // its approved_by — this is how we distinguish an auto-signed grant
-// ("grant:<id>") from a human-prompted approval ("karthi").
+// ("grant:<id>") from a human-prompted approval ("operator").
 func approverFor(t *testing.T, auditPath, reqID string) string {
 	t.Helper()
 	for _, ev := range readAudit(t, auditPath) {
@@ -230,7 +230,7 @@ func TestSignRequest_AdminVerbMustBeSoleCommand(t *testing.T) {
 			// Arm the mock so that IF the guard were removed, the request would be
 			// APPROVED + signed — turning a regression into a clean assertion
 			// failure below (status=approved / sigs>0) rather than a hang.
-			mock.Approve("r_reject", "karthi")
+			mock.Approve("r_reject", "operator")
 			resp := signMulti(t, d, "r_reject", cmds)
 			if resp.Status == "approved" || len(resp.Signatures) > 0 {
 				t.Fatalf("multi-command request with an admin verb was signed (status=%q sigs=%d) — smuggling NOT rejected", resp.Status, len(resp.Signatures))
@@ -248,7 +248,7 @@ func TestSignRequest_AdminVerbMustBeSoleCommand(t *testing.T) {
 		mock := signerkit.NewMockBackend()
 		d, _, audit, _, _ := newGrantDaemon(t, mock, time.Unix(1000, 0))
 		defer audit.Close()
-		mock.Approve("r_batch", "karthi")
+		mock.Approve("r_batch", "operator")
 		resp := signMulti(t, d, "r_batch", []string{"systemctl restart nginx", "systemctl restart redis"})
 		if resp.Status != "approved" {
 			t.Fatalf("normal 2-write batch status=%q; want approved (err=%q) — guard over-reached", resp.Status, resp.Error)
@@ -272,7 +272,7 @@ func TestGrant_ScopeAll_AutoSignsWithoutPrompt(t *testing.T) {
 	d, pub, audit, auditPath, _ := newGrantDaemon(t, mock, time.Unix(1000, 0))
 	defer audit.Close()
 
-	mock.Approve("g_req", "karthi")
+	mock.Approve("g_req", "operator")
 	gr := createGrant(t, d, "g_req", "prod", "all", nil, 3600)
 	if gr.Status != "approved" {
 		t.Fatalf("grant status = %q; want approved (err=%q)", gr.Status, gr.Error)
@@ -319,7 +319,7 @@ func TestGrant_AuthModeOnSignResponseAndAudit(t *testing.T) {
 	defer audit.Close()
 
 	// Grant auto-sign path.
-	mock.Approve("g_req", "karthi")
+	mock.Approve("g_req", "operator")
 	gr := createGrant(t, d, "g_req", "prod", "all", nil, 3600)
 	if gr.Status != "approved" {
 		t.Fatalf("grant status = %q; want approved (err=%q)", gr.Status, gr.Error)
@@ -346,7 +346,7 @@ func TestGrant_AuthModeOnSignResponseAndAudit(t *testing.T) {
 	}
 
 	// Human-tap path (different alias so no grant covers it).
-	mock.Approve("s_human", "karthi")
+	mock.Approve("s_human", "operator")
 	human := signOne(t, d, "s_human", "other", "rm /tmp/x", grantHost, false, "")
 	if human.Status != "approved" {
 		t.Fatalf("human sign status = %q; want approved", human.Status)
@@ -368,7 +368,7 @@ func TestGrant_ScopeCommands_ExactMatchOnly(t *testing.T) {
 	d, _, audit, auditPath, _ := newGrantDaemon(t, mock, time.Unix(1000, 0))
 	defer audit.Close()
 
-	mock.Approve("g_req", "karthi")
+	mock.Approve("g_req", "operator")
 	gr := createGrant(t, d, "g_req", "src", "commands", []string{"systemctl stop app"}, 3600)
 	if gr.Status != "approved" {
 		t.Fatalf("grant status = %q; want approved", gr.Status)
@@ -385,22 +385,22 @@ func TestGrant_ScopeCommands_ExactMatchOnly(t *testing.T) {
 
 	// Near-miss (extra arg) → must prompt. Arm the reqID so the prompt
 	// resolves, then assert the approver is the HUMAN, not the grant.
-	mock.Approve("s_near", "karthi")
+	mock.Approve("s_near", "operator")
 	resp = signOne(t, d, "s_near", "src", "systemctl stop app --now", grantHost, false, "")
 	if resp.Status != "approved" {
 		t.Fatalf("near-miss sign status = %q; want approved", resp.Status)
 	}
-	if got := approverFor(t, auditPath, "s_near"); got != "karthi" {
-		t.Errorf("near-miss approved_by = %q; want human \"karthi\" (NOT auto-signed)", got)
+	if got := approverFor(t, auditPath, "s_near"); got != "operator" {
+		t.Errorf("near-miss approved_by = %q; want human \"operator\" (NOT auto-signed)", got)
 	}
 
 	// Different alias, exact command → must prompt (grant is per-alias).
-	mock.Approve("s_otheralias", "karthi")
+	mock.Approve("s_otheralias", "operator")
 	resp = signOne(t, d, "s_otheralias", "other", "systemctl stop app", grantHost, false, "")
 	if resp.Status != "approved" {
 		t.Fatalf("other-alias sign status = %q; want approved", resp.Status)
 	}
-	if got := approverFor(t, auditPath, "s_otheralias"); got != "karthi" {
+	if got := approverFor(t, auditPath, "s_otheralias"); got != "operator" {
 		t.Errorf("other-alias approved_by = %q; want human (grant is per-alias)", got)
 	}
 }
@@ -416,7 +416,7 @@ func TestGrant_RevealNeverAutoSigned(t *testing.T) {
 	d, _, audit, auditPath, _ := newGrantDaemon(t, mock, time.Unix(1000, 0))
 	defer audit.Close()
 
-	mock.Approve("g_req", "karthi")
+	mock.Approve("g_req", "operator")
 	gr := createGrant(t, d, "g_req", "prod", "all", nil, 3600)
 	if gr.Status != "approved" {
 		t.Fatalf("grant status = %q; want approved", gr.Status)
@@ -425,13 +425,13 @@ func TestGrant_RevealNeverAutoSigned(t *testing.T) {
 	// A reveal on the SAME alias the scope=all grant covers. It must
 	// prompt — so arm the human approval; if the grant auto-signed it,
 	// the approver would be "grant:..." instead.
-	mock.Approve("s_reveal", "karthi")
+	mock.Approve("s_reveal", "operator")
 	resp := signOne(t, d, "s_reveal", "prod", "cat /etc/secret.env", grantHost, true, "debugging auth")
 	if resp.Status != "approved" {
 		t.Fatalf("reveal sign status = %q; want approved", resp.Status)
 	}
-	if got := approverFor(t, auditPath, "s_reveal"); got != "karthi" {
-		t.Fatalf("reveal approved_by = %q; want human \"karthi\" — a grant MUST NOT auto-sign a reveal", got)
+	if got := approverFor(t, auditPath, "s_reveal"); got != "operator" {
+		t.Fatalf("reveal approved_by = %q; want human \"operator\" — a grant MUST NOT auto-sign a reveal", got)
 	}
 	// The signed payload must still carry reveal=true (the human approved
 	// a reveal, not a plain write).
@@ -459,7 +459,7 @@ func TestGrant_AdminVerbNeverAutoSigned(t *testing.T) {
 	d, _, audit, auditPath, _ := newGrantDaemon(t, mock, time.Unix(1000, 0))
 	defer audit.Close()
 
-	mock.Approve("g_req", "karthi")
+	mock.Approve("g_req", "operator")
 	gr := createGrant(t, d, "g_req", "prod", "all", nil, 3600)
 	if gr.Status != "approved" {
 		t.Fatalf("grant status = %q; want approved", gr.Status)
@@ -473,13 +473,13 @@ func TestGrant_AdminVerbNeverAutoSigned(t *testing.T) {
 		"s_revoke": "SSHGATE_REVOKE",
 	}
 	for reqID, cmd := range adminCmds {
-		mock.Approve(reqID, "karthi")
+		mock.Approve(reqID, "operator")
 		resp := signOne(t, d, reqID, "prod", cmd, grantHost, false, "")
 		if resp.Status != "approved" {
 			t.Fatalf("%s sign status = %q; want approved", reqID, resp.Status)
 		}
-		if got := approverFor(t, auditPath, reqID); got != "karthi" {
-			t.Fatalf("%s (%q) approved_by = %q; want human \"karthi\" — a grant MUST NOT auto-sign an admin verb", reqID, cmd, got)
+		if got := approverFor(t, auditPath, reqID); got != "operator" {
+			t.Fatalf("%s (%q) approved_by = %q; want human \"operator\" — a grant MUST NOT auto-sign an admin verb", reqID, cmd, got)
 		}
 	}
 
@@ -503,15 +503,15 @@ func TestGrant_CrossServer(t *testing.T) {
 	d, _, audit, auditPath, _ := newGrantDaemon(t, mock, time.Unix(1000, 0))
 	defer audit.Close()
 
-	mock.Approve("g_req", "karthi")
+	mock.Approve("g_req", "operator")
 	createGrant(t, d, "g_req", "X", "all", nil, 3600)
 
-	mock.Approve("s_y", "karthi")
+	mock.Approve("s_y", "operator")
 	resp := signOne(t, d, "s_y", "Y", "rm -rf /tmp/x", grantHost, false, "")
 	if resp.Status != "approved" {
 		t.Fatalf("cross-server sign status = %q; want approved", resp.Status)
 	}
-	if got := approverFor(t, auditPath, "s_y"); got != "karthi" {
+	if got := approverFor(t, auditPath, "s_y"); got != "operator" {
 		t.Errorf("cross-server approved_by = %q; want human (grant for X must not cover Y)", got)
 	}
 }
@@ -526,7 +526,7 @@ func TestGrant_Expired(t *testing.T) {
 	defer audit.Close()
 
 	// 1h grant minted at base.
-	mock.Approve("g_req", "karthi")
+	mock.Approve("g_req", "operator")
 	gr := createGrant(t, d, "g_req", "prod", "all", nil, 3600)
 	if gr.Status != "approved" {
 		t.Fatalf("grant status = %q; want approved", gr.Status)
@@ -535,12 +535,12 @@ func TestGrant_Expired(t *testing.T) {
 	// Advance past expiry (base + 1h + 1s).
 	clk.set(base.Add(3601 * time.Second))
 
-	mock.Approve("s_expired", "karthi")
+	mock.Approve("s_expired", "operator")
 	resp := signOne(t, d, "s_expired", "prod", "systemctl restart nginx", grantHost, false, "")
 	if resp.Status != "approved" {
 		t.Fatalf("post-expiry sign status = %q; want approved", resp.Status)
 	}
-	if got := approverFor(t, auditPath, "s_expired"); got != "karthi" {
+	if got := approverFor(t, auditPath, "s_expired"); got != "operator" {
 		t.Errorf("post-expiry approved_by = %q; want human (expired grant must not auto-sign)", got)
 	}
 }
@@ -554,12 +554,12 @@ func TestGrant_FreshDaemonHasNoGrants(t *testing.T) {
 	d, _, audit, auditPath, _ := newGrantDaemon(t, mock, time.Unix(1000, 0))
 	defer audit.Close()
 
-	mock.Approve("s_fresh", "karthi")
+	mock.Approve("s_fresh", "operator")
 	resp := signOne(t, d, "s_fresh", "prod", "systemctl restart nginx", grantHost, false, "")
 	if resp.Status != "approved" {
 		t.Fatalf("fresh-daemon sign status = %q; want approved", resp.Status)
 	}
-	if got := approverFor(t, auditPath, "s_fresh"); got != "karthi" {
+	if got := approverFor(t, auditPath, "s_fresh"); got != "operator" {
 		t.Errorf("fresh-daemon approved_by = %q; want human (no grants exist by default)", got)
 	}
 }
@@ -581,12 +581,12 @@ func TestGrant_DeniedNotStored(t *testing.T) {
 		t.Errorf("grant_id = %q; want empty on denial", gr.GrantID)
 	}
 
-	mock.Approve("s_afterdeny", "karthi")
+	mock.Approve("s_afterdeny", "operator")
 	resp := signOne(t, d, "s_afterdeny", "prod", "systemctl restart nginx", grantHost, false, "")
 	if resp.Status != "approved" {
 		t.Fatalf("sign status = %q; want approved", resp.Status)
 	}
-	if got := approverFor(t, auditPath, "s_afterdeny"); got != "karthi" {
+	if got := approverFor(t, auditPath, "s_afterdeny"); got != "operator" {
 		t.Errorf("approved_by = %q; want human (denied grant must store nothing)", got)
 	}
 }
@@ -638,7 +638,7 @@ func TestGrant_BoundaryExact24hAllowed(t *testing.T) {
 	d, _, audit, _, _ := newGrantDaemon(t, mock, time.Unix(1000, 0))
 	defer audit.Close()
 
-	mock.Approve("g_24h", "karthi")
+	mock.Approve("g_24h", "operator")
 	gr := createGrant(t, d, "g_24h", "prod", "all", nil, 86400)
 	if gr.Status != "approved" {
 		t.Fatalf("status = %q; want approved (exactly 24h is allowed) err=%q", gr.Status, gr.Error)
@@ -653,7 +653,7 @@ func TestGrant_Revoke(t *testing.T) {
 	d, _, audit, auditPath, _ := newGrantDaemon(t, mock, time.Unix(1000, 0))
 	defer audit.Close()
 
-	mock.Approve("g_req", "karthi")
+	mock.Approve("g_req", "operator")
 	createGrant(t, d, "g_req", "prod", "all", nil, 3600)
 
 	// Before revoke: auto-signs (unarmed sign reqID).
@@ -679,12 +679,12 @@ func TestGrant_Revoke(t *testing.T) {
 	}
 
 	// After revoke: must prompt again.
-	mock.Approve("s_after", "karthi")
+	mock.Approve("s_after", "operator")
 	resp = signOne(t, d, "s_after", "prod", "systemctl restart nginx", grantHost, false, "")
 	if resp.Status != "approved" {
 		t.Fatalf("post-revoke sign status = %q; want approved", resp.Status)
 	}
-	if got := approverFor(t, auditPath, "s_after"); got != "karthi" {
+	if got := approverFor(t, auditPath, "s_after"); got != "operator" {
 		t.Errorf("post-revoke approved_by = %q; want human (grant was revoked)", got)
 	}
 }
@@ -709,7 +709,7 @@ func TestGrant_ByteIdenticalToHumanApproved(t *testing.T) {
 	mock1 := signerkit.NewMockBackend()
 	dH, pubH, auditH, _, _ := newGrantDaemon(t, mock1, base)
 	defer auditH.Close()
-	mock1.Approve("s_human", "karthi")
+	mock1.Approve("s_human", "operator")
 	human := signOne(t, dH, "s_human", "prod", "systemctl restart nginx", grantHost, false, "")
 	if human.Status != "approved" {
 		t.Fatalf("human sign status = %q; want approved", human.Status)
@@ -719,7 +719,7 @@ func TestGrant_ByteIdenticalToHumanApproved(t *testing.T) {
 	mock2 := signerkit.NewMockBackend()
 	dG, pubG, auditG, auditPathG, _ := newGrantDaemon(t, mock2, base)
 	defer auditG.Close()
-	mock2.Approve("g_req", "karthi")
+	mock2.Approve("g_req", "operator")
 	createGrant(t, dG, "g_req", "prod", "all", nil, 3600)
 	auto := signOne(t, dG, "s_auto", "prod", "systemctl restart nginx", grantHost, false, "")
 	if auto.Status != "approved" {
@@ -829,7 +829,7 @@ func TestListGrants_ReportsLiveGrant(t *testing.T) {
 	d, _, audit, _, _ := newGrantDaemon(t, mock, base)
 	defer audit.Close()
 
-	mock.Approve("g_req", "karthi")
+	mock.Approve("g_req", "operator")
 	gr := createGrant(t, d, "g_req", "prod", "commands", []string{"systemctl restart nginx"}, 3600)
 	if gr.Status != "approved" {
 		t.Fatalf("grant status = %q; want approved (err=%q)", gr.Status, gr.Error)
@@ -877,7 +877,7 @@ func TestListGrants_OmitsExpiredGrant(t *testing.T) {
 	d, _, audit, _, clk := newGrantDaemon(t, mock, base)
 	defer audit.Close()
 
-	mock.Approve("g_req", "karthi")
+	mock.Approve("g_req", "operator")
 	gr := createGrant(t, d, "g_req", "prod", "all", nil, 3600)
 	if gr.Status != "approved" {
 		t.Fatalf("grant status = %q; want approved", gr.Status)
@@ -970,11 +970,11 @@ func TestListGrants_AliasFilter(t *testing.T) {
 	d, _, audit, _, _ := newGrantDaemon(t, mock, time.Unix(1000, 0))
 	defer audit.Close()
 
-	mock.Approve("g_prod", "karthi")
+	mock.Approve("g_prod", "operator")
 	if gr := createGrant(t, d, "g_prod", "prod", "all", nil, 3600); gr.Status != "approved" {
 		t.Fatalf("prod grant status = %q; want approved", gr.Status)
 	}
-	mock.Approve("g_src", "karthi")
+	mock.Approve("g_src", "operator")
 	if gr := createGrant(t, d, "g_src", "src", "all", nil, 3600); gr.Status != "approved" {
 		t.Fatalf("src grant status = %q; want approved", gr.Status)
 	}

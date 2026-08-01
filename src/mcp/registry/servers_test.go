@@ -31,7 +31,7 @@ func TestLoad_RoundTrip(t *testing.T) {
 	path := filepath.Join(dir, "servers.json")
 	now := time.Date(2026, 5, 19, 12, 0, 0, 0, time.UTC)
 	body, err := json.Marshal(map[string]registry.Entry{
-		"prod-db": {Host: "10.0.0.1", Port: 22, User: "karthi", AddedAt: now},
+		"prod-db": {Host: "10.0.0.1", Port: 22, User: "operator", AddedAt: now},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -47,7 +47,7 @@ func TestLoad_RoundTrip(t *testing.T) {
 	if !ok {
 		t.Fatal("missing prod-db entry")
 	}
-	if e.Host != "10.0.0.1" || e.Port != 22 || e.User != "karthi" {
+	if e.Host != "10.0.0.1" || e.Port != 22 || e.User != "operator" {
 		t.Errorf("got %+v", e)
 	}
 	if !e.AddedAt.Equal(now) {
@@ -70,7 +70,7 @@ func TestFingerprint_PersistsThroughSaveLoad(t *testing.T) {
 	}
 	const fp = "SHA256:persistedHostKeyFingerprintAAAAAAAAAAAAAAAAA"
 	if err := s.Add("prod", registry.Entry{
-		Host: "10.0.0.1", Port: 22, User: "karthi", AddedAt: time.Now().UTC(), Fingerprint: fp,
+		Host: "10.0.0.1", Port: 22, User: "operator", AddedAt: time.Now().UTC(), Fingerprint: fp,
 	}); err != nil {
 		t.Fatalf("Add: %v", err)
 	}

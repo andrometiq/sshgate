@@ -134,7 +134,7 @@ func TestTransfer_ApprovedTwoLegs(t *testing.T) {
 	_, srcIDPub := registerHost(t, reg, srcFP, "src-host")
 	destBoxPub, _ := registerHost(t, reg, destFP, "dest-host")
 
-	mock.Approve("t_ok", "karthi")
+	mock.Approve("t_ok", "operator")
 	resp := driveTransfer(t, d, "t_ok", srcFP, "/etc/secret.env", destFP, "/etc/dest.env", "0600", 60)
 
 	if resp.Status != "approved" {
@@ -301,7 +301,7 @@ func TestSignPath_RejectsTransferVerb(t *testing.T) {
 
 	// Even with a standing grant covering ALL commands on the alias, the sign
 	// path must reject the transfer verb before matchGrant.
-	mock.Approve("g_all", "karthi")
+	mock.Approve("g_all", "operator")
 	createGrant(t, d, "g_all", "prod", "all", nil, 3600)
 
 	xferCmd := "SSHGATE_XFER_SEND c3NoZ2F0ZS14ZmVyLWJveA aaaa bbbb cccc"
@@ -341,7 +341,7 @@ func TestRegisterXferKey_ApprovedWrites(t *testing.T) {
 	ik, _ := xfer.GenerateIDKey()
 	fp := "SHA256:reg-host-44444444444444444444444444444444"
 
-	mock.Approve("reg1", "karthi")
+	mock.Approve("reg1", "operator")
 	resp := driveRegister(t, d, "reg1", fp, "new-host", bk.PublicText(), ik.PublicText())
 	if resp.Status != "approved" {
 		t.Fatalf("register status=%q (err=%q); want approved", resp.Status, resp.Error)

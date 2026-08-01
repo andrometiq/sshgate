@@ -184,7 +184,7 @@ func TestServer_DelayedApprovalWithinWindow_IsDelivered(t *testing.T) {
 	)
 	bk := delayedBackend{
 		delay:  approvalDelay,
-		result: signerkit.Result{Status: signerkit.StatusApproved, ApprovedBy: "karthi"},
+		result: signerkit.Result{Status: signerkit.StatusApproved, ApprovedBy: "operator"},
 	}
 	sockPath, stop := newServerWithDaemon(t, bk, handlerTimeout)
 	defer stop()
@@ -238,7 +238,7 @@ func TestServer_ApprovalAfterWindow_IsNotApproved(t *testing.T) {
 	)
 	bk := delayedBackend{
 		delay:  approvalDelay,
-		result: signerkit.Result{Status: signerkit.StatusApproved, ApprovedBy: "karthi"},
+		result: signerkit.Result{Status: signerkit.StatusApproved, ApprovedBy: "operator"},
 	}
 	sockPath, stop := newServerWithDaemon(t, bk, handlerTimeout)
 	defer stop()

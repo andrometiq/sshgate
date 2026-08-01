@@ -142,7 +142,7 @@ func decodeStructured(t *testing.T, res *mcpsdk.CallToolResult, v any) {
 
 func TestServer_ListServers_SDKBoundary(t *testing.T) {
 	t.Parallel()
-	r := newRegistryWith(t, "alpha", registry.Entry{Host: "10.0.0.1", Port: 22, User: "karthi", AddedAt: time.Now()})
+	r := newRegistryWith(t, "alpha", registry.Entry{Host: "10.0.0.1", Port: 22, User: "operator", AddedAt: time.Now()})
 	if err := r.Add("bravo", registry.Entry{Host: "10.0.0.2", Port: 2222, User: "ops", AddedAt: time.Now()}); err != nil {
 		t.Fatal(err)
 	}

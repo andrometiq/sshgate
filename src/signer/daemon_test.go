@@ -61,7 +61,7 @@ func TestDaemon_ApprovePath_SignaturesVerify(t *testing.T) {
 
 	// Pre-arrange approval so the daemon's Request call resolves
 	// immediately when it reaches the backend.
-	mock.Approve("r_a1", "karthi")
+	mock.Approve("r_a1", "operator")
 
 	if err := d.HandleSignRequest(context.Background(), conn); err != nil {
 		t.Fatalf("HandleSignRequest: %v", err)
@@ -143,7 +143,7 @@ func TestDaemon_SignsHostBinding(t *testing.T) {
 	const wantHost = "SHA256:prodServerHostKeyFingerprintAAAAAAAAAAAAAAAA"
 	req := `{"kind":"sign","request_id":"r_h1","commands":[{"server":"prod","cmd":"systemctl restart nginx","ttl_seconds":60,"host":"` + wantHost + `"}]}`
 	conn := &memConn{in: bytes.NewReader([]byte(req + "\n")), out: &bytes.Buffer{}}
-	mock.Approve("r_h1", "karthi")
+	mock.Approve("r_h1", "operator")
 
 	if err := d.HandleSignRequest(context.Background(), conn); err != nil {
 		t.Fatalf("HandleSignRequest: %v", err)
@@ -322,7 +322,7 @@ func TestDaemon_AuditRecordsServerFieldVerbatim(t *testing.T) {
 	mock := signerkit.NewMockBackend()
 	d, _, audit, auditPath := newDaemon(t, mock)
 	defer audit.Close()
-	mock.Approve("r_alias1", "karthi")
+	mock.Approve("r_alias1", "operator")
 
 	const wantAlias = "prod-db"
 	req := `{"kind":"sign","request_id":"r_alias1","commands":[{"server":"` + wantAlias + `","cmd":"systemctl restart nginx","ttl_seconds":60}]}`
@@ -356,7 +356,7 @@ func TestDaemon_ApprovedButWriteFails_AuditRecordsUndelivered(t *testing.T) {
 	mock := signerkit.NewMockBackend()
 	d, _, audit, auditPath := newDaemon(t, mock)
 	defer audit.Close()
-	mock.Approve("r_und1", "karthi")
+	mock.Approve("r_und1", "operator")
 
 	req := `{"kind":"sign","request_id":"r_und1","commands":[{"server":"prod","cmd":"systemctl restart nginx","ttl_seconds":60}]}`
 	conn := &failingWriter{in: bytes.NewReader([]byte(req + "\n"))}
@@ -381,8 +381,8 @@ func TestDaemon_ApprovedButWriteFails_AuditRecordsUndelivered(t *testing.T) {
 	if got[0].Status != "approved-undelivered" {
 		t.Errorf("audit Status = %q; want approved-undelivered (the operator approved but the MCP never received the signature)", got[0].Status)
 	}
-	if got[0].ApprovedBy != "karthi" {
-		t.Errorf("audit ApprovedBy = %q; want karthi", got[0].ApprovedBy)
+	if got[0].ApprovedBy != "operator" {
+		t.Errorf("audit ApprovedBy = %q; want operator", got[0].ApprovedBy)
 	}
 }
 
@@ -453,7 +453,7 @@ func TestDaemon_RemoteSignPath_PassesSignaturesVerbatim(t *testing.T) {
 		{Cmd: "systemctl restart nginx", Sig: "SSHGATE_SIG:remote-sig-1"},
 		{Cmd: "apt install -y certbot", Sig: "SSHGATE_SIG:remote-sig-2"},
 	}
-	mock.ApproveWithSignatures("r_remote1", cannedSigs, "karthi")
+	mock.ApproveWithSignatures("r_remote1", cannedSigs, "operator")
 
 	req := `{"kind":"sign","request_id":"r_remote1","commands":[{"server":"prod","cmd":"systemctl restart nginx","ttl_seconds":60},{"server":"prod","cmd":"apt install -y certbot","ttl_seconds":60}]}`
 	conn := &memConn{in: bytes.NewReader([]byte(req + "\n")), out: &bytes.Buffer{}}
@@ -493,8 +493,8 @@ func TestDaemon_RemoteSignPath_PassesSignaturesVerbatim(t *testing.T) {
 
 	audit.Close()
 	got := readAudit(t, auditPath)
-	if len(got) != 1 || got[0].Status != "approved" || got[0].ApprovedBy != "karthi" {
-		t.Errorf("audit = %+v; want one approved event by karthi", got)
+	if len(got) != 1 || got[0].Status != "approved" || got[0].ApprovedBy != "operator" {
+		t.Errorf("audit = %+v; want one approved event by operator", got)
 	}
 }
 
@@ -507,7 +507,7 @@ func TestDaemon_RemoteSign_LengthMismatch_RespondsError(t *testing.T) {
 	// Two commands in request, one signature returned.
 	mock.ApproveWithSignatures("r_mismatch_len",
 		[]signerkit.SignedCmd{{Cmd: "echo a", Sig: "SSHGATE_SIG:x"}},
-		"karthi")
+		"operator")
 	req := `{"kind":"sign","request_id":"r_mismatch_len","commands":[{"server":"p","cmd":"echo a","ttl_seconds":60},{"server":"p","cmd":"echo b","ttl_seconds":60}]}`
 	conn := &memConn{in: bytes.NewReader([]byte(req + "\n")), out: &bytes.Buffer{}}
 	if err := d.HandleSignRequest(context.Background(), conn); err != nil {
@@ -546,7 +546,7 @@ func TestDaemon_RemoteSign_CmdMismatch_RespondsError(t *testing.T) {
 			{Cmd: "echo a", Sig: "SSHGATE_SIG:x1"},
 			{Cmd: "WRONG", Sig: "SSHGATE_SIG:x2"},
 		},
-		"karthi")
+		"operator")
 	req := `{"kind":"sign","request_id":"r_mismatch_cmd","commands":[{"server":"p","cmd":"echo a","ttl_seconds":60},{"server":"p","cmd":"echo b","ttl_seconds":60}]}`
 	conn := &memConn{in: bytes.NewReader([]byte(req + "\n")), out: &bytes.Buffer{}}
 	if err := d.HandleSignRequest(context.Background(), conn); err != nil {

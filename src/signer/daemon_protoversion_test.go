@@ -67,7 +67,7 @@ func TestDaemon_ProtoVersionMatchSigns(t *testing.T) {
 	mock := signerkit.NewMockBackend()
 	d, _, audit, _ := newDaemon(t, mock)
 	defer audit.Close()
-	mock.Approve("r_pv", "karthi")
+	mock.Approve("r_pv", "operator")
 
 	req := `{"kind":"sign","proto_version":` + itoa(sigwire.ProtoVersion) + `,"request_id":"r_pv","commands":[{"server":"p","cmd":"ls","ttl_seconds":60}]}`
 	conn := &memConn{in: bytes.NewReader([]byte(req + "\n")), out: &bytes.Buffer{}}
@@ -93,7 +93,7 @@ func TestDaemon_LegacyNoProtoVersionSigns(t *testing.T) {
 	mock := signerkit.NewMockBackend()
 	d, _, audit, _ := newDaemon(t, mock)
 	defer audit.Close()
-	mock.Approve("r_legacy", "karthi")
+	mock.Approve("r_legacy", "operator")
 
 	// Note: this is byte-for-byte the legacy wire shape (no proto_version).
 	req := `{"kind":"sign","request_id":"r_legacy","commands":[{"server":"p","cmd":"ls","ttl_seconds":60}]}`

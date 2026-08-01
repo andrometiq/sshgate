@@ -159,14 +159,14 @@ func (f *fakeServer) handle(w http.ResponseWriter, r *http.Request) {
 				"request_id":       strings.TrimPrefix(r.URL.Path, "/v1/poll/"),
 				"status":           "approved",
 				"signatures":       signatures,
-				"approved_by_user": "karthi",
+				"approved_by_user": "operator",
 				"approved_at":      now,
 			})
 		case "denied":
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"request_id":       strings.TrimPrefix(r.URL.Path, "/v1/poll/"),
 				"status":           "denied",
-				"approved_by_user": "karthi",
+				"approved_by_user": "operator",
 			})
 		case "error":
 			_ = json.NewEncoder(w).Encode(map[string]any{
@@ -234,8 +234,8 @@ func TestHostedServerBackend_Approved(t *testing.T) {
 		if res.Status != signerkit.StatusApproved {
 			t.Errorf("status = %v; want StatusApproved", res.Status)
 		}
-		if res.ApprovedBy != "karthi" {
-			t.Errorf("ApprovedBy = %q; want karthi", res.ApprovedBy)
+		if res.ApprovedBy != "operator" {
+			t.Errorf("ApprovedBy = %q; want operator", res.ApprovedBy)
 		}
 		// Remote-signing contract: Signatures must be populated, one
 		// per request command, with the wire string from the server.
@@ -437,7 +437,7 @@ func TestHostedServerBackend_RejectsReveal(t *testing.T) {
 	hb := &signerkit.HostedServerBackend{
 		BaseURL:    ts.URL,
 		APIKey:     "k",
-		ClientID:   "karthi-laptop",
+		ClientID:   "client-1",
 		HTTPClient: ts.Client(),
 		PollWait:   50 * time.Millisecond,
 		Timeout:    2 * time.Second,
@@ -500,7 +500,7 @@ func TestHostedServerBackend_SendsExpectedBody(t *testing.T) {
 	hb := &signerkit.HostedServerBackend{
 		BaseURL:    ts.URL,
 		APIKey:     "k",
-		ClientID:   "karthi-laptop",
+		ClientID:   "client-1",
 		HTTPClient: ts.Client(),
 		PollWait:   50 * time.Millisecond,
 		Timeout:    2 * time.Second,
@@ -528,8 +528,8 @@ func TestHostedServerBackend_SendsExpectedBody(t *testing.T) {
 	if err := json.Unmarshal(captured, &body); err != nil {
 		t.Fatalf("decode captured body: %v (raw=%q)", err, string(captured))
 	}
-	if body.ClientID != "karthi-laptop" {
-		t.Errorf("client_id = %q; want karthi-laptop", body.ClientID)
+	if body.ClientID != "client-1" {
+		t.Errorf("client_id = %q; want client-1", body.ClientID)
 	}
 	if len(body.Commands) != 2 {
 		t.Fatalf("commands len = %d; want 2", len(body.Commands))

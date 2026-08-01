@@ -583,7 +583,7 @@ func TestPhase2EndToEnd(t *testing.T) {
 		}
 
 		// Inject the approve callback from the allowed user.
-		fakeMain.pushCallback(phase2AllowedUserID, "karthi", "approve:"+reqID, sent.MessageID, phase2ChatID)
+		fakeMain.pushCallback(phase2AllowedUserID, "operator", "approve:"+reqID, sent.MessageID, phase2ChatID)
 
 		// Runner should return success.
 		var res runResult
@@ -659,7 +659,7 @@ func TestPhase2EndToEnd(t *testing.T) {
 		}
 
 		// Inject DENY callback.
-		fakeMain.pushCallback(phase2AllowedUserID, "karthi", "deny:"+reqID, sent.MessageID, phase2ChatID)
+		fakeMain.pushCallback(phase2AllowedUserID, "operator", "deny:"+reqID, sent.MessageID, phase2ChatID)
 
 		var res runResult
 		select {
@@ -747,7 +747,7 @@ func TestPhase2EndToEnd(t *testing.T) {
 		}
 
 		// ONE approve callback resolves the whole batch.
-		fakeMain.pushCallback(phase2AllowedUserID, "karthi", "approve:"+reqID, sent.MessageID, phase2ChatID)
+		fakeMain.pushCallback(phase2AllowedUserID, "operator", "approve:"+reqID, sent.MessageID, phase2ChatID)
 
 		var res batchResult
 		select {
@@ -856,7 +856,7 @@ func TestPhase2EndToEnd(t *testing.T) {
 		}
 
 		// Now inject the REAL approve callback.
-		fakeMain.pushCallback(phase2AllowedUserID, "karthi", "approve:"+reqID, sent.MessageID, phase2ChatID)
+		fakeMain.pushCallback(phase2AllowedUserID, "operator", "approve:"+reqID, sent.MessageID, phase2ChatID)
 
 		var res runResult
 		select {

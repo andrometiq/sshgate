@@ -100,7 +100,7 @@ func TestTelegram_SendMessage5xxNoPendingEntry(t *testing.T) {
 
 	// Prove no pending entry leaked: a callback for that reqID hits the
 	// unknown-reqid branch ("expired or already resolved").
-	fake.pushCallback(allowedUserID, "karthi", "approve:r_send5xx", 1000, allowedChatID)
+	fake.pushCallback(allowedUserID, "operator", "approve:r_send5xx", 1000, allowedChatID)
 	waitFor(t, time.Second, func() bool { return len(fake.callbackAnswersSnapshot()) >= 1 })
 	ans := fake.callbackAnswersSnapshot()
 	if !strings.Contains(strings.ToLower(ans[0].Text), "expired") {
@@ -138,7 +138,7 @@ func TestTelegram_MalformedCallbackData(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			fake.pushCallback(allowedUserID, "karthi", tc.data, 1000, allowedChatID)
+			fake.pushCallback(allowedUserID, "operator", tc.data, 1000, allowedChatID)
 
 			waitFor(t, time.Second, func() bool { return len(fake.callbackAnswersSnapshot()) >= 1 })
 			ans := fake.callbackAnswersSnapshot()
@@ -303,7 +303,7 @@ func TestTelegram_ConcurrentRequestsResolvedOutOfOrder(t *testing.T) {
 	// Approve in reverse order: r_conc_2, r_conc_1, r_conc_0. The
 	// message_id for each send is 1000+i (nextMessageID starts at 1000).
 	for i := n - 1; i >= 0; i-- {
-		fake.pushCallback(allowedUserID, "karthi", "approve:"+reqIDs[i], 1000+i, allowedChatID)
+		fake.pushCallback(allowedUserID, "operator", "approve:"+reqIDs[i], 1000+i, allowedChatID)
 	}
 
 	// Each channel must yield exactly one StatusApproved. We don't assert
@@ -317,8 +317,8 @@ func TestTelegram_ConcurrentRequestsResolvedOutOfOrder(t *testing.T) {
 			if got.Status != signerkit.StatusApproved {
 				t.Errorf("chan[%d] (%s) Status = %v; want Approved", i, reqIDs[i], got.Status)
 			}
-			if got.ApprovedBy != "@karthi" {
-				t.Errorf("chan[%d] ApprovedBy = %q; want @karthi", i, got.ApprovedBy)
+			if got.ApprovedBy != "@operator" {
+				t.Errorf("chan[%d] ApprovedBy = %q; want @operator", i, got.ApprovedBy)
 			}
 			// The channel must be closed after exactly one Result.
 			if second, stillOpen := <-chans[i]; stillOpen {

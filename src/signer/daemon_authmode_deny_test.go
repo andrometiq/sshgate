@@ -106,7 +106,7 @@ func TestAuthMode_ApprovedUndelivered_StillHuman(t *testing.T) {
 	t.Parallel()
 	bk := realDenyBackend{result: signerkit.Result{
 		Status:     signerkit.StatusApproved,
-		ApprovedBy: "karthi",
+		ApprovedBy: "operator",
 	}}
 	d, _, audit, auditPath, _ := newGrantDaemon(t, bk, time.Unix(1000, 0))
 	defer audit.Close()
@@ -138,7 +138,7 @@ func TestAuthMode_GrantUndelivered_StillGrant(t *testing.T) {
 	d, _, audit, auditPath, _ := newGrantDaemon(t, mock, time.Unix(1000, 0))
 	defer audit.Close()
 
-	mock.Approve("g_req", "karthi")
+	mock.Approve("g_req", "operator")
 	gr := createGrant(t, d, "g_req", "prod", "all", nil, 3600)
 	if gr.Status != "approved" {
 		t.Fatalf("grant status = %q; want approved (err=%q)", gr.Status, gr.Error)

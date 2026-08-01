@@ -25,7 +25,7 @@ func TestDaemon_SignsRevealFlag(t *testing.T) {
 	const wantHost = "SHA256:prodServerHostKeyFingerprintAAAAAAAAAAAAAAAA"
 	req := `{"kind":"sign","request_id":"r_rv1","commands":[{"server":"prod","cmd":"cat /etc/secret.env","ttl_seconds":60,"host":"` + wantHost + `","reveal":true,"reason":"need the DB password to debug auth"}]}`
 	conn := &memConn{in: bytes.NewReader([]byte(req + "\n")), out: &bytes.Buffer{}}
-	mock.Approve("r_rv1", "karthi")
+	mock.Approve("r_rv1", "operator")
 
 	if err := d.HandleSignRequest(context.Background(), conn); err != nil {
 		t.Fatalf("HandleSignRequest: %v", err)
@@ -72,7 +72,7 @@ func TestDaemon_DefaultIsNotReveal(t *testing.T) {
 	const wantHost = "SHA256:prodServerHostKeyFingerprintAAAAAAAAAAAAAAAA"
 	req := `{"kind":"sign","request_id":"r_rv2","commands":[{"server":"prod","cmd":"systemctl restart nginx","ttl_seconds":60,"host":"` + wantHost + `"}]}`
 	conn := &memConn{in: bytes.NewReader([]byte(req + "\n")), out: &bytes.Buffer{}}
-	mock.Approve("r_rv2", "karthi")
+	mock.Approve("r_rv2", "operator")
 
 	if err := d.HandleSignRequest(context.Background(), conn); err != nil {
 		t.Fatalf("HandleSignRequest: %v", err)

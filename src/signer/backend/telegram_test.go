@@ -294,7 +294,7 @@ func (f *fakeTelegram) pushMessage(fromID, chatID int64, text string) int {
 		}
 		entitySuffix = fmt.Sprintf(`,"entities":[{"type":"bot_command","offset":0,"length":%d}]`, end)
 	}
-	msg := fmt.Sprintf(`{"message_id":%d,"from":{"id":%d,"is_bot":false,"first_name":"u","username":"karthi"},"chat":{"id":%d,"type":"private","first_name":"u"},"date":%d,"text":%q%s}`,
+	msg := fmt.Sprintf(`{"message_id":%d,"from":{"id":%d,"is_bot":false,"first_name":"u","username":"operator"},"chat":{"id":%d,"type":"private","first_name":"u"},"date":%d,"text":%q%s}`,
 		uid, fromID, chatID, time.Now().Unix(), text, entitySuffix)
 	f.pendingUpdates = append(f.pendingUpdates, fakeUpdate{UpdateID: uid, Message: json.RawMessage(msg)})
 	return uid
@@ -500,7 +500,7 @@ func TestTelegram_ApprovePath(t *testing.T) {
 	}
 
 	// Inject an Approve callback from the allowed user.
-	fake.pushCallback(allowedUserID, "karthi", "approve:r_approve", 1000, allowedChatID)
+	fake.pushCallback(allowedUserID, "operator", "approve:r_approve", 1000, allowedChatID)
 
 	var got signerkit.Result
 	select {
@@ -511,8 +511,8 @@ func TestTelegram_ApprovePath(t *testing.T) {
 	if got.Status != signerkit.StatusApproved {
 		t.Errorf("Status = %v; want Approved", got.Status)
 	}
-	if got.ApprovedBy != "@karthi" {
-		t.Errorf("ApprovedBy = %q; want @karthi", got.ApprovedBy)
+	if got.ApprovedBy != "@operator" {
+		t.Errorf("ApprovedBy = %q; want @operator", got.ApprovedBy)
 	}
 	// Telegram is a local-signing backend: it must leave Signatures nil
 	// so the daemon falls back to d.Key for the cryptographic step.
@@ -553,7 +553,7 @@ func TestTelegram_DenyPath(t *testing.T) {
 	}
 
 	waitFor(t, time.Second, func() bool { return len(fake.sentSnapshot()) == 1 })
-	fake.pushCallback(allowedUserID, "karthi", "deny:r_deny", 1000, allowedChatID)
+	fake.pushCallback(allowedUserID, "operator", "deny:r_deny", 1000, allowedChatID)
 
 	select {
 	case got := <-ch:
@@ -634,7 +634,7 @@ func TestTelegram_UnknownRequestIDCallback(t *testing.T) {
 	// No Request has been made — push a callback referencing a phantom
 	// request_id. The backend must answer it (clear the spinner) and
 	// not panic.
-	fake.pushCallback(allowedUserID, "karthi", "approve:ghost", 1000, allowedChatID)
+	fake.pushCallback(allowedUserID, "operator", "approve:ghost", 1000, allowedChatID)
 
 	waitFor(t, time.Second, func() bool { return len(fake.callbackAnswersSnapshot()) >= 1 })
 	answers := fake.callbackAnswersSnapshot()
