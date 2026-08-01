@@ -370,7 +370,7 @@ MCPB_BUNDLE := $(MCPB_OUTDIR)/sshgate-mcp.mcpb
 # Fixed timestamp for reproducible zips (2020-01-01 UTC; DOS zip can't encode
 # pre-1980). Override SOURCE_DATE_EPOCH to pin a different value.
 SOURCE_DATE_EPOCH ?= 1577836800
-MCPB_MCP_LDFLAGS  := -trimpath -ldflags '-s -w -buildid= -X $(MCP_PKG).Version=$(VERSION)'
+MCPB_MCP_LDFLAGS  := -trimpath -ldflags '-s -w -buildid= -X $(MCP_PKG).Version=$(VERSION)' -buildvcs=false
 
 mcpb:
 	@command -v zip >/dev/null 2>&1 || { echo "mcpb: 'zip' is required (Info-ZIP)" >&2; exit 1; }
