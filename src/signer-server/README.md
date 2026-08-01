@@ -1,6 +1,15 @@
 # sshgate-signer-server
 
-The hosted SSHGate signer is a separate approval boundary for laptops using the `hosted` signer backend. It queues bearer-authenticated signing requests in SQLite, serves an embedded human approval UI, authenticates operators with TOTP or WebAuthn, applies N-of-M/deny-veto policy, signs only after approval, and writes an append-only audit stream.
+The hosted SSHGate signer is the source foundation for a separate approval
+boundary for laptops using the `hosted` signer backend. It queues
+bearer-authenticated signing requests in SQLite, serves an embedded human
+approval UI, authenticates operators with TOTP or WebAuthn, applies N-of-M and
+deny-veto policy, signs only after approval, and writes an append-only audit
+stream.
+
+**Release status:** the v0.2 policy-authority and release gates are still open.
+Treat this guide as engineering/deployment reference, not as a declaration that
+the current branch is a release-ready hosted boundary.
 
 The server listens on private HTTP. A reverse proxy must provide the stable public HTTPS origin used by WebAuthn and the session-CSRF boundary.
 
@@ -66,7 +75,12 @@ poll_wait_sec = 30
 timeout_sec = 60
 ```
 
-`client_id` must exactly match the server's `SIGNER_SERVER_MACHINE_CLIENT_ID`; the bearer credential is bound to that requester identity at intake, persisted with the request, and shown to approvers. The current release still has one shared bearer token rather than a different credential per laptop, so distribute that token only within the intended requester boundary. Per-client credentials remain follow-up work.
+`client_id` must exactly match the server's `SIGNER_SERVER_MACHINE_CLIENT_ID`;
+the bearer credential is bound to that requester identity at intake, persisted
+with the request, and shown to approvers. The current foundation still has one
+shared bearer token rather than a different credential per laptop, so
+distribute that token only within the intended requester boundary during
+approved engineering exercises. Per-client credentials remain follow-up work.
 
 The gate on every writable server must trust the hosted signer's public key. Place the generated 32-byte public-key file at the configured local `gate.pub` path before running the human-only `sshgate add` flow.
 

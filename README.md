@@ -112,15 +112,25 @@ per-client details are in **[docs/install-generic-mcp.md](docs/install-generic-m
 
 ## Three tiers of setup
 
-`/sshgate:setup` is tiered and idempotent. Start with the lightest tier that meets your needs; you can upgrade later without tearing anything down.
+`/sshgate:setup` is tiered and idempotent. Start with the lightest tier that
+meets your needs. Moving an existing alias from Tier 1 to Tier 2 is deliberately
+human-only: install the local signer, then manually de-provision and re-add that
+alias with the staged signing public key.
 
 **Tier 1 — Read-only.** gate is deployed to every remote, but no signing key is uploaded. Reads work; writes are denied at the gate. No Telegram bot, no signer daemon, no sudo. Fastest install. Recommended for the first run while you decide whether you want write access at all.
 
-**Tier 2 — Local Telegram signer.** The full v1 install. Master keypair under the `sshgatesigner` system user, signer-telegram systemd unit, dedicated Telegram bot for approvals. Writes require a phone tap. This is the default for daily use.
+**Tier 2 — Local Telegram signer.** The local signed-write install. Master keypair under the `sshgatesigner` system user, signer-telegram systemd unit, dedicated Telegram bot for approvals. Writes require a phone tap. This is the default for daily use.
 
-**Tier 3 — Hosted server.** The v0.2 hosted `sshgate-signer-server` runs the signing key on a separate system, with an embedded approval UI, TOTP/WebAuthn auth, N-of-M/deny-veto policy, SQLite state, and append-only audit. The signer-telegram backend interface is the swap point; gate, the MCP, and the slash commands stay the same. See [the hosted signer guide](src/signer-server/README.md) for the DNS/TLS and deployment requirements.
+**Tier 3 — Hosted server.** The hosted `sshgate-signer-server` foundation runs
+the signing key on a separate system, with an embedded approval UI,
+TOTP/WebAuthn auth, N-of-M/deny-veto policy, SQLite state, and append-only audit.
+The signer-telegram backend interface is the swap point; gate, the MCP, and the
+slash commands stay the same. The remaining policy-authority work and release
+gates are tracked in the [roadmap](docs/ROADMAP.md); do not treat the current
+foundation as a cut v0.2 release. See [the hosted signer
+guide](src/signer-server/README.md) for DNS/TLS and deployment requirements.
 
-**Approval architecture (two tiers):** see [docs/approval-architecture.md](docs/approval-architecture.md).
+**Approval authority across the three install tiers:** see [docs/approval-architecture.md](docs/approval-architecture.md).
 
 ---
 
@@ -142,7 +152,7 @@ per-client details are in **[docs/install-generic-mcp.md](docs/install-generic-m
 - Restart services, install packages, edit configs with one tap on your phone. Your laptop and your phone are the two trust domains; the agent is neither.
 - Bulk-approve a sequence of writes in one tap. Claude queues `apt update && apt install nginx && systemctl enable nginx && systemctl start nginx` as a single approval. Each command is still individually signed for audit; the "bulk" is purely the UI.
 - Register a new server with the human-only `sshgate` CLI: `sshgate pubkey` prints the key line to paste into the target's `authorized_keys`, then `sshgate add prod-db ubuntu@prod-db.example.com` installs gate, locks that pasted line down to the restricted `authorized_keys` entry, and verifies end-to-end with a probe. The agent never runs this — provisioning stays in human hands so the agent can only operate within boundaries you set.
-- Your master signing key never sits in the same trust domain as the agent. The agent can request signatures; it cannot produce them. On the same machine this is a safety rail, not a hard wall — an agent that can escalate privileges on the host (e.g. has `sudo`) could read the signing key directly and bypass approval. For a guarantee that holds against a privileged rogue agent, run the signer on a separate machine (the hosted-signer tier). See [docs/approval-architecture.md](docs/approval-architecture.md).
+- Your master signing key never sits in the same trust domain as the agent. The agent can request signatures; it cannot produce them. On the same machine this is a safety rail, not a hard wall — an agent that can escalate privileges on the host (e.g. has `sudo`) could read the signing key directly and bypass approval. After the hosted policy-authority and release gates close, run the signer on a separate machine (the hosted-signer tier) for a guarantee that holds against a privileged rogue agent. See [docs/approval-architecture.md](docs/approval-architecture.md).
 
 ---
 
@@ -202,9 +212,14 @@ Tap approve. All four run in order. If any fails, the rest stop.
 
 ## Status
 
-The provisioning CLI (`sshgate pubkey` / `sshgate add`) and the full eleven-tool agent MCP surface (`run`, `run_batch`, `list_servers`, `status`, `ping`, `revoke_server`, `request_grant`, `revoke_grant`, `list_grants`, `update_gate`, `transfer`) are shipped. Both write tiers work: Tier 1 read-only (gate deployed, writes denied locally) and Tier 2 signed-write (local Telegram signer, one phone tap per approval). Inline secret redaction of command output is live (see *Secret redaction* below). The test suites — a race-enabled unit suite plus a Docker-backed integration suite — run locally via `make test` / `make test-integration` (`make preflight` is the pre-push gate); CI runs the race-enabled unit suite on every push/PR (the `tests` workflow, badged above), and `verify-gate` reproducibly rebuilds and checks the committed gate binary.
+The provisioning CLI (`sshgate pubkey` / `sshgate add`) and the full eleven-tool agent MCP surface (`run`, `run_batch`, `list_servers`, `status`, `ping`, `revoke_server`, `request_grant`, `revoke_grant`, `list_grants`, `update_gate`, `transfer`) are shipped. The local paths work: Tier 1 read-only (gate deployed, writes denied locally) and Tier 2 signed-write (local Telegram signer, one phone tap per approval). Inline secret redaction of command output is live (see *Secret redaction* below). The test suites — a race-enabled unit suite plus a Docker-backed integration suite — run locally via `make test` / `make test-integration` (`make preflight` is the pre-push gate); CI runs the race-enabled unit suite on every push/PR (the `tests` workflow, badged above), and `verify-gate` reproducibly rebuilds and checks the committed gate binary.
 
-The hosted Tier-3 signer is available as the v0.2 separate-machine approval boundary. It includes the reference web UI and deployment tooling; TLS/DNS, backups, and secret distribution remain operator responsibilities. Hosted standing grants, secret reveal, and box-to-box transfer continue to fail closed and use the local Telegram signer instead.
+The hosted Tier-3 reference implementation and deployment tooling are present,
+but the v0.2 policy-authority and release gates are still open. It is not yet a
+release-ready separate-machine boundary. TLS/DNS, backups, and secret
+distribution remain operator responsibilities. Hosted standing grants, secret
+reveal, and box-to-box transfer continue to fail closed and use the local
+Telegram signer instead.
 
 - Architecture and threat model: [`docs/THREAT-MODEL.md`](docs/THREAT-MODEL.md) (start here), then [`docs/design.md`](docs/design.md)
 - Roadmap and deferred work: [`docs/ROADMAP.md`](docs/ROADMAP.md)

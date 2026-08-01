@@ -47,8 +47,9 @@ The signing key that authorizes writes is isolated under a separate Unix
 user, so the agent cannot forge approvals even if it tried. On the same
 machine this is a safety rail, not a hard wall — an agent that can escalate
 privileges on the host (e.g. has `sudo`) could read the signing key directly
-and bypass approval. For a guarantee that holds against a privileged rogue
-agent, run the signer on a separate machine (the hosted-signer tier). See
+and bypass approval. After the hosted policy-authority and release gates close,
+run the signer on a separate machine (the hosted-signer tier) for a guarantee
+that holds against a privileged rogue agent. See
 `docs/approval-architecture.md`. The
 cryptographic gate is enforced on each remote server independently.
 
@@ -87,10 +88,11 @@ cryptographic gate is enforced on each remote server independently.
 
 Pick **Tier 1** first if you want to try SSHGate without committing to the
 phone-tap flow. **Tier 2** is the local upgrade path — re-run `/sshgate:setup`
-any time to add the signer. **Tier 3** is separately deployable on a systemd
-host with the embedded approval UI; it is not yet automated by the local setup
-menu. Follow `src/signer-server/README.md` for its DNS, TLS, roster, and key
-distribution steps.
+any time to add the signer. **Tier 3** has a source foundation for a separate
+systemd host with an embedded approval UI, but its v0.2 policy-authority and
+release gates remain open. It is not release-ready or automated by the local
+setup menu. Follow `src/signer-server/README.md` for current engineering status
+and deployment requirements.
 
 **Proceed with install?** *(default: yes — just hit enter)*
 
@@ -265,13 +267,16 @@ Tell the user:
 >   - **Tier 2 (local Telegram signer)** — full v1. Master keypair under
 >     `sshgatesigner` system user, systemd unit, Telegram bot for
 >     approvals. Writes need a phone tap. Adds ~10 min and a sudo run.
->   - **Tier 3 (hosted server signer)** — separately deployable; this local
->     setup command points to `src/signer-server/README.md` rather than
->     provisioning the VPS itself.
+>   - **Tier 3 (hosted server signer)** — source foundation present, but not
+>     release-ready until its policy-authority and release gates close. This
+>     local setup command points to `src/signer-server/README.md`; it does not
+>     provision a VPS.
 >
 > Pick Tier 1 first if you want to try SSHGate without committing to the
-> phone-tap flow. You can upgrade to Tier 2 later by re-running this same
-> command, or deploy Tier 3 separately when you need the hard boundary."
+> phone-tap flow. You can add the Tier 2 signer later by re-running this same
+> command, but existing Tier 1 aliases remain read-only until you manually
+> de-provision and re-add them under Tier 2. Tier 3 becomes the separate
+> hard-boundary option only after its release gates close."
 
 The setup command walks every step itself. For Tier 2 it will:
 

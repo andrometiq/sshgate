@@ -1,10 +1,11 @@
 name: release
 
 # Cut a GitHub Release on every v* tag: reproducible cross-platform binaries for
-# sshgate-mcp, sshgate, and sshgate-signer-telegram (linux/darwin × amd64/arm64),
-# plus the sshgate-mcp.mcpb bundle and a SHA256SUMS manifest. The test suite runs
-# BEFORE any build. The gate binary is NOT here — it has its own committed,
-# reproducible dist/gate channel and the verify-gate workflow.
+# sshgate-mcp, sshgate, sshgate-signer-telegram, and sshgate-signer-server
+# (linux/darwin × amd64/arm64), plus the sshgate-mcp.mcpb bundle and a
+# SHA256SUMS manifest. The test suite runs BEFORE any build. The gate binary is
+# NOT here — it has its own committed, reproducible dist/gate channel and the
+# verify-gate workflow.
 #
 # Reproducibility mirrors the Makefile's release-gate discipline: the toolchain is
 # pinned from go.mod's `toolchain` directive (so a byte-identical binary comes out
@@ -25,10 +26,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
 
       - name: Set up Go (pinned toolchain from go.mod)
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
           check-latest: false
@@ -63,18 +66,21 @@ jobs:
                 out="$OUT/$2-$os-$arch"
                 GOTOOLCHAIN="$TOOLCHAIN" CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" \
                   GOAMD64= GOEXPERIMENT= GOFLAGS=-mod=readonly \
-                  go build -trimpath -ldflags "$3" -o "$out" "$1"
+                  go build -trimpath -buildvcs=false -ldflags "$3" -o "$out" "$1"
               done
             done
           }
 
           build ./src/mcp/cmd/sshgate-mcp                 sshgate-mcp              "-s -w -buildid= -X $MCP_PKG.Version=$VERSION"
           build ./src/signer/cmd/sshgate-signer-telegram  sshgate-signer-telegram "-s -w -buildid= -X main.version=$VERSION"
+          build ./src/signer-server/cmd/sshgate-signer-server sshgate-signer-server "-s -w -buildid= -X main.version=$VERSION"
           build ./src/cli/cmd/sshgate                     sshgate                 "-s -w -buildid="
 
           # MCPB bundle (its own reproducible pack); asset name must match the
-          # packages[].identifier URL in server.json.
-          make mcpb
+          # packages[].identifier URL in server.json. Disable VCS stamping in
+          # both release and registry-publish builds so unrelated/untracked
+          # release outputs cannot change the bundle bytes.
+          GOFLAGS='-mod=readonly -buildvcs=false' make mcpb
           cp packaging/mcpb/dist/sshgate-mcp.mcpb "$OUT/sshgate-mcp.mcpb"
 
           # SHA256SUMS over every asset (excluding the manifest itself).
@@ -94,5 +100,6 @@ jobs:
           gh release create "$TAG" dist/release/* \
             --repo "$GITHUB_REPOSITORY" \
             --title "$TAG" \
+            --notes 'Release caveat: sshgate-signer-server binaries are engineering/pre-release artifacts. Tier 3 is not release-ready until its policy-authority work, owner-operated live approval/denial validation, and release gates close.' \
             --generate-notes \
             --verify-tag

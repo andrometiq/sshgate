@@ -24,8 +24,9 @@ plugin, that's fine — it's a no-op for SSHGate — but it's not required.
 
 ## Tiers
 
-SSHGate ships three install tiers. Pick the one matching how much
-trust you want to delegate.
+SSHGate defines three install tiers. Tier 1 and Tier 2 are usable now; Tier 3's
+source foundation is present but is not release-ready. Pick only a tier whose
+release status and trust boundary match your needs.
 
 ### Tier 1 — Read-only
 
@@ -55,8 +56,9 @@ trust you want to delegate.
   user. Claude (running as you) cannot read it. On the same machine this
   is a safety rail, not a hard wall — an agent that can escalate privileges
   on the host (e.g. has `sudo`) could read the signing key directly and
-  bypass approval. For a guarantee that holds against a privileged rogue
-  agent, run the signer on a separate machine (the hosted-signer tier).
+  bypass approval. After the hosted policy-authority and release gates close,
+  run the signer on a separate machine (the hosted-signer tier) for a guarantee
+  that holds against a privileged rogue agent.
   See `approval-architecture.md`. Every write
   requires your active tap on Telegram. The bot's `allowed_user_id` pins the
   channel to your account.
@@ -65,16 +67,19 @@ trust you want to delegate.
 
 ### Tier 3 — Hosted server signer
 
-- **Available as a separate v0.2 deployment.** The hosted signer
-  (`src/signer-server`) ships a hardened systemd installer, embedded approval
-  UI, TOTP/WebAuthn authentication, and N-of-M/deny-veto policy. The local
-  `/sshgate:setup` menu does not automate this tier yet; follow
-  `../src/signer-server/README.md`.
+- **Foundation present; not yet release-ready.** The hosted signer
+  (`src/signer-server`) contains a systemd installer, embedded approval UI,
+  TOTP/WebAuthn authentication, and N-of-M/deny-veto policy. Its v0.2
+  policy-authority and release gates are still open, so do not treat this
+  branch as an installable hosted release. The local `/sshgate:setup` menu does
+  not automate this tier; follow `../src/signer-server/README.md` for the
+  current engineering/deployment requirements.
 - The master key lives on a dedicated VPS; multiple operators can share the
   approval roster. TLS/DNS, backups, reverse-proxy policy, and secure client-key
   distribution remain operator responsibilities.
-- **Use when:** you need a boundary that still holds if the laptop-side agent
-  can escalate privileges, or you need multi-operator approval.
+- **Use after the hosted release gates close when:** you need a boundary that
+  still holds if the laptop-side agent can escalate privileges, or you need
+  multi-operator approval.
 
 ---
 

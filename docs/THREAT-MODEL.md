@@ -22,7 +22,7 @@ wall.**
   (`design.md` §"Provisioning", §"What the design protects against".)
 - A **write** runs only if it carries a valid Ed25519 signature the gate verifies
   against the signing pubkey deployed on that host. No pubkey on the host
-  (read-only / Install Tier 1) ⇒ no write can be signed ⇒ the gate refuses it
+  (read-only / Tier 1) ⇒ no write can be signed ⇒ the gate refuses it
   locally, before any approval channel is even consulted.
 - The signature carries a **bounded validity window** and a **per-host binding**
   (the target's TOFU-pinned host-key fingerprint), so an approved write cannot be
@@ -54,56 +54,62 @@ runs without approval — which is why the classifier is discussed honestly belo
   tool's write/exec-capable flags. Anything not affirmatively a known-safe read —
   unknown binaries, pipes into non-reads, redirects, `;`/`&&`/`||`, command
   substitution, `sudo` — collapses to *write* and is routed to approval.
-  (`design.md:147-167`.)
+  (`design.md` §"Read/write classification".)
 - **Is not:** a proof. Because reads are ultimately handed to a shell, an obscure
   tool flag or a shell-parse mismatch can in principle let a command the
   classifier deemed "read" do more than read. The default-deny structure holds
   (unknown ⇒ write), but per-tool flag enumeration cannot be proven complete
   against every tool on every server. The durable fix is structural — execute
   reads from a parsed `argv` with no intervening shell (the tracked argv-exec
-  item). (`design.md:154-167`, `security-readonly-bypass.md`.)
+  item). (`design.md` §"Read/write classification",
+  `security-readonly-bypass.md`.)
 
 ## Tiers — what each one buys
 
-SSHGate numbers install tiers and approval tiers differently; the mapping is in
-`design.md:293-295` (**do not** use `approval-architecture.md`'s bare "Tier 1/2"
-headers, which currently number the opposite way — see the redline draft).
-
-- **Install Tier 1 — read-only.** The gate is deployed but no signing pubkey is
+- **Tier 1 — read-only.** The gate is deployed but no signing pubkey is
   pushed, so **writes are denied at the gate** — a real, server-side wall (a
   write literally cannot be signed). It is a *safety rail on the read side*: it
   still trusts the agent not to weaponize read access (file enumeration, log
   harvesting), and reads run without approval via the fail-closed classifier
   above. The fastest, lowest-trust on-ramp — not a full security posture.
-- **Install Tier 2 — same-machine Telegram signer (= Approval Tier 1).** The
+- **Tier 2 — local Telegram signer.** The
   master key is isolated under a separate Unix user; writes need one phone tap.
   This is **a safety rail, not a hard wall**: it reliably catches mistakes and
   naïve prompt-injection and stops an *unprivileged* rogue agent, but an agent
   that can escalate privileges on the host (e.g. has `sudo`) can read the signing
   key directly and forge approvals. This caveat is load-bearing and surfaced to
-  the operator, not buried. (`design.md:235-249`, `approval-architecture.md`.)
-- **Install Tier 3 — hosted signer (= Approval Tier 2).** The signer runs on a
-  separate machine the agent cannot touch, so the agent can only *ask* it to
+  the operator, not buried. (`design.md` §"Install tiers",
+  `approval-architecture.md`.)
+- **Tier 3 — hosted signer boundary.** When the release-complete signer runs on
+  a separate machine the agent cannot touch, the agent can only *ask* it to
   sign — it cannot read the key or forge an approval. **This is the only tier
-  that is a hard boundary against a privileged rogue laptop agent.** v0.2 ships
-  the hosted backend, embedded TOTP/WebAuthn UI, SQLite approval policy, and
-  systemd deployment; TLS/DNS, backups, and secret distribution remain operator
-  responsibilities. (`design.md:251-291`, `src/signer-server/README.md`.)
+  designed to be a hard boundary against a privileged rogue laptop agent.**
+  The current branch contains the hosted backend, embedded TOTP/WebAuthn UI,
+  SQLite approval foundation, and systemd deployment, but its v0.2
+  policy-authority and release gates are still open. TLS/DNS, backups, and
+  secret distribution remain operator responsibilities. (`design.md` §"Install tiers",
+  `src/signer-server/README.md`.)
 
 ## What SSHGate does NOT protect against (be honest)
 
-- **A privileged rogue agent on the same machine (Install Tier 2 / Approval Tier
-  1).** If the agent can escalate to root or to the signer's user, it can read the
-  key and forge approvals. Use the hosted signer (Tier 3) when you need a hard
-  guarantee. (`design.md:315-320`.)
+- **A privileged rogue agent on the same machine (Tier 2 local signer).** If the
+  agent can escalate to root or to the signer's user, it can read the
+  key and forge approvals. After its release gates close, use the hosted signer
+  (Tier 3) when you need a hard guarantee. (`design.md` §"What the design
+  protects against, and what it does not".)
 - **The read-path classifier residual.** Most historically-catalogued read-only
   bypasses are now closed or fail closed in the live classifier (`sed e`,
   `find -fprintf`, env-var smuggling, awk `system()`; multiplexers and wrapper
   binaries are non-allowlisted). The tracked **structural** gap that remains is an
   *unlisted* GNU long-option abbreviation, open until the argv-exec fix lands.
-  (`security-readonly-bypass.md:5-14`, `FUTURE.md:89, 95-104`.) Do not read this
-  as "solved"; read it as "default-deny + a standing regression corpus, with one
-  known structural hole".
+  (`security-readonly-bypass.md`
+  §"Security research — read-only gate bypass landscape", opening "Status
+  update (2026-07)" callout, and
+  §"Bypass categories cross-referenced with SSHGate"; `FUTURE.md`
+  §"Operator-facing limitations (known and documented)", item 12, and
+  §"Read-only gate hardening (deferred MINORs/MAJORs from security research)".)
+  Do not read this as "solved"; read it as "default-deny + a standing regression
+  corpus, with one known structural hole".
 - **PTY-based escapes and `~/.ssh/rc` execution at the `authorized_keys` layer —
   closed.** The forced-command entry leads with `restrict` (the OpenSSH ≥ 7.2
   deny-all catch-all) and additionally pins
@@ -114,7 +120,8 @@ headers, which currently number the opposite way — see the redline draft).
   before the forced command — and auto-includes any future OpenSSH restriction. A
   third-party SSH client holding the key can no longer request a PTY, so
   `less`/`man`/`vim` cannot be turned interactive for an `!sh` escape. Enforced at
-  that layer. (`FUTURE.md:90`.)
+  that layer. (`FUTURE.md`
+  §"Operator-facing limitations (known and documented)", item 13.)
 - **A compromised gate binary.** The gate is the on-remote trust anchor for both
   signature verification and redaction. A gate replaced through a non-SSHGate
   channel defeats both. The verified release channel (committed `dist/gate/`
@@ -130,23 +137,23 @@ headers, which currently number the opposite way — see the redline draft).
 
 ## The trust the operator machine holds
 
-Even at Install Tier 2, the operator's laptop is inside the trust boundary: it
+Even at Tier 2, the operator's laptop is inside the trust boundary: it
 holds the signing key (under a separate Unix user), the server registry (which
 hosts the agent may reach), the staged gate bytes that `update_gate` pushes, and
 the Telegram bot token. Provisioning — *defining* which machines the agent can
 reach — is deliberately **human-only** and off the agent's tool surface, so the
 agent can never expand its own reach; it only operates within boundaries a human
 established (`design.md` §"Provisioning: control plane vs data plane"). A host
-compromise of the laptop is therefore a compromise of the Tier-2 boundary — which
-is exactly why Tier 3 (hosted signer) exists for anyone who needs the key off the
-agent's machine entirely.
+compromise of the laptop is therefore a compromise of the Tier-2 boundary.
+After its policy-authority and release gates close, Tier 3 is intended for
+operators who need the key off the agent's machine entirely.
 
 ## Where to read more
 
-- [`design.md`](design.md) — full architecture, the two-tier approval model, and
-  the protected/not-protected list this page condenses.
+- [`design.md`](design.md) — full architecture, the three install tiers, and the
+  protected/not-protected list this page condenses.
 - [`approval-architecture.md`](approval-architecture.md) — why the boundary is
-  *where the signer runs*, not which bot delivers the message.
+  *where the signer runs*, and the current approval surface for each tier.
 - [`security-readonly-bypass.md`](security-readonly-bypass.md) — the read-only
   bypass landscape and per-item CLOSED/open status.
 - [`FUTURE.md`](FUTURE.md) — the honest limitations list and the deferred

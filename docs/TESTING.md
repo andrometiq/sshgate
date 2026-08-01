@@ -6,9 +6,9 @@ network, systemd, or CGO**. The standing invariant is:
 > `go test ./...` must stay green with none of those at every commit (~11s of
 > per-package work, parallelised to ~8s wall).
 
-The only thing that needs real hosts is the Docker integration/e2e suite under
-`tests/integration` — it is gated behind `//go:build integration` and is **not**
-part of the unit gate (see §11).
+The only tests that need real Docker targets are the integration-tagged
+red-team live test under `internal/redteam` and the suite under
+`tests/integration`. They are **not** part of the unit gate (see §11).
 
 Everything below is grounded in the actual tree as of this writing. File:func
 citations are exact; if you change the code, re-derive them.
@@ -25,8 +25,9 @@ go test -race ./...      # run this before merge (needs CGO; see §10)
 
 What is **not** in the unit gate:
 
-- The Docker integration suite (`tests/integration`, `//go:build integration`)
-  — real `sshd` in a container, real `ssh` client. Run via `make test-integration`.
+- The Docker integration suites (`internal/redteam` and `tests/integration`,
+  `//go:build integration`) — real `sshd` in a container, real `ssh` client.
+  Run via `make test-integration`.
 - The fresh-install keyless-startup smoke (`scripts/smoke-fresh-install.sh`,
   `make smoke`).
 - The full `make e2e` target (preflight + integration + smoke), for after a
@@ -36,7 +37,7 @@ The standing gates live in `docs/E2E-TEST-STRATEGY.md`:
 
 | When | Command | Needs Docker |
 | --- | --- | --- |
-| Before every push | `make preflight` (`vet test gitleaks build verify-dist verify-repro`) | no |
+| Before every push | `make preflight` (`vet test test-refapp-js gitleaks build verify-dist verify-versions verify-repro verify-no-sqlite-local verify-no-humanauth-local`) | no |
 | After a large build / before release | `make e2e` (`preflight test-integration smoke`) | yes |
 
 > Note on `make test`: the Makefile's `test:` target is `go test -race ./...`,
@@ -56,7 +57,7 @@ is structurally avoided:
 | Never required | How it's avoided |
 | --- | --- |
 | **sudo / root** | Permission assertions run as the ordinary test user; tests that depend on unix perms being *enforced* skip when `os.Geteuid() == 0` (root bypasses mode bits — see §10). Components that refuse to run as root are tested via `assertNonRoot()`, not by actually being root. |
-| **Docker** | The only Docker is `tests/integration` (`//go:build integration`), excluded from `go test ./...` by the build tag. |
+| **Docker** | Docker-backed tests are integration-tagged under `internal/redteam` and `tests/integration`, so plain `go test ./...` excludes them. |
 | **network** | Every "socket" is a Unix-domain socket on `t.TempDir()` or a loopback `127.0.0.1:0` listener. The three HTTP collaborators (Telegram Bot API, OpenAI-compatible LLM, hosted v2 signer) are faked with `httptest.Server` on loopback. The MCP server uses the SDK **in-memory** transport — no TCP at all. |
 | **systemd** | Nothing under test talks to systemd. The signer's single-instance guarantee is a `flock` on a lockfile in `t.TempDir()` (`TestFlockOrFail_SecondLockBlocks`), not a unit. |
 | **CGO** | `sqlite` is pure-Go: `modernc.org/sqlite` in `go.mod` (no `mattn/go-sqlite3`). Plain `go test ./...` passes with `CGO_ENABLED=0`. CGO is only pulled in by `-race`. |
@@ -526,26 +527,31 @@ persist at mode 0600, reload-after-`Add`. The edge test has an
 
 ## 11. The integration / e2e boundary
 
-Real hosts and Docker live **only** in `tests/integration`, behind
-`//go:build integration` (e.g. `e2e_test.go`, `phase2/3/4_test.go`,
-`helpers_test.go`, `setup_test.go`). The build tag means `go test ./...` never
-compiles or runs them — that is structurally why they can never be part of the
-unit gate.
+Docker-backed tests live in `internal/redteam/tripwire_live_test.go` and
+`tests/integration`, behind `//go:build integration` (e.g. `e2e_test.go`,
+`phase2/3/4_test.go`, `helpers_test.go`, `setup_test.go`). The build tag means
+plain `go test ./...` never compiles or runs them — that is structurally why
+they can never be part of the unit gate.
 
-What they need and prove (per `tests/integration/README.md`): a throwaway
+What the `tests/integration` suite needs and proves (per
+`tests/integration/README.md`): a throwaway
 `linuxserver/openssh-server` container (rootless, pubkey auth, host port 2222),
 that a real `ssh` client connects to, so SSHGate is exercised end-to-end —
 deploy the gate over real SSH, run a read, and confirm write-denial against live
 `sshd`. Keys are generated into `fixtures/keys/` (empty-but-`.gitkeep` in git)
 at setup and deleted at tear-down.
 
+The red-team live test drives its own disposable target on that same default
+host port and verifies the filesystem write tripwire. The two package groups
+therefore run serially and uncached in the release gate.
+
 Makefile targets (and `docs/E2E-TEST-STRATEGY.md`):
 
 | Target | What it runs | Docker? | When |
 | --- | --- | --- | --- |
 | `make test` | `go test -race ./...` (the unit gate, CGO) | no | always |
-| `make preflight` | `vet test gitleaks build verify-dist verify-repro` | no | before every push |
-| `make test-integration` | `go test -race -tags=integration ./tests/integration/...` | **yes** | exercising real hosts |
+| `make preflight` | `vet test test-refapp-js gitleaks build verify-dist verify-versions verify-repro verify-no-sqlite-local verify-no-humanauth-local` | no | before every push |
+| `make test-integration` | `go test -count=1 -p=1 -race -tags=integration ./internal/redteam ./tests/integration/... -timeout=300s -v` | **yes** | exercising real hosts |
 | `make smoke` | `scripts/smoke-fresh-install.sh` (keyless first-run startup) | no | fresh-user regression |
 | `make e2e` | `preflight test-integration smoke` | **yes** | after a large build / before release |
 

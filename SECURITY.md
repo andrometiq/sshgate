@@ -63,8 +63,9 @@ The short version, stated factually:
 - **The signing key is isolated** under a dedicated Unix user the agent cannot
   read from. On a single machine this is a safety rail, not a hard wall: an agent
   that can escalate privileges on the host (e.g. has `sudo`) could read the key
-  directly. For a guarantee that holds against a privileged rogue agent, run the
-  signer on a separate machine. See
+  directly. After the hosted policy-authority and release gates close, run the
+  signer on a separate machine for a guarantee that holds against a privileged
+  rogue agent. See
   [`docs/approval-architecture.md`](docs/approval-architecture.md).
 
 We make **no claim that SSHGate is "proven secure."** It is a defense-in-depth

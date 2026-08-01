@@ -2,8 +2,9 @@
 
 SSHGate is a Claude Code plugin that lets an AI agent SSH into Linux servers to
 diagnose and operate them. **Read** commands run freely; **write** commands
-require an explicit human approval delivered to a phone over Telegram. A small
-binary on each remote server enforces this split independently of the agent.
+require explicit human approval: a phone tap for the local Telegram signer or
+the hosted signer's web UI. A small binary on each remote server enforces this
+split independently of the agent.
 
 This document describes what SSHGate is, the trust boundaries it draws, how the
 remote gate and the signed-write protocol work, and what the design does and
@@ -58,8 +59,8 @@ write and authorize it:
 
 The separation is what makes "approver ≠ runner" real. If the signing key lived
 in the same domain as the agent, the agent could forge its own approvals and the
-gate would be theater. (See *The two-tier approval model* below for the honest
-limits of same-machine separation.)
+gate would be theater. (See *Install tiers* below for the honest limits of
+same-machine separation.)
 
 ---
 
@@ -226,53 +227,12 @@ tap covers all of them while each command stays individually signed.
 
 ---
 
-## The two-tier approval model
-
-The strength of an approval depends on **where the signer runs relative to the
-agent**, not on which channel delivers the message. SSHGate offers two approval
-tiers and is honest about what each one buys. (For the full reasoning, see
-[approval-architecture.md](approval-architecture.md).)
-
-### Approval Tier 1 — same machine (a safety rail, not a wall)
-
-The signer runs on the same machine as the agent, as a separate Unix user, and
-approvals are routed through the operator's existing Telegram setup.
-
-This is the easy path: no separate signing infrastructure to stand up. The OS
-user separation (`0600` key, `ptrace_scope=1`) raises the bar against an
-*unprivileged* rogue agent and reliably catches **mistakes** (a wrong or
-destructive command) and **naïve prompt-injection**.
-
-It is explicitly **not** a hard boundary. An agent that can escalate privileges
-on the host — for example, one that has `sudo` — can read the signing key
-directly and forge approvals, bypassing the gate. No message-routing choice
-changes that. On one machine, approval is a safety rail, not a security wall.
-This caveat is load-bearing and is surfaced to the operator, not buried.
-
-### Approval Tier 2 — separate hosted signer (the real boundary)
-
-The signer runs as a hosted service on a separate machine the agent cannot
-touch. The agent can only *ask* it to sign over the network; it cannot read the
-key, forge an approval, or escalate. This is the recommended path for anyone who
-needs an actual guarantee.
-
-Because the key and the approval check live on a host the agent has no access to,
-theft of a bot token or compromise of any single channel degrades only to denial
-of service (the request just is not approved) — never to a forged approval. The
-cryptographic operator factor (passkey / WebAuthn, and N-of-M approval) lives in
-the server; a channel such as Telegram is a notification surface for it, not the
-root of trust.
-
-Both tiers share one signer core: the same approval logic, the same signed-command
-wire format, the same timeout chain, and the same audit log. Only the channel
-differs.
-
----
-
 ## Install tiers
 
-The setup flow is tiered and idempotent. Start with the lightest tier that meets
-your needs and upgrade later without tearing anything down.
+The three tiers below share the same signed-command wire format, timeout chain,
+and audit seam. The strength of approval depends on where the signer runs
+relative to the agent, not merely on which interface presents an approval. For
+the full reasoning, see [approval-architecture.md](approval-architecture.md).
 
 - **Tier 1 — read-only.** The gate is deployed to each remote, but **no** signing
   public key is uploaded. Reads work; every write is denied at the gate. No
@@ -281,19 +241,18 @@ your needs and upgrade later without tearing anything down.
 
 - **Tier 2 — local Telegram signer (signed-write).** A signer daemon runs on the
   operator's machine under a dedicated Unix user, holding the master signing key
-  and the bot token. Writes are approved with one tap on Telegram and then signed.
-  This corresponds to same-machine approval (Approval Tier 1 above): a strong
-  safety rail with the documented same-machine caveat.
+  and the bot token. Writes are approved with one tap on Telegram and then
+  signed. This is a same-machine safety rail with the documented privileged-agent
+  caveat, not a hard boundary.
 
-- **Tier 3 — hosted signer (separate machine).** The signer runs on a separate
-  host the agent cannot reach, giving the real boundary (Approval Tier 2 above),
-  with a richer approval surface (web UI plus Telegram, N-of-M approval,
-  centralized audit). This tier is the recommended investment where a hard
-  guarantee is required; its remaining productization is tracked on the roadmap.
-
-> Naming note: the install tiers and the approval tiers number differently.
-> Install Tier 2 (local Telegram signer) is approval Tier 1 (same machine);
-> install Tier 3 (hosted signer) is approval Tier 2 (separate machine).
+- **Tier 3 — hosted signer (separate machine).** The intended deployment runs
+  the signer on a separate host the agent cannot reach, giving the hard boundary
+  against a privileged laptop-side agent after its policy-authority and release
+  gates close. The current source foundation includes the hosted web UI,
+  TOTP/WebAuthn, N-of-M approval, and centralized audit, but it is not yet a
+  release-ready boundary. Hosted Telegram remains deferred. This tier is the
+  recommended future investment where a hard guarantee is required; its open
+  release work is tracked on the roadmap.
 
 ---
 
@@ -313,12 +272,12 @@ your needs and upgrade later without tearing anything down.
 
 **Not protected (be honest about it):**
 
-- On the same machine (install Tier 2 / approval Tier 1), a *privileged* rogue
+- On the same machine (Tier 2 local signer), a *privileged* rogue
   agent that can escalate to root or to the signer's user can read the key and
   forge approvals. The same-machine tier is a safety rail against mistakes and
-  naïve injection, not a wall against a determined privileged adversary. Use the
-  hosted signer (install Tier 3 / approval Tier 2) when a hard guarantee is
-  required.
+  naïve injection, not a wall against a determined privileged adversary. After
+  its release gates close, use the hosted signer (Tier 3) when a hard guarantee
+  is required.
 - The read/write classifier is a fail-closed heuristic over shell syntax; until
   the argv-exec structural fix lands, obscure tool flags or shell-parsing
   mismatches remain a residual risk on the read path, mitigated by default-deny

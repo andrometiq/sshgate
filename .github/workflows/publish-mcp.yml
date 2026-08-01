@@ -30,10 +30,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
 
       - name: Set up Go (pinned toolchain from go.mod)
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
           check-latest: false
@@ -53,8 +55,8 @@ jobs:
             *) echo "::error::packages[0].identifier ($ID) does not point at release $TAG's sshgate-mcp.mcpb asset — update the download URL"; exit 1 ;;
           esac
 
-      - name: Build the MCPB bundle
-        run: make mcpb
+      - name: Build the reproducible MCPB bundle
+        run: GOFLAGS='-mod=readonly -buildvcs=false' make mcpb
 
       - name: Compute bundle SHA-256 and inject into server.json
         run: |
@@ -85,15 +87,25 @@ jobs:
           WANT="$(jq -r '.packages[0].fileSha256' server.json)"
           echo "expecting release asset $URL to hash to $WANT"
           # release.yml fires on the same tag but must finish its full test
-          # suite + 12 cross-builds before the Release (and this asset) exists,
+          # suite + 16 standalone cross-builds before the Release (and this asset) exists,
           # so it typically lands MINUTES after this job reaches here. Poll for
-          # up to ~10 minutes rather than failing while release.yml is still
+          # up to ~20 minutes rather than failing while release.yml is still
           # building.
-          for i in $(seq 1 30); do
-            if curl -fsSL -o published.mcpb "$URL"; then break; fi
-            echo "asset not up yet (attempt $i/30) — waiting 20s"; sleep 20
+          ASSET_READY=false
+          for i in $(seq 1 60); do
+            if curl --fail --silent --show-error --location --remove-on-error \
+              --proto '=https' --proto-redir '=https' --tlsv1.2 \
+              --output published.mcpb "$URL" &&
+              test -s published.mcpb; then
+              ASSET_READY=true
+              break
+            fi
+            echo "asset not up yet (attempt $i/60) — waiting 20s"; sleep 20
           done
-          test -f published.mcpb || { echo "::error::release asset $URL is not reachable — did release.yml finish? re-run this job after the Release assets are attached"; exit 1; }
+          if [ "$ASSET_READY" != true ]; then
+            echo "::error::release asset $URL is not reachable as a nonempty file after 60 attempts (~20 minutes) — did release.yml finish? re-run this job after the Release assets are attached"
+            exit 1
+          fi
           GOT="$(sha256sum published.mcpb | awk '{print $1}')"
           if [ "$GOT" != "$WANT" ]; then
             echo "::error::Release asset sha256 ($GOT) != locally built bundle ($WANT) — the published .mcpb is not the reproducible build"
@@ -104,8 +116,18 @@ jobs:
       - name: Install mcp-publisher
         run: |
           set -euo pipefail
-          curl -L "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz" | tar xz mcp-publisher
-          sudo mv mcp-publisher /usr/local/bin/
+          PUBLISHER_VERSION=v1.7.9
+          PUBLISHER_ARCHIVE=mcp-publisher_linux_amd64.tar.gz
+          PUBLISHER_SHA256=ab128162b0616090b47cf245afe0a23f3ef08936fdce19074f5ba0a4469281ac
+          curl --fail --location --proto '=https' --proto-redir '=https' --tlsv1.2 \
+            --output "$PUBLISHER_ARCHIVE" \
+            "https://github.com/modelcontextprotocol/registry/releases/download/$PUBLISHER_VERSION/$PUBLISHER_ARCHIVE"
+          printf '%s  %s\n' "$PUBLISHER_SHA256" "$PUBLISHER_ARCHIVE" |
+            sha256sum --check --strict -
+          mkdir publisher-extract
+          tar -xzf "$PUBLISHER_ARCHIVE" -C publisher-extract mcp-publisher
+          test -f publisher-extract/mcp-publisher
+          sudo install -m 0755 publisher-extract/mcp-publisher /usr/local/bin/mcp-publisher
 
       - name: Login to the registry (GitHub OIDC)
         run: mcp-publisher login github-oidc

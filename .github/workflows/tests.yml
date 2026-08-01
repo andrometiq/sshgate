@@ -18,10 +18,14 @@ name: tests
 #   - make e2e / make smoke  — need Docker / a privileged fresh-user rig
 #                              (scripts/smoke-fresh-install.sh); not runnable on
 #                              a plain hosted runner.
-#   - make preflight in full — it additionally runs gitleaks + verify-dist +
-#                              verify-repro; the reproducible-build / dist
-#                              checks are the separate verify-gate.yml workflow's
-#                              job (spec §11.4), so we do NOT duplicate them here.
+#   - make preflight in full — beyond vet + test, it additionally runs
+#                              test-refapp-js, gitleaks, build, verify-dist,
+#                              verify-versions, verify-repro,
+#                              verify-no-sqlite-local, and
+#                              verify-no-humanauth-local. The reproducible-build /
+#                              dist checks are the separate verify-gate.yml
+#                              workflow's job (spec §11.4), so we do NOT
+#                              duplicate them here.
 #   - a `gofmt -l` gate       — deliberately NOT added yet: the tree is not
 #                              currently gofmt-clean (import ordering + comment
 #                              alignment across several files, some under src/).
@@ -47,10 +51,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
 
       - name: Set up Go (pinned toolchain from go.mod)
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
           check-latest: false
