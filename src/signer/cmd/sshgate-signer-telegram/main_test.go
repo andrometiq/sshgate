@@ -432,7 +432,7 @@ func TestDoInitFlow_DevHappyPath(t *testing.T) {
 	// Key files exist with the documented modes.
 	assertMode(t, keyPath, 0o600)
 	assertMode(t, pubPath, 0o644)
-	// Config exists; written with 0o640 — assert world bits are off.
+	// Config exists; written with 0o600 — assert world bits are off.
 	ci, err := os.Stat(configPath)
 	if err != nil {
 		t.Fatalf("stat config: %v", err)

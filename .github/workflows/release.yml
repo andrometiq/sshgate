@@ -80,7 +80,7 @@ jobs:
           # packages[].identifier URL in server.json. Disable VCS stamping in
           # both release and registry-publish builds so unrelated/untracked
           # release outputs cannot change the bundle bytes.
-          GOFLAGS='-mod=readonly -buildvcs=false' make mcpb
+          GOTOOLCHAIN="$TOOLCHAIN" GOFLAGS='-mod=readonly -buildvcs=false' make mcpb
           cp packaging/mcpb/dist/sshgate-mcp.mcpb "$OUT/sshgate-mcp.mcpb"
 
           # SHA256SUMS over every asset (excluding the manifest itself).

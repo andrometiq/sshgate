@@ -370,7 +370,7 @@ MCPB_BUNDLE := $(MCPB_OUTDIR)/sshgate-mcp.mcpb
 # Fixed timestamp for reproducible zips (2020-01-01 UTC; DOS zip can't encode
 # pre-1980). Override SOURCE_DATE_EPOCH to pin a different value.
 SOURCE_DATE_EPOCH ?= 1577836800
-MCPB_MCP_LDFLAGS  := -trimpath -ldflags '-s -w -buildid= -X $(MCP_PKG).Version=$(VERSION)' -buildvcs=false
+MCPB_MCP_BUILD_FLAGS := -trimpath -ldflags '-s -w -buildid= -X $(MCP_PKG).Version=$(VERSION)' -buildvcs=false
 
 mcpb:
 	@command -v zip >/dev/null 2>&1 || { echo "mcpb: 'zip' is required (Info-ZIP)" >&2; exit 1; }
@@ -378,10 +378,10 @@ mcpb:
 	@if [ -z "$(VERSION)" ]; then echo "mcpb: VERSION is empty" >&2; exit 1; fi
 	rm -rf "$(MCPB_STAGE)"
 	mkdir -p "$(MCPB_STAGE)/server/bin"
-	CGO_ENABLED=0 GOOS=linux  GOARCH=amd64 go build $(MCPB_MCP_LDFLAGS) -o "$(MCPB_STAGE)/server/bin/sshgate-mcp-linux-amd64"  ./src/mcp/cmd/sshgate-mcp
-	CGO_ENABLED=0 GOOS=linux  GOARCH=arm64 go build $(MCPB_MCP_LDFLAGS) -o "$(MCPB_STAGE)/server/bin/sshgate-mcp-linux-arm64"  ./src/mcp/cmd/sshgate-mcp
-	CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build $(MCPB_MCP_LDFLAGS) -o "$(MCPB_STAGE)/server/bin/sshgate-mcp-darwin-amd64" ./src/mcp/cmd/sshgate-mcp
-	CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build $(MCPB_MCP_LDFLAGS) -o "$(MCPB_STAGE)/server/bin/sshgate-mcp-darwin-arm64" ./src/mcp/cmd/sshgate-mcp
+	CGO_ENABLED=0 GOOS=linux  GOARCH=amd64 go build $(MCPB_MCP_BUILD_FLAGS) -o "$(MCPB_STAGE)/server/bin/sshgate-mcp-linux-amd64"  ./src/mcp/cmd/sshgate-mcp
+	CGO_ENABLED=0 GOOS=linux  GOARCH=arm64 go build $(MCPB_MCP_BUILD_FLAGS) -o "$(MCPB_STAGE)/server/bin/sshgate-mcp-linux-arm64"  ./src/mcp/cmd/sshgate-mcp
+	CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build $(MCPB_MCP_BUILD_FLAGS) -o "$(MCPB_STAGE)/server/bin/sshgate-mcp-darwin-amd64" ./src/mcp/cmd/sshgate-mcp
+	CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build $(MCPB_MCP_BUILD_FLAGS) -o "$(MCPB_STAGE)/server/bin/sshgate-mcp-darwin-arm64" ./src/mcp/cmd/sshgate-mcp
 	install -m 0755 "$(MCPB_DIR)/server/sshgate-mcp-launch.sh" "$(MCPB_STAGE)/server/sshgate-mcp-launch.sh"
 	@# manifest.json at the archive ROOT, version stamped from VERSION (sans 'v')
 	@# so the bundle can never disagree with the repo.

@@ -56,7 +56,11 @@ jobs:
           esac
 
       - name: Build the reproducible MCPB bundle
-        run: GOFLAGS='-mod=readonly -buildvcs=false' make mcpb
+        run: |
+          set -euo pipefail
+          TOOLCHAIN="$(awk '/^toolchain /{print $2}' go.mod)"
+          if [ -z "$TOOLCHAIN" ]; then echo "::error::go.mod has no toolchain directive"; exit 1; fi
+          GOTOOLCHAIN="$TOOLCHAIN" GOFLAGS='-mod=readonly -buildvcs=false' make mcpb
 
       - name: Compute bundle SHA-256 and inject into server.json
         run: |
