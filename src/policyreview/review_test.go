@@ -2,7 +2,10 @@ package policyreview
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/karthikeyan5/sshgate/src/policy"
@@ -76,5 +79,70 @@ func TestChangesAreSortedAndRejectMutationOrResurrection(t *testing.T) {
 	mutated.Entries[0].Identity = reviewEntry(t, 9, 2).Identity
 	if _, err := Changes(&head, mutated); err == nil {
 		t.Fatal("retained entry mutation accepted")
+	}
+}
+
+func TestReviewV2DocumentGoldenOrderShapesAndCounts(t *testing.T) {
+	host := "SHA256:" + strings.Repeat("A", 43)
+	identity, err := policy.NewShellExactIdentity([]byte("echo <safe>"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidate := policy.BaseManifest{
+		Schema: policy.SchemaV1, Host: host, Epoch: 1, Revision: 1,
+		MissAction: policy.MissActionAsk, Growth: policy.GrowthSignToAdd,
+		Entries:          []policy.BaseEntry{{ID: "pa_oob_0123456789abcdef0123456789abcdef", Identity: identity, Source: policy.EntrySourceOutOfBand}},
+		RevokedPermitIDs: []string{"pa_revoked_1"},
+	}
+	rules := []redact.Rule{redact.CompileRule("unused", "unused", `(never)`, []string{"never"}, 1, 1, 10)}
+	rendered, err := RenderDocument(DocumentInput{
+		Purpose: "base_manifest_sign_v1", Principal: "machine",
+		RequestID: "pm_0123456789abcdef0123456789abcdef", ReviewID: "pr_0123456789abcdef0123456789abcdef",
+		AuthorityID: "pauth_0123456789abcdef0123456789abcdef", Bootstrap: true,
+		Candidate: candidate, Rules: rules,
+		RedactString: func(value string, _ [32]byte, _ []redact.Rule) (string, bool) { return value, true },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := fmt.Sprintf(`{"contract":"sshgate-policy-review-v2","purpose":"base_manifest_sign_v1","principal":"machine","request_id":"pm_0123456789abcdef0123456789abcdef","review_id":"pr_0123456789abcdef0123456789abcdef","authority_id":"pauth_0123456789abcdef0123456789abcdef","host":"%s","bootstrap":true,"epoch":"1","revision":"1","miss_action":"ask","growth":"sign-to-add","entry_count":"1","revocation_count":"1","logical_change_count":"3","axes_changed":true,"items":[{"kind":"added","id":"pa_oob_0123456789abcdef0123456789abcdef","identity_digest":"%s","literal_length":"11","hidden_bytes":"0","preview":{"text":"echo \u003csafe\u003e","redacted":false}},{"kind":"revoked","id":"pa_revoked_1"},{"kind":"axes"}],"warnings":["%s"]}`,
+		host, hex.EncodeToString(identity.Digest[:]), SourceExactWarning)
+	if string(rendered.JSON) != want || rendered.ItemCount != 3 {
+		t.Fatalf("review document = %s (items=%d)\nwant = %s", rendered.JSON, rendered.ItemCount, want)
+	}
+	digest := sha256.Sum256(rendered.JSON)
+	if len(rendered.JSON) != 1002 || hex.EncodeToString(digest[:]) != "1b8fc2ba5c8acbc8361854da154eef59a1bc4e8650310a4648295005fe0aaed4" {
+		t.Fatalf("review bytes/hash = %d/%x", len(rendered.JSON), digest)
+	}
+	if RulesDigest() != "d7e9074da072759bcae896fe120c156ca3c1a3800d5633e0f3d481176648c6dc" {
+		t.Fatalf("review rules digest = %s", RulesDigest())
+	}
+}
+
+func TestReviewV2OmittedPreviewRetainsHiddenBytesAndNoOpIsEmpty(t *testing.T) {
+	host := "SHA256:" + strings.Repeat("A", 43)
+	entry := reviewEntry(t, 1, 7)
+	candidate := policy.BaseManifest{Schema: 1, Host: host, Epoch: 1, Revision: 1,
+		MissAction: policy.MissActionAsk, Growth: policy.GrowthSignToAdd, Entries: []policy.BaseEntry{entry}}
+	rendered, err := RenderDocument(DocumentInput{
+		Purpose: "base_manifest_sign_v1", Principal: "machine", RequestID: "request", ReviewID: "review",
+		AuthorityID: "authority", Bootstrap: true, Candidate: candidate,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(rendered.JSON, []byte(`"hidden_bytes":"7"`)) || bytes.Contains(rendered.JSON, []byte(`"preview"`)) {
+		t.Fatalf("omitted preview document = %s", rendered.JSON)
+	}
+	head := candidate
+	noOp, err := RenderDocument(DocumentInput{
+		Purpose: "base_manifest_sign_v1", Principal: "machine", RequestID: "request", ReviewID: "review",
+		AuthorityID: "authority", Head: &head, Candidate: candidate, NoOp: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if noOp.ItemCount != 0 || !bytes.Contains(noOp.JSON, []byte(`"items":[]`)) || !bytes.Contains(noOp.JSON, []byte(`"warnings":[]`)) {
+		t.Fatalf("no-op document = %s", noOp.JSON)
 	}
 }

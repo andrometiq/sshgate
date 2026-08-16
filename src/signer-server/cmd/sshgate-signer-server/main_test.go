@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/karthikeyan5/sshgate/pkg/signerkit/hosted"
+	"github.com/karthikeyan5/sshgate/pkg/signerkit/policystore"
 	"github.com/karthikeyan5/sshgate/pkg/signerkit/sqlitestore"
 )
 
@@ -57,6 +58,7 @@ func TestHostedHTTPHandlerUIRoutes(t *testing.T) {
 		want string
 	}{
 		{"/v1/sign", "api:/v1/sign"},
+		{"/v2/policy/base-manifests", "api:/v2/policy/base-manifests"},
 		{"/auth/login", "api:/auth/login"},
 		{"/ui/pending", "api:/ui/pending"},
 		{"/healthz", "api:/healthz"},
@@ -68,6 +70,118 @@ func TestHostedHTTPHandlerUIRoutes(t *testing.T) {
 		if rr.Body.String() != tc.want {
 			t.Errorf("GET %s body = %q; want %q", tc.path, rr.Body.String(), tc.want)
 		}
+	}
+}
+
+func TestResolvePolicyServingOptionsFlagMatrix(t *testing.T) {
+	complete := policyServingFlags{
+		AuthorityID: "pauth_11111111111111111111111111111111", ArchiveDirectory: "/policy/archive",
+		ArchiveID: "parch_22222222222222222222222222222222", AuditFile: "/policy/audit.log",
+	}
+	for mask := 0; mask < 32; mask++ {
+		flags := policyServingFlags{}
+		if mask&1 != 0 {
+			flags.AuthorityID = complete.AuthorityID
+		}
+		if mask&2 != 0 {
+			flags.ArchiveDirectory = complete.ArchiveDirectory
+		}
+		if mask&4 != 0 {
+			flags.ArchiveID = complete.ArchiveID
+		}
+		if mask&8 != 0 {
+			flags.AuditFile = complete.AuditFile
+		}
+		ui := mask&16 != 0
+		options, err := resolvePolicyServingOptions(flags, ui)
+		switch mask {
+		case 0, 16:
+			if err != nil || options.Requested {
+				t.Fatalf("empty policy flags = %#v, %v", options, err)
+			}
+		case 31:
+			if err != nil || !options.Requested || options.MaxRejectionBytes != policystore.DefaultRejectionReservedBytes {
+				t.Fatalf("complete policy flags = %#v, %v", options, err)
+			}
+		default:
+			if err == nil {
+				t.Fatalf("incomplete policy flag mask %05b was accepted: %#v", mask, options)
+			}
+		}
+	}
+
+	complete.MaxRejectionBytes = "1"
+	options, err := resolvePolicyServingOptions(complete, true)
+	if err != nil || options.MaxRejectionBytes != 1 {
+		t.Fatalf("minimum cap = %#v, %v", options, err)
+	}
+	complete.MaxRejectionBytes = "8388608"
+	options, err = resolvePolicyServingOptions(complete, true)
+	if err != nil || options.MaxRejectionBytes != policystore.MaxRejectionReservedBytes {
+		t.Fatalf("maximum cap = %#v, %v", options, err)
+	}
+	for _, invalid := range []string{"0", "8388609", "+1", " 1", "1 "} {
+		complete.MaxRejectionBytes = invalid
+		if _, err := resolvePolicyServingOptions(complete, true); err == nil {
+			t.Errorf("invalid cap %q was accepted", invalid)
+		}
+	}
+	if _, err := resolvePolicyServingOptions(policyServingFlags{MaxRejectionBytes: "1"}, false); err == nil || !strings.Contains(err.Error(), "--policy-authority-id") {
+		t.Fatalf("cap-only request error = %v", err)
+	}
+	for _, test := range []struct {
+		name  string
+		flags policyServingFlags
+		want  string
+	}{
+		{name: "authority spelling", flags: func() policyServingFlags {
+			value := complete
+			value.MaxRejectionBytes = ""
+			value.AuthorityID += " "
+			return value
+		}(), want: "--policy-authority-id"},
+		{name: "relative archive", flags: func() policyServingFlags {
+			value := complete
+			value.MaxRejectionBytes = ""
+			value.ArchiveDirectory = "relative"
+			return value
+		}(), want: "--policy-archive-dir"},
+		{name: "archive spelling", flags: func() policyServingFlags {
+			value := complete
+			value.MaxRejectionBytes = ""
+			value.ArchiveID = "parch_BAD"
+			return value
+		}(), want: "--policy-archive-id"},
+		{name: "relative audit", flags: func() policyServingFlags {
+			value := complete
+			value.MaxRejectionBytes = ""
+			value.AuditFile = "relative"
+			return value
+		}(), want: "--policy-audit-file"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := resolvePolicyServingOptions(test.flags, true); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("configuration error = %v; want named %s", err, test.want)
+			}
+		})
+	}
+}
+
+func TestPolicyAuthorityBindingMatchesProductionReviewAndVoteConfiguration(t *testing.T) {
+	options, err := resolvePolicyServingOptions(policyServingFlags{
+		AuthorityID: "pauth_11111111111111111111111111111111", ArchiveDirectory: "/policy/archive",
+		ArchiveID: "parch_22222222222222222222222222222222", AuditFile: "/policy/audit.log",
+	}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding, err := policyAuthorityBinding(options, "operator", 2, true, false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if binding.Config.VoterEligibilityVersion != "sshgate-policy-voter-eligibility-v1" || string(binding.Config.VoteAuthMethodsJSON) != `["totp"]` ||
+		binding.Config.ReviewRendererVersion != "sshgate-policy-review-v2" || len(binding.Config.ReviewRulesDigest) != 64 || binding.ConfigDigest == "" {
+		t.Fatalf("production binding = %#v", binding)
 	}
 }
 

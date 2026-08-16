@@ -53,6 +53,25 @@ func (store *policyDB) Fetch(ctx context.Context, key policystore.Key) (policyst
 	return policyFetchResult(request), nil
 }
 
+func (store *policyDB) VerifiedHead(ctx context.Context, hostKeyFP string) (policystore.VerifiedHeadView, error) {
+	if hostKeyFP == "" {
+		return policystore.VerifiedHeadView{}, errors.New("policy head host fingerprint is empty")
+	}
+	binding, err := store.VerifyAuthorityBinding(ctx)
+	if err != nil {
+		return policystore.VerifiedHeadView{}, err
+	}
+	head, err := loadPolicyHead(ctx, store.database, binding.AuthorityID, hostKeyFP)
+	if err != nil {
+		return policystore.VerifiedHeadView{}, err
+	}
+	manifest, err := verifyPolicyHeadRecord(head, binding.AuthorityID)
+	if err != nil {
+		return policystore.VerifiedHeadView{}, err
+	}
+	return policystore.VerifiedHeadView{Head: clonePolicyHead(*head), Manifest: clonePolicyManifest(manifest)}, nil
+}
+
 func (store *policyDB) Begin(ctx context.Context, input policystore.BeginInput) (policystore.BeginResult, error) {
 	decoded, err := validatePolicyBeginInput(input)
 	if err != nil {
@@ -213,6 +232,7 @@ func policyFetchResult(request *policystore.Request) policystore.FetchResult {
 	result := policystore.FetchResult{State: request.State}
 	if request.StorageKind == policystore.StorageTombstone {
 		result.Class, result.Archive = policystore.RowTombstone, request.ArchiveRef()
+		result.Tombstone = request
 		if request.TerminalHTTPStatus.Valid {
 			result.TerminalHTTPStatus = int(request.TerminalHTTPStatus.Value)
 		}
@@ -263,6 +283,23 @@ func authorityHead(head *policystore.Head) *policyauthority.Head {
 		SignerKeyID: head.SignerKeyID, SignerPublicKey: slices.Clone(head.SignerPublicKey)}
 }
 
+func clonePolicyHead(head policystore.Head) policystore.Head {
+	head.ManifestEnvelope = slices.Clone(head.ManifestEnvelope)
+	head.EpochBE = slices.Clone(head.EpochBE)
+	head.RevisionBE = slices.Clone(head.RevisionBE)
+	head.SignerPublicKey = slices.Clone(head.SignerPublicKey)
+	return head
+}
+
+func clonePolicyManifest(manifest policy.BaseManifest) policy.BaseManifest {
+	manifest.RevokedPermitIDs = slices.Clone(manifest.RevokedPermitIDs)
+	manifest.Entries = slices.Clone(manifest.Entries)
+	for index := range manifest.Entries {
+		manifest.Entries[index].Identity.Literal = slices.Clone(manifest.Entries[index].Identity.Literal)
+	}
+	return manifest
+}
+
 func buildPolicyAdmission(ctx context.Context, transaction *sql.Tx, meta policyMeta, input policystore.BeginInput,
 	decoded policywire.DecodedRequest, head *policystore.Head, noOp bool, errorCode policywire.ErrorCode) (*policystore.Request, error) {
 	payloadSHA, baseDigest, err := policywire.PayloadDigests(input.Payload)
@@ -288,10 +325,14 @@ func buildPolicyAdmission(ctx context.Context, transaction *sql.Tx, meta policyM
 		DenyVeto: meta.DenyVeto, AllowSelfApprove: meta.AllowSelfApprove, RequesterPrincipal: input.RequesterPrincipal,
 		StateVersion: 1, NoOp: noOp, CreatedAt: now, UpdatedAt: now,
 	}
-	copyTrustedHead(request, head)
+	trustedHead := head
+	if errorCode != "" && (head == nil || input.Tuple.Bootstrap || input.Tuple.ExpectedHeadDigest != head.BaseDigest) {
+		trustedHead = nil
+	}
+	copyTrustedHead(request, trustedHead)
 	var trustedManifest *policy.BaseManifest
-	if head != nil {
-		manifest, verifyErr := policy.VerifyBaseManifest(head.ManifestEnvelope, head.SignerPublicKey)
+	if trustedHead != nil {
+		manifest, verifyErr := policy.VerifyBaseManifest(trustedHead.ManifestEnvelope, trustedHead.SignerPublicKey)
 		if verifyErr != nil {
 			return nil, fmt.Errorf("%w: trusted review head: %v", policystore.ErrCorrupt, verifyErr)
 		}

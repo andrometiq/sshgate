@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/karthikeyan5/sshgate/src/policy"
 	"github.com/karthikeyan5/sshgate/src/policyauthority"
 	"github.com/karthikeyan5/sshgate/src/policywire"
 )
@@ -255,6 +256,14 @@ type Head struct {
 	UpdatedAt          int64
 }
 
+// VerifiedHeadView is a read-only snapshot of one cryptographically verified
+// policy head and its decoded manifest. Store implementations must not retain
+// aliases to any slice reachable from a returned view.
+type VerifiedHeadView struct {
+	Head     Head
+	Manifest policy.BaseManifest
+}
+
 type AuthorityBinding struct {
 	AuthorityID                           string
 	ArchiveID                             string
@@ -305,6 +314,9 @@ type FetchResult struct {
 	TerminalHTTPStatus int
 	TerminalResponse   []byte
 	Archive            *ArchiveRef
+	// Tombstone is the defensively loaded retained row used only to verify a
+	// referenced archive object. It is nil for every non-tombstone class.
+	Tombstone *Request
 }
 
 type BeginInput struct {
@@ -470,6 +482,10 @@ type Store interface {
 	VerifyAuthorityBinding(context.Context) (AuthorityBinding, error)
 	Lookup(context.Context, Key, RequestTuple) (LookupResult, error)
 	Fetch(context.Context, Key) (FetchResult, error)
+	// VerifiedHead returns ErrNotFound when the bound authority has no head for
+	// hostKeyFP. Malformed records and failed signature verification are
+	// reported as corruption, never absence.
+	VerifiedHead(context.Context, string) (VerifiedHeadView, error)
 	Begin(context.Context, BeginInput) (BeginResult, error)
 	MarkSubmissionAudited(context.Context, Key, uint64) (*Request, error)
 	MarkRejectionSubmissionAudited(context.Context, Key, uint64) (*Request, error)

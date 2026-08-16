@@ -48,6 +48,12 @@ func ValidateBootstrap(candidate policy.BaseManifest) error {
 	if total > MaxReviewedLiteralBytes {
 		return errors.New("policy review: newly reviewed literals exceed aggregate bound")
 	}
+	// The persisted v2 document has one axes item plus every added entry and
+	// explicit revocation. Keep classification aligned with the renderer so an
+	// accepted bootstrap can never become permanently unrenderable.
+	if 1+len(candidate.Entries)+len(candidate.RevokedPermitIDs) > MaxDocumentItems {
+		return errors.New("policy review: bootstrap logical-part bound exceeded")
+	}
 	return nil
 }
 

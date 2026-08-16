@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -26,7 +27,9 @@ import (
 	ordinary "github.com/karthikeyan5/sshgate/pkg/signerkit/store"
 	"github.com/karthikeyan5/sshgate/src/policy"
 	"github.com/karthikeyan5/sshgate/src/policyauthority"
+	"github.com/karthikeyan5/sshgate/src/policyreview"
 	"github.com/karthikeyan5/sshgate/src/policywire"
+	"github.com/karthikeyan5/sshgate/src/redact"
 )
 
 const (
@@ -150,6 +153,108 @@ func (core *testPolicyCore) rotate(t testing.TB) {
 }
 
 type embeddedPolicyStore struct{ policystore.Store }
+
+type admissionCaptureStore struct {
+	policystore.Store
+	head    policystore.VerifiedHeadView
+	headErr error
+	inputs  []policystore.BeginInput
+}
+
+func (store *admissionCaptureStore) VerifiedHead(context.Context, string) (policystore.VerifiedHeadView, error) {
+	return store.head, store.headErr
+}
+
+func (store *admissionCaptureStore) Begin(_ context.Context, input policystore.BeginInput) (policystore.BeginResult, error) {
+	input.CanonicalRequest = slices.Clone(input.CanonicalRequest)
+	input.Payload = slices.Clone(input.Payload)
+	input.SignerPublicKey = slices.Clone(input.SignerPublicKey)
+	input.ReviewJSON = slices.Clone(input.ReviewJSON)
+	store.inputs = append(store.inputs, input)
+	return policystore.BeginResult{Lookup: policystore.LookupResult{Kind: policystore.LookupExact}}, nil
+}
+
+func TestPolicyAdmissionRendersCompleteReviewWithFreshSalt(t *testing.T) {
+	core := newTestPolicyCore(t)
+	store := &admissionCaptureStore{headErr: policystore.ErrNotFound}
+	randomBytes := append(bytes.Repeat([]byte{1}, 48), bytes.Repeat([]byte{2}, 48)...)
+	var salts [][32]byte
+	engine, err := NewPolicyEngine(PolicyEngineConfig{
+		AuthorityID: testPolicyAuthority, WorkerID: "worker", Store: store, Core: core, Audit: &testPolicyAudit{},
+		Now: func() time.Time { return time.Unix(20_000, 0).UTC() }, Random: bytes.NewReader(randomBytes),
+		ReviewRules: []redact.Rule{{ID: "test"}},
+		RedactString: func(_ string, salt [32]byte, _ []redact.Rule) (string, bool) {
+			salts = append(salts, salt)
+			return fmt.Sprintf("salt-%02x", salt[0]), true
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index := 1; index <= 2; index++ {
+		admission := testPolicyAdmission(t, core.keyID, fmt.Sprintf("pm_%032x", index), "", true, 1)
+		if _, err := engine.Admit(context.Background(), admission); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(store.inputs) != 2 || len(salts) != 2 || salts[0] == salts[1] {
+		t.Fatalf("renders=%d salts=%x/%x", len(store.inputs), salts[0], salts[1])
+	}
+	for index, input := range store.inputs {
+		if len(input.ReviewJSON) == 0 || input.ReviewRenderedBytes != int64(len(input.ReviewJSON)) || input.ReviewItemCount != 2 ||
+			input.ReviewRendererVersion != policyreview.RendererVersion || input.ReviewRulesDigest != policyreview.RulesDigest() {
+			t.Fatalf("review group %d = %+v", index, input)
+		}
+		if marker := fmt.Sprintf(`"text":"salt-%02x"`, index+1); !bytes.Contains(input.ReviewJSON, []byte(marker)) {
+			t.Fatalf("review %d missing salt marker %q: %s", index, marker, input.ReviewJSON)
+		}
+	}
+}
+
+func TestPolicyAdmissionUnsafeHeadMappingPassesNoReview(t *testing.T) {
+	core := newTestPolicyCore(t)
+	store := &admissionCaptureStore{head: policystore.VerifiedHeadView{Head: policystore.Head{BaseDigest: strings.Repeat("1", 64)}}}
+	engine := newTestEngine(t, store, core, &testPolicyAudit{}, time.Unix(20_100, 0).UTC(), nil)
+	admission := testPolicyAdmission(t, core.keyID, "pm_99999999999999999999999999999999", strings.Repeat("2", 64), false, 2)
+	if _, err := engine.Admit(context.Background(), admission); err != nil {
+		t.Fatal(err)
+	}
+	if len(store.inputs) != 1 {
+		t.Fatalf("Begin calls = %d", len(store.inputs))
+	}
+	input := store.inputs[0]
+	if input.ReviewJSON != nil || input.ReviewRenderedBytes != 0 || input.ReviewItemCount != 0 || input.ReviewRendererVersion != "" || input.ReviewRulesDigest != "" {
+		t.Fatalf("unsafe mapping fabricated review data: %+v", input)
+	}
+}
+
+func testPolicyAdmission(t testing.TB, keyID, requestID, expectedHead string, bootstrap bool, revision uint64) PolicyAdmissionInput {
+	t.Helper()
+	identity, err := policy.NewShellExactIdentity([]byte("echo <review>"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest := policy.BaseManifest{Schema: policy.SchemaV1, Host: testPolicyHost, Epoch: 1,
+		MissAction: policy.MissActionAsk, Growth: policy.GrowthSignToAdd, Revision: revision,
+		Entries: []policy.BaseEntry{{ID: "pa_oob_11111111111111111111111111111111", Identity: identity, Source: policy.EntrySourceOutOfBand}}}
+	payload, err := policy.MarshalBaseManifest(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wire, err := policywire.NewRequest(requestID, testPolicyHost, keyID, payload, expectedHead, bootstrap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonical, err := policywire.MarshalRequest(wire)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := policywire.DecodeRequest(canonical)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return PolicyAdmissionInput{Principal: "machine", CanonicalRequest: canonical, Decoded: decoded}
+}
 
 type workerPolicyStore struct {
 	policystore.Store
@@ -1079,8 +1184,8 @@ func testPolicyStoreConfig(approvals uint64) policystore.ConfigDigestInput {
 	config.VoterEligibilityVersion = "v1"
 	config.VoteAuthMethodsJSON = []byte(`["session"]`)
 	config.ArchiveID = testPolicyArchiveID
-	config.ReviewRendererVersion = "sshgate-policy-review-v2"
-	config.ReviewRulesDigest = strings.Repeat("e", 64)
+	config.ReviewRendererVersion = policyreview.RendererVersion
+	config.ReviewRulesDigest = policyreview.RulesDigest()
 	return config
 }
 
@@ -1113,7 +1218,7 @@ func testPolicyBeginInput(t testing.TB, core *testPolicyCore, number int, now ti
 		CanonicalRequest: canonical, Payload: payload, AuthorityID: testPolicyAuthority, ReviewID: reviewID,
 		RequesterPrincipal: "machine", SignerKeyID: core.keyID, SignerPublicKey: core.public,
 		ReviewJSON: review, ReviewRenderedBytes: int64(len(review)), ReviewItemCount: 1,
-		ReviewRendererVersion: "sshgate-policy-review-v2", ReviewRulesDigest: strings.Repeat("e", 64), Now: now,
+		ReviewRendererVersion: policyreview.RendererVersion, ReviewRulesDigest: policyreview.RulesDigest(), Now: now,
 	}
 }
 

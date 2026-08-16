@@ -4,11 +4,15 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/base64"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"math"
+	"slices"
 	"strconv"
 	"sync"
 	"time"
@@ -17,7 +21,9 @@ import (
 	"github.com/karthikeyan5/sshgate/pkg/signerkit/policystore"
 	"github.com/karthikeyan5/sshgate/src/policy"
 	"github.com/karthikeyan5/sshgate/src/policyauthority"
+	"github.com/karthikeyan5/sshgate/src/policyreview"
 	"github.com/karthikeyan5/sshgate/src/policywire"
+	"github.com/karthikeyan5/sshgate/src/redact"
 )
 
 const (
@@ -172,30 +178,41 @@ func (readiness *PolicyReadiness) Ready() bool {
 }
 
 type PolicyEngineConfig struct {
-	AuthorityID string
-	WorkerID    string
-	Store       policystore.Store
-	Core        PolicyCustody
-	Audit       signerkit.DurableAuditSink
-	Now         func() time.Time
-	Fault       func(PolicyFaultPoint) error
-	Sleep       func(context.Context, time.Duration) error
-	Jitter      func(time.Duration) time.Duration
+	AuthorityID           string
+	WorkerID              string
+	Store                 policystore.Store
+	Core                  PolicyCustody
+	Audit                 signerkit.DurableAuditSink
+	Now                   func() time.Time
+	Fault                 func(PolicyFaultPoint) error
+	Sleep                 func(context.Context, time.Duration) error
+	Jitter                func(time.Duration) time.Duration
+	Random                io.Reader
+	ReviewRules           []redact.Rule
+	RedactString          policyreview.RedactString
+	ReviewRendererVersion string
+	ReviewRulesDigest     string
 }
 
 // PolicyEngine owns durable event acknowledgement and every transition after
 // Begin/PrepareVote. Store CASes remain the correctness boundary.
 type PolicyEngine struct {
-	authorityID string
-	workerID    string
-	store       policystore.Store
-	core        PolicyCustody
-	audit       signerkit.DurableAuditSink
-	readiness   *PolicyReadiness
-	now         func() time.Time
-	fault       func(PolicyFaultPoint) error
-	sleep       func(context.Context, time.Duration) error
-	jitter      func(time.Duration) time.Duration
+	authorityID           string
+	workerID              string
+	store                 policystore.Store
+	core                  PolicyCustody
+	audit                 signerkit.DurableAuditSink
+	readiness             *PolicyReadiness
+	now                   func() time.Time
+	fault                 func(PolicyFaultPoint) error
+	sleep                 func(context.Context, time.Duration) error
+	jitter                func(time.Duration) time.Duration
+	random                io.Reader
+	randomMu              sync.Mutex
+	reviewRules           []redact.Rule
+	redactString          policyreview.RedactString
+	reviewRendererVersion string
+	reviewRulesDigest     string
 }
 
 func NewPolicyEngine(config PolicyEngineConfig) (*PolicyEngine, error) {
@@ -210,6 +227,17 @@ func NewPolicyEngine(config PolicyEngineConfig) (*PolicyEngine, error) {
 	}
 	if config.Audit == nil {
 		return nil, errors.New("hosted policy engine: durable audit is required")
+	}
+	rendererVersion := config.ReviewRendererVersion
+	if rendererVersion == "" {
+		rendererVersion = policyreview.RendererVersion
+	}
+	rulesDigest := config.ReviewRulesDigest
+	if rulesDigest == "" {
+		rulesDigest = policyreview.RulesDigest()
+	}
+	if rendererVersion != policyreview.RendererVersion || rulesDigest != policyreview.RulesDigest() {
+		return nil, errors.New("hosted policy engine: review renderer binding is invalid")
 	}
 	if err := policystore.ValidateIdentity(config.WorkerID); err != nil {
 		return nil, fmt.Errorf("hosted policy engine: worker ID: %w", err)
@@ -233,17 +261,34 @@ func NewPolicyEngine(config PolicyEngineConfig) (*PolicyEngine, error) {
 			return delay - spread + time.Duration(time.Now().UnixNano()%int64(2*spread+1))
 		}
 	}
+	random := config.Random
+	if random == nil {
+		random = rand.Reader
+	}
+	reviewRules := slices.Clone(config.ReviewRules)
+	for index := range reviewRules {
+		reviewRules[index].Keywords = slices.Clone(reviewRules[index].Keywords)
+	}
+	redactString := config.RedactString
+	if redactString == nil {
+		redactString = redact.RedactString
+	}
 	return &PolicyEngine{
-		authorityID: config.AuthorityID,
-		workerID:    config.WorkerID,
-		store:       config.Store,
-		core:        config.Core,
-		audit:       config.Audit,
-		readiness:   newPolicyReadiness(config.Audit),
-		now:         now,
-		fault:       config.Fault,
-		sleep:       sleep,
-		jitter:      jitter,
+		authorityID:           config.AuthorityID,
+		workerID:              config.WorkerID,
+		store:                 config.Store,
+		core:                  config.Core,
+		audit:                 config.Audit,
+		readiness:             newPolicyReadiness(config.Audit),
+		now:                   now,
+		fault:                 config.Fault,
+		sleep:                 sleep,
+		jitter:                jitter,
+		random:                random,
+		reviewRules:           reviewRules,
+		redactString:          redactString,
+		reviewRendererVersion: rendererVersion,
+		reviewRulesDigest:     rulesDigest,
 	}, nil
 }
 
@@ -267,6 +312,164 @@ func (engine *PolicyEngine) Submit(ctx context.Context, input policystore.BeginI
 		return result, err
 	}
 	return result, nil
+}
+
+// PolicyAdmissionInput is the canonical, already-decoded machine intake. The
+// authenticated principal is supplied separately from the body by withAuth.
+type PolicyAdmissionInput struct {
+	Principal        string
+	CanonicalRequest []byte
+	Decoded          policywire.DecodedRequest
+}
+
+// Admit resolves the R77 verified-head view, renders review-v2 only for a safe
+// predecessor mapping, and then delegates the authoritative classification to
+// Begin. The pre-read is deliberately unlocked; Begin's transaction-time head
+// comparison remains the acceptance boundary.
+func (engine *PolicyEngine) Admit(ctx context.Context, admission PolicyAdmissionInput) (policystore.BeginResult, error) {
+	decoded := admission.Decoded
+	payloadSHA, _, err := policywire.PayloadDigests(decoded.Payload)
+	if err != nil {
+		return policystore.BeginResult{}, err
+	}
+	publicKey, keyID, err := engine.core.SnapshotBaseManifestSigner()
+	if err != nil {
+		return policystore.BeginResult{}, err
+	}
+	reviewID, err := engine.randomIdentifier("pr_", 16)
+	if err != nil {
+		return policystore.BeginResult{}, fmt.Errorf("hosted policy: generate review ID: %w", err)
+	}
+	input := policystore.BeginInput{
+		Key: policystore.Key{Principal: admission.Principal, RequestID: decoded.Wire.RequestID},
+		Tuple: policyauthority.RequestTuple{
+			RequestID: decoded.Wire.RequestID, Purpose: policywire.Purpose, HostKeyFP: decoded.Wire.HostKeyFP,
+			ExpectedSignerKeyID: decoded.Wire.ExpectedSignerKeyID, PayloadSHA256: payloadSHA,
+			ExpectedHeadDigest: decoded.Wire.ExpectedHeadDigest, Bootstrap: decoded.Wire.Bootstrap,
+		},
+		CanonicalRequest: slices.Clone(admission.CanonicalRequest), Payload: slices.Clone(decoded.Payload),
+		AuthorityID: engine.authorityID, ReviewID: reviewID, RequesterPrincipal: admission.Principal,
+		SignerKeyID: keyID, SignerPublicKey: slices.Clone(publicKey), Now: engine.now().UTC(),
+	}
+
+	var verified *policystore.VerifiedHeadView
+	view, headErr := engine.store.VerifiedHead(ctx, decoded.Wire.HostKeyFP)
+	switch {
+	case headErr == nil:
+		verified = &view
+	case errors.Is(headErr, policystore.ErrNotFound):
+	default:
+		return policystore.BeginResult{}, headErr
+	}
+	safeMapping := decoded.Wire.Bootstrap && verified == nil
+	if !decoded.Wire.Bootstrap && verified != nil && decoded.Wire.ExpectedHeadDigest == verified.Head.BaseDigest {
+		safeMapping = true
+	}
+	if safeMapping {
+		var head *policyauthority.Head
+		var manifest *policy.BaseManifest
+		if verified != nil {
+			head = authorityHead(&verified.Head)
+			copy := verified.Manifest
+			manifest = &copy
+		}
+		classification := policyauthority.Classify(decoded, head, publicKey)
+		if classification.ErrorCode == "" {
+			var salt [32]byte
+			if err := engine.readRandom(salt[:]); err != nil {
+				return policystore.BeginResult{}, fmt.Errorf("hosted policy: generate review salt: %w", err)
+			}
+			rendered, err := policyreview.RenderDocument(policyreview.DocumentInput{
+				Purpose: policywire.Purpose, Principal: admission.Principal, RequestID: decoded.Wire.RequestID,
+				ReviewID: reviewID, AuthorityID: engine.authorityID, Bootstrap: decoded.Wire.Bootstrap,
+				Head: manifest, Candidate: decoded.Manifest, NoOp: classification.NoOp, Salt: salt,
+				Rules: engine.reviewRules, RedactString: engine.redactString,
+			})
+			if err != nil {
+				return policystore.BeginResult{}, err
+			}
+			input.ReviewJSON = rendered.JSON
+			input.ReviewRenderedBytes = int64(len(rendered.JSON))
+			input.ReviewItemCount = int64(rendered.ItemCount)
+			input.ReviewRendererVersion = engine.reviewRendererVersion
+			input.ReviewRulesDigest = engine.reviewRulesDigest
+		}
+	}
+	return engine.Submit(ctx, input)
+}
+
+// Resume retries the deterministic post-Begin lifecycle for an exact hidden
+// row. It never re-runs admission classification.
+func (engine *PolicyEngine) Resume(ctx context.Context, request *policystore.Request) error {
+	if request == nil {
+		return fmt.Errorf("%w: nil policy request", policystore.ErrCorrupt)
+	}
+	return engine.advance(ctx, request, engine.store, false)
+}
+
+func (engine *PolicyEngine) randomIdentifier(prefix string, bytes int) (string, error) {
+	raw := make([]byte, bytes)
+	if err := engine.readRandom(raw); err != nil {
+		return "", err
+	}
+	return prefix + hex.EncodeToString(raw), nil
+}
+
+func (engine *PolicyEngine) readRandom(destination []byte) error {
+	engine.randomMu.Lock()
+	defer engine.randomMu.Unlock()
+	_, err := io.ReadFull(engine.random, destination)
+	return err
+}
+
+func authorityHead(head *policystore.Head) *policyauthority.Head {
+	if head == nil {
+		return nil
+	}
+	return &policyauthority.Head{
+		ManifestEnvelope: slices.Clone(head.ManifestEnvelope),
+		BaseDigest:       head.BaseDigest,
+		SignerKeyID:      head.SignerKeyID,
+		SignerPublicKey:  slices.Clone(head.SignerPublicKey),
+	}
+}
+
+// IdempotencyConflict emits both deterministic no-row audits before returning
+// the canonical typed terminal. It consults neither current custody nor head.
+func (engine *PolicyEngine) IdempotencyConflict(ctx context.Context, principal string, decoded policywire.DecodedRequest) ([]byte, error) {
+	payloadSHA, baseDigest, err := policywire.PayloadDigests(decoded.Payload)
+	if err != nil {
+		return nil, err
+	}
+	tuple := policyauthority.RequestTuple{RequestID: decoded.Wire.RequestID, Purpose: policywire.Purpose,
+		HostKeyFP: decoded.Wire.HostKeyFP, ExpectedSignerKeyID: decoded.Wire.ExpectedSignerKeyID,
+		PayloadSHA256: payloadSHA, ExpectedHeadDigest: decoded.Wire.ExpectedHeadDigest, Bootstrap: decoded.Wire.Bootstrap}
+	metadata := signerkit.PolicyAuditMetadata{
+		AuthorityID: engine.authorityID, Purpose: policywire.Purpose, Principal: principal,
+		TupleDigest: policyauthority.TupleDigest(tuple), StateVersion: 1, RequestID: decoded.Wire.RequestID,
+		HostKeyFP: decoded.Wire.HostKeyFP, PayloadSHA256: payloadSHA, CandidateDigest: baseDigest,
+		Epoch: decoded.Manifest.Epoch, Revision: decoded.Manifest.Revision,
+		MissAction: string(decoded.Manifest.MissAction), Growth: string(decoded.Manifest.Growth),
+		EntryCount: len(decoded.Manifest.Entries), RevocationCount: len(decoded.Manifest.RevokedPermitIDs),
+		SignerKeyID: decoded.Wire.ExpectedSignerKeyID, ErrorCode: string(policywire.ErrorIdempotencyConflict),
+	}
+	for _, event := range []struct{ phase, outcome string }{{policyAuditPhaseSubmission, "received"}, {policyAuditPhaseTerminalNoMint, "error"}} {
+		metadata.Phase, metadata.Outcome = event.phase, event.outcome
+		metadata.EventID = policyauthority.AuditEventID(policyauthority.AuditEvent{
+			AuthorityID: metadata.AuthorityID, Purpose: metadata.Purpose, Principal: metadata.Principal,
+			RequestID: metadata.RequestID, TupleDigest: metadata.TupleDigest, Phase: metadata.Phase, StateVersion: metadata.StateVersion,
+		})
+		if err := engine.audit.Call(ctx, signerkit.AuditCall{Time: engine.now().UTC(), RequestID: decoded.Wire.RequestID,
+			HostKeyFP: decoded.Wire.HostKeyFP, Policy: &metadata}); err != nil {
+			engine.readiness.Fail(err)
+			return nil, err
+		}
+	}
+	return policywire.MarshalResponse(policywire.Response{
+		RequestID: decoded.Wire.RequestID, AuthorityID: engine.authorityID, Purpose: policywire.Purpose,
+		Status: policywire.StatusError, PayloadSHA256: payloadSHA, BaseDigest: baseDigest,
+		SignerKeyID: decoded.Wire.ExpectedSignerKeyID, ErrorCode: policywire.ErrorIdempotencyConflict,
+	})
 }
 
 // Vote durably audits the frozen vote before it may influence a claim.

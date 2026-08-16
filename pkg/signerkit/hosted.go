@@ -3,6 +3,7 @@ package signerkit
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -65,6 +66,12 @@ type HostedServerBackend struct {
 	// possibly-multiple polls). Defaults to 60s. ctx cancellation
 	// always wins over Timeout.
 	Timeout time.Duration
+
+	// The policy trust anchor is configured atomically through
+	// ConfigurePolicyAuthority before the backend is shared.
+	policyPublicKey   [ed25519.PublicKeySize]byte
+	policyAuthorityID string
+	policyConfigured  bool
 }
 
 // signRequestBody is the POST /v1/sign body. Matches the

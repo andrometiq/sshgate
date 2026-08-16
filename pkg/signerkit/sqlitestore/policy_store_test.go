@@ -1559,6 +1559,129 @@ func TestPolicyVoteRaces(t *testing.T) {
 	})
 }
 
+func TestPolicyVerifiedHeadNotFoundAndDefensiveView(t *testing.T) {
+	database, store, public, private, keyID, _ := newPolicyStoreHarness(t, 1, false)
+	addPolicyVoter(t, database, "voter-a")
+	ctx := context.Background()
+	host := "SHA256:" + strings.Repeat("A", 43)
+	if _, err := store.VerifiedHead(ctx, host); !errors.Is(err, policystore.ErrNotFound) {
+		t.Fatalf("bootstrap VerifiedHead error = %v; want ErrNotFound", err)
+	}
+	published := publishPolicyBootstrap(t, store, public, private, keyID, 3050, time.Unix(12_050, 0).UTC())
+	first, err := store.VerifiedHead(ctx, published.HostKeyFP)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Head.BaseDigest != published.BaseDigest || first.Manifest.Host != published.HostKeyFP {
+		t.Fatalf("verified head = %+v", first)
+	}
+	first.Head.ManifestEnvelope[0] ^= 0xff
+	first.Head.SignerPublicKey[0] ^= 0xff
+	first.Head.EpochBE[0] ^= 0xff
+	first.Manifest.Host = "mutated"
+	second, err := store.VerifiedHead(ctx, published.HostKeyFP)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(first.Head.ManifestEnvelope, second.Head.ManifestEnvelope) ||
+		bytes.Equal(first.Head.SignerPublicKey, second.Head.SignerPublicKey) ||
+		bytes.Equal(first.Head.EpochBE, second.Head.EpochBE) || second.Manifest.Host != published.HostKeyFP {
+		t.Fatal("VerifiedHead returned storage aliases")
+	}
+}
+
+func TestPolicyVerifiedHeadCorruptionFailsClosed(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		update string
+	}{
+		{
+			name: "bad envelope",
+			update: `UPDATE policy_heads SET manifest_envelope=CAST(x'00'||substr(manifest_envelope,2) AS BLOB),
+				payload_sha256=?,base_digest=?,epoch_be=x'0000000000000002',revision_be=x'0000000000000002',
+				row_version=row_version+1,updated_at=updated_at+1 WHERE authority_id=? AND host_key_fp=?`,
+		},
+		{
+			name: "bad record signer pair",
+			update: `UPDATE policy_heads SET manifest_envelope=CAST(x'00'||substr(manifest_envelope,2) AS BLOB),
+				payload_sha256=?,base_digest=?,epoch_be=x'0000000000000002',revision_be=x'0000000000000002',
+				signer_key_id=?,signer_public_key=zeroblob(32),row_version=row_version+1,updated_at=updated_at+1
+				WHERE authority_id=? AND host_key_fp=?`,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			database, store, public, private, keyID, _ := newPolicyStoreHarness(t, 1, false)
+			addPolicyVoter(t, database, "voter-a")
+			published := publishPolicyBootstrap(t, store, public, private, keyID, 3060, time.Unix(12_060, 0).UTC())
+			arguments := []any{hex64("b"), hex64("c")}
+			if test.name == "bad record signer pair" {
+				arguments = append(arguments, hex64("d"))
+			}
+			arguments = append(arguments, authorityID("a"), published.HostKeyFP)
+			if _, err := database.db.Exec(test.update, arguments...); err != nil {
+				t.Fatalf("inject corrupt head: %v", err)
+			}
+			if _, err := store.VerifiedHead(context.Background(), published.HostKeyFP); !errors.Is(err, policystore.ErrCorrupt) {
+				t.Fatalf("VerifiedHead corruption error = %v; want ErrCorrupt", err)
+			}
+		})
+	}
+}
+
+func TestPolicyAcceptedClassificationWithoutReviewWritesNoRow(t *testing.T) {
+	database, store, public, _, keyID, _ := newPolicyStoreHarness(t, 1, false)
+	addPolicyVoter(t, database, "voter-a")
+	input := policyBootstrapInputNumber(t, public, keyID, authorityID("a"), "machine", 3070, 1, time.Unix(12_070, 0).UTC())
+	input.ReviewJSON = nil
+	input.ReviewRenderedBytes = 0
+	input.ReviewItemCount = 0
+	input.ReviewRendererVersion = ""
+	input.ReviewRulesDigest = ""
+	if result, err := store.Begin(context.Background(), input); err == nil || result.Request != nil {
+		t.Fatalf("accepted Begin without review = %+v, %v", result, err)
+	}
+	lookup, err := store.Lookup(context.Background(), input.Key, input.Tuple)
+	if err != nil || lookup.Kind != policystore.LookupAbsent {
+		t.Fatalf("reviewless accepted request persisted: %+v, %v", lookup, err)
+	}
+}
+
+func TestPolicyStaleHeadAdmissionPersistsNoReviewGroup(t *testing.T) {
+	database, store, public, private, keyID, _ := newPolicyStoreHarness(t, 1, false)
+	addPolicyVoter(t, database, "voter-a")
+	ctx := context.Background()
+	now := time.Unix(12_080, 0).UTC()
+	first := publishPolicyBootstrap(t, store, public, private, keyID, 3080, now)
+	identity, err := policy.NewShellExactIdentity([]byte("echo winning successor"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	winnerManifest := policy.BaseManifest{Schema: policy.SchemaV1, Host: first.HostKeyFP, Epoch: 1,
+		MissAction: policy.MissActionAsk, Growth: policy.GrowthSignToAdd, Revision: 2,
+		Entries: []policy.BaseEntry{{ID: "pa_oob_11111111111111111111111111111111", Identity: identity, Source: policy.EntrySourceOutOfBand}}}
+	publishPolicySuccessor(t, store, public, private, keyID, first, 3081, winnerManifest, now.Add(10*time.Second))
+
+	staleIdentity, err := policy.NewShellExactIdentity([]byte("echo stale successor"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	staleManifest := winnerManifest
+	staleManifest.Entries = []policy.BaseEntry{{ID: "pa_oob_22222222222222222222222222222222", Identity: staleIdentity, Source: policy.EntrySourceOutOfBand}}
+	stale := policySuccessorInput(t, public, keyID, first, 3082, staleManifest, now.Add(20*time.Second))
+	begin, err := store.Begin(ctx, stale)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := begin.Request
+	if request == nil || request.State != policystore.StateRejectionUnaudited || request.FailureCode != policywire.ErrorStalePolicyHead {
+		t.Fatalf("stale admission = %+v", request)
+	}
+	if request.ReviewJSON != nil || request.ReviewSHA256.Valid || request.ReviewRenderedBytes.Valid || request.ReviewItemCount.Valid ||
+		request.ReviewRendererVersion.Valid || request.ReviewRulesDigest.Valid {
+		t.Fatalf("stale admission retained review group: %+v", request)
+	}
+}
+
 func newPolicyStoreHarness(t *testing.T, approvals uint64, stepUp bool) (*DB, policystore.Store, ed25519.PublicKey, ed25519.PrivateKey, string, policystore.ConfigDigestInput) {
 	t.Helper()
 	database := openPolicyTestDB(t)
@@ -1739,6 +1862,57 @@ func publishPolicyBootstrap(t *testing.T, store policystore.Store, public ed2551
 		t.Fatal(err)
 	}
 	envelope, err := policy.SignBaseManifest(private, decoded.Manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, err = store.PersistMaterialized(ctx, lease, envelope, now.Add(4*time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, err = store.MarkResultAudited(ctx, request.Key(), request.StateVersion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, err = store.PublishApproved(ctx, request.Key(), request.StateVersion, now.Add(5*time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return request
+}
+
+func publishPolicySuccessor(t *testing.T, store policystore.Store, public ed25519.PublicKey, private ed25519.PrivateKey,
+	keyID string, predecessor *policystore.Request, number int, manifest policy.BaseManifest, now time.Time) *policystore.Request {
+	t.Helper()
+	ctx := context.Background()
+	input := policySuccessorInput(t, public, keyID, predecessor, number, manifest, now)
+	begin, err := store.Begin(ctx, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, err := store.MarkSubmissionAudited(ctx, begin.Request.Key(), begin.Request.StateVersion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, err = store.ActivateSubmission(ctx, request.Key(), request.StateVersion, now.Add(time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	vote, err := store.PrepareVote(ctx, policystore.VoteInput{ReviewID: request.ReviewID, Operator: "voter-a",
+		Decision: policystore.DecisionApprove, AuthnMethod: policystore.AuthnSession, Now: now.Add(2 * time.Second)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.PublishVoteAudit(ctx, request.Key(), "voter-a", vote.Vote.AuditStateVersion); err != nil {
+		t.Fatal(err)
+	}
+	lease, err := store.ClaimApproval(ctx, request.Key(), vote.Vote.AuditStateVersion, "worker", now.Add(3*time.Second), 2*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.MarkPreMintAudited(ctx, lease); err != nil {
+		t.Fatal(err)
+	}
+	envelope, err := policy.SignBaseManifest(private, manifest)
 	if err != nil {
 		t.Fatal(err)
 	}

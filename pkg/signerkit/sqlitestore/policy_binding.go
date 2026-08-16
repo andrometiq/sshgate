@@ -754,7 +754,7 @@ func validatePolicyRequestRecord(request *policystore.Request, meta policyMeta) 
 		return err
 	}
 	var trustedManifest *policy.BaseManifest
-	if !request.Bootstrap {
+	if !request.Bootstrap && request.TrustedHeadEnvelope != nil {
 		verified, verifyErr := policy.VerifyBaseManifest(request.TrustedHeadEnvelope, ed25519.PublicKey(request.TrustedHeadPublicKey))
 		if verifyErr != nil {
 			return fmt.Errorf("%w: trusted review predecessor", policystore.ErrCorrupt)
@@ -878,10 +878,18 @@ func validatePolicyRequestRecord(request *policystore.Request, meta policyMeta) 
 }
 
 func validatePolicyPredecessors(request *policystore.Request) error {
+	trustedPresent := request.TrustedHeadEnvelope != nil || request.TrustedHeadDigest.Valid || request.TrustedHeadKeyID.Valid ||
+		request.TrustedHeadPublicKey != nil || request.TrustedHeadEpochBE != nil || request.TrustedHeadRevisionBE != nil || request.TrustedHeadRowVersion.Valid
+	if !request.Bootstrap && !trustedPresent && isMatrix2A(*request) {
+		claimedPresent := request.ClaimedHeadEnvelope != nil || request.ClaimedHeadDigest.Valid || request.ClaimedHeadKeyID.Valid ||
+			request.ClaimedHeadPublicKey != nil || request.ClaimedHeadEpochBE != nil || request.ClaimedHeadRevisionBE != nil || request.ClaimedHeadRowVersion.Valid
+		if claimedPresent {
+			return fmt.Errorf("%w: claimed predecessor", policystore.ErrCorrupt)
+		}
+		return nil
+	}
 	trusted, err := trustedHeadFromRequest(request)
 	if request.Bootstrap {
-		trustedPresent := request.TrustedHeadEnvelope != nil || request.TrustedHeadDigest.Valid || request.TrustedHeadKeyID.Valid ||
-			request.TrustedHeadPublicKey != nil || request.TrustedHeadEpochBE != nil || request.TrustedHeadRevisionBE != nil || request.TrustedHeadRowVersion.Valid
 		claimedPresent := request.ClaimedHeadEnvelope != nil || request.ClaimedHeadDigest.Valid || request.ClaimedHeadKeyID.Valid ||
 			request.ClaimedHeadPublicKey != nil || request.ClaimedHeadEpochBE != nil || request.ClaimedHeadRevisionBE != nil || request.ClaimedHeadRowVersion.Valid
 		if err != nil || trusted != nil || trustedPresent || request.ExpectedHeadDigest != "" || claimedPresent {
@@ -889,7 +897,10 @@ func validatePolicyPredecessors(request *policystore.Request) error {
 		}
 		return nil
 	}
-	if err != nil || trusted == nil || trusted.BaseDigest != request.ExpectedHeadDigest {
+	if err != nil {
+		return fmt.Errorf("%w: trusted predecessor", policystore.ErrCorrupt)
+	}
+	if trusted == nil || trusted.BaseDigest != request.ExpectedHeadDigest {
 		return fmt.Errorf("%w: trusted predecessor", policystore.ErrCorrupt)
 	}
 	if err := validatePolicyHeadRecord(trusted, request.AuthorityID); err != nil {
@@ -1046,29 +1057,34 @@ func requireBoundPolicyKey(ctx context.Context, queryer policyQueryer, keyID str
 }
 
 func validatePolicyHeadRecord(head *policystore.Head, authorityID string) error {
+	_, err := verifyPolicyHeadRecord(head, authorityID)
+	return err
+}
+
+func verifyPolicyHeadRecord(head *policystore.Head, authorityID string) (policy.BaseManifest, error) {
 	if head == nil || head.AuthoritySingleton != 1 || head.AuthorityID != authorityID || head.RowVersion == 0 || len(head.EpochBE) != 8 || len(head.RevisionBE) != 8 {
-		return fmt.Errorf("%w: head shape", policystore.ErrCorrupt)
+		return policy.BaseManifest{}, fmt.Errorf("%w: head shape", policystore.ErrCorrupt)
 	}
 	derived, err := policy.SignerKeyID(head.SignerPublicKey)
 	if err != nil || derived != head.SignerKeyID {
-		return fmt.Errorf("%w: head signer key", policystore.ErrCorrupt)
+		return policy.BaseManifest{}, fmt.Errorf("%w: head signer key", policystore.ErrCorrupt)
 	}
 	manifest, err := policy.VerifyBaseManifest(head.ManifestEnvelope, head.SignerPublicKey)
 	if err != nil || manifest.Host != head.HostKeyFP {
-		return fmt.Errorf("%w: head envelope", policystore.ErrCorrupt)
+		return policy.BaseManifest{}, fmt.Errorf("%w: head envelope", policystore.ErrCorrupt)
 	}
 	payload, _, err := policy.DecodeBaseManifestEnvelope(head.ManifestEnvelope)
 	if err != nil {
-		return fmt.Errorf("%w: head envelope payload", policystore.ErrCorrupt)
+		return policy.BaseManifest{}, fmt.Errorf("%w: head envelope payload", policystore.ErrCorrupt)
 	}
 	payloadSHA, baseDigest, err := policywire.PayloadDigests(payload)
 	if err != nil || payloadSHA != head.PayloadSHA256 || baseDigest != head.BaseDigest {
-		return fmt.Errorf("%w: head digests", policystore.ErrCorrupt)
+		return policy.BaseManifest{}, fmt.Errorf("%w: head digests", policystore.ErrCorrupt)
 	}
 	if !bytes.Equal(head.EpochBE, uint64BigEndian(manifest.Epoch)) || !bytes.Equal(head.RevisionBE, uint64BigEndian(manifest.Revision)) {
-		return fmt.Errorf("%w: head epoch/revision", policystore.ErrCorrupt)
+		return policy.BaseManifest{}, fmt.Errorf("%w: head epoch/revision", policystore.ErrCorrupt)
 	}
-	return nil
+	return manifest, nil
 }
 
 func isMatrix2A(request policystore.Request) bool {

@@ -97,6 +97,9 @@ type Server struct {
 	policyWorkersRun bool
 	policyClosed     bool
 	policyRosterWait time.Duration
+	policyMachine    http.Handler
+	policyPostLimit  *machineRateLimiter
+	policyGetLimit   *machineRateLimiter
 }
 
 // NewServer builds a Server with routes registered. The Server's
@@ -121,6 +124,8 @@ func NewServer(auth string, st store.Store, logger *log.Logger) *Server {
 		mux:                http.NewServeMux(),
 		machineSubmitLimit: &machineRateLimiter{},
 		machinePollLimit:   &machineRateLimiter{},
+		policyPostLimit:    &machineRateLimiter{},
+		policyGetLimit:     &machineRateLimiter{},
 		policyRosterWait:   policyRosterSweepInterval,
 	}
 	s.AttachMachine()
@@ -224,7 +229,28 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Pragma", "no-cache")
 	}
+	if s.policyMachine != nil && isPolicyV2Path(r.URL.Path, r.URL.EscapedPath()) {
+		s.logRequest(w, r, s.policyMachine.ServeHTTP)
+		return
+	}
 	s.logRequest(w, r, s.mux.ServeHTTP)
+}
+
+func isPolicyV2Path(path, escapedPath string) bool {
+	for _, target := range []string{path, escapedPath} {
+		target = strings.TrimLeft(target, "/")
+		if target == "v2" || strings.HasPrefix(target, "v2/") {
+			return true
+		}
+	}
+	return false
+}
+
+type machinePrincipalContextKey struct{}
+
+func machinePrincipalFromContext(ctx context.Context) (string, bool) {
+	principal, ok := ctx.Value(machinePrincipalContextKey{}).(string)
+	return principal, ok && principal != ""
 }
 
 // withAuth wraps next with a bearer-token check. On a missing or
@@ -247,6 +273,6 @@ func (s *Server) withAuth(next http.Handler) http.Handler {
 			writeJSONError(w, http.StatusUnauthorized, "unauthorized")
 			return
 		}
-		next.ServeHTTP(w, r)
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), machinePrincipalContextKey{}, s.MachineClientID)))
 	})
 }

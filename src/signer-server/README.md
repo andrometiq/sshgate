@@ -87,6 +87,26 @@ content-addressed full archive record before replacing the terminal database
 row with its tombstone. Owner clearing increments the recovery generation, so
 all outstanding workers remain fenced.
 
+## Permanent-policy serving
+
+The permanent-policy plane is requested when any policy flag is set. Serving
+requires the complete set below plus the existing `--ui`, RP, machine
+principal, quorum, database, API-key, and signing-key configuration:
+
+```text
+--policy-authority-id pauth_0123456789abcdef0123456789abcdef
+--policy-archive-dir /var/lib/sshgate-signer-server/policy-archive
+--policy-archive-id parch_0123456789abcdef0123456789abcdef
+--policy-audit-file /var/log/sshgate-signer-server/policy-audit.jsonl
+--policy-max-rejection-bytes-per-principal 8388608  # optional
+```
+
+The database, archive directory, and audit file paths must be absolute. The
+optional rejection cap defaults to 8 MiB and may only be reduced to a positive
+decimal value. A partial policy flag set is a startup error; leaving every
+policy flag empty preserves ordinary hosted signing without mounting v2 policy
+routes.
+
 ## Laptop backend
 
 Copy the API token to a 0600 local file, then select the hosted backend in the signer configuration:
@@ -99,9 +119,17 @@ type = "hosted"
 base_url = "https://signer.example.com"
 api_key_file = "/path/to/hosted-api.key"
 client_id = "alice"
+policy_pubkey_file = "/path/to/hosted-policy-public-key.hex"
+policy_authority_id = "pauth_0123456789abcdef0123456789abcdef"
 poll_wait_sec = 30
 timeout_sec = 60
 ```
+
+The two policy fields are an inseparable trust anchor. The public-key file must
+be owned by the signer process, must not be a symlink, must have no group/world
+permission bits, and must contain exactly 64 lowercase hexadecimal characters
+with at most one trailing newline. Omitting both leaves hosted policy approval
+disabled while ordinary hosted command approval continues to work.
 
 `client_id` must exactly match the server's `SIGNER_SERVER_MACHINE_CLIENT_ID`;
 the bearer credential is bound to that requester identity at intake, persisted

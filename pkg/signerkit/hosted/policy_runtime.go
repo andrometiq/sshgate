@@ -6,12 +6,15 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/karthikeyan5/sshgate/pkg/signerkit"
 	"github.com/karthikeyan5/sshgate/pkg/signerkit/policyarchive"
 	"github.com/karthikeyan5/sshgate/pkg/signerkit/policystore"
 	"github.com/karthikeyan5/sshgate/pkg/signerkit/sqlitestore"
+	"github.com/karthikeyan5/sshgate/src/policyreview"
+	"github.com/karthikeyan5/sshgate/src/redact"
 )
 
 // PolicyAPIConfig is deliberately post-construction: nil leaves every
@@ -51,17 +54,66 @@ func (server *Server) AttachPolicy(config *PolicyAPIConfig) error {
 	if server.policy != nil {
 		return errors.New("hosted: AttachPolicy: policy plane already attached")
 	}
-	machine := server.policyReady(config.Engine.Readiness(), server.withAuth(config.Handler))
+	machine := server.policyMachineDispatch(server.policyReady(config.Engine.Readiness(), server.withAuth(server.policyMachineLimit(config.Handler))))
 	human := server.policyReady(config.Engine.Readiness(), config.Handler)
-	server.mux.Handle("POST /v2/policy/base-manifests", machine)
-	server.mux.Handle("GET /v2/policy/base-manifests/{request_id}", machine)
 	server.mux.Handle("GET /ui/policy/pending", human)
 	server.mux.Handle("GET /ui/policy/requests/{review_id}", human)
 	server.mux.Handle("POST /ui/policy/requests/{review_id}/approve", human)
 	server.mux.Handle("POST /ui/policy/requests/{review_id}/deny", human)
 	server.mux.Handle("GET /ui/policy/requests/{review_id}/audit", human)
+	server.policyMachine = machine
 	server.policy = config
 	return nil
+}
+
+func (server *Server) policyMachineDispatch(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Cache-Control", "no-store")
+		if request.URL.RawQuery != "" {
+			writeJSONError(writer, http.StatusNotFound, "not found")
+			return
+		}
+		target := request.URL.EscapedPath()
+		collection := target == "/v2/policy/base-manifests"
+		resource := validPolicyResourcePath(target)
+		switch {
+		case collection && request.Method != http.MethodPost, resource && request.Method != http.MethodGet:
+			writeJSONError(writer, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		case !collection && !resource:
+			writeJSONError(writer, http.StatusNotFound, "not found")
+			return
+		}
+		next.ServeHTTP(writer, request)
+	})
+}
+
+func (server *Server) policyMachineLimit(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		limiter, maximum := server.policyPostLimit, 120
+		if request.Method == http.MethodGet {
+			limiter, maximum = server.policyGetLimit, 600
+		}
+		if !limiter.allow(maximum) {
+			writer.Header().Set("Retry-After", "60")
+			writeJSONError(writer, http.StatusTooManyRequests, "too many requests")
+			return
+		}
+		next.ServeHTTP(writer, request)
+	})
+}
+
+func validPolicyResourcePath(target string) bool {
+	const prefix = "/v2/policy/base-manifests/pm_"
+	if len(target) != len(prefix)+32 || !strings.HasPrefix(target, prefix) {
+		return false
+	}
+	for index := len(prefix); index < len(target); index++ {
+		if (target[index] < '0' || target[index] > '9') && (target[index] < 'a' || target[index] > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 func (server *Server) policyReady(readiness *PolicyReadiness, next http.Handler) http.Handler {
@@ -185,6 +237,12 @@ type PolicyStartupConfig struct {
 	Fault  func(PolicyFaultPoint) error
 	Sleep  func(context.Context, time.Duration) error
 	Jitter func(time.Duration) time.Duration
+	Random io.Reader
+
+	ReviewRules           []redact.Rule
+	RedactString          policyreview.RedactString
+	ReviewRendererVersion string
+	ReviewRulesDigest     string
 }
 
 // PolicyRuntime owns the resource tail whose close order is security
@@ -280,6 +338,8 @@ func StartPolicy(ctx context.Context, config PolicyStartupConfig) (_ *PolicyRunt
 		AuthorityID: binding.AuthorityID, WorkerID: config.WorkerID,
 		Store: store, Core: config.Core, Audit: audit, Now: config.Now,
 		Fault: config.Fault, Sleep: config.Sleep, Jitter: config.Jitter,
+		Random: config.Random, ReviewRules: config.ReviewRules, RedactString: config.RedactString,
+		ReviewRendererVersion: config.ReviewRendererVersion, ReviewRulesDigest: config.ReviewRulesDigest,
 	})
 	if err != nil {
 		return nil, err

@@ -22,6 +22,11 @@
 //	                          Offline owner clear for one recovery lease.
 //	--policy-archive-dir <absolute path>
 //	                          Existing bound archive for policy maintenance.
+//	--policy-authority-id <pauth_...>
+//	--policy-archive-id <parch_...>
+//	--policy-audit-file <absolute path>
+//	                          Required together with archive-dir and --ui to
+//	                          serve the permanent-policy plane.
 //	--ui                     Serve the embedded human approval UI (default off).
 //	--rp-id <domain>         WebAuthn relying-party ID (required with --ui).
 //	--rp-origin <origin>     Allowed WebAuthn origin; repeatable/comma-separated.
@@ -58,6 +63,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -71,6 +77,10 @@ import (
 	"github.com/karthikeyan5/sshgate/pkg/signerkit/policystore"
 	"github.com/karthikeyan5/sshgate/pkg/signerkit/sqlitestore"
 	"github.com/karthikeyan5/sshgate/pkg/signerkit/store"
+	"github.com/karthikeyan5/sshgate/src/policyauthority"
+	"github.com/karthikeyan5/sshgate/src/policyreview"
+	"github.com/karthikeyan5/sshgate/src/redact"
+	redactrules "github.com/karthikeyan5/sshgate/src/redact/rules"
 )
 
 // version is stamped from the single VERSION file at link time via
@@ -99,7 +109,11 @@ func run(args []string) int {
 	dbPath := fs.String("db", "/var/lib/signer-server/state.db", "SQLite database path")
 	compactPolicyBefore := fs.String("compact-policy-before", "", "Offline compact policy terminals resolved before RFC3339 time")
 	clearPolicyRecoveryLease := fs.String("clear-policy-recovery-lease", "", "Offline clear of the recovery lease for one policy review ID")
+	policyAuthorityID := fs.String("policy-authority-id", "", "Canonical pauth_ policy authority ID")
 	policyArchiveDir := fs.String("policy-archive-dir", "", "Absolute owner-only policy archive directory for offline maintenance")
+	policyArchiveID := fs.String("policy-archive-id", "", "Canonical parch_ policy archive namespace ID")
+	policyAuditFile := fs.String("policy-audit-file", "", "Absolute owner-only durable policy audit file")
+	policyMaxRejectionBytes := fs.String("policy-max-rejection-bytes-per-principal", "", "Retained rejection-byte cap per principal (1 through 8388608)")
 	uiEnabled := fs.Bool("ui", false, "Serve the embedded human approval UI")
 	rpID := fs.String("rp-id", "", "WebAuthn relying-party ID (required with --ui)")
 	var rpOrigins stringListFlag
@@ -177,6 +191,15 @@ func run(args []string) int {
 		}
 		return 0
 	}
+	policyOptions, err := resolvePolicyServingOptions(policyServingFlags{
+		AuthorityID: *policyAuthorityID, ArchiveDirectory: *policyArchiveDir,
+		ArchiveID: *policyArchiveID, AuditFile: *policyAuditFile,
+		MaxRejectionBytes: *policyMaxRejectionBytes,
+	}, *uiEnabled)
+	if err != nil {
+		logf("policy configuration: %v", err)
+		return 1
+	}
 	if err := validateUIConfig(*uiEnabled, *rpID, rpOrigins, *sessionTTL); err != nil {
 		logf("%v", err)
 		return 1
@@ -232,60 +255,96 @@ func run(args []string) int {
 	}
 
 	logger := log.New(os.Stderr, "signer-server: ", log.LstdFlags|log.Lmicroseconds)
-
-	// SQLite store. Open creates the file + applies the schema on
-	// first run; subsequent starts no-op. The file's containing dir
-	// must exist and be writable by the signer-server user
-	// (install/deploy.sh provisions /var/lib/signer-server).
-	db, err := sqlitestore.Open(*dbPath)
-	if err != nil {
-		logf("open store: %v", err)
-		return 1
+	policyLifetime := context.Background()
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer stop()
+	var httpSrv *http.Server
+	buildServer := func(database *sqlitestore.DB) (*hosted.Server, error) {
+		if *uiEnabled {
+			if err := validateApprovalRoster(policyLifetime, database, strings.TrimSpace(*machineClientID), *requiredApprovals, *allowSelfApprove); err != nil {
+				return nil, fmt.Errorf("approval policy: %w", err)
+			}
+		}
+		config := hosted.Config{
+			Core: core, Store: database, APIKey: apiKey,
+			MachineClientID:   strings.TrimSpace(*machineClientID),
+			RequiredApprovals: *requiredApprovals, Logger: logger,
+		}
+		if *uiEnabled {
+			config.Auth = hosted.AuthConfig{
+				RPID: strings.TrimSpace(*rpID), RPDisplayName: strings.TrimSpace(*rpDisplayName),
+				RPOrigins: slices.Clone(rpOrigins), SessionTTL: *sessionTTL,
+				TOTPIssuer: strings.TrimSpace(*totpIssuer),
+			}
+			config.Human = hosted.HumanAPIConfig{
+				ApprovalPolicy: hosted.ApprovalPolicy{DenyVeto: *denyVeto, AllowSelfApprove: *allowSelfApprove},
+				RequireStepUp:  *requireStepUp, SecureCookie: *secureCookie, TrustProxyHeaders: *trustProxyHeaders,
+			}
+		}
+		return hosted.New(config)
 	}
-	defer func() { _ = db.Close() }()
-	if *uiEnabled {
-		if err := validateApprovalRoster(context.Background(), db, strings.TrimSpace(*machineClientID), *requiredApprovals, *allowSelfApprove); err != nil {
-			logf("approval policy: %v", err)
+
+	var srv *hosted.Server
+	var policyRuntime *hosted.PolicyRuntime
+	if policyOptions.Requested {
+		if !filepath.IsAbs(*dbPath) {
+			logf("policy configuration: --db must be absolute when the policy plane is requested")
+			return 1
+		}
+		binding, bindErr := policyAuthorityBinding(policyOptions, strings.TrimSpace(*machineClientID), *requiredApprovals, *denyVeto, *allowSelfApprove, *requireStepUp)
+		if bindErr != nil {
+			logf("policy configuration: %v", bindErr)
+			return 1
+		}
+		policyRuntime, err = hosted.StartPolicy(policyLifetime, hosted.PolicyStartupConfig{
+			DatabasePath: *dbPath, ArchiveRoot: policyOptions.ArchiveDirectory,
+			Binding: binding, WorkerID: "signer-server-policy-worker", Core: core,
+			OpenDatabase: func() (hosted.PolicyDatabase, error) { return sqlitestore.Open(*dbPath) },
+			OpenAudit: func() (signerkit.DurableAuditSink, error) {
+				return signerkit.NewDurableFileAuditSink(policyOptions.AuditFile)
+			},
+			BuildServer: func(database hosted.PolicyDatabase) (*hosted.Server, error) {
+				sqlite, ok := database.(*sqlitestore.DB)
+				if !ok {
+					return nil, errors.New("policy database is not the production SQLite store")
+				}
+				return buildServer(sqlite)
+			},
+			BuildHandler: func(engine *hosted.PolicyEngine, archive *policyarchive.Archive) (http.Handler, error) {
+				return hosted.NewPolicyMachineHandler(engine, archive)
+			},
+			StopIntake: func() error {
+				if httpSrv == nil {
+					return nil
+				}
+				shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				return httpSrv.Shutdown(shutdownCtx)
+			},
+			ReviewRules: redactrules.Combined(), RedactString: redact.RedactString,
+			ReviewRendererVersion: policyreview.RendererVersion, ReviewRulesDigest: policyreview.RulesDigest(),
+		})
+		if err != nil {
+			logf("start policy authority: %v", err)
+			return 1
+		}
+		defer func() { _ = policyRuntime.Close() }()
+		srv = policyRuntime.Server
+	} else {
+		database, openErr := sqlitestore.Open(*dbPath)
+		if openErr != nil {
+			logf("open store: %v", openErr)
+			return 1
+		}
+		defer func() { _ = database.Close() }()
+		srv, err = buildServer(database)
+		if err != nil {
+			logf("build hosted server: %v", err)
 			return 1
 		}
 	}
 
-	// With --ui off, Auth stays zero and the exact historical machine-only
-	// handler is served. With --ui on, hosted.New mounts the human JSON plane;
-	// an outer mux adds only the embedded static application.
-	hostedCfg := hosted.Config{
-		Core:              core,
-		Store:             db,
-		APIKey:            apiKey,
-		MachineClientID:   strings.TrimSpace(*machineClientID),
-		RequiredApprovals: *requiredApprovals,
-		Logger:            logger,
-	}
-	if *uiEnabled {
-		hostedCfg.Auth = hosted.AuthConfig{
-			RPID:          strings.TrimSpace(*rpID),
-			RPDisplayName: strings.TrimSpace(*rpDisplayName),
-			RPOrigins:     slices.Clone(rpOrigins),
-			SessionTTL:    *sessionTTL,
-			TOTPIssuer:    strings.TrimSpace(*totpIssuer),
-		}
-		hostedCfg.Human = hosted.HumanAPIConfig{
-			ApprovalPolicy: hosted.ApprovalPolicy{
-				DenyVeto:         *denyVeto,
-				AllowSelfApprove: *allowSelfApprove,
-			},
-			RequireStepUp:     *requireStepUp,
-			SecureCookie:      *secureCookie,
-			TrustProxyHeaders: *trustProxyHeaders,
-		}
-	}
-	srv, err := hosted.New(hostedCfg)
-	if err != nil {
-		logf("build hosted server: %v", err)
-		return 1
-	}
-
-	httpSrv := &http.Server{
+	httpSrv = &http.Server{
 		Addr:              *addr,
 		Handler:           hostedHTTPHandler(*uiEnabled, srv, refapp.Handler()),
 		ReadHeaderTimeout: 10 * time.Second,
@@ -296,9 +355,6 @@ func run(args []string) int {
 		WriteTimeout: 90 * time.Second,
 		IdleTimeout:  120 * time.Second,
 	}
-
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
-	defer stop()
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -321,13 +377,18 @@ func run(args []string) int {
 		return 0
 	}
 
-	// Graceful shutdown: stop accepting new connections, drain
-	// in-flight requests up to 5s, then force-close.
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if err := httpSrv.Shutdown(shutdownCtx); err != nil {
-		logf("shutdown: %v", err)
-		return 1
+	if policyRuntime != nil {
+		if err := policyRuntime.Close(); err != nil {
+			logf("shutdown policy authority: %v", err)
+			return 1
+		}
+	} else {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := httpSrv.Shutdown(shutdownCtx); err != nil {
+			logf("shutdown: %v", err)
+			return 1
+		}
 	}
 	logger.Printf("stopped")
 	return 0
@@ -425,6 +486,103 @@ func (s *stringListFlag) Set(value string) error {
 	return nil
 }
 
+type policyServingFlags struct {
+	AuthorityID       string
+	ArchiveDirectory  string
+	ArchiveID         string
+	AuditFile         string
+	MaxRejectionBytes string
+}
+
+type policyServingOptions struct {
+	Requested         bool
+	AuthorityID       string
+	ArchiveDirectory  string
+	ArchiveID         string
+	AuditFile         string
+	MaxRejectionBytes uint64
+}
+
+var policyDecimalPattern = regexp.MustCompile(`^[0-9]+$`)
+
+func resolvePolicyServingOptions(flags policyServingFlags, uiEnabled bool) (policyServingOptions, error) {
+	requested := flags.AuthorityID != "" || flags.ArchiveDirectory != "" || flags.ArchiveID != "" || flags.AuditFile != "" || flags.MaxRejectionBytes != ""
+	options := policyServingOptions{Requested: requested, AuthorityID: flags.AuthorityID, ArchiveDirectory: flags.ArchiveDirectory, ArchiveID: flags.ArchiveID, AuditFile: flags.AuditFile, MaxRejectionBytes: policystore.DefaultRejectionReservedBytes}
+	if !requested {
+		return options, nil
+	}
+	if flags.AuthorityID == "" {
+		return policyServingOptions{}, errors.New("--policy-authority-id is required when the policy plane is requested")
+	}
+	if !policyauthority.ValidAuthorityID(flags.AuthorityID) {
+		return policyServingOptions{}, errors.New("--policy-authority-id must be pauth_ followed by 32 lowercase hexadecimal characters")
+	}
+	if flags.ArchiveDirectory == "" {
+		return policyServingOptions{}, errors.New("--policy-archive-dir is required when the policy plane is requested")
+	}
+	if !filepath.IsAbs(flags.ArchiveDirectory) {
+		return policyServingOptions{}, errors.New("--policy-archive-dir must be absolute when the policy plane is requested")
+	}
+	if flags.ArchiveID == "" {
+		return policyServingOptions{}, errors.New("--policy-archive-id is required when the policy plane is requested")
+	}
+	if !policystore.ValidArchiveID(flags.ArchiveID) {
+		return policyServingOptions{}, errors.New("--policy-archive-id must be parch_ followed by 32 lowercase hexadecimal characters")
+	}
+	if flags.AuditFile == "" {
+		return policyServingOptions{}, errors.New("--policy-audit-file is required when the policy plane is requested")
+	}
+	if !filepath.IsAbs(flags.AuditFile) {
+		return policyServingOptions{}, errors.New("--policy-audit-file must be absolute when the policy plane is requested")
+	}
+	if !uiEnabled {
+		return policyServingOptions{}, errors.New("--ui is required when the policy plane is requested")
+	}
+	if flags.MaxRejectionBytes != "" {
+		if !policyDecimalPattern.MatchString(flags.MaxRejectionBytes) {
+			return policyServingOptions{}, errors.New("--policy-max-rejection-bytes-per-principal must be a decimal integer")
+		}
+		value, err := strconv.ParseUint(flags.MaxRejectionBytes, 10, 64)
+		if err != nil || value == 0 || value > policystore.MaxRejectionReservedBytes {
+			return policyServingOptions{}, fmt.Errorf("--policy-max-rejection-bytes-per-principal must be between 1 and %d", policystore.MaxRejectionReservedBytes)
+		}
+		options.MaxRejectionBytes = value
+	}
+	return options, nil
+}
+
+func policyAuthorityBinding(options policyServingOptions, requester string, requiredApprovals int, denyVeto, allowSelfApprove, requireStepUp bool) (policystore.AuthorityBinding, error) {
+	config := policystore.DefaultConfigDigestInput()
+	config.RequesterOperatorID = requester
+	config.RequiredApprovals = uint64(requiredApprovals)
+	config.DenyVeto = denyVeto
+	config.AllowSelfApprove = allowSelfApprove
+	config.PolicyVoterRole = "operator"
+	config.VoterEligibilityVersion = "sshgate-policy-voter-eligibility-v1"
+	config.VoteStepUpRequired = requireStepUp
+	config.VoteAuthMethodsJSON = []byte(`["session"]`)
+	if requireStepUp {
+		config.VoteAuthMethodsJSON = []byte(`["totp"]`)
+	}
+	config.MaxRejectionReservedBytesPerPrincipal = options.MaxRejectionBytes
+	config.ArchiveID = options.ArchiveID
+	config.ReviewRendererVersion = policyreview.RendererVersion
+	config.ReviewRulesDigest = policyreview.RulesDigest()
+	if err := config.Validate(); err != nil {
+		return policystore.AuthorityBinding{}, err
+	}
+	digest, err := policystore.ConfigDigest(config)
+	if err != nil {
+		return policystore.AuthorityBinding{}, err
+	}
+	return policystore.AuthorityBinding{
+		AuthorityID: options.AuthorityID, ArchiveID: options.ArchiveID,
+		AccountingVersion: policystore.AccountingVersion, ConfigDigest: digest,
+		MaxRejectionReservedBytesPerPrincipal: options.MaxRejectionBytes,
+		Config:                                config,
+	}, nil
+}
+
 // hostedHTTPHandler keeps the default machine surface literally unchanged:
 // when UI is disabled it returns api itself. UI mode routes only the existing
 // hosted prefixes to api and reserves the catch-all for embedded static files.
@@ -434,6 +592,7 @@ func hostedHTTPHandler(uiEnabled bool, api, ui http.Handler) http.Handler {
 	}
 	mux := http.NewServeMux()
 	mux.Handle("/v1/", api)
+	mux.Handle("/v2/", api)
 	mux.Handle("/auth/", api)
 	mux.Handle("/ui/", api)
 	mux.Handle("/healthz", api)

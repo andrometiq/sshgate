@@ -33,7 +33,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
@@ -98,6 +100,10 @@ type hostedConfig struct {
 	PollWaitSec int `toml:"poll_wait_sec"`
 	// TimeoutSec bounds the total per-Request budget. Default 60.
 	TimeoutSec int `toml:"timeout_sec"`
+	// PolicyPubKeyFile and PolicyAuthorityID are one optional, inseparable
+	// policy-authority trust anchor. The key is never accepted inline.
+	PolicyPubKeyFile  string `toml:"policy_pubkey_file"`
+	PolicyAuthorityID string `toml:"policy_authority_id"`
 }
 
 // telegramConfig is the [backend.telegram] block. Only consulted when
@@ -391,6 +397,20 @@ func buildHostedBackend(c hostedConfig) (signerkit.Backend, error) {
 	if c.ClientID == "" {
 		return nil, errors.New(`config missing backend.hosted.client_id`)
 	}
+	if (c.PolicyPubKeyFile == "") != (c.PolicyAuthorityID == "") {
+		return nil, errors.New(`backend.hosted.policy_pubkey_file and backend.hosted.policy_authority_id must be configured together`)
+	}
+	var policyPublicKey ed25519.PublicKey
+	if c.PolicyPubKeyFile != "" {
+		var err error
+		policyPublicKey, err = readPinnedPolicyPublicKey(c.PolicyPubKeyFile)
+		if err != nil {
+			return nil, fmt.Errorf("read hosted policy public key %s: %w", c.PolicyPubKeyFile, err)
+		}
+		if !validPolicyAuthorityID(c.PolicyAuthorityID) {
+			return nil, errors.New(`backend.hosted.policy_authority_id must be pauth_ followed by 32 lowercase hexadecimal characters`)
+		}
+	}
 	keyRaw, err := readOwnerSecretFile(c.APIKeyFile)
 	if err != nil {
 		return nil, fmt.Errorf("read hosted api key %s: %w", c.APIKeyFile, err)
@@ -409,14 +429,99 @@ func buildHostedBackend(c hostedConfig) (signerkit.Backend, error) {
 	}
 	logf("hosted backend ready (base_url=%s client_id=%s poll_wait=%s timeout=%s)",
 		c.BaseURL, c.ClientID, pollWait, timeout)
-	return &signerkit.HostedServerBackend{
+	hosted := &signerkit.HostedServerBackend{
 		BaseURL:    c.BaseURL,
 		APIKey:     key,
 		ClientID:   c.ClientID,
 		HTTPClient: &http.Client{Timeout: timeout + 10*time.Second},
 		PollWait:   pollWait,
 		Timeout:    timeout,
-	}, nil
+	}
+	if policyPublicKey != nil {
+		if err := hosted.ConfigurePolicyAuthority(policyPublicKey, c.PolicyAuthorityID); err != nil {
+			return nil, err
+		}
+	}
+	return hosted, nil
+}
+
+func readPinnedPolicyPublicKey(path string) (ed25519.PublicKey, error) {
+	return readPinnedPolicyPublicKeyForUID(path, uint32(os.Geteuid()))
+}
+
+func readPinnedPolicyPublicKeyForUID(path string, euid uint32) (ed25519.PublicKey, error) {
+	before, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if before.Mode()&os.ModeSymlink != 0 {
+		return nil, errors.New("policy public key file is a symbolic link")
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	after, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if after.Mode()&os.ModeSymlink != 0 || !os.SameFile(info, after) {
+		return nil, errors.New("policy public key file changed or became a symbolic link during open")
+	}
+	if !info.Mode().IsRegular() {
+		return nil, errors.New("policy public key file is not a regular file")
+	}
+	if mode := info.Mode().Perm(); mode&0o077 != 0 {
+		return nil, fmt.Errorf("policy public key file has insecure mode %#o (group/world bits must be off)", mode)
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return nil, errors.New("policy public key file owner is unavailable")
+	}
+	if stat.Uid != euid {
+		return nil, fmt.Errorf("policy public key file owner uid %d does not match effective uid %d", stat.Uid, euid)
+	}
+	raw, err := io.ReadAll(io.LimitReader(f, 4097))
+	if err != nil {
+		return nil, err
+	}
+	if len(raw) > 4096 {
+		return nil, errors.New("policy public key file exceeds 4096 bytes")
+	}
+	if len(raw) == 65 && raw[64] == '\n' {
+		raw = raw[:64]
+	}
+	if len(raw) != 64 {
+		return nil, errors.New("policy public key file must contain exactly 64 lowercase hexadecimal characters with at most one trailing newline")
+	}
+	for _, character := range raw {
+		if (character < '0' || character > '9') && (character < 'a' || character > 'f') {
+			return nil, errors.New("policy public key file must contain exactly 64 lowercase hexadecimal characters with at most one trailing newline")
+		}
+	}
+	decoded := make([]byte, ed25519.PublicKeySize)
+	if _, err := hex.Decode(decoded, raw); err != nil {
+		return nil, fmt.Errorf("decode policy public key: %w", err)
+	}
+	return ed25519.PublicKey(decoded), nil
+}
+
+func validPolicyAuthorityID(authorityID string) bool {
+	const prefix = "pauth_"
+	if len(authorityID) != len(prefix)+32 || !strings.HasPrefix(authorityID, prefix) {
+		return false
+	}
+	for _, character := range authorityID[len(prefix):] {
+		if (character < '0' || character > '9') && (character < 'a' || character > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // buildTelegramBackend reads the bot token, constructs the backend
