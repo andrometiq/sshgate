@@ -126,6 +126,7 @@ func (store *policyDB) PrepareVote(ctx context.Context, input policystore.VoteIn
 		if request.State != policystore.StatePending || !request.SubmissionAudited {
 			return policystore.VoteResult{}, policystore.ErrConflict
 		}
+		beforeRequest := requestPolicyCounters(request)
 		if err := validateFrozenVoter(ctx, transaction, meta, request, input.Operator, input.AuthnMethod); err != nil {
 			return policystore.VoteResult{}, err
 		}
@@ -149,7 +150,14 @@ func (store *policyDB) PrepareVote(ctx context.Context, input policystore.VoteIn
 		if err := insertPolicyVote(ctx, transaction, vote); err != nil {
 			return policystore.VoteResult{}, err
 		}
-		if err := finishPolicyMutation(ctx, transaction, meta); err != nil {
+		var delta policyCounterDelta
+		if err := delta.add(beforeRequest, requestPolicyCounters(request)); err != nil {
+			return policystore.VoteResult{}, err
+		}
+		if err := delta.add(policyCounters{}, votePolicyCounters(vote)); err != nil {
+			return policystore.VoteResult{}, err
+		}
+		if err := finishPolicyMutation(ctx, transaction, meta, delta); err != nil {
 			return policystore.VoteResult{}, err
 		}
 		tally, err := policyTally(ctx, transaction, request)
@@ -173,6 +181,7 @@ func (store *policyDB) PublishVoteAudit(ctx context.Context, key policystore.Key
 		if err := store.validateFence(request, time.Now()); err != nil {
 			return policystore.TallyResult{}, err
 		}
+		beforeRequest := requestPolicyCounters(request)
 		vote, err := loadPolicyVote(ctx, transaction, key, operator)
 		if err != nil {
 			return policystore.TallyResult{}, err
@@ -196,7 +205,11 @@ func (store *policyDB) PublishVoteAudit(ctx context.Context, key policystore.Key
 				return policystore.TallyResult{}, err
 			}
 		}
-		if err := finishPolicyMutation(ctx, transaction, meta); err != nil {
+		var delta policyCounterDelta
+		if err := delta.add(beforeRequest, requestPolicyCounters(request)); err != nil {
+			return policystore.TallyResult{}, err
+		}
+		if err := finishPolicyMutation(ctx, transaction, meta, delta); err != nil {
 			return policystore.TallyResult{}, err
 		}
 		return tally, nil
@@ -373,35 +386,39 @@ func (store *policyDB) PublishNoOp(ctx context.Context, key policystore.Key, une
 }
 
 func (store *policyDB) publishApproved(ctx context.Context, key policystore.Key, version uint64, now time.Time, noOp bool) (*policystore.Request, error) {
-	return store.mutatePolicyRequest(ctx, key, func(ctx context.Context, transaction *sql.Tx, request *policystore.Request) error {
+	return store.mutatePolicyRequestWithDelta(ctx, key, func(ctx context.Context, transaction *sql.Tx, request *policystore.Request) (policyCounterDelta, error) {
+		var delta policyCounterDelta
 		wantState := policystore.StateApprovedUnexposed
 		if noOp {
 			wantState = policystore.StateNoOpUnexposed
 		}
 		if request.State != wantState || request.StateVersion != version || request.NoOp != noOp ||
 			(noOp && !request.TerminalAudited) || (!noOp && !request.ResultAudited) {
-			return policystore.ErrStaleVersion
+			return delta, policystore.ErrStaleVersion
 		}
 		if noOp {
 			head, err := loadPolicyHead(ctx, transaction, request.AuthorityID, request.HostKeyFP)
 			if err != nil || !headMatchesTrusted(request, head) || !bytes.Equal(request.ResultEnvelope, head.ManifestEnvelope) {
-				return policystore.ErrStaleVersion
+				return delta, policystore.ErrStaleVersion
 			}
 		} else {
 			head, trusted, err := materializedPolicyHead(request, now)
 			if err != nil {
-				return err
+				return delta, err
 			}
 			if err := upsertPolicyHead(ctx, transaction, head, request.Bootstrap, trusted); err != nil {
-				return err
+				return delta, err
+			}
+			if err := delta.add(headPolicyCounters(trusted), headPolicyCounters(head)); err != nil {
+				return delta, err
 			}
 		}
 		body, err := terminalPolicyResponse(request, policywire.StatusApproved)
 		if err != nil {
-			return err
+			return delta, err
 		}
 		publishPolicyTerminal(request, policystore.StateApproved, body, 200, now)
-		return nil
+		return delta, nil
 	})
 }
 
@@ -619,6 +636,13 @@ func (store *policyDB) ReconcilePendingAttainability(ctx context.Context, author
 
 func (store *policyDB) mutatePolicyRequest(ctx context.Context, key policystore.Key,
 	mutation func(context.Context, *sql.Tx, *policystore.Request) error) (*policystore.Request, error) {
+	return store.mutatePolicyRequestWithDelta(ctx, key, func(ctx context.Context, transaction *sql.Tx, request *policystore.Request) (policyCounterDelta, error) {
+		return policyCounterDelta{}, mutation(ctx, transaction, request)
+	})
+}
+
+func (store *policyDB) mutatePolicyRequestWithDelta(ctx context.Context, key policystore.Key,
+	mutation func(context.Context, *sql.Tx, *policystore.Request) (policyCounterDelta, error)) (*policystore.Request, error) {
 	if err := validatePolicyKey(key); err != nil {
 		return nil, err
 	}
@@ -634,13 +658,18 @@ func (store *policyDB) mutatePolicyRequest(ctx context.Context, key policystore.
 		if err := store.validateFence(request, time.Now()); err != nil {
 			return nil, err
 		}
-		if err := mutation(ctx, transaction, request); err != nil {
+		beforeRequest := requestPolicyCounters(request)
+		delta, err := mutation(ctx, transaction, request)
+		if err != nil {
 			return nil, err
 		}
 		if err := updatePolicyRequest(ctx, transaction, request); err != nil {
 			return nil, err
 		}
-		if err := finishPolicyMutation(ctx, transaction, meta); err != nil {
+		if err := delta.add(beforeRequest, requestPolicyCounters(request)); err != nil {
+			return nil, err
+		}
+		if err := finishPolicyMutation(ctx, transaction, meta, delta); err != nil {
 			return nil, err
 		}
 		return request, nil

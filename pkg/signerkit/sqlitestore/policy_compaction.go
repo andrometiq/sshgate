@@ -69,6 +69,17 @@ func (store *policyDB) CommitTerminalArchive(ctx context.Context, key policystor
 			int64(len(request.TerminalResponse)) != reference.TerminalResponseBytes || digestBytes(request.TerminalResponse) != reference.TerminalResponseSHA256 {
 			return policystore.CompactionResult{}, policystore.ErrStaleVersion
 		}
+		beforeRequest := requestPolicyCounters(request)
+		votes, err := loadPolicyVotes(ctx, transaction, key, false)
+		if err != nil {
+			return policystore.CompactionResult{}, err
+		}
+		var delta policyCounterDelta
+		for _, vote := range votes {
+			if err := delta.add(votePolicyCounters(vote), policyCounters{}); err != nil {
+				return policystore.CompactionResult{}, err
+			}
+		}
 		request.StorageKind = policystore.StorageTombstone
 		request.CanonicalRequest = nil
 		request.Payload = nil
@@ -110,7 +121,10 @@ func (store *policyDB) CommitTerminalArchive(ctx context.Context, key policystor
 			return policystore.CompactionResult{}, err
 		}
 		request.CompactionDeleteGuard = false // cleared atomically by the compaction trigger
-		if err := finishPolicyMutation(ctx, transaction, meta); err != nil {
+		if err := delta.add(beforeRequest, requestPolicyCounters(request)); err != nil {
+			return policystore.CompactionResult{}, err
+		}
+		if err := finishPolicyMutation(ctx, transaction, meta, delta); err != nil {
 			return policystore.CompactionResult{}, err
 		}
 		stored, err := loadPolicyRequest(ctx, transaction, key)

@@ -12,11 +12,13 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -297,25 +299,37 @@ type rosterPolicyStore struct {
 
 type startupPolicyStore struct {
 	policystore.Store
-	bindErr     error
-	scanErr     error
-	rosterErr   error
-	scanStarted chan struct{}
-	scanRelease chan struct{}
-	bindCalls   atomic.Int64
-	rosterCalls atomic.Int64
+	bindErr           error
+	scanErr           error
+	rosterErr         error
+	scanStarted       chan struct{}
+	scanRelease       chan struct{}
+	scanCanceled      chan struct{}
+	scanCancelRelease chan struct{}
+	bindCalls         atomic.Int64
+	rosterCalls       atomic.Int64
 }
 
 func (store *startupPolicyStore) BindAuthority(context.Context, policystore.AuthorityBinding) error {
 	store.bindCalls.Add(1)
 	return store.bindErr
 }
-func (store *startupPolicyStore) SafetyScan(_ context.Context, inspect func(*policystore.Request) error) error {
+func (store *startupPolicyStore) SafetyScan(ctx context.Context, inspect func(*policystore.Request) error) error {
 	if store.scanStarted != nil {
 		close(store.scanStarted)
 	}
 	if store.scanRelease != nil {
-		<-store.scanRelease
+		select {
+		case <-store.scanRelease:
+		case <-ctx.Done():
+			if store.scanCanceled != nil {
+				close(store.scanCanceled)
+			}
+			if store.scanCancelRelease != nil {
+				<-store.scanCancelRelease
+			}
+			return ctx.Err()
+		}
 	}
 	if store.scanErr != nil {
 		return store.scanErr
@@ -1070,6 +1084,126 @@ func TestPolicyStartupListenerServesV1AndPolicy503DuringDelayedScan(t *testing.T
 	}
 	if !runtime.Engine.Readiness().Ready() {
 		t.Fatal("clean delayed scan did not enable policy readiness")
+	}
+}
+
+func TestPolicySignalCancellationDuringDelayedScanShutsDownPromptly(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	store := &startupPolicyStore{scanStarted: started, scanRelease: release}
+	config, databasePath, _ := minimalPolicyStartup(t, store)
+	runtime, err := StartPolicy(context.Background(), config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = runtime.Close() })
+
+	lifetime, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM)
+	defer stop()
+	shutdown := make(chan error, 1)
+	go func() {
+		completionErr := runtime.CompleteStartup(lifetime)
+		shutdown <- errors.Join(completionErr, runtime.Close())
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("fault-delayed safety scan did not start")
+	}
+	if err := syscall.Kill(os.Getpid(), syscall.SIGTERM); err != nil {
+		t.Fatalf("send SIGTERM: %v", err)
+	}
+	select {
+	case err := <-shutdown:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("signal-canceled shutdown = %v; want context cancellation", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("signal-canceled startup did not shut down promptly")
+	}
+	if runtime.Engine.Readiness().Ready() {
+		t.Fatal("signal-canceled startup exposed policy readiness")
+	}
+	exclusive, err := policyarchive.AcquireMaintenanceLease(databasePath, policyarchive.LeaseExclusive)
+	if err != nil {
+		t.Fatalf("signal-canceled shutdown retained maintenance lease: %v", err)
+	}
+	if err := exclusive.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPolicyRuntimeCloseCancelsAndJoinsCompletionBeforeResourceClose(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	canceled := make(chan struct{})
+	cancelRelease := make(chan struct{})
+	store := &startupPolicyStore{
+		scanStarted: started, scanRelease: release,
+		scanCanceled: canceled, scanCancelRelease: cancelRelease,
+	}
+	config, _, _ := minimalPolicyStartup(t, store)
+	databaseValue, err := config.OpenDatabase()
+	if err != nil {
+		t.Fatal(err)
+	}
+	database, ok := databaseValue.(*startupPolicyDatabase)
+	if !ok {
+		t.Fatal("minimal startup did not expose its test database")
+	}
+	runtime, err := StartPolicy(context.Background(), config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		select {
+		case <-cancelRelease:
+		default:
+			close(cancelRelease)
+		}
+		_ = runtime.Close()
+	})
+	completion := make(chan error, 1)
+	go func() { completion <- runtime.CompleteStartup(context.Background()) }()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("fault-delayed safety scan did not start")
+	}
+	closed := make(chan error, 1)
+	go func() { closed <- runtime.Close() }()
+	select {
+	case <-canceled:
+	case <-time.After(time.Second):
+		t.Fatal("Close did not cancel in-flight startup completion")
+	}
+	select {
+	case err := <-closed:
+		t.Fatalf("Close returned before startup completion joined: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	if database.closed.Load() {
+		t.Fatal("Close closed the database under the live safety scan")
+	}
+	close(cancelRelease)
+	select {
+	case err := <-completion:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("canceled startup completion = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("startup completion did not finish after scan release")
+	}
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Close did not return after startup completion joined")
+	}
+	if !database.closed.Load() {
+		t.Fatal("Close did not close the database after startup completion joined")
 	}
 }
 

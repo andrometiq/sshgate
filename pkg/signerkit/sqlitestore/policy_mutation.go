@@ -16,32 +16,106 @@ import (
 )
 
 func preparePolicyMutation(ctx context.Context, transaction *sql.Tx) (policyMeta, error) {
-	if err := requirePolicyMigration(ctx, transaction); err != nil {
-		return policyMeta{}, err
-	}
-	if err := verifyPolicySchema(ctx, transaction); err != nil {
-		return policyMeta{}, err
-	}
 	meta, err := readPolicyMeta(ctx, transaction)
 	if err != nil {
 		return policyMeta{}, err
 	}
-	if err := verifyPolicyRosterIdentities(ctx, transaction, meta.PolicyVoterRole, meta.VoteStepUpRequired); err != nil {
-		return policyMeta{}, err
-	}
-	if err := verifyPolicyKeyBindings(ctx, transaction, meta.AuthorityID, false); err != nil {
-		return policyMeta{}, err
-	}
-	if _, err := scanPolicyLedger(ctx, transaction, meta); err != nil {
+	if err := validatePolicyMeta(meta); err != nil {
 		return policyMeta{}, err
 	}
 	return meta, nil
 }
 
-func finishPolicyMutation(ctx context.Context, transaction *sql.Tx, meta policyMeta) error {
-	counters, err := recomputePolicyLedger(ctx, transaction, meta)
-	if err != nil {
+type policyCounterDelta struct {
+	before policyCounters
+	after  policyCounters
+}
+
+func (delta *policyCounterDelta) add(before, after policyCounters) error {
+	if err := addPolicyCounters(&delta.before, before); err != nil {
 		return err
+	}
+	return addPolicyCounters(&delta.after, after)
+}
+
+func addPolicyCounters(total *policyCounters, add policyCounters) error {
+	for _, pair := range []struct {
+		name  string
+		total *uint64
+		add   uint64
+	}{
+		{"logical_used_bytes", &total.Used, add.Used},
+		{"logical_reserved_bytes", &total.Reserved, add.Reserved},
+		{"full_request_count", &total.Full, add.Full},
+		{"head_count", &total.Heads, add.Heads},
+		{"active_count", &total.Active, add.Active},
+	} {
+		if math.MaxUint64-*pair.total < pair.add {
+			return fmt.Errorf("%w: %s mutation delta overflow", policystore.ErrCounterDrift, pair.name)
+		}
+		*pair.total += pair.add
+	}
+	return nil
+}
+
+func requestPolicyCounters(request *policystore.Request) policyCounters {
+	if request == nil {
+		return policyCounters{}
+	}
+	counters := policyCounters{Used: request.LogicalBytes, Reserved: request.ReservedBytes}
+	if request.StorageKind == policystore.StorageFull {
+		counters.Full = 1
+		if request.State.Active() {
+			counters.Active = 1
+		}
+	}
+	return counters
+}
+
+func votePolicyCounters(vote *policystore.Vote) policyCounters {
+	if vote == nil {
+		return policyCounters{}
+	}
+	return policyCounters{Used: vote.LogicalBytes}
+}
+
+func headPolicyCounters(head *policystore.Head) policyCounters {
+	if head == nil {
+		return policyCounters{}
+	}
+	return policyCounters{Used: head.LogicalBytes, Heads: 1}
+}
+
+func applyPolicyCounterDelta(name string, stored, before, after uint64) (uint64, error) {
+	if stored < before {
+		return 0, fmt.Errorf("%w: %s mutation delta underflow", policystore.ErrCounterDrift, name)
+	}
+	next := stored - before
+	if math.MaxUint64-next < after || next+after > math.MaxInt64 {
+		return 0, fmt.Errorf("%w: %s mutation delta overflow", policystore.ErrCounterDrift, name)
+	}
+	return next + after, nil
+}
+
+func finishPolicyMutation(ctx context.Context, transaction *sql.Tx, meta policyMeta, delta policyCounterDelta) error {
+	var counters policyCounters
+	updates := []struct {
+		name                  string
+		stored, before, after uint64
+		output                *uint64
+	}{
+		{"logical_used_bytes", meta.LogicalUsedBytes, delta.before.Used, delta.after.Used, &counters.Used},
+		{"logical_reserved_bytes", meta.LogicalReservedBytes, delta.before.Reserved, delta.after.Reserved, &counters.Reserved},
+		{"full_request_count", meta.FullRequestCount, delta.before.Full, delta.after.Full, &counters.Full},
+		{"head_count", meta.HeadCount, delta.before.Heads, delta.after.Heads, &counters.Heads},
+		{"active_count", meta.ActiveCount, delta.before.Active, delta.after.Active, &counters.Active},
+	}
+	for _, update := range updates {
+		next, err := applyPolicyCounterDelta(update.name, update.stored, update.before, update.after)
+		if err != nil {
+			return err
+		}
+		*update.output = next
 	}
 	result, err := transaction.ExecContext(ctx, `UPDATE policy_authority_meta SET
 		logical_used_bytes=?,logical_reserved_bytes=?,full_request_count=?,head_count=?,active_count=?

@@ -270,9 +270,13 @@ type PolicyRuntime struct {
 	store    policystore.Store
 	binding  policystore.AuthorityBinding
 
-	completionOnce sync.Once
-	completionErr  error
-	closed         atomic.Bool
+	completionOnce    sync.Once
+	completionMu      sync.Mutex
+	completionCancel  context.CancelFunc
+	completionDone    chan struct{}
+	completionStarted bool
+	completionErr     error
+	closed            atomic.Bool
 }
 
 // StartPolicy performs the frozen serving order through route mounting. It
@@ -282,7 +286,7 @@ func StartPolicy(ctx context.Context, config PolicyStartupConfig) (_ *PolicyRunt
 	if config.DatabasePath == "" || config.ArchiveRoot == "" || config.OpenDatabase == nil || config.OpenAudit == nil || config.BuildServer == nil || config.BuildHandler == nil || config.StopIntake == nil || config.Core == nil {
 		return nil, errors.New("hosted policy startup: incomplete configuration")
 	}
-	runtime := &PolicyRuntime{}
+	runtime := &PolicyRuntime{completionDone: make(chan struct{})}
 	defer func() {
 		if returnedErr != nil {
 			returnedErr = errors.Join(returnedErr, runtime.Close())
@@ -395,11 +399,22 @@ func (runtime *PolicyRuntime) CompleteStartup(ctx context.Context) error {
 		return errors.New("hosted policy startup: nil runtime")
 	}
 	runtime.completionOnce.Do(func() {
+		runtime.completionMu.Lock()
 		if runtime.closed.Load() {
 			runtime.completionErr = errors.New("hosted policy startup: runtime is closed")
+			runtime.completionMu.Unlock()
 			return
 		}
-		runtime.completionErr = runtime.completeStartup(ctx)
+		completionContext, cancel := context.WithCancel(ctx)
+		runtime.completionCancel = cancel
+		runtime.completionStarted = true
+		runtime.completionMu.Unlock()
+		defer func() {
+			cancel()
+			close(runtime.completionDone)
+		}()
+
+		runtime.completionErr = runtime.completeStartup(completionContext)
 		if runtime.completionErr != nil && runtime.Engine != nil {
 			runtime.Engine.Readiness().MarkUnready()
 		}
@@ -448,12 +463,25 @@ func (runtime *PolicyRuntime) Close() error {
 	if runtime == nil || !runtime.closed.CompareAndSwap(false, true) {
 		return nil
 	}
+	runtime.completionMu.Lock()
+	completionCancel := runtime.completionCancel
+	var completionDone <-chan struct{}
+	if runtime.completionStarted {
+		completionDone = runtime.completionDone
+	}
+	runtime.completionMu.Unlock()
+	if completionCancel != nil {
+		completionCancel()
+	}
 	var err error
 	if runtime.Server != nil {
 		runtime.Server.MarkPolicyUnready()
 	}
 	if runtime.stopHTTP != nil {
 		err = errors.Join(err, runtime.stopHTTP())
+	}
+	if completionDone != nil {
+		<-completionDone
 	}
 	if runtime.Server != nil {
 		err = errors.Join(err, runtime.Server.Close())

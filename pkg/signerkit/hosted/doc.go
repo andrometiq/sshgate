@@ -33,9 +33,11 @@
 // Production composition uses StartPolicy to acquire and mount the policy plane
 // behind false readiness, starts ordinary HTTP service, then calls
 // PolicyRuntime.CompleteStartup for the one-transaction safety scan, startup
-// roster sweep, and separate ROSTER and RECOVERY workers. Policy readiness is
-// independent of the ordinary /v1 plane; a sticky durable-audit failure closes
-// policy responses without stopping /v1.
+// roster sweep, and separate ROSTER and RECOVERY workers. The caller supplies
+// one signal-derived lifetime to completion and the workers; Close cancels and
+// joins an in-flight completion before closing its resources. Policy readiness
+// is independent of the ordinary /v1 plane; a sticky durable-audit failure
+// closes policy responses without stopping /v1.
 //
 // The wire the machine plane speaks is BYTE-FROZEN: the frozen
 // HostedServerBackend client in pkg/signerkit is the oracle (wire_frozen_test.go),

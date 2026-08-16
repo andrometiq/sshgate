@@ -256,9 +256,9 @@ func run(args []string) int {
 	}
 
 	logger := log.New(os.Stderr, "signer-server: ", log.LstdFlags|log.Lmicroseconds)
-	policyLifetime := context.Background()
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
+	policyLifetime := ctx
 	var httpSrv *http.Server
 	buildServer := func(database *sqlitestore.DB) (*hosted.Server, error) {
 		if *uiEnabled {

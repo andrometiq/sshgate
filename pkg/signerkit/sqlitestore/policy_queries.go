@@ -304,6 +304,7 @@ func (store *policyDB) ClearRecoveryLease(ctx context.Context, reviewID string) 
 		if err != nil {
 			return struct{}{}, err
 		}
+		beforeRequest := requestPolicyCounters(request)
 		// Do not fabricate the durable first-owner-consumption marker.
 		if !request.State.Terminal() && request.RecoveryLeaseOwner == "" && request.RecoveryLeaseGeneration == 0 {
 			return struct{}{}, policystore.ErrLeaseLost
@@ -317,7 +318,11 @@ func (store *policyDB) ClearRecoveryLease(ctx context.Context, reviewID string) 
 		if err := updatePolicyRequest(ctx, transaction, request); err != nil {
 			return struct{}{}, err
 		}
-		return struct{}{}, finishPolicyMutation(ctx, transaction, meta)
+		var delta policyCounterDelta
+		if err := delta.add(beforeRequest, requestPolicyCounters(request)); err != nil {
+			return struct{}{}, err
+		}
+		return struct{}{}, finishPolicyMutation(ctx, transaction, meta, delta)
 	})
 	return err
 }

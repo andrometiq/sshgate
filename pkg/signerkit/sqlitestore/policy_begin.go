@@ -137,7 +137,11 @@ func (store *policyDB) Begin(ctx context.Context, input policystore.BeginInput) 
 		if err := insertPolicyRequest(ctx, transaction, request); err != nil {
 			return policystore.BeginResult{}, err
 		}
-		if err := finishPolicyMutation(ctx, transaction, meta); err != nil {
+		var delta policyCounterDelta
+		if err := delta.add(policyCounters{}, requestPolicyCounters(request)); err != nil {
+			return policystore.BeginResult{}, err
+		}
+		if err := finishPolicyMutation(ctx, transaction, meta, delta); err != nil {
 			return policystore.BeginResult{}, err
 		}
 		lookup := classifyPolicyLookup(request, input.Tuple)

@@ -236,6 +236,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		if plane == "human" {
 			w.Header().Set("Pragma", "no-cache")
+		} else {
+			w.Header().Del("Pragma")
 		}
 		s.logRequest(w, r, func(writer http.ResponseWriter, _ *http.Request) {
 			if plane == "machine" {
