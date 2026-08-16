@@ -1,7 +1,9 @@
 package sqlitestore
 
 import (
+	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 )
 
@@ -24,10 +26,16 @@ type migration struct {
 	Version int
 	Name    string
 	SQL     string
-	// Apply overrides the default tx.Exec(SQL) path for schema changes that
+	// Apply overrides the default connection ExecContext(SQL) path for schema changes that
 	// SQLite cannot express idempotently in plain DDL (notably ADD COLUMN,
 	// which has no portable IF NOT EXISTS form). It must apply SQL itself.
-	Apply func(*sql.Tx, string) error
+	Apply func(context.Context, migrationExecutor, string) error
+}
+
+type migrationExecutor interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+	QueryRowContext(context.Context, string, ...any) *sql.Row
 }
 
 // migrations is the ordered ledger of schema steps. Index order does
@@ -161,6 +169,12 @@ CREATE TABLE IF NOT EXISTS totp_replay (
 );
 `,
 	},
+	{
+		Version: 6,
+		Name:    "hosted_policy_store_v3",
+		SQL:     policyMigration6SQL,
+		Apply:   applyMigration6,
+	},
 }
 
 // applyMigration2 makes the one non-idempotent part of migration 2 safe to
@@ -170,17 +184,17 @@ CREATE TABLE IF NOT EXISTS totp_replay (
 // column name". Inspecting the schema and conditionally adding the column in
 // the SAME transaction as the remaining IF-NOT-EXISTS DDL and ledger insert
 // safely adopts both fully- and partially-applied migration-2 databases.
-func applyMigration2(tx *sql.Tx, remainingSQL string) error {
-	hasColumn, err := tableHasColumn(tx, "requests", "required_approvals")
+func applyMigration2(ctx context.Context, connection migrationExecutor, remainingSQL string) error {
+	hasColumn, err := tableHasColumn(ctx, connection, "requests", "required_approvals")
 	if err != nil {
 		return err
 	}
 	if !hasColumn {
-		if _, err := tx.Exec(`ALTER TABLE requests ADD COLUMN required_approvals INTEGER NOT NULL DEFAULT 1`); err != nil {
+		if _, err := connection.ExecContext(ctx, `ALTER TABLE requests ADD COLUMN required_approvals INTEGER NOT NULL DEFAULT 1`); err != nil {
 			return fmt.Errorf("add requests.required_approvals: %w", err)
 		}
 	}
-	if _, err := tx.Exec(remainingSQL); err != nil {
+	if _, err := connection.ExecContext(ctx, remainingSQL); err != nil {
 		return fmt.Errorf("apply operator/auth tables: %w", err)
 	}
 	return nil
@@ -193,18 +207,18 @@ func applyMigration2(tx *sql.Tx, remainingSQL string) error {
 // receive state 2 (legacy audit state unknown): ListVotes may surface them for
 // immutable history, but Vote.Audited remains false. We must not claim an old
 // event reached the external sink merely because its request became terminal.
-func applyMigration3(tx *sql.Tx, _ string) error {
-	hasColumn, err := tableHasColumn(tx, "approvals", "audited")
+func applyMigration3(ctx context.Context, connection migrationExecutor, _ string) error {
+	hasColumn, err := tableHasColumn(ctx, connection, "approvals", "audited")
 	if err != nil {
 		return err
 	}
 	if hasColumn {
 		return nil
 	}
-	if _, err := tx.Exec(`ALTER TABLE approvals ADD COLUMN audited INTEGER NOT NULL DEFAULT 0`); err != nil {
+	if _, err := connection.ExecContext(ctx, `ALTER TABLE approvals ADD COLUMN audited INTEGER NOT NULL DEFAULT 0`); err != nil {
 		return fmt.Errorf("add approvals.audited: %w", err)
 	}
-	if _, err := tx.Exec(`
+	if _, err := connection.ExecContext(ctx, `
 		UPDATE approvals SET audited = 2
 		WHERE request_id IN (
 			SELECT request_id FROM requests WHERE status <> 'pending'
@@ -218,8 +232,8 @@ func applyMigration3(tx *sql.Tx, _ string) error {
 // tableHasColumn reports whether table currently exposes column. PRAGMA rows
 // are read and closed before the caller attempts ALTER TABLE on the same
 // transaction/connection.
-func tableHasColumn(tx *sql.Tx, table, column string) (bool, error) {
-	rows, err := tx.Query(fmt.Sprintf("PRAGMA table_info(%q)", table))
+func tableHasColumn(ctx context.Context, connection migrationExecutor, table, column string) (bool, error) {
+	rows, err := connection.QueryContext(ctx, fmt.Sprintf("PRAGMA table_info(%q)", table))
 	if err != nil {
 		return false, fmt.Errorf("inspect table %s: %w", table, err)
 	}
@@ -274,15 +288,6 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 //     last fully-committed version (never half-applied-and-recorded);
 //   - a version already present in schema_migrations is skipped.
 func runMigrations(db *sql.DB) error {
-	if _, err := db.Exec(schemaMigrationsDDL); err != nil {
-		return fmt.Errorf("create schema_migrations: %w", err)
-	}
-
-	applied, err := appliedVersions(db)
-	if err != nil {
-		return err
-	}
-
 	// Apply in ascending Version order. The ledger is authored in order
 	// but we sort defensively so a mis-ordered append still applies
 	// correctly.
@@ -291,9 +296,6 @@ func runMigrations(db *sql.DB) error {
 	sortMigrations(ordered)
 
 	for _, m := range ordered {
-		if applied[m.Version] {
-			continue
-		}
 		if err := applyOne(db, m); err != nil {
 			return fmt.Errorf("migration %d (%s): %w", m.Version, m.Name, err)
 		}
@@ -303,50 +305,107 @@ func runMigrations(db *sql.DB) error {
 
 // applyOne runs one migration's SQL and records it, atomically.
 func applyOne(db *sql.DB, m migration) error {
-	tx, err := db.Begin()
+	ctx := context.Background()
+	conn, err := db.Conn(ctx)
 	if err != nil {
-		return fmt.Errorf("begin: %w", err)
+		return fmt.Errorf("acquire connection: %w", err)
 	}
-	defer func() { _ = tx.Rollback() }() // no-op after a successful Commit
+	defer conn.Close()
+
+	// Take the write reservation explicitly on this one held connection before
+	// either creating or reading the ledger. This closes the simultaneous-first-
+	// opener race that a deferred transaction or pre-transaction snapshot leaves.
+	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+		return fmt.Errorf("begin immediate: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
+		}
+	}()
+	if _, err := conn.ExecContext(ctx, schemaMigrationsDDL); err != nil {
+		return fmt.Errorf("create schema_migrations: %w", err)
+	}
+
+	if err := validateMigrationLedger(ctx, conn); err != nil {
+		return err
+	}
+	var recordedName string
+	err = conn.QueryRowContext(ctx, `SELECT name FROM schema_migrations WHERE version = ?`, m.Version).Scan(&recordedName)
+	switch {
+	case err == nil:
+		if recordedName != m.Name {
+			return fmt.Errorf("schema_migrations version %d name %q; want %q", m.Version, recordedName, m.Name)
+		}
+		if m.Version == 6 {
+			if err := verifyPolicySchema(ctx, conn); err != nil {
+				return err
+			}
+		}
+		if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
+			return fmt.Errorf("commit recorded migration: %w", err)
+		}
+		committed = true
+		return nil
+	case !errors.Is(err, sql.ErrNoRows):
+		return fmt.Errorf("recheck ledger version %d: %w", m.Version, err)
+	}
 
 	if m.Apply != nil {
-		if err := m.Apply(tx, m.SQL); err != nil {
+		if err := m.Apply(ctx, conn, m.SQL); err != nil {
 			return fmt.Errorf("exec: %w", err)
 		}
-	} else if _, err := tx.Exec(m.SQL); err != nil {
+	} else if _, err := conn.ExecContext(ctx, m.SQL); err != nil {
 		return fmt.Errorf("exec: %w", err)
 	}
-	if _, err := tx.Exec(
+	if _, err := conn.ExecContext(ctx,
 		`INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)`,
 		m.Version, m.Name, nowUnix(),
 	); err != nil {
 		return fmt.Errorf("record: %w", err)
 	}
-	if err := tx.Commit(); err != nil {
+	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
 		return fmt.Errorf("commit: %w", err)
 	}
+	committed = true
 	return nil
 }
 
-// appliedVersions reads the set of versions already recorded.
-func appliedVersions(db *sql.DB) (map[int]bool, error) {
-	rows, err := db.Query(`SELECT version FROM schema_migrations`)
+// validateMigrationLedger rejects unknown future versions and version-name
+// drift. A known missing row is deliberately allowed: the migration callbacks
+// are idempotent so Open can repair the historical half-applied/missing-ledger
+// cases covered by migrations 1-3.
+func validateMigrationLedger(ctx context.Context, connection migrationExecutor) error {
+	rows, err := connection.QueryContext(ctx, `SELECT version, name FROM schema_migrations ORDER BY version`)
 	if err != nil {
-		return nil, fmt.Errorf("read schema_migrations: %w", err)
+		return fmt.Errorf("read schema_migrations: %w", err)
 	}
 	defer rows.Close()
-	out := make(map[int]bool)
+	known := make(map[int]string, len(migrations))
+	for _, candidate := range migrations {
+		known[candidate.Version] = candidate.Name
+	}
 	for rows.Next() {
-		var v int
-		if err := rows.Scan(&v); err != nil {
-			return nil, fmt.Errorf("scan version: %w", err)
+		var (
+			version int
+			name    string
+		)
+		if err := rows.Scan(&version, &name); err != nil {
+			return fmt.Errorf("scan migration ledger: %w", err)
 		}
-		out[v] = true
+		wantName, ok := known[version]
+		if !ok {
+			return fmt.Errorf("schema_migrations contains unsupported version %d", version)
+		}
+		if name != wantName {
+			return fmt.Errorf("schema_migrations version %d name %q; want %q", version, name, wantName)
+		}
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate schema_migrations: %w", err)
+		return fmt.Errorf("iterate schema_migrations: %w", err)
 	}
-	return out, nil
+	return nil
 }
 
 // sortMigrations sorts in ascending Version order. Implemented as a

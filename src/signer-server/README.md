@@ -59,6 +59,34 @@ sudo -u sshgate-signer-server \
 
 Factor changes after bootstrap require an authenticated session plus a fresh current TOTP proof. Successful TOTP timesteps are one-use across login, factor changes, and approval step-up; after signing in, wait for the authenticator code to rotate before re-authenticating. HTTP self-bootstrap is intentionally absent.
 
+## Offline policy maintenance
+
+Policy terminal compaction and recovery-lease owner clearing are offline-only
+operations. Stop the serving process first; the command takes the exclusive
+maintenance lease before opening either resource. Both paths require absolute
+paths, an existing migration-6 database with a verified authority binding, and
+an existing owner-only archive whose binding matches the database. They never
+create or migrate a database and never repair an archive during preflight.
+
+```bash
+sudo -u sshgate-signer-server \
+  /usr/local/bin/sshgate-signer-server \
+  --db /var/lib/sshgate-signer-server/state.db \
+  --policy-archive-dir /var/lib/sshgate-signer-server/policy-archive \
+  --compact-policy-before 2026-08-01T00:00:00Z
+
+sudo -u sshgate-signer-server \
+  /usr/local/bin/sshgate-signer-server \
+  --db /var/lib/sshgate-signer-server/state.db \
+  --policy-archive-dir /var/lib/sshgate-signer-server/policy-archive \
+  --clear-policy-recovery-lease pr_0123456789abcdef0123456789abcdef
+```
+
+The two maintenance actions are mutually exclusive. Compaction publishes a
+content-addressed full archive record before replacing the terminal database
+row with its tombstone. Owner clearing increments the recovery generation, so
+all outstanding workers remain fenced.
+
 ## Laptop backend
 
 Copy the API token to a 0600 local file, then select the hosted backend in the signer configuration:

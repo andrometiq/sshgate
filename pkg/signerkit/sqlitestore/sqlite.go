@@ -3,6 +3,7 @@ package sqlitestore
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"fmt"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/karthikeyan5/sshgate/pkg/signerkit/store"
 
@@ -19,7 +21,7 @@ import (
 	// SQLite — slower than the CGO build but cross-compile-friendly
 	// (no host C toolchain required for `GOOS=linux GOARCH=amd64
 	// go build`).
-	_ "modernc.org/sqlite"
+	moderncsqlite "modernc.org/sqlite"
 )
 
 // The schema lives in store/migrations.go as a versioned, append-only
@@ -47,6 +49,32 @@ const (
 // from accidentally sharing state.
 var memoryDBSeq atomic.Uint64
 
+func init() {
+	// SQLite's built-in length functions can enforce the byte bound through a
+	// BLOB cast, but SQLite deliberately accepts arbitrary byte strings as TEXT.
+	// Policy identities are a trust-boundary value, so migration 6 adds this
+	// deterministic CHECK helper to close valid-UTF-8 and NUL as schema
+	// properties as well as Go validation properties.
+	moderncsqlite.MustRegisterDeterministicScalarFunction("policy_valid_identity", 1, func(_ *moderncsqlite.FunctionContext, args []driver.Value) (driver.Value, error) {
+		if len(args) != 1 {
+			return int64(0), nil
+		}
+		var value string
+		switch typed := args[0].(type) {
+		case string:
+			value = typed
+		case []byte:
+			value = string(typed)
+		default:
+			return int64(0), nil
+		}
+		if value == "" || len(value) > 128 || !utf8.ValidString(value) || strings.IndexByte(value, 0) >= 0 {
+			return int64(0), nil
+		}
+		return int64(1), nil
+	})
+}
+
 // DB is the SQLite-backed Store. It wraps *sql.DB; all methods are
 // safe for concurrent use (sql.DB is, and our SQL is bounded queries
 // only — no transactions that span calls).
@@ -73,6 +101,23 @@ type DB struct {
 // already recorded in schema_migrations and applies nothing. Calling
 // Open twice against the same path is a safe no-op on the second call.
 func Open(path string) (*DB, error) {
+	return openSQLite(path, true, true, true)
+}
+
+// OpenExisting opens an existing SQLite database without creating the file or
+// applying migrations. It is the maintenance-mode entry point: callers first
+// perform read-only schema and authority-binding verification, then may use the
+// returned handle for explicitly authorized maintenance writes. In particular,
+// this open path does not request a journal-mode transition, which itself can
+// mutate an otherwise unverified database.
+func OpenExisting(path string) (*DB, error) {
+	if path == ":memory:" {
+		return nil, errors.New("open existing sqlite: in-memory database is not an existing file")
+	}
+	return openSQLite(path, false, false, false)
+}
+
+func openSQLite(path string, create, migrate, setWAL bool) (*DB, error) {
 	if path == "" {
 		return nil, errors.New("open sqlite: empty path")
 	}
@@ -93,11 +138,20 @@ func Open(path string) (*DB, error) {
 				return nil, fmt.Errorf("sqlite path %s is a symbolic link", path)
 			}
 		case errors.Is(lstatErr, os.ErrNotExist):
+			if !create {
+				return nil, fmt.Errorf("open existing sqlite %s: %w", path, os.ErrNotExist)
+			}
 			flags |= os.O_CREATE | os.O_EXCL
 		default:
 			return nil, fmt.Errorf("inspect sqlite path %s: %w", path, lstatErr)
 		}
 		f, err := os.OpenFile(path, flags, 0o600)
+		if err != nil && create && flags&os.O_EXCL != 0 && errors.Is(err, os.ErrExist) {
+			// Another first opener won O_EXCL after our Lstat. Open the exact
+			// path it published and let BEGIN IMMEDIATE serialize/recheck the
+			// migration ledger below.
+			f, err = os.OpenFile(path, os.O_RDWR, 0)
+		}
 		if err != nil {
 			return nil, fmt.Errorf("open %s securely: %w", path, err)
 		}
@@ -135,11 +189,14 @@ func Open(path string) (*DB, error) {
 	//                            failing with SQLITE_BUSY.
 	//   foreign_keys=on       — defensive; we don't use FKs yet but
 	//                            future schema may.
-	dsn := fmt.Sprintf("file:%s?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(on)", path)
+	dsn := fmt.Sprintf("file:%s?mode=rw&_txlock=immediate&_pragma=busy_timeout(5000)&_pragma=foreign_keys(on)&_pragma=recursive_triggers(on)", path)
+	if setWAL {
+		dsn += "&_pragma=journal_mode(WAL)"
+	}
 	memory := path == ":memory:"
 	if memory {
 		name := memoryDBSeq.Add(1)
-		dsn = fmt.Sprintf("file:sshgate-memory-%d?mode=memory&cache=shared&_pragma=busy_timeout(5000)&_pragma=foreign_keys(on)", name)
+		dsn = fmt.Sprintf("file:sshgate-memory-%d?mode=memory&cache=shared&_txlock=immediate&_pragma=busy_timeout(5000)&_pragma=foreign_keys(on)&_pragma=recursive_triggers(on)", name)
 	}
 	d, err := sql.Open("sqlite", dsn)
 	if err != nil {
@@ -151,15 +208,36 @@ func Open(path string) (*DB, error) {
 		d.SetMaxOpenConns(1)
 		d.SetMaxIdleConns(1)
 	}
-	if err := d.Ping(); err != nil {
+	if err := pingSQLite(d); err != nil {
 		_ = d.Close()
 		return nil, fmt.Errorf("ping %s: %w", path, err)
 	}
-	if err := runMigrations(d); err != nil {
-		_ = d.Close()
-		return nil, fmt.Errorf("apply migrations: %w", err)
+	if migrate {
+		if err := runMigrations(d); err != nil {
+			_ = d.Close()
+			return nil, fmt.Errorf("apply migrations: %w", err)
+		}
 	}
 	return &DB{db: d}, nil
+}
+
+func pingSQLite(database *sql.DB) error {
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		err := database.Ping()
+		if err == nil {
+			return nil
+		}
+		var sqliteError *moderncsqlite.Error
+		if !errors.As(err, &sqliteError) || (sqliteError.Code()&0xff != 5 && sqliteError.Code()&0xff != 6) || time.Now().After(deadline) {
+			return err
+		}
+		// Connection initialization may need the journal-mode write lock before
+		// busy_timeout has taken effect. A simultaneous first opener holds it only
+		// briefly while publishing WAL/migrations, so retry that narrow SQLite
+		// BUSY/LOCKED window on a fresh pooled connection.
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 // Close closes the underlying *sql.DB. It is safe to race with database

@@ -16,6 +16,12 @@
 //	                          terminated upstream (Caddy/nginx) in v2.0.
 //	--db <path>              SQLite database path (default:
 //	                          /var/lib/signer-server/state.db)
+//	--compact-policy-before <RFC3339>
+//	                          Offline archive/compact older policy terminals.
+//	--clear-policy-recovery-lease <review_id>
+//	                          Offline owner clear for one recovery lease.
+//	--policy-archive-dir <absolute path>
+//	                          Existing bound archive for policy maintenance.
 //	--ui                     Serve the embedded human approval UI (default off).
 //	--rp-id <domain>         WebAuthn relying-party ID (required with --ui).
 //	--rp-origin <origin>     Allowed WebAuthn origin; repeatable/comma-separated.
@@ -61,6 +67,8 @@ import (
 	"github.com/karthikeyan5/sshgate/pkg/signerkit"
 	"github.com/karthikeyan5/sshgate/pkg/signerkit/hosted"
 	"github.com/karthikeyan5/sshgate/pkg/signerkit/hosted/refapp"
+	"github.com/karthikeyan5/sshgate/pkg/signerkit/policyarchive"
+	"github.com/karthikeyan5/sshgate/pkg/signerkit/policystore"
 	"github.com/karthikeyan5/sshgate/pkg/signerkit/sqlitestore"
 	"github.com/karthikeyan5/sshgate/pkg/signerkit/store"
 )
@@ -89,6 +97,9 @@ func run(args []string) int {
 	requiredApprovals := fs.Int("required-approvals", 1, "Number of distinct eligible approvals required per request")
 	addr := fs.String("addr", ":8443", "Listen address (host:port). Default :8443; TLS terminated upstream.")
 	dbPath := fs.String("db", "/var/lib/signer-server/state.db", "SQLite database path")
+	compactPolicyBefore := fs.String("compact-policy-before", "", "Offline compact policy terminals resolved before RFC3339 time")
+	clearPolicyRecoveryLease := fs.String("clear-policy-recovery-lease", "", "Offline clear of the recovery lease for one policy review ID")
+	policyArchiveDir := fs.String("policy-archive-dir", "", "Absolute owner-only policy archive directory for offline maintenance")
 	uiEnabled := fs.Bool("ui", false, "Serve the embedded human approval UI")
 	rpID := fs.String("rp-id", "", "WebAuthn relying-party ID (required with --ui)")
 	var rpOrigins stringListFlag
@@ -130,6 +141,17 @@ func run(args []string) int {
 	if err := assertNonRoot(); err != nil {
 		logf("%v", err)
 		return 1
+	}
+	if *compactPolicyBefore != "" || *clearPolicyRecoveryLease != "" {
+		if *compactPolicyBefore != "" && *clearPolicyRecoveryLease != "" {
+			logf("--compact-policy-before and --clear-policy-recovery-lease are mutually exclusive")
+			return 1
+		}
+		if err := runPolicyMaintenance(context.Background(), *dbPath, *policyArchiveDir, *compactPolicyBefore, *clearPolicyRecoveryLease); err != nil {
+			logf("policy maintenance: %v", err)
+			return 1
+		}
+		return 0
 	}
 	if name := strings.TrimSpace(*bootstrapOperatorName); name != "" {
 		if err := validateUIConfig(true, *rpID, rpOrigins, *sessionTTL); err != nil {
@@ -309,6 +331,83 @@ func run(args []string) int {
 	}
 	logger.Printf("stopped")
 	return 0
+}
+
+func runPolicyMaintenance(ctx context.Context, databasePath, archiveDirectory, compactBefore, clearReviewID string) (returnError error) {
+	if !filepath.IsAbs(databasePath) {
+		return errors.New("--db must be absolute for policy maintenance")
+	}
+	if !filepath.IsAbs(archiveDirectory) {
+		return errors.New("--policy-archive-dir must be absolute for policy maintenance")
+	}
+	var before time.Time
+	var err error
+	if compactBefore != "" {
+		before, err = time.Parse(time.RFC3339, compactBefore)
+		if err != nil {
+			return fmt.Errorf("parse --compact-policy-before: %w", err)
+		}
+	}
+	lease, err := policyarchive.AcquireMaintenanceLease(databasePath, policyarchive.LeaseExclusive)
+	if err != nil {
+		return err
+	}
+	defer func() { returnError = errors.Join(returnError, lease.Close()) }()
+	database, err := sqlitestore.OpenExisting(databasePath)
+	if err != nil {
+		return err
+	}
+	defer func() { returnError = errors.Join(returnError, database.Close()) }()
+	binding, err := database.PolicyStore().VerifyAuthorityBinding(ctx)
+	if err != nil {
+		return err
+	}
+	archive, err := policyarchive.OpenExisting(archiveDirectory, lease)
+	if err != nil {
+		return err
+	}
+	defer func() { returnError = errors.Join(returnError, archive.Close()) }()
+	if err := archive.VerifyBinding(binding.ArchiveID, binding.AuthorityID); err != nil {
+		return err
+	}
+	if clearReviewID != "" {
+		return database.ClearPolicyRecoveryLease(ctx, clearReviewID)
+	}
+	if _, err := archive.CleanupTemporaryObjects(lease, func(path string) { logf("removed orphan policy archive temporary object %s", path) }); err != nil {
+		return err
+	}
+	store := database.PolicyStore()
+	var cursor *policystore.TerminalCursor
+	for {
+		page, err := store.ListTerminalCompactionCandidates(ctx, before, cursor, 64)
+		if err != nil {
+			return err
+		}
+		for _, request := range page.Requests {
+			record, err := store.SnapshotTerminalArchive(ctx, request.Key(), request.StateVersion)
+			if err != nil {
+				return err
+			}
+			reference, encoded, err := record.ObjectRef()
+			if err != nil {
+				return err
+			}
+			object, err := archive.PublishObject(lease, encoded)
+			if err != nil {
+				return err
+			}
+			if object.SHA256 != reference.ObjectSHA256 || object.Bytes != reference.RecordBytes {
+				return errors.New("policy archive publication reference mismatch")
+			}
+			if _, err := store.CommitTerminalArchive(ctx, request.Key(), request.StateVersion, reference); err != nil {
+				return err
+			}
+		}
+		if page.Next == nil {
+			return nil
+		}
+		cursor = page.Next
+	}
 }
 
 // stringListFlag accepts a repeatable flag and comma-separated values while

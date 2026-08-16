@@ -240,6 +240,52 @@ func TestValidateApprovalRosterPreventsUnreachableFreshPolicy(t *testing.T) {
 	}
 }
 
+func TestPolicyMaintenanceRefusesAbsentAndUnboundDatabaseBeforeArchiveWrite(t *testing.T) {
+	directory := t.TempDir()
+	archiveRoot := filepath.Join(directory, "archive")
+	if err := os.Mkdir(archiveRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(archiveRoot, "owner-marker")
+	if err := os.WriteFile(marker, []byte("unchanged"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cutoff := time.Unix(10, 0).UTC().Format(time.RFC3339)
+	absent := filepath.Join(directory, "absent.db")
+	if err := runPolicyMaintenance(context.Background(), absent, archiveRoot, cutoff, ""); err == nil {
+		t.Fatal("maintenance accepted an absent database")
+	}
+	if _, err := os.Stat(absent); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("maintenance created absent database: %v", err)
+	}
+
+	unbound := filepath.Join(directory, "unbound.db")
+	database, err := sqlitestore.Open(unbound)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := runPolicyMaintenance(context.Background(), unbound, archiveRoot, cutoff, ""); err == nil {
+		t.Fatal("maintenance accepted an unbound database")
+	}
+	contents, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(contents) != "unchanged" {
+		t.Fatalf("maintenance changed archive marker to %q", contents)
+	}
+	entries, err := os.ReadDir(archiveRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "owner-marker" {
+		t.Fatalf("maintenance wrote archive before DB preflight: %v", entries)
+	}
+}
+
 func TestDeployScriptSyntaxAndRequiredUnitWiring(t *testing.T) {
 	installDir := filepath.Join("..", "..", "install")
 	deployPath := filepath.Join(installDir, "deploy.sh")
