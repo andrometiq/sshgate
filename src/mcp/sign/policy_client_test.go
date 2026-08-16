@@ -21,10 +21,11 @@ import (
 const policyClientTestHost = "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 
 type policyClientFixture struct {
-	private ed25519.PrivateKey
-	public  ed25519.PublicKey
-	request policywire.Request
-	payload []byte
+	private     ed25519.PrivateKey
+	public      ed25519.PublicKey
+	authorityID string
+	request     policywire.Request
+	payload     []byte
 }
 
 type fullWriteErrorConn struct{ *readResultConn }
@@ -62,7 +63,11 @@ func newPolicyClientFixture(t testing.TB) policyClientFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return policyClientFixture{private: private, public: public, request: request, payload: payload}
+	return policyClientFixture{
+		private: private, public: public,
+		authorityID: "pauth_0123456789abcdef0123456789abcdef",
+		request:     request, payload: payload,
+	}
 }
 
 func (f policyClientFixture) response(t testing.TB, status policywire.Status) policywire.Response {
@@ -72,7 +77,7 @@ func (f policyClientFixture) response(t testing.TB, status policywire.Status) po
 		t.Fatal(err)
 	}
 	response := policywire.Response{
-		RequestID: f.request.RequestID, Purpose: policywire.Purpose, Status: status,
+		RequestID: f.request.RequestID, AuthorityID: f.authorityID, Purpose: policywire.Purpose, Status: status,
 		PayloadSHA256: payloadSHA, BaseDigest: baseDigest, SignerKeyID: f.request.ExpectedSignerKeyID,
 	}
 	if status == policywire.StatusApproved {
@@ -125,7 +130,7 @@ func TestRequestBaseManifestApprovedWritesExactRequestAndVerifiesEnvelope(t *tes
 	requestLine := withPolicyResponse(t, policyResponseLine(t, fixture.response(t, policywire.StatusApproved)))
 	client := &Client{SocketPath: "/unused", Timeout: time.Second}
 
-	result, err := client.RequestBaseManifest(context.Background(), fixture.request, fixture.public)
+	result, err := client.RequestBaseManifest(context.Background(), fixture.request, fixture.public, fixture.authorityID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -157,7 +162,7 @@ func TestRequestBaseManifestAcceptsCanonicalResponseAtCleanEOF(t *testing.T) {
 	}
 	withPolicyResponse(t, body) // no trailing newline; server closes after the body
 	client := &Client{SocketPath: "/unused", Timeout: time.Second}
-	result, err := client.RequestBaseManifest(context.Background(), fixture.request, fixture.public)
+	result, err := client.RequestBaseManifest(context.Background(), fixture.request, fixture.public, fixture.authorityID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -178,7 +183,7 @@ func TestRequestBaseManifestReturnsTypedTerminalOutcomes(t *testing.T) {
 		t.Run(string(status), func(t *testing.T) {
 			withPolicyResponse(t, policyResponseLine(t, fixture.response(t, status)))
 			client := &Client{SocketPath: "/unused", Timeout: time.Second}
-			_, err := client.RequestBaseManifest(context.Background(), fixture.request, fixture.public)
+			_, err := client.RequestBaseManifest(context.Background(), fixture.request, fixture.public, fixture.authorityID)
 			var terminal *PolicyError
 			if !errors.As(err, &terminal) {
 				t.Fatalf("error = %v; want *PolicyError", err)
@@ -201,7 +206,7 @@ func TestRequestBaseManifestRejectsPendingFromLocalSocket(t *testing.T) {
 	fixture := newPolicyClientFixture(t)
 	withPolicyResponse(t, policyResponseLine(t, fixture.response(t, policywire.StatusPending)))
 	client := &Client{SocketPath: "/unused", Timeout: time.Second}
-	_, err := client.RequestBaseManifest(context.Background(), fixture.request, fixture.public)
+	_, err := client.RequestBaseManifest(context.Background(), fixture.request, fixture.public, fixture.authorityID)
 	if !errors.Is(err, ErrPolicyPending) {
 		t.Fatalf("error = %v; want ErrPolicyPending", err)
 	}
@@ -215,6 +220,9 @@ func TestRequestBaseManifestRejectsResponseTupleMismatches(t *testing.T) {
 	fixture := newPolicyClientFixture(t)
 	tests := map[string]func(*policywire.Response){
 		"request id": func(r *policywire.Response) { r.RequestID = "pm_ffffffffffffffffffffffffffffffff" },
+		"authority id": func(r *policywire.Response) {
+			r.AuthorityID = "pauth_ffffffffffffffffffffffffffffffff"
+		},
 		"payload sha": func(r *policywire.Response) {
 			r.PayloadSHA256 = strings.Repeat("a", 64)
 		},
@@ -227,10 +235,28 @@ func TestRequestBaseManifestRejectsResponseTupleMismatches(t *testing.T) {
 			mutate(&response)
 			withPolicyResponse(t, policyResponseLine(t, response))
 			client := &Client{SocketPath: "/unused", Timeout: time.Second}
-			if _, err := client.RequestBaseManifest(context.Background(), fixture.request, fixture.public); err == nil || !strings.Contains(err.Error(), "verify response") {
+			if _, err := client.RequestBaseManifest(context.Background(), fixture.request, fixture.public, fixture.authorityID); err == nil || !strings.Contains(err.Error(), "verify response") {
 				t.Fatalf("mismatch error = %v", err)
 			}
 		})
+	}
+}
+
+func TestRequestBaseManifestRejectsAbsentAuthorityAgainstPinnedPair(t *testing.T) {
+	fixture := newPolicyClientFixture(t)
+	response := fixture.response(t, policywire.StatusError)
+	response.AuthorityID = ""
+	response.ErrorCode = policywire.ErrorPolicyNotSupported
+	response.Retryable = false
+	withPolicyResponse(t, policyResponseLine(t, response))
+	client := &Client{SocketPath: "/unused", Timeout: time.Second}
+	_, err := client.RequestBaseManifest(context.Background(), fixture.request, fixture.public, fixture.authorityID)
+	if err == nil || !strings.Contains(err.Error(), "verify response") || !strings.Contains(err.Error(), "authority_id") {
+		t.Fatalf("absent-authority error = %v; want pair-verification failure", err)
+	}
+	var terminal *PolicyError
+	if errors.As(err, &terminal) {
+		t.Fatalf("absent hosted authority was exposed as a verified terminal: %#v", terminal)
 	}
 }
 
@@ -244,7 +270,7 @@ func TestRequestBaseManifestRejectsWrongKeySignatureAndValidSubstitute(t *testin
 		}
 		otherPublic := ed25519.NewKeyFromSeed(otherSeed).Public().(ed25519.PublicKey)
 		client := &Client{SocketPath: "/must-not-dial", Timeout: time.Second}
-		if _, err := client.RequestBaseManifest(context.Background(), fixture.request, otherPublic); err == nil || !strings.Contains(err.Error(), "does not match frozen key") {
+		if _, err := client.RequestBaseManifest(context.Background(), fixture.request, otherPublic, fixture.authorityID); err == nil || !strings.Contains(err.Error(), "does not match frozen key") {
 			t.Fatalf("wrong-key error = %v", err)
 		}
 	})
@@ -258,7 +284,7 @@ func TestRequestBaseManifestRejectsWrongKeySignatureAndValidSubstitute(t *testin
 		response.ManifestEnvelopeB64 = base64.StdEncoding.EncodeToString(envelope)
 		withPolicyResponse(t, policyResponseLine(t, response))
 		client := &Client{SocketPath: "/unused", Timeout: time.Second}
-		if _, err := client.RequestBaseManifest(context.Background(), fixture.request, fixture.public); err == nil {
+		if _, err := client.RequestBaseManifest(context.Background(), fixture.request, fixture.public, fixture.authorityID); err == nil {
 			t.Fatal("wrong signature accepted")
 		}
 	})
@@ -286,7 +312,7 @@ func TestRequestBaseManifestRejectsWrongKeySignatureAndValidSubstitute(t *testin
 		response.ManifestEnvelopeB64 = base64.StdEncoding.EncodeToString(envelope)
 		withPolicyResponse(t, policyResponseLine(t, response))
 		client := &Client{SocketPath: "/unused", Timeout: time.Second}
-		if _, err := client.RequestBaseManifest(context.Background(), fixture.request, fixture.public); err == nil {
+		if _, err := client.RequestBaseManifest(context.Background(), fixture.request, fixture.public, fixture.authorityID); err == nil {
 			t.Fatal("different valid manifest accepted")
 		}
 	})
@@ -296,7 +322,7 @@ func TestRequestBaseManifestUsesPolicyResponseFrameBound(t *testing.T) {
 	fixture := newPolicyClientFixture(t)
 	withPolicyResponse(t, bytes.Repeat([]byte{'x'}, policywire.MaxResponseFrameBytes+1))
 	client := &Client{SocketPath: "/unused", Timeout: time.Second}
-	_, err := client.RequestBaseManifest(context.Background(), fixture.request, fixture.public)
+	_, err := client.RequestBaseManifest(context.Background(), fixture.request, fixture.public, fixture.authorityID)
 	if !errors.Is(err, lineframe.ErrTooLarge) {
 		t.Fatalf("oversize error = %v; want lineframe.ErrTooLarge", err)
 	}
@@ -315,7 +341,7 @@ func TestRequestBaseManifestTransportUncertainty(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			withFakeDial(t, newReadResultConn(readErr))
 			client := &Client{SocketPath: "/unused", Timeout: time.Second}
-			_, err := client.RequestBaseManifest(context.Background(), fixture.request, fixture.public)
+			_, err := client.RequestBaseManifest(context.Background(), fixture.request, fixture.public, fixture.authorityID)
 			if !errors.Is(err, ErrPolicyVerdictUnknown) {
 				t.Fatalf("error = %v; want ErrPolicyVerdictUnknown", err)
 			}
@@ -330,7 +356,7 @@ func TestRequestBaseManifestFullWriteWithErrorIsVerdictUnknown(t *testing.T) {
 	fixture := newPolicyClientFixture(t)
 	withFakeDial(t, &fullWriteErrorConn{readResultConn: newReadResultConn(io.EOF)})
 	client := &Client{SocketPath: "/unused", Timeout: time.Second}
-	_, err := client.RequestBaseManifest(context.Background(), fixture.request, fixture.public)
+	_, err := client.RequestBaseManifest(context.Background(), fixture.request, fixture.public, fixture.authorityID)
 	if !errors.Is(err, ErrPolicyVerdictUnknown) || !errors.Is(err, errWriteBoom) {
 		t.Fatalf("full-write error = %v; want both ErrPolicyVerdictUnknown and underlying write error", err)
 	}
@@ -340,7 +366,7 @@ func TestRequestBaseManifestZeroByteWriteErrorIsNotVerdictUnknown(t *testing.T) 
 	fixture := newPolicyClientFixture(t)
 	withFakeDial(t, newWriteFailConn())
 	client := &Client{SocketPath: "/unused", Timeout: time.Second}
-	_, err := client.RequestBaseManifest(context.Background(), fixture.request, fixture.public)
+	_, err := client.RequestBaseManifest(context.Background(), fixture.request, fixture.public, fixture.authorityID)
 	if err == nil || !errors.Is(err, errWriteBoom) || errors.Is(err, ErrPolicyVerdictUnknown) {
 		t.Fatalf("zero-byte write error = %v", err)
 	}
@@ -350,7 +376,7 @@ func TestRequestBaseManifestPartialEOFIsMalformedNotUnknown(t *testing.T) {
 	fixture := newPolicyClientFixture(t)
 	withPolicyResponse(t, []byte(`{"request_id":"pm_0123456789abcdef`))
 	client := &Client{SocketPath: "/unused", Timeout: time.Second}
-	_, err := client.RequestBaseManifest(context.Background(), fixture.request, fixture.public)
+	_, err := client.RequestBaseManifest(context.Background(), fixture.request, fixture.public, fixture.authorityID)
 	if err == nil || !strings.Contains(err.Error(), "malformed response") {
 		t.Fatalf("partial response error = %v", err)
 	}
@@ -365,7 +391,7 @@ func TestRequestBaseManifestContextCancellationIsNotUnknown(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	client := &Client{SocketPath: "/unused", Timeout: time.Second}
-	_, err := client.RequestBaseManifest(ctx, fixture.request, fixture.public)
+	_, err := client.RequestBaseManifest(ctx, fixture.request, fixture.public, fixture.authorityID)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("error = %v; want context.Canceled", err)
 	}

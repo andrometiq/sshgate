@@ -5,13 +5,12 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"reflect"
-	"sort"
 	"strings"
 	"time"
 
 	"github.com/karthikeyan5/sshgate/pkg/signerkit"
 	"github.com/karthikeyan5/sshgate/src/policy"
+	"github.com/karthikeyan5/sshgate/src/policyreview"
 	"github.com/karthikeyan5/sshgate/src/policywire"
 	"github.com/karthikeyan5/sshgate/src/redact"
 )
@@ -23,9 +22,9 @@ const (
 	policyTelegramPreviewBytes    = 512
 	policyTelegramPartBodyBytes   = 3650 // reserves banner + numbering + request/host identity
 	policyPermanentAuthorityTitle = "⚠️ PERMANENT REMOTE POLICY AUTHORITY"
-	policyReviewMaxChanges        = 32
-	policyReviewMaxLiteralBytes   = 24 << 10
-	policyReviewMaxLiteral        = 4 << 10
+	policyReviewMaxChanges        = policyreview.MaxRevisionChanges
+	policyReviewMaxLiteralBytes   = policyreview.MaxReviewedLiteralBytes
+	policyReviewMaxLiteral        = policyreview.MaxBootstrapLiteralBytes
 )
 
 const policySourceExactWarning = "WARNING: source-exact is not exact effect; variables, globs, interpreters, cwd/env, and referenced files can change behavior. Dynamic/interpreter commands should not be made permanent."
@@ -137,136 +136,41 @@ func renderPolicyReview(req signerkit.BaseManifestApprovalRequest, timeout time.
 }
 
 func validatePolicyLiteralReviewBounds(head *policy.BaseManifest, candidate policy.BaseManifest) error {
-	existing := make(map[string]struct{})
-	revoked := make(map[string]struct{})
-	if head != nil {
-		for _, entry := range head.Entries {
-			existing[entry.ID] = struct{}{}
-		}
-		for _, id := range head.RevokedPermitIDs {
-			revoked[id] = struct{}{}
-		}
+	if head == nil {
+		return policyreview.ValidateBootstrap(candidate)
 	}
-	newBytes := 0
-	for _, entry := range candidate.Entries {
-		if head == nil && len(entry.Identity.Literal) > policyReviewMaxLiteral {
-			return errors.New("telegram policy: command literal exceeds per-entry review bound")
-		}
-		if _, ok := existing[entry.ID]; !ok {
-			const prefix = "pa_oob_"
-			if len(entry.ID) != len(prefix)+32 || !strings.HasPrefix(entry.ID, prefix) || !isLowerHex(entry.ID[len(prefix):]) {
-				return errors.New("telegram policy: newly reviewed entry is not a random out-of-band policy id")
-			}
-			if _, wasRevoked := revoked[entry.ID]; wasRevoked {
-				return errors.New("telegram policy: revoked entry id was resurrected")
-			}
-			newBytes += len(entry.Identity.Literal)
-		}
-	}
-	if newBytes > policyReviewMaxLiteralBytes {
-		return errors.New("telegram policy: newly reviewed literals exceed aggregate bound")
-	}
-	return nil
+	return policyreview.ValidateSuccessor(*head, candidate)
 }
 
 func buildPolicyChangeBlocks(head *policy.BaseManifest, candidate policy.BaseManifest, salt [32]byte, rules []redact.Rule) ([]string, int, error) {
+	changes, err := policyreview.Changes(head, candidate)
+	if err != nil {
+		return nil, 0, err
+	}
 	var blocks []string
-	changes := 0
 	if head == nil {
 		blocks = append(blocks, fmt.Sprintf("BASELINE AXES\nmiss_action=%s\ngrowth=%s", candidate.MissAction, candidate.Growth))
-		changes++
-		entries := append([]policy.BaseEntry(nil), candidate.Entries...)
-		sort.Slice(entries, func(i, j int) bool { return entries[i].ID < entries[j].ID })
-		for _, entry := range entries {
+		for _, entry := range changes.AddedEntries {
 			blocks = append(blocks, renderPolicyAddedEntry(entry, salt, rules))
-			changes++
 		}
-		revoked := append([]string(nil), candidate.RevokedPermitIDs...)
-		sort.Strings(revoked)
-		for _, id := range revoked {
+		for _, id := range changes.NewRevokedIDs {
 			blocks = append(blocks, "REVOKED ID\nID: "+id)
-			changes++
 		}
-		return blocks, changes, nil
+		return blocks, changes.LogicalChanges, nil
 	}
-	if head.MissAction != candidate.MissAction || head.Growth != candidate.Growth {
+	if changes.AxesChanged {
 		blocks = append(blocks, fmt.Sprintf("AXES CHANGED\nmiss_action: %s -> %s\ngrowth: %s -> %s", head.MissAction, candidate.MissAction, head.Growth, candidate.Growth))
-		changes++
 	}
-	headEntries := make(map[string]policy.BaseEntry, len(head.Entries))
-	candidateEntries := make(map[string]policy.BaseEntry, len(candidate.Entries))
-	headRevoked := make(map[string]struct{}, len(head.RevokedPermitIDs))
-	candidateRevoked := make(map[string]struct{}, len(candidate.RevokedPermitIDs))
-	for _, entry := range head.Entries {
-		headEntries[entry.ID] = entry
-	}
-	for _, entry := range candidate.Entries {
-		candidateEntries[entry.ID] = entry
-	}
-	for _, id := range head.RevokedPermitIDs {
-		headRevoked[id] = struct{}{}
-	}
-	for _, id := range candidate.RevokedPermitIDs {
-		candidateRevoked[id] = struct{}{}
-	}
-	for id := range headRevoked {
-		if _, ok := candidateRevoked[id]; !ok {
-			return nil, 0, fmt.Errorf("telegram policy: prior tombstone %s was deleted", id)
-		}
-		if _, resurrected := candidateEntries[id]; resurrected {
-			return nil, 0, fmt.Errorf("telegram policy: tombstoned id %s was resurrected", id)
-		}
-	}
-	var removed []string
-	for id, old := range headEntries {
-		if current, ok := candidateEntries[id]; ok {
-			if !reflect.DeepEqual(old, current) {
-				return nil, 0, fmt.Errorf("telegram policy: retained entry %s changed under immutable id", id)
-			}
-			continue
-		}
-		if _, ok := candidateRevoked[id]; !ok {
-			return nil, 0, fmt.Errorf("telegram policy: removed entry %s is not tombstoned", id)
-		}
-		removed = append(removed, id)
-	}
-	sort.Strings(removed)
-	removedSet := make(map[string]struct{}, len(removed))
-	for _, id := range removed {
-		removedSet[id] = struct{}{}
+	for _, id := range changes.RemovedIDs {
 		blocks = append(blocks, "REMOVED AND REVOKED ENTRY\nID: "+id)
-		changes++
 	}
-	var added []policy.BaseEntry
-	for id, entry := range candidateEntries {
-		if _, ok := headEntries[id]; !ok {
-			if len(id) != len("pa_oob_")+32 || !strings.HasPrefix(id, "pa_oob_") || !isLowerHex(id[len("pa_oob_"):]) {
-				return nil, 0, fmt.Errorf("telegram policy: newly added entry %s is not an out-of-band policy id", id)
-			}
-			added = append(added, entry)
-		}
-	}
-	sort.Slice(added, func(i, j int) bool { return added[i].ID < added[j].ID })
-	for _, entry := range added {
+	for _, entry := range changes.AddedEntries {
 		blocks = append(blocks, renderPolicyAddedEntry(entry, salt, rules))
-		changes++
 	}
-	var tombstones []string
-	for id := range candidateRevoked {
-		if _, old := headRevoked[id]; old {
-			continue
-		}
-		if _, paired := removedSet[id]; paired {
-			continue
-		}
-		tombstones = append(tombstones, id)
-	}
-	sort.Strings(tombstones)
-	for _, id := range tombstones {
+	for _, id := range changes.NewRevokedIDs {
 		blocks = append(blocks, "NEW CERTIFICATE-ONLY REVOCATION\nID: "+id)
-		changes++
 	}
-	return blocks, changes, nil
+	return blocks, changes.LogicalChanges, nil
 }
 
 func renderPolicyAddedEntry(entry policy.BaseEntry, salt [32]byte, rules []redact.Rule) string {
@@ -291,63 +195,7 @@ func renderPolicyAddedEntry(entry policy.BaseEntry, salt [32]byte, rules []redac
 }
 
 func policyLiteralPreview(literal []byte, salt [32]byte, rules []redact.Rule) (preview string, hidden int, wasRedacted bool, ok bool) {
-	if len(literal) == 0 || len(rules) == 0 {
-		return "", 0, false, false
-	}
-	original := string(literal)
-	redacted, redactOK := safePolicyRedactString(original, salt, rules)
-	if !redactOK {
-		return "", 0, false, false
-	}
-	escaped := escapePolicyBytes([]byte(redacted))
-	changed := redacted != original
-	if len(escaped) <= policyTelegramPreviewBytes {
-		return escaped, 0, changed, true
-	}
-	if changed {
-		// Redaction changed byte cardinality. Without a source map, truncating
-		// the redacted result cannot prove an exact original hidden-byte count.
-		return "", 0, true, false
-	}
-	var b strings.Builder
-	consumed := 0
-	for consumed < len(literal) {
-		piece := escapePolicyBytes(literal[consumed : consumed+1])
-		if b.Len()+len(piece) > policyTelegramPreviewBytes {
-			break
-		}
-		b.WriteString(piece)
-		consumed++
-	}
-	if consumed == 0 {
-		return "", 0, false, false
-	}
-	return b.String(), len(literal) - consumed, false, true
-}
-
-func safePolicyRedactString(value string, salt [32]byte, rules []redact.Rule) (redacted string, ok bool) {
-	defer func() {
-		if recover() != nil {
-			redacted = ""
-			ok = false
-		}
-	}()
-	return policyRedactString(value, salt, rules)
-}
-
-func escapePolicyBytes(raw []byte) string {
-	var b strings.Builder
-	for _, c := range raw {
-		switch {
-		case c >= 0x20 && c <= 0x7e && c != '\\':
-			b.WriteByte(c)
-		case c == '\\':
-			b.WriteString(`\\`)
-		default:
-			fmt.Fprintf(&b, `\x%02x`, c)
-		}
-	}
-	return b.String()
+	return policyreview.LiteralPreview(literal, policyTelegramPreviewBytes, salt, rules, policyRedactString)
 }
 
 func packPolicyDetailParts(requestID, hostKeyFP string, blocks []string) ([]string, error) {

@@ -8,14 +8,12 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
-	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
-	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -24,6 +22,8 @@ import (
 
 	"github.com/karthikeyan5/sshgate/internal/securestate"
 	"github.com/karthikeyan5/sshgate/src/policy"
+	"github.com/karthikeyan5/sshgate/src/policyauthority"
+	"github.com/karthikeyan5/sshgate/src/policyreview"
 	"github.com/karthikeyan5/sshgate/src/policywire"
 	"golang.org/x/sys/unix"
 )
@@ -46,10 +46,7 @@ const (
 
 	maxPolicyActorBytes      = 256
 	maxPolicyAuthMethodBytes = 64
-	maxBootstrapEntries      = 32
-	maxReviewedLiteralBytes  = 24 << 10
-	maxBootstrapLiteralBytes = 4 << 10
-	maxRevisionChanges       = 32
+	maxBootstrapEntries      = policyreview.MaxBootstrapEntries
 )
 
 var (
@@ -128,6 +125,7 @@ type policyRequestRecord struct {
 	State               policyRequestState   `json:"state"`
 	StateVersion        uint64               `json:"state_version"`
 	FrozenPublicKeyB64  string               `json:"frozen_public_key_b64,omitempty"`
+	HostedAuthorityID   string               `json:"hosted_authority_id,omitempty"`
 	CallbackChallenge   string               `json:"callback_challenge,omitempty"`
 	ApprovedBy          string               `json:"approved_by,omitempty"`
 	OperatorAuthMethod  string               `json:"operator_auth_method,omitempty"`
@@ -391,7 +389,7 @@ func validatePolicyJournal(d *policyJournalDisk) error {
 		if i > 0 && d.Requests[i-1].RequestID >= d.Requests[i].RequestID {
 			return errors.New("policy journal: requests are not uniquely sorted")
 		}
-		if err := validatePolicyRequestRecord(&d.Requests[i]); err != nil {
+		if err := validatePolicyRequestRecord(&d.Requests[i], d.AuthorityID); err != nil {
 			return fmt.Errorf("policy journal request %q: %w", d.Requests[i].RequestID, err)
 		}
 		record := &d.Requests[i]
@@ -449,7 +447,7 @@ func validatePolicyHead(h *policyHeadRecord) error {
 	return nil
 }
 
-func validatePolicyRequestRecord(r *policyRequestRecord) error {
+func validatePolicyRequestRecord(r *policyRequestRecord, localAuthorityID string) error {
 	payload, err := decodeJournalBytes(r.PayloadB64, 1, policy.MaxPolicyPayloadBytes)
 	if err != nil {
 		return fmt.Errorf("payload: %w", err)
@@ -480,6 +478,13 @@ func validatePolicyRequestRecord(r *policyRequestRecord) error {
 	}
 	if r.Mode != policyModeLocalTelegram && r.Mode != policyModeHosted {
 		return errors.New("invalid request mode")
+	}
+	if r.Mode == policyModeHosted {
+		if !policyauthority.ValidAuthorityID(r.HostedAuthorityID) {
+			return errors.New("invalid hosted authority_id")
+		}
+	} else if r.HostedAuthorityID != "" {
+		return errors.New("local request carries hosted authority_id")
 	}
 	if r.StateVersion == 0 || !validPolicyRequestState(r.State) {
 		return errors.New("invalid request state")
@@ -528,7 +533,12 @@ func validatePolicyRequestRecord(r *policyRequestRecord) error {
 		if _, err := policywire.MarshalResponse(*r.Response); err != nil {
 			return fmt.Errorf("response: %w", err)
 		}
+		expectedAuthorityID := localAuthorityID
+		if r.State == policyStateHostedTerminalUnexposed {
+			expectedAuthorityID = r.HostedAuthorityID
+		}
 		if r.Response.RequestID != r.RequestID || r.Response.Purpose != r.Purpose ||
+			r.Response.AuthorityID != expectedAuthorityID ||
 			r.Response.PayloadSHA256 != r.PayloadSHA256 || r.Response.BaseDigest != r.BaseDigest ||
 			r.Response.SignerKeyID != r.ExpectedSignerKeyID {
 			return errors.New("terminal response immutable fields mismatch")
@@ -553,7 +563,7 @@ func validatePolicyRequestRecord(r *policyRequestRecord) error {
 			if hex.EncodeToString(digest[:]) != r.ResultSHA256 {
 				return errors.New("approved response envelope hash mismatch")
 			}
-		} else if r.ResultEnvelopeB64 != "" {
+		} else if r.ResultEnvelopeB64 != "" && !(r.Mode == policyModeHosted && r.FailureCode == policywire.ErrorSignerKeyChanged) {
 			return errors.New("non-approved response with result envelope")
 		}
 	}
@@ -640,8 +650,10 @@ func validatePolicyStateFields(r *policyRequestRecord) error {
 	case policyStateMaterializationErrorReceived:
 		promptedFailure := hasActor && hasAuth && !r.NoOp
 		noOpFailure := !hasActor && !hasAuth && r.NoOp
-		if r.Mode != policyModeLocalTelegram || (!promptedFailure && !noOpFailure) || hasChallenge || hasResult || hasResponse ||
-			(r.FailureCode != policywire.ErrorPolicyMaterializationFailed && r.FailureCode != policywire.ErrorSignerKeyChanged && r.FailureCode != policywire.ErrorStalePolicyHead) {
+		hostedStale := r.Mode == policyModeHosted && !hasActor && !hasAuth && !r.NoOp && r.FailureCode == policywire.ErrorSignerKeyChanged
+		localFailure := r.Mode == policyModeLocalTelegram && (promptedFailure || noOpFailure) &&
+			(r.FailureCode == policywire.ErrorPolicyMaterializationFailed || r.FailureCode == policywire.ErrorSignerKeyChanged || r.FailureCode == policywire.ErrorStalePolicyHead)
+		if (!localFailure && !hostedStale) || hasChallenge || hasResponse || (hasResult && !hostedStale) {
 			return errors.New("invalid materialization_error_received fields")
 		}
 	case policyStateHostedTerminalUnexposed:
@@ -674,7 +686,8 @@ func validatePolicyStateFields(r *policyRequestRecord) error {
 			return errors.New("invalid interrupted terminal fields")
 		}
 	case policyStateError, policyStateSignerKeyChanged, policyStateStalePolicyHead:
-		if hasChallenge || hasResult || !hasResponse || r.Response.Status != policywire.StatusError || r.Response.ErrorCode != r.FailureCode || r.NoOp ||
+		hostedRetainedStale := r.Mode == policyModeHosted && r.State == policyStateSignerKeyChanged && r.FailureCode == policywire.ErrorSignerKeyChanged
+		if hasChallenge || (hasResult && !hostedRetainedStale) || !hasResponse || r.Response.Status != policywire.StatusError || r.Response.ErrorCode != r.FailureCode || r.NoOp ||
 			(r.Mode == policyModeHosted && (hasActor || hasAuth)) || (hasActor != hasAuth) {
 			return errors.New("invalid error terminal fields")
 		}
@@ -693,7 +706,8 @@ func validStoredPolicyErrorCode(code policywire.ErrorCode) bool {
 	case policywire.ErrorInvalidPolicyRequest, policywire.ErrorPolicyNotSupported,
 		policywire.ErrorIdempotencyConflict, policywire.ErrorPolicyRequestInProgress,
 		policywire.ErrorSignerKeyChanged, policywire.ErrorStalePolicyHead,
-		policywire.ErrorPolicyKeyTransitionRequired, policywire.ErrorPolicyJournalFull,
+		policywire.ErrorPolicyKeyTransitionRequired, policywire.ErrorQuorumUnattainable,
+		policywire.ErrorPolicyJournalFull,
 		policywire.ErrorPolicyNotificationFailed, policywire.ErrorPolicyMaterializationFailed:
 		return true
 	default:
@@ -810,26 +824,11 @@ func policyTupleDigestDecoded(decoded policywire.DecodedRequest) string {
 }
 
 func policyTupleDigestFields(requestID, purpose, host, keyID, payloadSHA, head string, bootstrap bool) string {
-	h := sha256.New()
-	_, _ = h.Write([]byte("sshgate-policy-request-tuple-v1\x00"))
-	for _, field := range []string{requestID, purpose, host, keyID, payloadSHA, head} {
-		writePolicyLengthField(h, []byte(field))
-	}
-	if bootstrap {
-		_, _ = h.Write([]byte{1})
-	} else {
-		_, _ = h.Write([]byte{0})
-	}
-	return hex.EncodeToString(h.Sum(nil))
-}
-
-type policyHashWriter interface{ Write([]byte) (int, error) }
-
-func writePolicyLengthField(w policyHashWriter, field []byte) {
-	var size [4]byte
-	binary.BigEndian.PutUint32(size[:], uint32(len(field)))
-	_, _ = w.Write(size[:])
-	_, _ = w.Write(field)
+	return policyauthority.TupleDigest(policyauthority.RequestTuple{
+		RequestID: requestID, Purpose: purpose, HostKeyFP: host,
+		ExpectedSignerKeyID: keyID, PayloadSHA256: payloadSHA,
+		ExpectedHeadDigest: head, Bootstrap: bootstrap,
+	})
 }
 
 func (j *localPolicyJournal) lookup(decoded policywire.DecodedRequest) (policyBeginResult, bool, error) {
@@ -854,10 +853,19 @@ func (j *localPolicyJournal) lookup(decoded policywire.DecodedRequest) (policyBe
 	return out, found, err
 }
 
-func (j *localPolicyJournal) begin(decoded policywire.DecodedRequest, mode policyRequestMode, publicKey ed25519.PublicKey, submitted time.Time) (policyBeginResult, error) {
+func (j *localPolicyJournal) begin(decoded policywire.DecodedRequest, mode policyRequestMode, publicKey ed25519.PublicKey, submitted time.Time, hostedAuthorityIDs ...string) (policyBeginResult, error) {
 	var out policyBeginResult
 	if submitted.IsZero() {
 		return out, errors.New("policy journal: zero submission time")
+	}
+	hostedAuthorityID := ""
+	if mode == policyModeHosted {
+		if len(hostedAuthorityIDs) != 1 || !policyauthority.ValidAuthorityID(hostedAuthorityIDs[0]) {
+			return out, errors.New("policy journal: hosted authority pair is required")
+		}
+		hostedAuthorityID = hostedAuthorityIDs[0]
+	} else if len(hostedAuthorityIDs) != 0 && (len(hostedAuthorityIDs) != 1 || hostedAuthorityIDs[0] != "") {
+		return out, errors.New("policy journal: local request cannot carry hosted authority")
 	}
 	payloadSHA, baseDigest, err := policywire.PayloadDigests(decoded.Payload)
 	if err != nil {
@@ -926,6 +934,7 @@ func (j *localPolicyJournal) begin(decoded policywire.DecodedRequest, mode polic
 			State:               policyStateReceivedUnaudited,
 			StateVersion:        1,
 			FrozenPublicKeyB64:  base64.StdEncoding.EncodeToString(publicKey),
+			HostedAuthorityID:   hostedAuthorityID,
 			FailureCode:         failureCode,
 			NoOp:                noOp,
 		}
@@ -954,6 +963,15 @@ func (j *localPolicyJournal) trustedHeadDigest(host string) (string, error) {
 		return nil
 	})
 	return digest, err
+}
+
+func (j *localPolicyJournal) authorityID() (string, error) {
+	var authorityID string
+	err := j.view(func(disk *policyJournalDisk) error {
+		authorityID = disk.AuthorityID
+		return nil
+	})
+	return authorityID, err
 }
 
 func policyOutstandingReserve(disk *policyJournalDisk) int {
@@ -1033,143 +1051,25 @@ func policyReservedHeadCount(disk *policyJournalDisk) int {
 }
 
 func classifyPolicyCandidate(decoded policywire.DecodedRequest, head *policyHeadRecord, hasHead bool, publicKey ed25519.PublicKey) (bool, policywire.ErrorCode) {
-	candidate := decoded.Manifest
-	if !hasHead {
-		if !decoded.Wire.Bootstrap || decoded.Wire.ExpectedHeadDigest != "" || candidate.Epoch != 1 || candidate.Revision != 1 {
+	var authorityHead *policyauthority.Head
+	if hasHead {
+		headPublic, err := policyHeadPublicKey(head)
+		if err != nil || !bytes.Equal(headPublic, publicKey) {
+			return false, policywire.ErrorPolicyKeyTransitionRequired
+		}
+		headEnvelope, err := policyHeadEnvelope(head)
+		if err != nil {
 			return false, policywire.ErrorInvalidPolicyRequest
 		}
-		if err := validatePolicyBootstrapReview(candidate); err != nil {
-			return false, policywire.ErrorInvalidPolicyRequest
-		}
-		return false, ""
-	}
-	if decoded.Wire.Bootstrap {
-		return false, policywire.ErrorInvalidPolicyRequest
-	}
-	if decoded.Wire.ExpectedHeadDigest != head.BaseDigest {
-		return false, policywire.ErrorStalePolicyHead
-	}
-	headPublic, err := policyHeadPublicKey(head)
-	if err != nil || !bytes.Equal(headPublic, publicKey) || head.SignerKeyID != decoded.Wire.ExpectedSignerKeyID {
-		return false, policywire.ErrorPolicyKeyTransitionRequired
-	}
-	headEnvelope, err := policyHeadEnvelope(head)
-	if err != nil {
-		return false, policywire.ErrorInvalidPolicyRequest
-	}
-	headPayload, _, err := policy.DecodeBaseManifestEnvelope(headEnvelope)
-	if err != nil {
-		return false, policywire.ErrorInvalidPolicyRequest
-	}
-	if bytes.Equal(headPayload, decoded.Payload) {
-		return true, ""
-	}
-	headManifest, err := policy.ParseBaseManifest(headPayload)
-	if err != nil {
-		return false, policywire.ErrorInvalidPolicyRequest
-	}
-	if candidate.Host != headManifest.Host || candidate.Epoch != headManifest.Epoch {
-		return false, policywire.ErrorPolicyKeyTransitionRequired
-	}
-	if headManifest.Revision == ^uint64(0) || candidate.Revision != headManifest.Revision+1 {
-		return false, policywire.ErrorInvalidPolicyRequest
-	}
-	if err := validatePolicySuccessor(headManifest, candidate); err != nil {
-		return false, policywire.ErrorInvalidPolicyRequest
-	}
-	return false, ""
-}
-
-func validatePolicyBootstrapReview(manifest policy.BaseManifest) error {
-	if len(manifest.Entries) > maxBootstrapEntries {
-		return errors.New("bootstrap entry review bound exceeded")
-	}
-	total := 0
-	for _, entry := range manifest.Entries {
-		if !validOutOfBandPolicyID(entry.ID) || len(entry.Identity.Literal) > maxBootstrapLiteralBytes {
-			return errors.New("bootstrap entry violates id/literal review bound")
-		}
-		total += len(entry.Identity.Literal)
-	}
-	if total > maxReviewedLiteralBytes {
-		return errors.New("bootstrap total literal review bound exceeded")
-	}
-	return nil
-}
-
-func validatePolicySuccessor(head, candidate policy.BaseManifest) error {
-	headEntries := make(map[string]policy.BaseEntry, len(head.Entries))
-	headTombstones := make(map[string]struct{}, len(head.RevokedPermitIDs))
-	for _, entry := range head.Entries {
-		headEntries[entry.ID] = entry
-	}
-	for _, id := range head.RevokedPermitIDs {
-		headTombstones[id] = struct{}{}
-	}
-	candidateEntries := make(map[string]policy.BaseEntry, len(candidate.Entries))
-	candidateTombstones := make(map[string]struct{}, len(candidate.RevokedPermitIDs))
-	for _, entry := range candidate.Entries {
-		candidateEntries[entry.ID] = entry
-	}
-	for _, id := range candidate.RevokedPermitIDs {
-		candidateTombstones[id] = struct{}{}
-	}
-	for id := range headTombstones {
-		if _, ok := candidateTombstones[id]; !ok {
-			return errors.New("tombstone deletion")
+		authorityHead = &policyauthority.Head{
+			ManifestEnvelope: headEnvelope,
+			BaseDigest:       head.BaseDigest,
+			SignerKeyID:      head.SignerKeyID,
+			SignerPublicKey:  append(ed25519.PublicKey(nil), headPublic...),
 		}
 	}
-
-	changes := 0
-	newLiteralBytes := 0
-	if head.MissAction != candidate.MissAction || head.Growth != candidate.Growth {
-		changes++
-	}
-	removed := make(map[string]struct{})
-	for id, oldEntry := range headEntries {
-		newEntry, retained := candidateEntries[id]
-		if retained {
-			if !reflect.DeepEqual(oldEntry, newEntry) {
-				return errors.New("retained entry changed under immutable id")
-			}
-			continue
-		}
-		if _, revoked := candidateTombstones[id]; !revoked {
-			return errors.New("entry removed without tombstone")
-		}
-		removed[id] = struct{}{}
-		changes++
-	}
-	for id, entry := range candidateEntries {
-		if _, retained := headEntries[id]; retained {
-			continue
-		}
-		if !validOutOfBandPolicyID(id) {
-			return errors.New("new base entry id is not random out-of-band id")
-		}
-		if _, used := headTombstones[id]; used {
-			return errors.New("revoked id resurrection")
-		}
-		newLiteralBytes += len(entry.Identity.Literal)
-		changes++
-	}
-	for id := range candidateTombstones {
-		if _, old := headTombstones[id]; old {
-			continue
-		}
-		if _, pairedRemoval := removed[id]; !pairedRemoval {
-			changes++
-		}
-	}
-	if changes == 0 || changes > maxRevisionChanges || newLiteralBytes > maxReviewedLiteralBytes {
-		return errors.New("revision logical/literal review bounds violated")
-	}
-	return nil
-}
-
-func validOutOfBandPolicyID(id string) bool {
-	const prefix = "pa_oob_"
-	return len(id) == len(prefix)+32 && strings.HasPrefix(id, prefix) && validLowerHexString(id[len(prefix):])
+	classification := policyauthority.Classify(decoded, authorityHead, publicKey)
+	return classification.NoOp, classification.ErrorCode
 }
 
 func policyStateIsTerminal(state policyRequestState) bool {
@@ -1448,7 +1348,8 @@ func (j *localPolicyJournal) recoverableRequestIDs() ([]string, error) {
 		for i := range disk.Requests {
 			record := &disk.Requests[i]
 			switch record.State {
-			case policyStateApprovalReceived, policyStateDenialReceived, policyStateTimeoutReceived,
+			case policyStateNotifying, policyStatePending,
+				policyStateApprovalReceived, policyStateDenialReceived, policyStateTimeoutReceived,
 				policyStateInterruptionReceived, policyStateNotificationErrorReceived,
 				policyStateApprovedMaterializing, policyStateApprovedUnexposed,
 				policyStateMaterializationErrorReceived, policyStateHostedTerminalUnexposed:
@@ -1541,11 +1442,29 @@ func (j *localPolicyJournal) stageHostedTerminal(requestID string, response poli
 	})
 }
 
+func (j *localPolicyJournal) stageHostedSignerKeyChanged(requestID string) (policyRequestRecord, error) {
+	return j.mutateRequest(requestID, []policyRequestState{
+		policyStateNotifying, policyStatePending, policyStateApprovedUnexposed, policyStateHostedTerminalUnexposed,
+	}, func(record *policyRequestRecord) error {
+		if record.Mode != policyModeHosted {
+			return errPolicyConflict
+		}
+		record.CallbackChallenge = ""
+		record.ApprovedBy = ""
+		record.OperatorAuthMethod = ""
+		record.Response = nil
+		record.FailureCode = policywire.ErrorSignerKeyChanged
+		record.State = policyStateMaterializationErrorReceived
+		return nil
+	})
+}
+
 func validateResponseForPolicyRecord(record *policyRequestRecord, response policywire.Response) error {
 	if _, err := policywire.MarshalResponse(response); err != nil {
 		return err
 	}
 	if response.RequestID != record.RequestID || response.Purpose != record.Purpose ||
+		response.AuthorityID != record.HostedAuthorityID ||
 		response.PayloadSHA256 != record.PayloadSHA256 || response.BaseDigest != record.BaseDigest ||
 		response.SignerKeyID != record.ExpectedSignerKeyID {
 		return errors.New("policy journal: hosted response immutable fields mismatch")
@@ -1554,13 +1473,19 @@ func validateResponseForPolicyRecord(record *policyRequestRecord, response polic
 }
 
 func (j *localPolicyJournal) finalizeNoMint(requestID string) (policyRequestRecord, error) {
+	authorityID, err := j.authorityID()
+	if err != nil {
+		return policyRequestRecord{}, err
+	}
 	return j.mutateRequest(requestID, []policyRequestState{
 		policyStateDenialReceived, policyStateTimeoutReceived, policyStateInterruptionReceived,
 		policyStateNotificationErrorReceived, policyStateMaterializationErrorReceived,
 		policyStateReceivedUnaudited, policyStateHostedTerminalUnexposed,
 	}, func(record *policyRequestRecord) error {
 		if record.State == policyStateHostedTerminalUnexposed {
-			switch record.Response.Status {
+			status := record.Response.Status
+			code := record.Response.ErrorCode
+			switch status {
 			case policywire.StatusDenied:
 				record.State = policyStateDenied
 			case policywire.StatusTimeout:
@@ -1570,10 +1495,15 @@ func (j *localPolicyJournal) finalizeNoMint(requestID string) (policyRequestReco
 				// authority, not the forbidden local restart synthesis.
 				record.State = policyStateInterrupted
 			case policywire.StatusError:
-				record.State = terminalErrorState(record.Response.ErrorCode)
+				record.State = terminalErrorState(code)
 			default:
 				return errors.New("policy journal: invalid staged hosted terminal")
 			}
+			response, err := buildPolicyResponse(record, authorityID, status, code, nil)
+			if err != nil {
+				return err
+			}
+			record.Response = &response
 			return nil
 		}
 
@@ -1603,7 +1533,7 @@ func (j *localPolicyJournal) finalizeNoMint(requestID string) (policyRequestReco
 			status, code = policywire.StatusError, record.FailureCode
 			record.State = terminalErrorState(code)
 		}
-		response, err := buildPolicyResponse(record, status, code, nil)
+		response, err := buildPolicyResponse(record, authorityID, status, code, nil)
 		if err != nil {
 			return err
 		}
@@ -1623,9 +1553,10 @@ func terminalErrorState(code policywire.ErrorCode) policyRequestState {
 	}
 }
 
-func buildPolicyResponse(record *policyRequestRecord, status policywire.Status, code policywire.ErrorCode, envelope []byte) (policywire.Response, error) {
+func buildPolicyResponse(record *policyRequestRecord, authorityID string, status policywire.Status, code policywire.ErrorCode, envelope []byte) (policywire.Response, error) {
 	response := policywire.Response{
 		RequestID:     record.RequestID,
+		AuthorityID:   authorityID,
 		Purpose:       policywire.Purpose,
 		Status:        status,
 		PayloadSHA256: record.PayloadSHA256,
@@ -1718,7 +1649,7 @@ func (j *localPolicyJournal) commitApproved(requestID string) (policyRequestReco
 			copy(disk.Heads[idx+1:], disk.Heads[idx:])
 			disk.Heads[idx] = head
 		}
-		response, err := buildPolicyResponse(record, policywire.StatusApproved, "", envelope)
+		response, err := buildPolicyResponse(record, disk.AuthorityID, policywire.StatusApproved, "", envelope)
 		if err != nil {
 			return err
 		}

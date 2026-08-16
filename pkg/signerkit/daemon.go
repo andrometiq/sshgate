@@ -161,8 +161,13 @@ type Daemon struct {
 	// A startup reconciliation audit failure disables only policy RPC until a
 	// later policy request successfully retries recovery. Ordinary signing keeps
 	// its frozen availability contract.
-	policyRecoveryMu  sync.Mutex
-	policyRecoveryErr error
+	policyRecoveryMu        sync.Mutex
+	policyRecoveryErr       error
+	policyLocalRecoveryErr  error
+	policyHostedRecoveryErr error
+	policyRecoveryWorkerMu  sync.Mutex
+	policyRecoveryCancel    context.CancelFunc
+	policyRecoveryDone      chan struct{}
 	// policyBeforeCommit is a test-only seam invoked while custody is pinned
 	// immediately before the journal head/result transaction.
 	policyBeforeCommit func()

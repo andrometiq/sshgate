@@ -1,11 +1,17 @@
 package signerkit
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"sync"
 	"time"
+
+	"github.com/karthikeyan5/sshgate/src/policyauthority"
+	"github.com/karthikeyan5/sshgate/src/policywire"
 )
 
 // AuditSink is the integrator-facing audit seam for the hosted (Tier-3) plane
@@ -33,6 +39,16 @@ type AuditSink interface {
 	// which command (by SHA-256, never the raw bytes on this ledger), how they
 	// authenticated (Operator.AuthnMethod), and whether they approved.
 	Verdict(ctx context.Context, e AuditVerdict) error
+}
+
+const DurableAuditContract = "sshgate-policy-durable-audit-v2"
+
+// DurableAuditSink is the policy-only audit contract. A successful policy
+// call means the complete record crossed the sink's crash boundary; readiness
+// also proves that any prior torn tail was recovered and durably audited.
+type DurableAuditSink interface {
+	AuditSink
+	PolicyAuditReady(context.Context) error
 }
 
 // AuditCall is a backwards-compatible discriminated union. Lifecycle == "" is
@@ -64,6 +80,10 @@ type AuditCall struct {
 	// Policy carries the dedicated policy-authority event metadata. It is nil
 	// for every ordinary/custody event, preserving their frozen encodings.
 	Policy *PolicyAuditMetadata `json:"policy,omitempty"`
+	// Recovery is non-nil only for the durable sink's audit_log_recovered
+	// lifecycle record. Its position and omitempty tag preserve every existing
+	// ordinary, custody, and policy encoding.
+	Recovery *AuditRecoveryMetadata `json:"recovery,omitempty"`
 }
 
 // AuditVerdict is the event recorded for every vote on the hosted human plane.
@@ -86,6 +106,7 @@ type AuditVerdict struct {
 // command literals, signatures, or envelopes.
 type PolicyAuditMetadata struct {
 	EventID            string `json:"event_id"`
+	AuthorityID        string `json:"authority_id,omitempty"`
 	Purpose            string `json:"purpose"`
 	Principal          string `json:"principal"`
 	TupleDigest        string `json:"tuple_digest"`
@@ -109,6 +130,68 @@ type PolicyAuditMetadata struct {
 	NoOp               bool   `json:"no_op,omitempty"`
 	VerifiedOperator   string `json:"verified_operator,omitempty"`
 	OperatorAuthMethod string `json:"operator_auth_method,omitempty"`
+}
+
+type policyAuditMetadataWire PolicyAuditMetadata
+
+func (metadata PolicyAuditMetadata) MarshalJSON() ([]byte, error) {
+	if err := validatePolicyAuditAuthority(metadata); err != nil {
+		return nil, err
+	}
+	return json.Marshal(policyAuditMetadataWire(metadata))
+}
+
+func (metadata *PolicyAuditMetadata) UnmarshalJSON(body []byte) error {
+	if metadata == nil {
+		return errors.New("policy audit metadata: nil destination")
+	}
+	var decoded policyAuditMetadataWire
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&decoded); err != nil {
+		return fmt.Errorf("policy audit metadata: decode: %w", err)
+	}
+	var extra any
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("policy audit metadata: trailing JSON value")
+		}
+		return fmt.Errorf("policy audit metadata: trailing JSON: %w", err)
+	}
+	if err := validatePolicyAuditAuthority(PolicyAuditMetadata(decoded)); err != nil {
+		return err
+	}
+	canonical, err := json.Marshal(decoded)
+	if err != nil {
+		return fmt.Errorf("policy audit metadata: re-marshal: %w", err)
+	}
+	if !bytes.Equal(body, canonical) {
+		return errors.New("policy audit metadata: JSON is not the canonical typed encoding")
+	}
+	*metadata = PolicyAuditMetadata(decoded)
+	return nil
+}
+
+func validatePolicyAuditAuthority(metadata PolicyAuditMetadata) error {
+	if metadata.ErrorCode == string(policywire.ErrorPolicyNotSupported) {
+		if metadata.AuthorityID != "" {
+			return errors.New("policy audit metadata: policy_not_supported must omit authority_id")
+		}
+		return nil
+	}
+	if !policyauthority.ValidAuthorityID(metadata.AuthorityID) {
+		return errors.New("policy audit metadata: authority_id must be pauth_ plus 32 lowercase hexadecimal characters")
+	}
+	return nil
+}
+
+// AuditRecoveryMetadata is the exact additive payload of the durable sink's
+// audit_log_recovered lifecycle event. Lengths are canonical decimal uint64
+// strings so recovery never passes them through JSON number precision.
+type AuditRecoveryMetadata struct {
+	RecoveryID   string `json:"recovery_id"`
+	BeforeLength string `json:"before_length"`
+	AfterLength  string `json:"after_length"`
 }
 
 // NewAppendOnlySink returns an AuditSink that appends one JSON line per event to
@@ -146,11 +229,10 @@ func (s *appendOnlySink) Verdict(_ context.Context, e AuditVerdict) error {
 }
 
 func (s *appendOnlySink) write(v auditLine) error {
-	b, err := json.Marshal(v)
+	b, err := marshalAuditLine(v)
 	if err != nil {
 		return err
 	}
-	b = append(b, '\n')
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	n, err := s.w.Write(b)
@@ -158,6 +240,14 @@ func (s *appendOnlySink) write(v auditLine) error {
 		return io.ErrShortWrite
 	}
 	return err
+}
+
+func marshalAuditLine(line auditLine) ([]byte, error) {
+	body, err := json.Marshal(line)
+	if err != nil {
+		return nil, err
+	}
+	return append(body, '\n'), nil
 }
 
 // Call adapts the local append-only *AuditLog to AuditSink (C5): the shapes

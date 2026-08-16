@@ -6,10 +6,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
-	"crypto/sha256"
 	"encoding/base64"
-	"encoding/binary"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -17,6 +14,7 @@ import (
 
 	"github.com/karthikeyan5/sshgate/internal/securestate"
 	"github.com/karthikeyan5/sshgate/src/policy"
+	"github.com/karthikeyan5/sshgate/src/policyauthority"
 	"github.com/karthikeyan5/sshgate/src/policywire"
 )
 
@@ -67,7 +65,8 @@ func (d *Daemon) handleBaseManifestPolicy(ctx context.Context, conn io.Writer, f
 	if d.policyJournal == nil {
 		return d.respondPolicyEphemeral(ctx, conn, decoded, policywire.ErrorPolicyNotSupported)
 	}
-	if err := d.retryPolicyRecovery(ctx); err != nil {
+	backend, backendAvailable := d.Backend.(BaseManifestApprovalBackend)
+	if err := d.retryPolicyRecovery(ctx, backend, ""); err != nil {
 		return fmt.Errorf("policy recovery unavailable: %w", err)
 	}
 
@@ -79,8 +78,7 @@ func (d *Daemon) handleBaseManifestPolicy(ctx context.Context, conn io.Writer, f
 		return writePolicyResponse(conn, *lookup.Terminal)
 	}
 
-	backend, ok := d.Backend.(BaseManifestApprovalBackend)
-	if !ok {
+	if !backendAvailable {
 		if found {
 			// The durable ID remains authoritative. A temporary capability or
 			// configuration loss must not manufacture an uncached terminal that a
@@ -101,11 +99,11 @@ func (d *Daemon) handleBaseManifestPolicy(ctx context.Context, conn io.Writer, f
 	}
 
 	if !found {
-		publicKey, keyErr := d.snapshotPolicyAuthority(mode)
+		publicKey, hostedAuthorityID, keyErr := d.snapshotPolicyAuthority(mode)
 		if keyErr != nil {
 			return fmt.Errorf("snapshot policy authority: %w", keyErr)
 		}
-		begin, beginErr := d.policyJournal.begin(decoded, mode, publicKey, d.now())
+		begin, beginErr := d.policyJournal.begin(decoded, mode, publicKey, d.now(), hostedAuthorityID)
 		if beginErr != nil {
 			return d.respondPolicyJournalError(ctx, conn, decoded, beginErr)
 		}
@@ -140,23 +138,30 @@ func (d *Daemon) handleBaseManifestPolicy(ctx context.Context, conn io.Writer, f
 	return writePolicyResponse(conn, *response)
 }
 
-func (d *Daemon) snapshotPolicyAuthority(mode policyRequestMode) (ed25519.PublicKey, error) {
+func (d *Daemon) snapshotPolicyAuthority(mode policyRequestMode) (ed25519.PublicKey, string, error) {
 	if mode == policyModeHosted {
 		hosted, ok := d.Backend.(HostedBaseManifestApprovalBackend)
 		if !ok {
-			return nil, errors.New("hosted policy backend marker missing")
+			return nil, "", errors.New("hosted policy backend marker missing")
 		}
 		raw, err := hosted.BaseManifestAuthorityPublicKey()
 		if err != nil {
-			return nil, err
+			return nil, "", err
 		}
 		if len(raw) != ed25519.PublicKeySize {
-			return nil, fmt.Errorf("hosted policy authority key is %d bytes; want %d", len(raw), ed25519.PublicKeySize)
+			return nil, "", fmt.Errorf("hosted policy authority key is %d bytes; want %d", len(raw), ed25519.PublicKeySize)
 		}
-		return append(ed25519.PublicKey(nil), raw...), nil
+		authorityID, err := hosted.BaseManifestAuthorityID()
+		if err != nil {
+			return nil, "", err
+		}
+		if !policyauthority.ValidAuthorityID(authorityID) {
+			return nil, "", errors.New("hosted policy authority_id is not canonical")
+		}
+		return append(ed25519.PublicKey(nil), raw...), authorityID, nil
 	}
 	publicKey, _, err := d.SnapshotBaseManifestSigner()
-	return publicKey, err
+	return publicKey, "", err
 }
 
 func (d *Daemon) acquirePolicyFlight(requestID string) (<-chan struct{}, bool) {
@@ -370,6 +375,21 @@ func (d *Daemon) processPolicyRecord(ctx context.Context, requestID string, back
 				}
 				continue
 			}
+			if record.Mode == policyModeHosted {
+				if backend == nil {
+					return nil, errors.New("hosted policy backend unavailable for publication recovery")
+				}
+				current, err := d.hostedPolicyAnchorsCurrent(record, backend)
+				if err != nil {
+					return nil, fmt.Errorf("compare hosted policy authority anchors: %w", err)
+				}
+				if !current {
+					if _, err := d.policyJournal.stageHostedSignerKeyChanged(requestID); err != nil {
+						return nil, err
+					}
+					continue
+				}
+			}
 			if err := d.emitPolicyAudit(ctx, record, policyAuditPhaseMaterialization); err != nil {
 				return nil, fmt.Errorf("policy result audit: %w", err)
 			}
@@ -411,6 +431,19 @@ func (d *Daemon) processPolicyRecord(ctx context.Context, requestID string, back
 			continue
 
 		case policyStateHostedTerminalUnexposed:
+			if backend == nil {
+				return nil, errors.New("hosted policy backend unavailable for terminal recovery")
+			}
+			current, err := d.hostedPolicyAnchorsCurrent(record, backend)
+			if err != nil {
+				return nil, fmt.Errorf("compare hosted policy authority anchors: %w", err)
+			}
+			if !current {
+				if _, err := d.policyJournal.stageHostedSignerKeyChanged(requestID); err != nil {
+					return nil, err
+				}
+				continue
+			}
 			if err := d.emitPolicyAudit(ctx, record, policyAuditPhaseTerminalNoMint); err != nil {
 				return nil, fmt.Errorf("hosted policy terminal import audit: %w", err)
 			}
@@ -484,6 +517,43 @@ func (d *Daemon) verifyPolicyCustodyLocked(record policyRequestRecord) error {
 	return nil
 }
 
+func (d *Daemon) hostedPolicyAnchorsCurrent(record policyRequestRecord, backend BaseManifestApprovalBackend) (bool, error) {
+	hosted, ok := backend.(HostedBaseManifestApprovalBackend)
+	if !ok {
+		return false, errors.New("hosted policy backend marker missing during recovery")
+	}
+	currentRaw, err := hosted.BaseManifestAuthorityPublicKey()
+	if err != nil {
+		return false, err
+	}
+	currentAuthorityID, err := hosted.BaseManifestAuthorityID()
+	if err != nil {
+		return false, err
+	}
+	if len(currentRaw) != ed25519.PublicKeySize || !policyauthority.ValidAuthorityID(currentAuthorityID) {
+		return false, nil
+	}
+	currentKeyID, err := policy.SignerKeyID(ed25519.PublicKey(currentRaw))
+	if err != nil {
+		return false, nil
+	}
+	frozenRaw, err := policyRequestPublicKey(&record)
+	if err != nil {
+		return false, err
+	}
+	if currentAuthorityID != record.HostedAuthorityID || currentKeyID != record.ExpectedSignerKeyID || !bytes.Equal(currentRaw, frozenRaw) {
+		return false, nil
+	}
+	gatePublicKey, gateKeyID, err := d.SnapshotBaseManifestSigner()
+	if err != nil {
+		return false, err
+	}
+	if gateKeyID != record.ExpectedSignerKeyID || !bytes.Equal(gatePublicKey, frozenRaw) {
+		return false, nil
+	}
+	return true, nil
+}
+
 func (d *Daemon) requestPolicyDecision(ctx context.Context, record policyRequestRecord, backend BaseManifestApprovalBackend) (BaseManifestApprovalResult, error) {
 	payload, err := policyRequestPayload(&record)
 	if err != nil {
@@ -495,6 +565,7 @@ func (d *Daemon) requestPolicyDecision(ctx context.Context, record policyRequest
 	}
 	request := BaseManifestApprovalRequest{
 		RequestID:           record.RequestID,
+		FrozenAuthorityID:   record.HostedAuthorityID,
 		HostKeyFP:           record.HostKeyFP,
 		ExpectedSignerKeyID: record.ExpectedSignerKeyID,
 		Payload:             append([]byte(nil), payload...),
@@ -578,8 +649,11 @@ func (d *Daemon) stageHostedResult(requestID string, result BaseManifestApproval
 	if err != nil {
 		return err
 	}
+	if record.Mode != policyModeHosted {
+		return errPolicyConflict
+	}
 	response := policywire.Response{
-		RequestID: record.RequestID, Purpose: policywire.Purpose, Status: result.Status,
+		RequestID: record.RequestID, AuthorityID: result.AuthorityID, Purpose: policywire.Purpose, Status: result.Status,
 		PayloadSHA256: record.PayloadSHA256, BaseDigest: record.BaseDigest, SignerKeyID: record.ExpectedSignerKeyID,
 		ErrorCode: result.ErrorCode, Retryable: result.Retryable,
 	}
@@ -589,23 +663,53 @@ func (d *Daemon) stageHostedResult(requestID string, result BaseManifestApproval
 			return errors.New("hosted approval carried invalid error/envelope fields")
 		}
 		response.ManifestEnvelopeB64 = base64.StdEncoding.EncodeToString(result.ManifestEnvelope)
-		if _, err := policywire.MarshalResponse(response); err != nil {
+		if result.AuthorityID != record.HostedAuthorityID {
+			if _, err := d.policyJournal.persistApprovedUnexposed(requestID, result.ManifestEnvelope); err != nil {
+				return err
+			}
+			_, err = d.policyJournal.stageHostedSignerKeyChanged(requestID)
 			return err
 		}
-		_, err = d.policyJournal.persistApprovedUnexposed(requestID, result.ManifestEnvelope)
-		return err
 	case policywire.StatusDenied, policywire.StatusTimeout, policywire.StatusInterrupted, policywire.StatusError:
 		if len(result.ManifestEnvelope) != 0 {
 			return errors.New("hosted non-approval carried envelope")
 		}
-		if _, err := policywire.MarshalResponse(response); err != nil {
+		if result.AuthorityID != record.HostedAuthorityID {
+			_, err = d.policyJournal.stageHostedSignerKeyChanged(requestID)
 			return err
 		}
-		_, err = d.policyJournal.stageHostedTerminal(requestID, response)
-		return err
 	default:
 		return errors.New("hosted backend returned nonterminal/unknown status")
 	}
+	body, err := policywire.MarshalResponse(response)
+	if err != nil {
+		return err
+	}
+	decodedResponse, err := policywire.DecodeResponse(body)
+	if err != nil {
+		return err
+	}
+	payload, err := policyRequestPayload(&record)
+	if err != nil {
+		return err
+	}
+	request, err := policywire.NewRequest(record.RequestID, record.HostKeyFP, record.ExpectedSignerKeyID, payload, record.ExpectedHeadDigest, record.Bootstrap)
+	if err != nil {
+		return err
+	}
+	frozenPublicKey, err := policyRequestPublicKey(&record)
+	if err != nil {
+		return err
+	}
+	if err := policywire.VerifyResponseForRequest(request, decodedResponse, frozenPublicKey, record.HostedAuthorityID); err != nil {
+		return fmt.Errorf("verify hosted policy result under persisted authority pair: %w", err)
+	}
+	if result.Status == policywire.StatusApproved {
+		_, err = d.policyJournal.persistApprovedUnexposed(requestID, result.ManifestEnvelope)
+		return err
+	}
+	_, err = d.policyJournal.stageHostedTerminal(requestID, response)
+	return err
 }
 
 func writePolicyResponse(w io.Writer, response policywire.Response) error {
@@ -630,7 +734,15 @@ func (d *Daemon) respondPolicyJournalError(ctx context.Context, conn io.Writer, 
 
 func (d *Daemon) respondPolicyEphemeral(ctx context.Context, conn io.Writer, decoded policywire.DecodedRequest, code policywire.ErrorCode) error {
 	record := ephemeralPolicyRecord(decoded, d.now())
+	authorityID := ""
 	if d.policyJournal != nil {
+		if code != policywire.ErrorPolicyNotSupported {
+			var err error
+			authorityID, err = d.policyJournal.authorityID()
+			if err != nil {
+				return err
+			}
+		}
 		if trusted, err := d.policyJournal.trustedHeadDigest(decoded.Wire.HostKeyFP); err == nil {
 			record.TrustedHeadDigest = trusted
 		}
@@ -642,7 +754,7 @@ func (d *Daemon) respondPolicyEphemeral(ctx context.Context, conn io.Writer, dec
 	if err := d.emitPolicyAudit(ctx, record, policyAuditPhaseTerminalNoMint); err != nil {
 		return fmt.Errorf("policy terminal rejection audit: %w", err)
 	}
-	response, err := buildPolicyResponse(&record, policywire.StatusError, code, nil)
+	response, err := buildPolicyResponse(&record, authorityID, policywire.StatusError, code, nil)
 	if err != nil {
 		return err
 	}
@@ -681,7 +793,15 @@ func (d *Daemon) emitPolicyAudit(ctx context.Context, record policyRequestRecord
 	if sink == nil {
 		return ErrNoAudit
 	}
-	metadata := policyAuditMetadata(record, phase)
+	authorityID := ""
+	if d.policyJournal != nil && record.FailureCode != policywire.ErrorPolicyNotSupported {
+		var err error
+		authorityID, err = d.policyJournal.authorityID()
+		if err != nil {
+			return fmt.Errorf("load policy authority id: %w", err)
+		}
+	}
+	metadata := policyAuditMetadata(record, authorityID, phase)
 	if phase == policyAuditPhaseHumanVerdict && record.ApprovedBy != "" {
 		approved := record.State == policyStateApprovalReceived || record.State == policyStateApprovedMaterializing ||
 			record.State == policyStateApprovedUnexposed || record.State == policyStateApproved
@@ -694,9 +814,9 @@ func (d *Daemon) emitPolicyAudit(ctx context.Context, record policyRequestRecord
 	return sink.Call(ctx, AuditCall{Time: d.now().UTC(), RequestID: record.RequestID, HostKeyFP: record.HostKeyFP, Policy: &metadata})
 }
 
-func policyAuditMetadata(record policyRequestRecord, phase string) PolicyAuditMetadata {
+func policyAuditMetadata(record policyRequestRecord, authorityID, phase string) PolicyAuditMetadata {
 	metadata := PolicyAuditMetadata{
-		Purpose: policywire.Purpose, Principal: policyAuditPrincipalLocal, TupleDigest: record.TupleDigest,
+		AuthorityID: authorityID, Purpose: policywire.Purpose, Principal: policyAuditPrincipalLocal, TupleDigest: record.TupleDigest,
 		Phase: phase, StateVersion: record.StateVersion, RequestID: record.RequestID,
 		HostKeyFP: record.HostKeyFP, PayloadSHA256: record.PayloadSHA256,
 		CandidateDigest: record.BaseDigest, HeadDigest: record.TrustedHeadDigest,
@@ -755,18 +875,15 @@ func policyAuditOutcome(record policyRequestRecord, phase string) string {
 }
 
 func policyAuditEventID(metadata PolicyAuditMetadata) string {
-	h := sha256.New()
-	_, _ = h.Write([]byte("sshgate-policy-audit-event-v1\x00"))
-	for _, field := range []string{metadata.Purpose, metadata.Principal, metadata.RequestID, metadata.TupleDigest, metadata.Phase} {
-		writePolicyLengthField(h, []byte(field))
-	}
-	var version [8]byte
-	binary.BigEndian.PutUint64(version[:], metadata.StateVersion)
-	_, _ = h.Write(version[:])
-	return hex.EncodeToString(h.Sum(nil))
+	return policyauthority.AuditEventID(policyauthority.AuditEvent{
+		AuthorityID: metadata.AuthorityID, Purpose: metadata.Purpose,
+		Principal: metadata.Principal, RequestID: metadata.RequestID,
+		TupleDigest: metadata.TupleDigest, Phase: metadata.Phase,
+		StateVersion: metadata.StateVersion,
+	})
 }
 
-func (d *Daemon) retryPolicyRecovery(ctx context.Context) error {
+func (d *Daemon) retryPolicyRecovery(ctx context.Context, backend BaseManifestApprovalBackend, onlyMode policyRequestMode) error {
 	d.policyRecoveryMu.Lock()
 	defer d.policyRecoveryMu.Unlock()
 	if d.policyJournal == nil {
@@ -778,6 +895,23 @@ func (d *Daemon) retryPolicyRecovery(ctx context.Context) error {
 		return err
 	}
 	for _, requestID := range ids {
+		record, loadErr := d.policyJournal.record(requestID)
+		if loadErr != nil {
+			d.policyRecoveryErr = loadErr
+			return loadErr
+		}
+		if onlyMode != "" && record.Mode != onlyMode {
+			continue
+		}
+		processBackend := BaseManifestApprovalBackend(nil)
+		if record.Mode == policyModeHosted {
+			if _, ok := backend.(HostedBaseManifestApprovalBackend); !ok {
+				err := errors.New("hosted policy backend unavailable for same-ID recovery")
+				d.policyHostedRecoveryErr = err
+				return err
+			}
+			processBackend = backend
+		}
 		wait, leader := d.acquirePolicyFlight(requestID)
 		if !leader {
 			// An already-serving caller owns this durable ID. It will either
@@ -785,14 +919,27 @@ func (d *Daemon) retryPolicyRecovery(ctx context.Context) error {
 			// pass; recovery must never race its audit/materialization path.
 			continue
 		}
-		_, processErr := d.processPolicyRecord(ctx, requestID, nil)
+		_, processErr := d.processPolicyRecord(ctx, requestID, processBackend)
 		d.releasePolicyFlight(requestID, wait)
 		if processErr != nil {
-			d.policyRecoveryErr = processErr
+			if record.Mode == policyModeHosted {
+				d.policyHostedRecoveryErr = processErr
+			} else {
+				d.policyLocalRecoveryErr = processErr
+			}
 			return processErr
 		}
 	}
 	d.policyRecoveryErr = nil
+	switch onlyMode {
+	case policyModeHosted:
+		d.policyHostedRecoveryErr = nil
+	case policyModeLocalTelegram:
+		d.policyLocalRecoveryErr = nil
+	default:
+		d.policyHostedRecoveryErr = nil
+		d.policyLocalRecoveryErr = nil
+	}
 	return nil
 }
 
@@ -801,16 +948,105 @@ func (d *Daemon) initializePolicyRecovery(ctx context.Context) error {
 		return nil
 	}
 	if _, err := d.policyJournal.reconcileLocalStartup(); err != nil {
-		d.policyRecoveryErr = err
+		d.policyRecoveryMu.Lock()
+		d.policyLocalRecoveryErr = err
+		d.policyRecoveryMu.Unlock()
 		return err
 	}
-	return d.retryPolicyRecovery(ctx)
+	if err := d.retryPolicyRecovery(ctx, nil, policyModeLocalTelegram); err != nil {
+		return err
+	}
+	if hosted, ok := d.Backend.(HostedBaseManifestApprovalBackend); ok {
+		d.startHostedPolicyRecovery(hosted)
+	}
+	return nil
+}
+
+func (d *Daemon) startHostedPolicyRecovery(backend HostedBaseManifestApprovalBackend) {
+	d.policyRecoveryWorkerMu.Lock()
+	defer d.policyRecoveryWorkerMu.Unlock()
+	if d.policyRecoveryCancel != nil {
+		return
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	d.policyRecoveryCancel = cancel
+	d.policyRecoveryDone = done
+	go func() {
+		defer close(done)
+		backoff := 250 * time.Millisecond
+		for {
+			err := d.retryPolicyRecovery(ctx, backend, policyModeHosted)
+			if ctx.Err() != nil {
+				return
+			}
+			remaining, checkErr := d.hasRecoverableHostedPolicyRequest()
+			if checkErr != nil {
+				err = checkErr
+				d.policyRecoveryMu.Lock()
+				d.policyHostedRecoveryErr = checkErr
+				d.policyRecoveryMu.Unlock()
+			}
+			if err == nil && !remaining {
+				backoff = 30 * time.Second
+			}
+			timer := time.NewTimer(backoff)
+			select {
+			case <-ctx.Done():
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+				return
+			case <-timer.C:
+			}
+			if backoff < 30*time.Second {
+				backoff *= 2
+				if backoff > 30*time.Second {
+					backoff = 30 * time.Second
+				}
+			}
+		}
+	}()
+}
+
+func (d *Daemon) hasRecoverableHostedPolicyRequest() (bool, error) {
+	ids, err := d.policyJournal.recoverableRequestIDs()
+	if err != nil {
+		return false, err
+	}
+	for _, requestID := range ids {
+		record, err := d.policyJournal.record(requestID)
+		if err != nil {
+			return false, err
+		}
+		if record.Mode == policyModeHosted {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (d *Daemon) stopHostedPolicyRecovery() {
+	d.policyRecoveryWorkerMu.Lock()
+	cancel := d.policyRecoveryCancel
+	done := d.policyRecoveryDone
+	d.policyRecoveryCancel = nil
+	d.policyRecoveryDone = nil
+	d.policyRecoveryWorkerMu.Unlock()
+	if cancel == nil {
+		return
+	}
+	cancel()
+	<-done
 }
 
 func (d *Daemon) policyRecoveryStatus() error {
 	d.policyRecoveryMu.Lock()
 	defer d.policyRecoveryMu.Unlock()
-	return d.policyRecoveryErr
+	return errors.Join(d.policyRecoveryErr, d.policyLocalRecoveryErr, d.policyHostedRecoveryErr)
 }
 
 var _ BaseManifestDecisionHooks = (*localPolicyDecisionHooks)(nil)

@@ -116,11 +116,9 @@ func New(cfg Config) (*Service, error) {
 			return nil, fmt.Errorf("open policy journal: %w", err)
 		}
 		d.policyJournal = journal
-		if err := d.initializePolicyRecovery(context.Background()); err != nil {
-			// Audit/recovery unavailability disables only policy. The durable
-			// received state remains retriable and ordinary signing can serve.
-			d.policyRecoveryErr = err
-		}
+		// Audit/recovery unavailability disables only policy. The recovery
+		// routine records its mode-specific error; ordinary signing can serve.
+		_ = d.initializePolicyRecovery(context.Background())
 	}
 	return &Service{daemon: d, audit: cfg.Audit}, nil
 }
@@ -141,6 +139,7 @@ func (s *Service) Close() error {
 	if s == nil || s.daemon == nil || s.daemon.policyJournal == nil {
 		return nil
 	}
+	s.daemon.stopHostedPolicyRecovery()
 	return s.daemon.policyJournal.Close()
 }
 

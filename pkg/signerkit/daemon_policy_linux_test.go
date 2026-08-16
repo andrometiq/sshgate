@@ -30,17 +30,35 @@ type localPolicyTestBackend struct {
 
 type hostedPolicyTestBackend struct {
 	StubBackend
-	private      ed25519.PrivateKey
-	mu           sync.Mutex
-	requests     int
-	stallFirst   bool
-	firstStarted chan struct{}
+	private                ed25519.PrivateKey
+	resultPrivate          ed25519.PrivateKey
+	privateAfterResult     ed25519.PrivateKey
+	authorityID            string
+	resultAuthorityID      string
+	authorityIDAfterResult string
+	mu                     sync.Mutex
+	requests               int
+	stallFirst             bool
+	firstStarted           chan struct{}
 }
+
+const policyTestHostedAuthorityID = "pauth_11111111111111111111111111111111"
 
 func (*hostedPolicyTestBackend) HostedBaseManifestAuthority() {}
 
 func (b *hostedPolicyTestBackend) BaseManifestAuthorityPublicKey() ([]byte, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	return append([]byte(nil), b.private.Public().(ed25519.PublicKey)...), nil
+}
+
+func (b *hostedPolicyTestBackend) BaseManifestAuthorityID() (string, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.authorityID != "" {
+		return b.authorityID, nil
+	}
+	return policyTestHostedAuthorityID, nil
 }
 
 func (b *hostedPolicyTestBackend) RequestBaseManifest(_ context.Context, request BaseManifestApprovalRequest) (<-chan BaseManifestApprovalResult, error) {
@@ -48,7 +66,7 @@ func (b *hostedPolicyTestBackend) RequestBaseManifest(_ context.Context, request
 	b.requests++
 	call := b.requests
 	b.mu.Unlock()
-	if request.DecisionHooks != nil || len(request.TrustedHeadEnvelope) != 0 || len(request.FrozenPublicKey) != ed25519.PublicKeySize {
+	if request.DecisionHooks != nil || len(request.TrustedHeadEnvelope) != 0 || len(request.FrozenPublicKey) != ed25519.PublicKeySize || request.FrozenAuthorityID != policyTestHostedAuthorityID {
 		return nil, errors.New("hosted request carried local review state or missing frozen key")
 	}
 	if b.stallFirst && call == 1 {
@@ -59,12 +77,33 @@ func (b *hostedPolicyTestBackend) RequestBaseManifest(_ context.Context, request
 	if err != nil {
 		return nil, err
 	}
-	envelope, err := policy.SignBaseManifest(b.private, manifest)
+	b.mu.Lock()
+	resultPrivate := b.resultPrivate
+	if len(resultPrivate) == 0 {
+		resultPrivate = b.private
+	}
+	b.mu.Unlock()
+	envelope, err := policy.SignBaseManifest(resultPrivate, manifest)
 	if err != nil {
 		return nil, err
 	}
+	b.mu.Lock()
+	resultAuthorityID := b.resultAuthorityID
+	if resultAuthorityID == "" {
+		resultAuthorityID = b.authorityID
+		if resultAuthorityID == "" {
+			resultAuthorityID = policyTestHostedAuthorityID
+		}
+	}
+	if b.authorityIDAfterResult != "" {
+		b.authorityID = b.authorityIDAfterResult
+	}
+	if len(b.privateAfterResult) != 0 {
+		b.private = b.privateAfterResult
+	}
+	b.mu.Unlock()
 	ch := make(chan BaseManifestApprovalResult, 1)
-	ch <- BaseManifestApprovalResult{Status: policywire.StatusApproved, Kind: BaseManifestResultRemoteEnvelope, ManifestEnvelope: envelope}
+	ch <- BaseManifestApprovalResult{AuthorityID: resultAuthorityID, Status: policywire.StatusApproved, Kind: BaseManifestResultRemoteEnvelope, ManifestEnvelope: envelope}
 	close(ch)
 	return ch, nil
 }
@@ -435,6 +474,192 @@ func TestHostedPendingCancellationRemainsResumableAndRepostsSameID(t *testing.T)
 	}
 }
 
+func TestHostedPolicyRecoveryStagesAuthorityAndGateMismatches(t *testing.T) {
+	otherAuthorityID := "pauth_22222222222222222222222222222222"
+	for _, tc := range []struct {
+		name        string
+		configure   func(*hostedPolicyTestBackend)
+		gatePrivate func(ed25519.PrivateKey) ed25519.PrivateKey
+	}{
+		{
+			name: "response authority",
+			configure: func(backend *hostedPolicyTestBackend) {
+				backend.resultAuthorityID = otherAuthorityID
+			},
+		},
+		{
+			name: "current authority",
+			configure: func(backend *hostedPolicyTestBackend) {
+				backend.authorityIDAfterResult = otherAuthorityID
+			},
+		},
+		{
+			name: "current public key",
+			configure: func(backend *hostedPolicyTestBackend) {
+				_, other, err := ed25519.GenerateKey(nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				backend.privateAfterResult = other
+			},
+		},
+		{
+			name: "gate public key",
+			gatePrivate: func(ed25519.PrivateKey) ed25519.PrivateKey {
+				_, other, err := ed25519.GenerateKey(nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return other
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, hostedPrivate, err := ed25519.GenerateKey(nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			backend := &hostedPolicyTestBackend{private: hostedPrivate}
+			if tc.configure != nil {
+				tc.configure(backend)
+			}
+			gatePrivate := hostedPrivate
+			if tc.gatePrivate != nil {
+				gatePrivate = tc.gatePrivate(hostedPrivate)
+			}
+			service, err := New(Config{
+				Signer: gatePrivate, Backend: backend, Audit: &policyTestAuditSink{},
+				PolicyJournalRoot: t.TempDir() + "/policy-requests",
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = service.Close() })
+			requestID := "pm_56000000000000000000000000000001"
+			line := policyRequestLineForTest(t, hostedPrivate, requestID)
+			responseLine, err := runPolicyRequest(t, service, line)
+			if err != nil {
+				t.Fatal(err)
+			}
+			response, err := policywire.DecodeResponseLine(responseLine)
+			if err != nil || response.Wire.Status != policywire.StatusError || response.Wire.ErrorCode != policywire.ErrorSignerKeyChanged {
+				t.Fatalf("stale hosted result response = %#v, %v", response, err)
+			}
+			record, err := service.daemon.policyJournal.record(requestID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			localAuthorityID, err := service.daemon.policyJournal.authorityID()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if record.State != policyStateSignerKeyChanged || record.HostedAuthorityID != policyTestHostedAuthorityID || record.ResultEnvelopeB64 == "" {
+				t.Fatalf("stale hosted record = %#v", record)
+			}
+			if response.Wire.AuthorityID != localAuthorityID || response.Wire.AuthorityID == record.HostedAuthorityID {
+				t.Fatalf("local response authority = %q, local=%q hosted=%q", response.Wire.AuthorityID, localAuthorityID, record.HostedAuthorityID)
+			}
+		})
+	}
+}
+
+func TestHostedPolicyHistoricalSignatureFailureRemainsRecoverable(t *testing.T) {
+	_, hostedPrivate, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, wrongPrivate, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend := &hostedPolicyTestBackend{private: hostedPrivate, resultPrivate: wrongPrivate}
+	service, err := New(Config{
+		Signer: hostedPrivate, Backend: backend, Audit: &policyTestAuditSink{},
+		PolicyJournalRoot: t.TempDir() + "/policy-requests",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = service.Close() })
+	requestID := "pm_57000000000000000000000000000001"
+	responseLine, requestErr := runPolicyRequest(t, service, policyRequestLineForTest(t, hostedPrivate, requestID))
+	if requestErr == nil || len(responseLine) != 0 {
+		t.Fatalf("historical signature substitution response=%q err=%v", responseLine, requestErr)
+	}
+	record, err := service.daemon.policyJournal.record(requestID)
+	if err != nil || record.State != policyStatePending || record.ResultEnvelopeB64 != "" || record.Response != nil {
+		t.Fatalf("signature substitution changed durable recovery state: %#v, %v", record, err)
+	}
+	ids, err := service.daemon.policyJournal.recoverableRequestIDs()
+	if err != nil || len(ids) != 1 || ids[0] != requestID {
+		t.Fatalf("recoverable hosted IDs = %v, %v", ids, err)
+	}
+}
+
+func TestHostedPolicyStartupRecoveryIsAsyncAndUsesPersistedPair(t *testing.T) {
+	for index, initialState := range []policyRequestState{policyStateNotifying, policyStatePending} {
+		t.Run(string(initialState), func(t *testing.T) {
+			publicKey, privateKey, err := ed25519.GenerateKey(nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			root := t.TempDir() + "/policy-requests"
+			journal, err := openLocalPolicyJournal(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			requestID := fmt.Sprintf("pm_5800000000000000000000000000000%d", index+1)
+			host := testPolicyFingerprint(byte(0x58 + index))
+			decoded := testPolicyDecoded(t, privateKey, requestID, host, testBootstrapManifest(host), "", true)
+			if _, err := journal.begin(decoded, policyModeHosted, publicKey, time.Unix(580+int64(index), 0), policyTestHostedAuthorityID); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := journal.markNotifying(requestID, ""); err != nil {
+				t.Fatal(err)
+			}
+			if initialState == policyStatePending {
+				if _, err := journal.activateHosted(requestID); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := journal.Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			backend := &hostedPolicyTestBackend{private: privateKey}
+			service, err := New(Config{Signer: privateKey, Backend: backend, Audit: &policyTestAuditSink{}, PolicyJournalRoot: root})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = service.Close() })
+			deadline := time.Now().Add(3 * time.Second)
+			for {
+				record, loadErr := service.daemon.policyJournal.record(requestID)
+				if loadErr != nil {
+					t.Fatal(loadErr)
+				}
+				if record.State == policyStateApproved {
+					localAuthorityID, err := service.daemon.policyJournal.authorityID()
+					if err != nil {
+						t.Fatal(err)
+					}
+					if record.HostedAuthorityID != policyTestHostedAuthorityID || record.Response == nil || record.Response.AuthorityID != localAuthorityID {
+						t.Fatalf("recovered hosted record = %#v", record)
+					}
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatalf("startup recovery did not complete: %#v", record)
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+			if backend.requestCount() != 1 {
+				t.Fatalf("startup same-ID reconciliations = %d; want 1", backend.requestCount())
+			}
+		})
+	}
+}
+
 func TestPolicyJournalUnsafeStartupFailsBeforeServiceConstruction(t *testing.T) {
 	_, private, err := ed25519.GenerateKey(nil)
 	if err != nil {
@@ -789,7 +1014,9 @@ func TestPolicyAuditEventIDSeparatesPrincipalAndLengthBoundaries(t *testing.T) {
 		Phase: policyAuditPhaseSubmission, StateVersion: 1,
 	}
 	first := policyAuditEventID(base)
-	const golden = "8464c8cb354ab7048425ec8c85cd57d83f8b8f9aef2980960d6184a8ff857cd3"
+	// Spec-mandated golden bump: R45 makes the v2 formula universal, and this
+	// representative refusal contributes an empty first authority field.
+	const golden = "cf3c788236c0d934e37ab3c3cd85b2676a1799437dc957c718a577f946e1c2cb"
 	if first != golden {
 		t.Fatalf("policy audit event-id golden drifted: got %q want %q", first, golden)
 	}

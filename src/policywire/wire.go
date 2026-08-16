@@ -64,6 +64,7 @@ const (
 	ErrorSignerKeyChanged            ErrorCode = "signer_key_changed"
 	ErrorStalePolicyHead             ErrorCode = "stale_policy_head"
 	ErrorPolicyKeyTransitionRequired ErrorCode = "policy_key_transition_required"
+	ErrorQuorumUnattainable          ErrorCode = "quorum_unattainable"
 	ErrorPolicyJournalFull           ErrorCode = "policy_journal_full"
 	ErrorPolicyNotificationFailed    ErrorCode = "policy_notification_failed"
 	ErrorPolicyMaterializationFailed ErrorCode = "policy_materialization_failed"
@@ -96,6 +97,7 @@ type DecodedRequest struct {
 // responses carry ManifestEnvelopeB64.
 type Response struct {
 	RequestID           string    `json:"request_id"`
+	AuthorityID         string    `json:"authority_id,omitempty"`
 	Purpose             string    `json:"purpose"`
 	Status              Status    `json:"status"`
 	PayloadSHA256       string    `json:"payload_sha256"`
@@ -274,6 +276,13 @@ func validateResponse(resp Response) ([]byte, error) {
 	} else if resp.ErrorCode != "" || resp.Retryable {
 		return nil, errors.New("policy wire response: non-error status cannot carry error_code or retryable=true")
 	}
+	if resp.ErrorCode == ErrorPolicyNotSupported {
+		if resp.AuthorityID != "" {
+			return nil, errors.New("policy wire response: policy_not_supported must omit authority_id")
+		}
+	} else if !validAuthorityID(resp.AuthorityID) {
+		return nil, errors.New("policy wire response: authority_id must be pauth_ plus 32 lowercase hexadecimal characters")
+	}
 
 	if resp.Status == StatusApproved {
 		if resp.ManifestEnvelopeB64 == "" {
@@ -362,6 +371,10 @@ func validRequestID(s string) bool {
 
 func validDigest(s string) bool { return len(s) == 64 && validLowerHex(s) }
 
+func validAuthorityID(s string) bool {
+	return len(s) == len("pauth_")+32 && s[:len("pauth_")] == "pauth_" && validLowerHex(s[len("pauth_"):])
+}
+
 func validLowerHex(s string) bool {
 	for i := range len(s) {
 		if (s[i] < '0' || s[i] > '9') && (s[i] < 'a' || s[i] > 'f') {
@@ -384,7 +397,7 @@ func validErrorCode(code ErrorCode) bool {
 	switch code {
 	case ErrorInvalidPolicyRequest, ErrorPolicyNotSupported, ErrorIdempotencyConflict,
 		ErrorPolicyRequestInProgress, ErrorSignerKeyChanged, ErrorStalePolicyHead,
-		ErrorPolicyKeyTransitionRequired, ErrorPolicyJournalFull,
+		ErrorPolicyKeyTransitionRequired, ErrorQuorumUnattainable, ErrorPolicyJournalFull,
 		ErrorPolicyNotificationFailed, ErrorPolicyMaterializationFailed:
 		return true
 	default:

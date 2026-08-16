@@ -89,7 +89,11 @@ type RegisterApprovalRequest struct {
 // This type is deliberately disjoint from ApprovalRequest and carries no
 // command-signing TTL, grant scope, or sigwire payload.
 type BaseManifestApprovalRequest struct {
-	RequestID           string
+	RequestID string
+	// FrozenAuthorityID is present only for hosted pass-through. It is the
+	// canonical remote authority ID persisted with FrozenPublicKey for this
+	// exact request and must be used for every same-ID reconciliation.
+	FrozenAuthorityID   string
 	HostKeyFP           string
 	ExpectedSignerKeyID string
 	Payload             []byte
@@ -146,6 +150,9 @@ const (
 // BaseManifestApprovalResult is one human policy decision. Kind is the
 // explicit custody boundary. Non-approved results never carry an envelope.
 type BaseManifestApprovalResult struct {
+	// AuthorityID is required on every hosted result and absent on local
+	// Telegram results. It is verified together with the persisted raw key.
+	AuthorityID        string
 	Status             policywire.Status
 	ErrorCode          policywire.ErrorCode
 	Retryable          bool
@@ -173,6 +180,7 @@ type HostedBaseManifestApprovalBackend interface {
 	BaseManifestApprovalBackend
 	HostedBaseManifestAuthority()
 	BaseManifestAuthorityPublicKey() ([]byte, error)
+	BaseManifestAuthorityID() (string, error)
 }
 
 // CommandReq is a single command awaiting approval. Server is the human-

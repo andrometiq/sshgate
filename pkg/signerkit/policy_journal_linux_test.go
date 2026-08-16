@@ -117,6 +117,54 @@ func TestPolicyJournalRejectsInvalidAuthorityIDPrefix(t *testing.T) {
 	}
 }
 
+func TestPolicyJournalReopenRejectsCorruptHostedAuthorityPair(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(*policyRequestRecord)
+	}{
+		{name: "missing authority", mutate: func(record *policyRequestRecord) { record.HostedAuthorityID = "" }},
+		{name: "malformed authority", mutate: func(record *policyRequestRecord) { record.HostedAuthorityID = "pauth_ABC" }},
+		{name: "derived key id", mutate: func(record *policyRequestRecord) { record.ExpectedSignerKeyID = strings.Repeat("0", 64) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			journal, root := testPolicyJournal(t)
+			publicKey, privateKey, err := ed25519.GenerateKey(nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			host := testPolicyFingerprint(0x19)
+			decoded := testPolicyDecoded(t, privateKey, "pm_19000000000000000000000000000001", host, testBootstrapManifest(host), "", true)
+			if _, err := journal.begin(decoded, policyModeHosted, publicKey, time.Unix(19, 0), policyTestHostedAuthorityID); err != nil {
+				t.Fatal(err)
+			}
+			var disk policyJournalDisk
+			if err := journal.view(func(current *policyJournalDisk) error {
+				disk = *current
+				disk.Heads = append([]policyHeadRecord(nil), current.Heads...)
+				disk.Requests = append([]policyRequestRecord(nil), current.Requests...)
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			tc.mutate(&disk.Requests[0])
+			body, err := json.Marshal(disk)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := journal.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(root, policyJournalFile), body, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if reopened, err := openLocalPolicyJournal(root); err == nil {
+				reopened.Close()
+				t.Fatal("corrupt hosted authority pair reopened")
+			}
+		})
+	}
+}
+
 func TestPolicyJournalLocalApprovalIsDurableAndIdempotent(t *testing.T) {
 	journal, _ := testPolicyJournal(t)
 	publicKey, privateKey, err := ed25519.GenerateKey(nil)
@@ -264,7 +312,7 @@ func TestPolicyJournalTrustedHeadEnvelopeIsExactAndLocalOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 	third := testPolicyDecoded(t, privateKey, "pm_31000000000000000000000000000003", host, successor, headDigest, false)
-	if _, err := journal.begin(third, policyModeHosted, publicKey, time.Unix(12, 0)); err != nil {
+	if _, err := journal.begin(third, policyModeHosted, publicKey, time.Unix(12, 0), policyTestHostedAuthorityID); err != nil {
 		t.Fatal(err)
 	}
 	if got, err := journal.trustedHeadEnvelopeForRequest(third.Wire.RequestID); err != nil || got != nil {
@@ -317,7 +365,11 @@ func TestPolicyJournalRestartInterruptsOnlyLocalPromptedStates(t *testing.T) {
 	makeRequest := func(id string, fill byte, mode policyRequestMode) policywire.DecodedRequest {
 		host := testPolicyFingerprint(fill)
 		decoded := testPolicyDecoded(t, privateKey, id, host, testBootstrapManifest(host), "", true)
-		if _, err := journal.begin(decoded, mode, publicKey, time.Unix(int64(fill), 0)); err != nil {
+		hostedAuthorityID := ""
+		if mode == policyModeHosted {
+			hostedAuthorityID = policyTestHostedAuthorityID
+		}
+		if _, err := journal.begin(decoded, mode, publicKey, time.Unix(int64(fill), 0), hostedAuthorityID); err != nil {
 			t.Fatal(err)
 		}
 		return decoded
@@ -333,6 +385,10 @@ func TestPolicyJournalRestartInterruptsOnlyLocalPromptedStates(t *testing.T) {
 	}
 	if _, err := journal.markNotifying(hosted.Wire.RequestID, ""); err != nil {
 		t.Fatal(err)
+	}
+	beforeHostedPending, err := journal.recoverableRequestIDs()
+	if err != nil || len(beforeHostedPending) != 2 || beforeHostedPending[0] != local.Wire.RequestID || beforeHostedPending[1] != hosted.Wire.RequestID {
+		t.Fatalf("recoverable IDs with hosted notifying = %v, %v", beforeHostedPending, err)
 	}
 	if _, err := journal.activateHosted(hosted.Wire.RequestID); err != nil {
 		t.Fatal(err)
@@ -352,6 +408,10 @@ func TestPolicyJournalRestartInterruptsOnlyLocalPromptedStates(t *testing.T) {
 		if err != nil || record.State != check.want {
 			t.Fatalf("record %s state = %s, %v; want %s", check.id, record.State, err, check.want)
 		}
+	}
+	recoverable, err := journal.recoverableRequestIDs()
+	if err != nil || len(recoverable) != 2 || recoverable[0] != local.Wire.RequestID || recoverable[1] != hosted.Wire.RequestID {
+		t.Fatalf("recoverable IDs after startup = %v, %v", recoverable, err)
 	}
 }
 
@@ -393,7 +453,7 @@ func TestPolicyJournalHostedNewIDNeverTrustsLocalMirrorForNoOpOrStaleDecision(t 
 	}
 
 	newID := testPolicyDecoded(t, privateKey, "pm_61000000000000000000000000000002", host, manifest, terminal.BaseDigest, false)
-	begin, err := journal.begin(newID, policyModeHosted, publicKey, time.Unix(62, 0))
+	begin, err := journal.begin(newID, policyModeHosted, publicKey, time.Unix(62, 0), policyTestHostedAuthorityID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -458,7 +518,7 @@ func TestPolicyJournalHostedNewIDNeverTrustsLocalMirrorForNoOpOrStaleDecision(t 
 	}
 	staleManifest.Revision++
 	staleNewID := testPolicyDecoded(t, privateKey, "pm_62000000000000000000000000000002", staleHost, staleManifest, strings.Repeat("a", 64), false)
-	staleBegin, err := staleJournal.begin(staleNewID, policyModeHosted, publicKey, time.Unix(64, 0))
+	staleBegin, err := staleJournal.begin(staleNewID, policyModeHosted, publicKey, time.Unix(64, 0), policyTestHostedAuthorityID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -476,7 +536,7 @@ func TestPolicyJournalImportsAuthenticatedHostedInterruptedTerminal(t *testing.T
 	host := testPolicyFingerprint(0x63)
 	manifest := testBootstrapManifest(host)
 	decoded := testPolicyDecoded(t, privateKey, "pm_63000000000000000000000000000001", host, manifest, "", true)
-	begin, err := journal.begin(decoded, policyModeHosted, publicKey, time.Unix(65, 0))
+	begin, err := journal.begin(decoded, policyModeHosted, publicKey, time.Unix(65, 0), policyTestHostedAuthorityID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -484,7 +544,7 @@ func TestPolicyJournalImportsAuthenticatedHostedInterruptedTerminal(t *testing.T
 		t.Fatal(err)
 	}
 	response := policywire.Response{
-		RequestID: decoded.Wire.RequestID, Purpose: policywire.Purpose, Status: policywire.StatusInterrupted,
+		RequestID: decoded.Wire.RequestID, AuthorityID: policyTestHostedAuthorityID, Purpose: policywire.Purpose, Status: policywire.StatusInterrupted,
 		PayloadSHA256: begin.Record.PayloadSHA256, BaseDigest: begin.Record.BaseDigest,
 		SignerKeyID: begin.Record.ExpectedSignerKeyID,
 	}
@@ -495,7 +555,12 @@ func TestPolicyJournalImportsAuthenticatedHostedInterruptedTerminal(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if terminal.State != policyStateInterrupted || terminal.Response == nil || terminal.Response.Status != policywire.StatusInterrupted {
+	localAuthorityID, err := journal.authorityID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if terminal.State != policyStateInterrupted || terminal.Response == nil || terminal.Response.Status != policywire.StatusInterrupted ||
+		terminal.Response.AuthorityID != localAuthorityID || terminal.Response.AuthorityID == terminal.HostedAuthorityID {
 		t.Fatalf("authenticated hosted interruption was not preserved: %#v", terminal)
 	}
 }
@@ -1084,5 +1149,14 @@ func TestPolicyJournalIndependentInstancesSerializeBegin(t *testing.T) {
 	}
 	if succeeded != 1 || blocked != 1 {
 		t.Fatalf("concurrent begin results = %v; succeeded=%d blocked=%d", errs, succeeded, blocked)
+	}
+}
+
+func TestValidStoredPolicyErrorCodeAcceptsQuorumUnattainable(t *testing.T) {
+	if !validStoredPolicyErrorCode(policywire.ErrorQuorumUnattainable) {
+		t.Fatal("local journal rejected quorum_unattainable from its independent allowlist")
+	}
+	if validStoredPolicyErrorCode("quorum-unattainable") {
+		t.Fatal("local journal accepted an alternate quorum error spelling")
 	}
 }

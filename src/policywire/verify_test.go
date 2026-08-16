@@ -50,7 +50,7 @@ func (f responseVerificationFixture) response(t testing.TB, status Status) Decod
 		t.Fatal(err)
 	}
 	response := Response{
-		RequestID: f.request.RequestID, Purpose: Purpose, Status: status,
+		RequestID: f.request.RequestID, AuthorityID: testAuthorityID, Purpose: Purpose, Status: status,
 		PayloadSHA256: payloadSHA, BaseDigest: baseDigest, SignerKeyID: f.request.ExpectedSignerKeyID,
 	}
 	if status == StatusApproved {
@@ -84,7 +84,7 @@ func TestVerifyResponseForRequestAcceptsEveryCorrelatedStatus(t *testing.T) {
 	statuses := []Status{StatusPending, StatusApproved, StatusDenied, StatusTimeout, StatusInterrupted, StatusError}
 	for _, status := range statuses {
 		t.Run(string(status), func(t *testing.T) {
-			if err := VerifyResponseForRequest(fixture.request, fixture.response(t, status), fixture.public); err != nil {
+			if err := VerifyResponseForRequest(fixture.request, fixture.response(t, status), fixture.public, testAuthorityID); err != nil {
 				t.Fatalf("VerifyResponseForRequest(%s): %v", status, err)
 			}
 		})
@@ -96,7 +96,10 @@ func TestVerifyResponseForRequestRejectsTupleSubstitution(t *testing.T) {
 	base := fixture.response(t, StatusDenied)
 	tests := map[string]func(*DecodedResponse){
 		"request id": func(r *DecodedResponse) { r.Wire.RequestID = "pm_ffffffffffffffffffffffffffffffff" },
-		"purpose":    func(r *DecodedResponse) { r.Wire.Purpose = "sign" },
+		"authority id": func(r *DecodedResponse) {
+			r.Wire.AuthorityID = "pauth_ffffffffffffffffffffffffffffffff"
+		},
+		"purpose": func(r *DecodedResponse) { r.Wire.Purpose = "sign" },
 		"payload sha": func(r *DecodedResponse) {
 			r.Wire.PayloadSHA256 = strings.Repeat("a", 64)
 		},
@@ -107,7 +110,7 @@ func TestVerifyResponseForRequestRejectsTupleSubstitution(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			response := base
 			mutate(&response)
-			if err := VerifyResponseForRequest(fixture.request, response, fixture.public); err == nil {
+			if err := VerifyResponseForRequest(fixture.request, response, fixture.public, testAuthorityID); err == nil {
 				t.Fatal("substituted response accepted")
 			}
 		})
@@ -123,10 +126,10 @@ func TestVerifyResponseForRequestRejectsWrongKeyAndSignature(t *testing.T) {
 		otherSeed[i] = byte(255 - i)
 	}
 	otherPublic := ed25519.NewKeyFromSeed(otherSeed).Public().(ed25519.PublicKey)
-	if err := VerifyResponseForRequest(fixture.request, approved, otherPublic); err == nil {
+	if err := VerifyResponseForRequest(fixture.request, approved, otherPublic, testAuthorityID); err == nil {
 		t.Fatal("wrong frozen public key accepted")
 	}
-	if err := VerifyResponseForRequest(fixture.request, approved, fixture.public[:31]); err == nil {
+	if err := VerifyResponseForRequest(fixture.request, approved, fixture.public[:31], testAuthorityID); err == nil {
 		t.Fatal("short frozen public key accepted")
 	}
 
@@ -137,14 +140,14 @@ func TestVerifyResponseForRequestRejectsWrongKeyAndSignature(t *testing.T) {
 	tampered := approved
 	tampered.Wire.ManifestEnvelopeB64 = base64.StdEncoding.EncodeToString(tamperedEnvelope)
 	tampered.ManifestEnvelope = tamperedEnvelope
-	if err := VerifyResponseForRequest(fixture.request, tampered, fixture.public); err == nil {
+	if err := VerifyResponseForRequest(fixture.request, tampered, fixture.public, testAuthorityID); err == nil {
 		t.Fatal("bad envelope signature accepted")
 	}
 
 	decodedMismatch := approved
 	decodedMismatch.ManifestEnvelope = append([]byte(nil), approved.ManifestEnvelope...)
 	decodedMismatch.ManifestEnvelope[0] ^= 1
-	if err := VerifyResponseForRequest(fixture.request, decodedMismatch, fixture.public); err == nil {
+	if err := VerifyResponseForRequest(fixture.request, decodedMismatch, fixture.public, testAuthorityID); err == nil {
 		t.Fatal("decoded envelope/wire mismatch accepted")
 	}
 }
@@ -168,7 +171,7 @@ func TestVerifyResponseForRequestRejectsDifferentValidManifest(t *testing.T) {
 		t.Fatal(err)
 	}
 	response := Response{
-		RequestID: fixture.request.RequestID, Purpose: Purpose, Status: StatusApproved,
+		RequestID: fixture.request.RequestID, AuthorityID: testAuthorityID, Purpose: Purpose, Status: StatusApproved,
 		PayloadSHA256: payloadSHA, BaseDigest: baseDigest, SignerKeyID: fixture.request.ExpectedSignerKeyID,
 		ManifestEnvelopeB64: base64.StdEncoding.EncodeToString(envelope),
 	}
@@ -180,7 +183,7 @@ func TestVerifyResponseForRequestRejectsDifferentValidManifest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := VerifyResponseForRequest(fixture.request, decoded, fixture.public); err == nil {
+	if err := VerifyResponseForRequest(fixture.request, decoded, fixture.public, testAuthorityID); err == nil {
 		t.Fatal("different valid manifest accepted for request")
 	}
 }
@@ -209,7 +212,7 @@ func TestVerifyResponseForRequestRejectsDifferentHostManifest(t *testing.T) {
 		t.Fatal(err)
 	}
 	response := Response{
-		RequestID: fixture.request.RequestID, Purpose: Purpose, Status: StatusApproved,
+		RequestID: fixture.request.RequestID, AuthorityID: testAuthorityID, Purpose: Purpose, Status: StatusApproved,
 		PayloadSHA256: payloadSHA, BaseDigest: baseDigest, SignerKeyID: fixture.request.ExpectedSignerKeyID,
 		ManifestEnvelopeB64: base64.StdEncoding.EncodeToString(envelope),
 	}
@@ -221,7 +224,34 @@ func TestVerifyResponseForRequestRejectsDifferentHostManifest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := VerifyResponseForRequest(fixture.request, decoded, fixture.public); err == nil {
+	if err := VerifyResponseForRequest(fixture.request, decoded, fixture.public, testAuthorityID); err == nil {
 		t.Fatal("different-host manifest accepted for request")
+	}
+}
+
+func TestVerifyResponseForRequestPinsAuthorityPair(t *testing.T) {
+	fixture := newResponseVerificationFixture(t)
+	denied := fixture.response(t, StatusDenied)
+	if err := VerifyResponseForRequest(fixture.request, denied, fixture.public, "pauth_ffffffffffffffffffffffffffffffff"); err == nil {
+		t.Fatal("response verified against a different authority id")
+	}
+
+	unsupported := denied.Wire
+	unsupported.AuthorityID = ""
+	unsupported.Status = StatusError
+	unsupported.ErrorCode = ErrorPolicyNotSupported
+	body, err := MarshalResponse(unsupported)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := DecodeResponse(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifyResponseForRequest(fixture.request, decoded, fixture.public, testAuthorityID); err == nil {
+		t.Fatal("hosted pinned authority accepted absent response authority")
+	}
+	if err := VerifyResponseForRequest(fixture.request, decoded, fixture.public, ""); err != nil {
+		t.Fatalf("compatibility refusal did not verify with an absent expected authority: %v", err)
 	}
 }

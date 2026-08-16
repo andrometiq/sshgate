@@ -25,4 +25,8 @@ func (d *Daemon) handleBaseManifestPolicy(context.Context, io.Writer, []byte) er
 
 func (d *Daemon) initializePolicyRecovery(context.Context) error { return nil }
 
-func (d *Daemon) policyRecoveryStatus() error { return d.policyRecoveryErr }
+func (d *Daemon) stopHostedPolicyRecovery() {}
+
+func (d *Daemon) policyRecoveryStatus() error {
+	return errors.Join(d.policyRecoveryErr, d.policyLocalRecoveryErr, d.policyHostedRecoveryErr)
+}

@@ -9,15 +9,15 @@ import (
 )
 
 // VerifyResponseForRequest verifies that response belongs to the exact policy
-// request and frozen policy-authority key supplied by the caller. It performs
-// tuple correlation for every status. For an approved response it also
-// verifies the Ed25519 envelope and requires its payload to be byte-for-byte
-// identical to the canonical payload carried by request.
+// request and frozen policy-authority key/authority-ID pair supplied by the
+// caller. It performs tuple correlation for every status. For an approved
+// response it also verifies the Ed25519 envelope and requires its payload to be
+// byte-for-byte identical to the canonical payload carried by request.
 //
 // This function is pure: it does not perform I/O, retry, consult current key
 // configuration, or generate a replacement request ID. Callers recovering an
-// older request must pass the key frozen for that request.
-func VerifyResponseForRequest(request Request, response DecodedResponse, frozenPublicKey ed25519.PublicKey) error {
+// older request must pass the key and authority ID frozen for that request.
+func VerifyResponseForRequest(request Request, response DecodedResponse, frozenPublicKey ed25519.PublicKey, frozenAuthorityID string) error {
 	requestPayload, requestManifest, err := validateRequest(request)
 	if err != nil {
 		return fmt.Errorf("policy wire correlation: request: %w", err)
@@ -45,6 +45,9 @@ func VerifyResponseForRequest(request Request, response DecodedResponse, frozenP
 	}
 	if response.Wire.RequestID != request.RequestID {
 		return fmt.Errorf("policy wire correlation: response request_id %q does not match request %q", response.Wire.RequestID, request.RequestID)
+	}
+	if response.Wire.AuthorityID != frozenAuthorityID {
+		return fmt.Errorf("policy wire correlation: response authority_id %q does not match frozen authority %q", response.Wire.AuthorityID, frozenAuthorityID)
 	}
 	if response.Wire.Purpose != Purpose {
 		return fmt.Errorf("policy wire correlation: response purpose %q does not match %q", response.Wire.Purpose, Purpose)

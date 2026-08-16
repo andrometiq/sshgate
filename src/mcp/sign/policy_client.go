@@ -58,15 +58,15 @@ func (e *PolicyError) Error() string {
 }
 
 // RequestBaseManifest submits one already-constructed policy request to the
-// local signer socket and verifies the response against frozenPublicKey. It
-// never generates or replaces a request ID and never retries. Callers that
-// receive ErrPolicyVerdictUnknown may recover only with the exact same
-// request tuple and ID.
+// local signer socket and verifies the response against the frozen public-key
+// and authority-ID pair. It never generates or replaces a request ID and never
+// retries. Callers that receive ErrPolicyVerdictUnknown may recover only with
+// the exact same request tuple and ID.
 //
 // Approval returns PolicyResult. Every terminal non-approval returns a typed
 // *PolicyError. A pending response is rejected because pending is hosted-only
 // and must never be emitted by the local signer socket.
-func (c *Client) RequestBaseManifest(ctx context.Context, request policywire.Request, frozenPublicKey ed25519.PublicKey) (PolicyResult, error) {
+func (c *Client) RequestBaseManifest(ctx context.Context, request policywire.Request, frozenPublicKey ed25519.PublicKey, frozenAuthorityID string) (PolicyResult, error) {
 	wire, err := policywire.MarshalRequestLine(request)
 	if err != nil {
 		return PolicyResult{}, fmt.Errorf("policy: request: %w", err)
@@ -133,7 +133,7 @@ func (c *Client) RequestBaseManifest(ctx context.Context, request policywire.Req
 	if err != nil {
 		return PolicyResult{}, fmt.Errorf("policy: malformed response: %w", err)
 	}
-	if err := policywire.VerifyResponseForRequest(request, decoded, frozenPublicKey); err != nil {
+	if err := policywire.VerifyResponseForRequest(request, decoded, frozenPublicKey, frozenAuthorityID); err != nil {
 		return PolicyResult{}, fmt.Errorf("policy: verify response: %w", err)
 	}
 

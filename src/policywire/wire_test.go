@@ -13,8 +13,9 @@ import (
 )
 
 const (
-	testHost    = "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
-	testPayload = `{"schema":1,"host":"SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","epoch":1,"miss_action":"classifier","growth":"none","revision":1,"revoked_permit_ids":[],"entries":[]}`
+	testHost        = "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+	testAuthorityID = "pauth_0123456789abcdef0123456789abcdef"
+	testPayload     = `{"schema":1,"host":"SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","epoch":1,"miss_action":"classifier","growth":"none","revision":1,"revoked_permit_ids":[],"entries":[]}`
 )
 
 func testRequest(t testing.TB) Request {
@@ -54,6 +55,7 @@ func TestRequestLineGolden(t *testing.T) {
 func TestResponseLineGolden(t *testing.T) {
 	resp := Response{
 		RequestID:     "pm_0123456789abcdef0123456789abcdef",
+		AuthorityID:   testAuthorityID,
 		Purpose:       Purpose,
 		Status:        StatusDenied,
 		PayloadSHA256: strings.Repeat("b", 64),
@@ -64,7 +66,7 @@ func TestResponseLineGolden(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const want = "{\"request_id\":\"pm_0123456789abcdef0123456789abcdef\",\"purpose\":\"base_manifest_sign_v1\",\"status\":\"denied\",\"payload_sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"base_digest\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"signer_key_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"retryable\":false}\n"
+	const want = "{\"request_id\":\"pm_0123456789abcdef0123456789abcdef\",\"authority_id\":\"pauth_0123456789abcdef0123456789abcdef\",\"purpose\":\"base_manifest_sign_v1\",\"status\":\"denied\",\"payload_sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"base_digest\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"signer_key_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"retryable\":false}\n"
 	if string(got) != want {
 		t.Fatalf("response wire drifted:\n got  %q\n want %q", got, want)
 	}
@@ -137,6 +139,7 @@ func TestRequestRejectsFieldAndPayloadSubstitution(t *testing.T) {
 func TestResponseStatusEnvelopeAndRetryContracts(t *testing.T) {
 	base := Response{
 		RequestID:     "pm_0123456789abcdef0123456789abcdef",
+		AuthorityID:   testAuthorityID,
 		Purpose:       Purpose,
 		Status:        StatusDenied,
 		PayloadSHA256: strings.Repeat("b", 64),
@@ -219,6 +222,76 @@ func TestResponseStatusEnvelopeAndRetryContracts(t *testing.T) {
 	}
 }
 
+func TestResponseAuthorityPresenceBiconditional(t *testing.T) {
+	base := Response{
+		RequestID: "pm_0123456789abcdef0123456789abcdef", AuthorityID: testAuthorityID,
+		Purpose: Purpose, Status: StatusDenied,
+		PayloadSHA256: strings.Repeat("b", 64), BaseDigest: strings.Repeat("c", 64), SignerKeyID: strings.Repeat("a", 64),
+	}
+	tests := map[string]func(*Response){
+		"required authority absent": func(r *Response) { r.AuthorityID = "" },
+		"unsupported carries authority": func(r *Response) {
+			r.Status = StatusError
+			r.ErrorCode = ErrorPolicyNotSupported
+		},
+		"wrong authority prefix": func(r *Response) { r.AuthorityID = "xauth_0123456789abcdef0123456789abcdef" },
+		"uppercase authority":    func(r *Response) { r.AuthorityID = "pauth_0123456789ABCDEF0123456789abcdef" },
+		"padded authority":       func(r *Response) { r.AuthorityID += "0" },
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			response := base
+			mutate(&response)
+			if _, err := MarshalResponse(response); err == nil {
+				t.Fatal("invalid authority presence accepted on encode")
+			}
+			body, err := json.Marshal(response)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := DecodeResponse(body); err == nil {
+				t.Fatal("invalid authority presence accepted on decode")
+			}
+		})
+	}
+
+	unsupported := base
+	unsupported.AuthorityID = ""
+	unsupported.Status = StatusError
+	unsupported.ErrorCode = ErrorPolicyNotSupported
+	body, err := MarshalResponse(unsupported)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const want = "{\"request_id\":\"pm_0123456789abcdef0123456789abcdef\",\"purpose\":\"base_manifest_sign_v1\",\"status\":\"error\",\"payload_sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"base_digest\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"signer_key_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"error_code\":\"policy_not_supported\",\"retryable\":false}"
+	if string(body) != want {
+		t.Fatalf("policy_not_supported response bytes changed:\n got  %q\n want %q", body, want)
+	}
+	if _, err := DecodeResponse(body); err != nil {
+		t.Fatalf("canonical policy_not_supported response rejected: %v", err)
+	}
+}
+
+func TestQuorumUnattainableResponseGolden(t *testing.T) {
+	response := Response{
+		RequestID: "pm_0123456789abcdef0123456789abcdef", AuthorityID: testAuthorityID,
+		Purpose: Purpose, Status: StatusError,
+		PayloadSHA256: strings.Repeat("b", 64), BaseDigest: strings.Repeat("c", 64), SignerKeyID: strings.Repeat("a", 64),
+		ErrorCode: ErrorQuorumUnattainable,
+	}
+	line, err := MarshalResponseLine(response)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const want = "{\"request_id\":\"pm_0123456789abcdef0123456789abcdef\",\"authority_id\":\"pauth_0123456789abcdef0123456789abcdef\",\"purpose\":\"base_manifest_sign_v1\",\"status\":\"error\",\"payload_sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"base_digest\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"signer_key_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"error_code\":\"quorum_unattainable\",\"retryable\":false}\n"
+	if string(line) != want {
+		t.Fatalf("quorum_unattainable response wire drifted:\n got  %q\n want %q", line, want)
+	}
+	if _, err := DecodeResponseLine(line); err != nil {
+		t.Fatalf("quorum_unattainable response rejected: %v", err)
+	}
+}
+
 func TestFrameBoundsAreDerivedFromPolicyMaxima(t *testing.T) {
 	if got, want := MaxRequestFrameBytes, base64.StdEncoding.EncodedLen(policy.MaxPolicyPayloadBytes)+(4<<10); got != want {
 		t.Fatalf("request frame bound = %d; want %d", got, want)
@@ -258,7 +331,7 @@ func TestPayloadDigestsRejectNonCanonicalPayload(t *testing.T) {
 
 func TestDecodeResponseRejectsOversizeBeforeBase64Decode(t *testing.T) {
 	resp := Response{
-		RequestID: "pm_0123456789abcdef0123456789abcdef", Purpose: Purpose, Status: StatusApproved,
+		RequestID: "pm_0123456789abcdef0123456789abcdef", AuthorityID: testAuthorityID, Purpose: Purpose, Status: StatusApproved,
 		PayloadSHA256: strings.Repeat("b", 64), BaseDigest: strings.Repeat("c", 64), SignerKeyID: strings.Repeat("a", 64),
 		ManifestEnvelopeB64: strings.Repeat("A", base64.StdEncoding.EncodedLen(policy.MaxPolicyEnvelopeBytes)+4),
 	}
