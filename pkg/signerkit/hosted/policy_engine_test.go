@@ -347,6 +347,31 @@ func (store *startupPolicyStore) ListRecovery(context.Context, string, time.Time
 	return policystore.RecoveryPage{}, nil
 }
 
+type startupWorkerPolicyStore struct {
+	startupPolicyStore
+	rosterSignal   chan struct{}
+	recoverySignal chan struct{}
+	recoveryCalls  atomic.Int64
+}
+
+func (store *startupWorkerPolicyStore) ReconcilePendingAttainability(context.Context, string, time.Time) (policystore.AttainabilityResult, error) {
+	store.rosterCalls.Add(1)
+	select {
+	case store.rosterSignal <- struct{}{}:
+	default:
+	}
+	return policystore.AttainabilityResult{}, nil
+}
+
+func (store *startupWorkerPolicyStore) ListRecovery(context.Context, string, time.Time, *policystore.RecoveryCursor, int) (policystore.RecoveryPage, error) {
+	store.recoveryCalls.Add(1)
+	select {
+	case store.recoverySignal <- struct{}{}:
+	default:
+	}
+	return policystore.RecoveryPage{}, nil
+}
+
 type startupPolicyDatabase struct {
 	store   policystore.Store
 	closed  atomic.Bool
@@ -1018,6 +1043,99 @@ func TestPolicyStartupOrdersLeaseDatabaseArchiveAuditMountScanAndWorkers(t *test
 	}
 	if err := exclusive.Close(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestPolicyCompleteStartupKeepsWorkersAliveUntilClose(t *testing.T) {
+	rosterTicks := make(chan time.Time, 1)
+	store := &startupWorkerPolicyStore{
+		rosterSignal:   make(chan struct{}, 2),
+		recoverySignal: make(chan struct{}, 2),
+	}
+	recoveryContinue := make(chan struct{}, 1)
+	recoverySleeping := make(chan struct{}, 2)
+	recoveryStopped := make(chan struct{}, 1)
+	config, _, _ := minimalPolicyStartup(t, store)
+	buildServer := config.BuildServer
+	config.BuildServer = func(database PolicyDatabase) (*Server, error) {
+		server, err := buildServer(database)
+		if err != nil {
+			return nil, err
+		}
+		server.policyRosterTick = rosterTicks
+		return server, nil
+	}
+	config.Sleep = func(ctx context.Context, _ time.Duration) error {
+		recoverySleeping <- struct{}{}
+		select {
+		case <-ctx.Done():
+			recoveryStopped <- struct{}{}
+			return ctx.Err()
+		case <-recoveryContinue:
+			return nil
+		}
+	}
+	runtime, err := StartPolicy(context.Background(), config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = runtime.Close() })
+
+	if err := runtime.CompleteStartup(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-store.rosterSignal:
+	case <-time.After(time.Second):
+		t.Fatal("startup roster sweep did not complete")
+	}
+	select {
+	case <-store.recoverySignal:
+	case <-time.After(time.Second):
+		t.Fatal("RECOVERY worker did not start")
+	}
+	select {
+	case <-recoverySleeping:
+	case <-time.After(time.Second):
+		t.Fatal("RECOVERY worker did not enter its loop sleep")
+	}
+
+	rosterTicks <- time.Now()
+	select {
+	case <-store.rosterSignal:
+	case <-time.After(time.Second):
+		t.Fatal("ROSTER worker stopped when CompleteStartup returned")
+	}
+	recoveryContinue <- struct{}{}
+	select {
+	case <-store.recoverySignal:
+	case <-time.After(time.Second):
+		t.Fatal("RECOVERY worker stopped when CompleteStartup returned")
+	}
+	select {
+	case <-recoverySleeping:
+	case <-time.After(time.Second):
+		t.Fatal("RECOVERY worker did not continue its loop")
+	}
+	select {
+	case <-recoveryStopped:
+		t.Fatal("RECOVERY worker stopped before Close")
+	default:
+	}
+
+	if err := runtime.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-recoveryStopped:
+	default:
+		t.Fatal("Close did not stop the RECOVERY worker")
+	}
+	rosterCalls := store.rosterCalls.Load()
+	recoveryCalls := store.recoveryCalls.Load()
+	rosterTicks <- time.Now()
+	if store.rosterCalls.Load() != rosterCalls || store.recoveryCalls.Load() != recoveryCalls {
+		t.Fatal("policy worker continued after Close joined it")
 	}
 }
 

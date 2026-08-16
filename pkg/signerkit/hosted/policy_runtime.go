@@ -405,7 +405,8 @@ func (runtime *PolicyRuntime) CompleteStartup(ctx context.Context) error {
 			runtime.completionMu.Unlock()
 			return
 		}
-		completionContext, cancel := context.WithCancel(ctx)
+		lifetimeContext := ctx
+		completionContext, cancel := context.WithCancel(lifetimeContext)
 		runtime.completionCancel = cancel
 		runtime.completionStarted = true
 		runtime.completionMu.Unlock()
@@ -414,7 +415,7 @@ func (runtime *PolicyRuntime) CompleteStartup(ctx context.Context) error {
 			close(runtime.completionDone)
 		}()
 
-		runtime.completionErr = runtime.completeStartup(completionContext)
+		runtime.completionErr = runtime.completeStartup(completionContext, lifetimeContext)
 		if runtime.completionErr != nil && runtime.Engine != nil {
 			runtime.Engine.Readiness().MarkUnready()
 		}
@@ -422,12 +423,12 @@ func (runtime *PolicyRuntime) CompleteStartup(ctx context.Context) error {
 	return runtime.completionErr
 }
 
-func (runtime *PolicyRuntime) completeStartup(ctx context.Context) error {
+func (runtime *PolicyRuntime) completeStartup(completionContext, lifetimeContext context.Context) error {
 	scanner, ok := runtime.store.(policystore.SafetyScanner)
 	if !ok {
 		return errors.New("hosted policy startup: policy store has no one-transaction safety scanner")
 	}
-	if err := scanner.SafetyScan(ctx, func(tombstone *policystore.Request) error {
+	if err := scanner.SafetyScan(completionContext, func(tombstone *policystore.Request) error {
 		if tombstone == nil {
 			if err := runtime.Archive.VerifyBinding(runtime.binding.ArchiveID, runtime.binding.AuthorityID); err != nil {
 				return err
@@ -447,13 +448,13 @@ func (runtime *PolicyRuntime) completeStartup(ctx context.Context) error {
 	}); err != nil {
 		return fmt.Errorf("hosted policy startup: safety scan: %w", err)
 	}
-	if err := runtime.Engine.RosterSweep(ctx); err != nil {
+	if err := runtime.Engine.RosterSweep(completionContext); err != nil {
 		return fmt.Errorf("hosted policy startup: roster sweep: %w", err)
 	}
-	if err := runtime.Engine.Readiness().SetReady(ctx); err != nil {
+	if err := runtime.Engine.Readiness().SetReady(completionContext); err != nil {
 		return fmt.Errorf("hosted policy startup: set readiness: %w", err)
 	}
-	if err := runtime.Server.StartPolicyWorkers(ctx); err != nil {
+	if err := runtime.Server.StartPolicyWorkers(lifetimeContext); err != nil {
 		return err
 	}
 	return nil

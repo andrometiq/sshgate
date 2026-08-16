@@ -131,10 +131,37 @@ func oraclePublishPolicy(t *testing.T, oracle *policyCounterOracle, private ed25
 }
 
 func TestPolicyIncrementalCountersMatchRecomputeMutationMatrix(t *testing.T) {
+	t.Run("authority binding", func(t *testing.T) {
+		database := openPolicyTestDB(t)
+		public, _, err := ed25519.GenerateKey(nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		keyID, err := policy.SignerKeyID(public)
+		if err != nil {
+			t.Fatal(err)
+		}
+		config := testPolicyConfig("machine", 1, false)
+		digest, err := policystore.ConfigDigest(config)
+		if err != nil {
+			t.Fatal(err)
+		}
+		store := database.PolicyStore()
+		oracle := &policyCounterOracle{t: t, database: database, store: store}
+		if err := store.BindAuthority(context.Background(), policystore.AuthorityBinding{
+			AuthorityID: authorityID("a"), ArchiveID: config.ArchiveID, AccountingVersion: policystore.AccountingVersion,
+			ConfigDigest: digest, SignerKeyID: keyID, SignerPublicKey: public,
+			MaxRejectionReservedBytesPerPrincipal: config.MaxRejectionReservedBytesPerPrincipal, Config: config,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		oracle.check("authority binding")
+	})
+
 	t.Run("accepted successor no-op and compaction", func(t *testing.T) {
 		database, store, public, private, keyID, _ := newPolicyStoreHarness(t, 1, false)
-		addPolicyVoter(t, database, "voter-a")
 		oracle := &policyCounterOracle{t: t, database: database, store: store}
+		addPolicyVoter(t, database, "voter-a")
 		now := time.Unix(20_000, 0).UTC()
 		firstInput := policyBootstrapInputNumber(t, public, keyID, authorityID("a"), "machine", 20_000, 1, now)
 		first := oraclePublishPolicy(t, oracle, private, firstInput)
@@ -194,34 +221,71 @@ func TestPolicyIncrementalCountersMatchRecomputeMutationMatrix(t *testing.T) {
 		oracle.check("compaction request conversion and vote deletion")
 	})
 
-	t.Run("admission rejection", func(t *testing.T) {
+	t.Run("leased admission rejection and compaction", func(t *testing.T) {
 		database, store, public, _, keyID, _ := newPolicyStoreHarness(t, 1, false)
 		oracle := &policyCounterOracle{t: t, database: database, store: store}
-		input := policyBootstrapInput(t, public, keyID, authorityID("a"), "machine", "d", 2, time.Unix(21_000, 0).UTC())
+		now := time.Now().UTC().Truncate(time.Second)
+		input := policyBootstrapInput(t, public, keyID, authorityID("a"), "machine", "d", 2, now)
 		begin, err := store.Begin(context.Background(), input)
 		if err != nil || begin.Request.State != policystore.StateRejectionUnaudited {
 			t.Fatalf("rejection admission = %+v, %v", begin, err)
 		}
 		oracle.check("rejection admission")
-		request, err := store.MarkRejectionSubmissionAudited(context.Background(), begin.Request.Key(), begin.Request.StateVersion)
+		components, err := policystore.Matrix2AReservation(input.CanonicalRequest, input.Payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		lease, err := store.AcquireRecoveryLease(context.Background(), begin.Request.Key(), "rejection-worker", now, 2*time.Minute)
+		if err != nil {
+			t.Fatal(err)
+		}
+		oracle.check("rejection lease acquire")
+		fenced := store.Fenced(lease)
+		request, err := fenced.MarkRejectionSubmissionAudited(context.Background(), begin.Request.Key(), begin.Request.StateVersion)
 		if err != nil {
 			t.Fatal(err)
 		}
 		oracle.check("rejection submission audit")
-		request, err = store.StageRejectionError(context.Background(), request.Key(), request.StateVersion, input.Now.Add(time.Second))
+		if request.ReservedBytes != begin.Request.ReservedBytes-components.Growth.LeaseOwner {
+			t.Fatalf("rejection owner allowance reserve = %d; want %d",
+				request.ReservedBytes, begin.Request.ReservedBytes-components.Growth.LeaseOwner)
+		}
+		request, err = fenced.StageRejectionError(context.Background(), request.Key(), request.StateVersion, input.Now.Add(time.Second))
 		if err != nil {
 			t.Fatal(err)
 		}
 		oracle.check("rejection staging")
-		request, err = store.MarkRejectionTerminalAudited(context.Background(), request.Key(), request.StateVersion)
+		request, err = fenced.MarkRejectionTerminalAudited(context.Background(), request.Key(), request.StateVersion)
 		if err != nil {
 			t.Fatal(err)
 		}
 		oracle.check("rejection terminal audit")
-		if _, err := store.PublishRejection(context.Background(), request.Key(), request.StateVersion, input.Now.Add(2*time.Second)); err != nil {
+		request, err = fenced.PublishRejection(context.Background(), request.Key(), request.StateVersion, input.Now.Add(2*time.Second))
+		if err != nil {
 			t.Fatal(err)
 		}
 		oracle.check("rejection publication")
+		floor := uint64(len(input.CanonicalRequest) + len(input.Payload))
+		if request.ReservedBytes != floor || request.RecoveryLeaseOwner != "" || request.RecoveryLeaseUntil != 0 {
+			t.Fatalf("published rejection reserve/lease = %d %q/%d; want %d and cleared",
+				request.ReservedBytes, request.RecoveryLeaseOwner, request.RecoveryLeaseUntil, floor)
+		}
+		record, err := store.SnapshotTerminalArchive(context.Background(), request.Key(), request.StateVersion)
+		if err != nil {
+			t.Fatal(err)
+		}
+		reference, _, err := record.ObjectRef()
+		if err != nil {
+			t.Fatal(err)
+		}
+		compacted, err := store.CommitTerminalArchive(context.Background(), request.Key(), request.StateVersion, reference)
+		if err != nil {
+			t.Fatal(err)
+		}
+		oracle.check("rejection compaction")
+		if compacted.Request.StorageKind != policystore.StorageTombstone || compacted.Request.ReservedBytes != floor {
+			t.Fatalf("compacted rejection = %+v; want tombstone reserve %d", compacted.Request, floor)
+		}
 	})
 
 	t.Run("denial claim and publication", func(t *testing.T) {
@@ -283,6 +347,107 @@ func TestPolicyIncrementalCountersMatchRecomputeMutationMatrix(t *testing.T) {
 			t.Fatal(err)
 		}
 		oracle.check("maintenance lease clear")
+	})
+
+	t.Run("fenced recovery lifecycle", func(t *testing.T) {
+		t.Run("activation clears lease", func(t *testing.T) {
+			database, store, public, _, keyID, _ := newPolicyStoreHarness(t, 1, false)
+			addPolicyVoter(t, database, "voter-a")
+			oracle := &policyCounterOracle{t: t, database: database, store: store}
+			now := time.Now().UTC().Truncate(time.Second)
+			input := policyBootstrapInputNumber(t, public, keyID, authorityID("a"), "machine", 23_100, 1, now)
+			begin, err := store.Begin(context.Background(), input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			oracle.check("fenced activation admission")
+			lease, err := store.AcquireRecoveryLease(context.Background(), begin.Request.Key(), "activation-worker", now, 2*time.Minute)
+			if err != nil {
+				t.Fatal(err)
+			}
+			oracle.check("fenced activation lease acquire")
+			fenced := store.Fenced(lease)
+			request, err := fenced.MarkSubmissionAudited(context.Background(), begin.Request.Key(), begin.Request.StateVersion)
+			if err != nil {
+				t.Fatal(err)
+			}
+			oracle.check("fenced activation submission audit")
+			request, err = fenced.ActivateSubmission(context.Background(), request.Key(), request.StateVersion, now.Add(time.Second))
+			if err != nil {
+				t.Fatal(err)
+			}
+			oracle.check("fenced activation lease clear")
+			if request.State != policystore.StatePending || request.RecoveryLeaseOwner != "" || request.RecoveryLeaseUntil != 0 {
+				t.Fatalf("fenced activation retained lease: %+v", request)
+			}
+		})
+
+		t.Run("vote audit without outcome clears lease", func(t *testing.T) {
+			database, store, public, _, keyID, _ := newPolicyStoreHarness(t, 2, false)
+			addPolicyVoter(t, database, "voter-a")
+			addPolicyVoter(t, database, "voter-b")
+			oracle := &policyCounterOracle{t: t, database: database, store: store}
+			now := time.Now().UTC().Truncate(time.Second)
+			input := policyBootstrapInputNumber(t, public, keyID, authorityID("a"), "machine", 23_200, 1, now)
+			request := oracleActivatePolicy(t, oracle, input)
+			vote, err := store.PrepareVote(context.Background(), policystore.VoteInput{ReviewID: request.ReviewID,
+				Operator: "voter-a", Decision: policystore.DecisionApprove, AuthnMethod: policystore.AuthnSession,
+				Now: now.Add(2 * time.Second)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			oracle.check("fenced no-outcome vote")
+			lease, err := store.AcquireRecoveryLease(context.Background(), request.Key(), "vote-audit-worker", now.Add(3*time.Second), 2*time.Minute)
+			if err != nil {
+				t.Fatal(err)
+			}
+			oracle.check("fenced no-outcome lease acquire")
+			tally, err := store.Fenced(lease).PublishVoteAudit(context.Background(), request.Key(), "voter-a", vote.Vote.AuditStateVersion)
+			if err != nil {
+				t.Fatal(err)
+			}
+			oracle.check("fenced no-outcome vote audit lease clear")
+			request, err = store.GetByReviewID(context.Background(), request.ReviewID)
+			if err != nil || tally.ApprovalReached || tally.DenialReached || request.RecoveryLeaseOwner != "" || request.RecoveryLeaseUntil != 0 {
+				t.Fatalf("fenced no-outcome vote audit = %+v, request %+v, %v", tally, request, err)
+			}
+		})
+
+		t.Run("approval claim", func(t *testing.T) {
+			database, store, public, _, keyID, _ := newPolicyStoreHarness(t, 1, false)
+			addPolicyVoter(t, database, "voter-a")
+			oracle := &policyCounterOracle{t: t, database: database, store: store}
+			now := time.Now().UTC().Truncate(time.Second)
+			input := policyBootstrapInputNumber(t, public, keyID, authorityID("a"), "machine", 23_300, 1, now)
+			request := oracleActivatePolicy(t, oracle, input)
+			vote, err := store.PrepareVote(context.Background(), policystore.VoteInput{ReviewID: request.ReviewID,
+				Operator: "voter-a", Decision: policystore.DecisionApprove, AuthnMethod: policystore.AuthnSession,
+				Now: now.Add(2 * time.Second)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			oracle.check("fenced approval vote")
+			if _, err := store.PublishVoteAudit(context.Background(), request.Key(), "voter-a", vote.Vote.AuditStateVersion); err != nil {
+				t.Fatal(err)
+			}
+			oracle.check("fenced approval vote audit")
+			lease, err := store.AcquireRecoveryLease(context.Background(), request.Key(), "approval-worker", now.Add(3*time.Second), 2*time.Minute)
+			if err != nil {
+				t.Fatal(err)
+			}
+			oracle.check("fenced approval lease acquire")
+			workLease, err := store.Fenced(lease).ClaimApproval(context.Background(), request.Key(), vote.Vote.AuditStateVersion,
+				lease.Owner, now.Add(4*time.Second), 2*time.Minute)
+			if err != nil {
+				t.Fatal(err)
+			}
+			oracle.check("fenced approval claim")
+			request, err = store.GetByReviewID(context.Background(), request.ReviewID)
+			if err != nil || request.State != policystore.StateApprovedMaterializing || workLease.Generation != lease.Generation ||
+				request.RecoveryLeaseOwner != lease.Owner {
+				t.Fatalf("fenced approval claim = %+v, request %+v, %v", workLease, request, err)
+			}
+		})
 	})
 
 	t.Run("processing materialization and publication errors", func(t *testing.T) {
