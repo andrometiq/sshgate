@@ -368,7 +368,7 @@ func validatePolicyJournal(d *policyJournalDisk) error {
 	if d.Schema != policyJournalSchema {
 		return fmt.Errorf("policy journal: unsupported schema %d", d.Schema)
 	}
-	if len(d.AuthorityID) != len("pauth_")+32 || !validLowerHexString(d.AuthorityID[len("pauth_"):]) {
+	if len(d.AuthorityID) != len("pauth_")+32 || !strings.HasPrefix(d.AuthorityID, "pauth_") || !validLowerHexString(d.AuthorityID[len("pauth_"):]) {
 		return errors.New("policy journal: invalid authority_id")
 	}
 	if d.Heads == nil || d.Requests == nil {

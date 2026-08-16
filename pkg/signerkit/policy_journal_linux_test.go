@@ -105,6 +105,18 @@ func TestPolicyJournalStableAuthorityAndExactOwnerModes(t *testing.T) {
 	}
 }
 
+func TestPolicyJournalRejectsInvalidAuthorityIDPrefix(t *testing.T) {
+	disk := policyJournalDisk{
+		Schema:      policyJournalSchema,
+		AuthorityID: "XAUTH_" + strings.Repeat("a", 32),
+		Heads:       []policyHeadRecord{},
+		Requests:    []policyRequestRecord{},
+	}
+	if err := validatePolicyJournal(&disk); err == nil || err.Error() != "policy journal: invalid authority_id" {
+		t.Fatalf("validatePolicyJournal() error = %v; want policy journal: invalid authority_id", err)
+	}
+}
+
 func TestPolicyJournalLocalApprovalIsDurableAndIdempotent(t *testing.T) {
 	journal, _ := testPolicyJournal(t)
 	publicKey, privateKey, err := ed25519.GenerateKey(nil)
