@@ -76,6 +76,11 @@ type Config struct {
 	// meaningful only when Auth is set, ignored otherwise.
 	Human HumanAPIConfig
 
+	// Policy is the additive post-construction policy plane. Nil preserves the
+	// ordinary hosted surface. Production normally uses StartPolicy so lease,
+	// database, archive, audit, scan, and worker ordering cannot be rearranged.
+	Policy *PolicyAPIConfig
+
 	// PollWait bounds /v1/poll's long-poll wait. Zero keeps NewServer's 30s
 	// default (it is applied AFTER NewServer so the knob is not silently dead).
 	PollWait time.Duration
@@ -143,6 +148,11 @@ func New(cfg Config) (*Server, error) {
 			Store:  cfg.Store,
 			Cfg:    cfg.Human,
 		})
+	}
+	if cfg.Policy != nil {
+		if err := s.AttachPolicy(cfg.Policy); err != nil {
+			return nil, fmt.Errorf("hosted: New: policy: %w", err)
+		}
 	}
 
 	return s, nil

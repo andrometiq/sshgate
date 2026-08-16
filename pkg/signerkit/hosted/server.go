@@ -1,6 +1,7 @@
 package hosted
 
 import (
+	"context"
 	"crypto/subtle"
 	"log"
 	"net/http"
@@ -88,6 +89,14 @@ type Server struct {
 	machineAttached    bool
 	machineSubmitLimit *machineRateLimiter
 	machinePollLimit   *machineRateLimiter
+
+	policyMu         sync.Mutex
+	policy           *PolicyAPIConfig
+	policyCancel     context.CancelFunc
+	policyWorkers    sync.WaitGroup
+	policyWorkersRun bool
+	policyClosed     bool
+	policyRosterWait time.Duration
 }
 
 // NewServer builds a Server with routes registered. The Server's
@@ -112,6 +121,7 @@ func NewServer(auth string, st store.Store, logger *log.Logger) *Server {
 		mux:                http.NewServeMux(),
 		machineSubmitLimit: &machineRateLimiter{},
 		machinePollLimit:   &machineRateLimiter{},
+		policyRosterWait:   policyRosterSweepInterval,
 	}
 	s.AttachMachine()
 	return s

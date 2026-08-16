@@ -167,10 +167,34 @@ func (s *Service) SnapshotBaseManifestSigner() (ed25519.PublicKey, string, error
 	return s.daemon.SnapshotBaseManifestSigner()
 }
 
+// WithBaseManifestSignerIfCurrent holds custody across a short policy-store
+// commit so rotation cannot race final publication.
+func (s *Service) WithBaseManifestSignerIfCurrent(expectedKeyID string, expectedPublicKey ed25519.PublicKey, commit func() error) error {
+	return s.daemon.WithBaseManifestSignerIfCurrent(expectedKeyID, expectedPublicKey, commit)
+}
+
 // MaterializeBaseManifest routes a human-approved canonical policy payload
 // through the same Lock/RotateTo/HSM custody boundary as ordinary signatures.
 func (s *Service) MaterializeBaseManifest(expectedSignerKeyID, expectedHost string, exactPayload []byte) (BaseManifestMaterialization, error) {
 	return s.daemon.MaterializeBaseManifest(expectedSignerKeyID, expectedHost, exactPayload)
+}
+
+// MaterializeBaseManifestContext gives hosted recovery an explicit deadline
+// seam. crypto.Signer has no cancellation protocol, so an invocation already
+// inside Sign cannot be interrupted; the second check prevents persistence or
+// publication after its context expires.
+func (s *Service) MaterializeBaseManifestContext(ctx context.Context, expectedSignerKeyID, expectedHost string, exactPayload []byte) (BaseManifestMaterialization, error) {
+	if err := ctx.Err(); err != nil {
+		return BaseManifestMaterialization{}, err
+	}
+	result, err := s.daemon.MaterializeBaseManifest(expectedSignerKeyID, expectedHost, exactPayload)
+	if err != nil {
+		return BaseManifestMaterialization{}, err
+	}
+	if err := ctx.Err(); err != nil {
+		return BaseManifestMaterialization{}, err
+	}
+	return result, nil
 }
 
 // RotateToWithAudit delegates to Daemon.RotateToWithAudit for callers that

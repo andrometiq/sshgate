@@ -62,6 +62,10 @@ func (store *policyDB) ActivateSubmission(ctx context.Context, key policystore.K
 			request.ResultSHA256 = digestBytes(head.ManifestEnvelope)
 		} else {
 			request.State = policystore.StatePending
+			if store.fence != nil {
+				request.RecoveryLeaseOwner = ""
+				request.RecoveryLeaseUntil = 0
+			}
 		}
 		request.UpdatedAt = now.UTC().Unix()
 		return setExactPolicyReservation(ctx, transaction, request)
@@ -181,10 +185,21 @@ func (store *policyDB) PublishVoteAudit(ctx context.Context, key policystore.Key
 				return policystore.TallyResult{}, fmt.Errorf("publish policy vote audit: %w", err)
 			}
 		}
+		tally, err := policyTally(ctx, transaction, request)
+		if err != nil {
+			return policystore.TallyResult{}, err
+		}
+		if store.fence != nil && !tally.ApprovalReached && !tally.DenialReached && tally.Unaudited == 0 {
+			request.RecoveryLeaseOwner = ""
+			request.RecoveryLeaseUntil = 0
+			if err := updatePolicyRequest(ctx, transaction, request); err != nil {
+				return policystore.TallyResult{}, err
+			}
+		}
 		if err := finishPolicyMutation(ctx, transaction, meta); err != nil {
 			return policystore.TallyResult{}, err
 		}
-		return policyTally(ctx, transaction, request)
+		return tally, nil
 	})
 }
 
@@ -468,6 +483,10 @@ func (store *policyDB) StageMaterializationError(ctx context.Context, lease poli
 		request.ErrorFamily = policystore.ErrorFamilyProcessing
 		request.FailureCode = code
 		request.UpdatedAt = now.UTC().Unix()
+		if code == policywire.ErrorPolicyMaterializationFailed {
+			request.RecoveryLeaseOwner = ""
+			request.RecoveryLeaseUntil = 0
+		}
 		return setExactPolicyReservation(ctx, transaction, request)
 	})
 }
@@ -578,36 +597,17 @@ func (store *policyDB) ReconcilePendingAttainability(ctx context.Context, author
 			if err != nil {
 				return policystore.AttainabilityResult{}, err
 			}
-			if err := store.validateFence(request, now); err != nil {
-				return policystore.AttainabilityResult{}, err
-			}
 			result.Examined = append(result.Examined, key)
-			if err := requireNoUnauditedVotes(ctx, transaction, key); errors.Is(err, policystore.ErrUnauditedVote) {
-				continue
-			} else if err != nil {
-				return policystore.AttainabilityResult{}, err
-			}
 			attainable, err := policyCurrentlyAttainable(ctx, transaction, request)
 			if err != nil {
 				return policystore.AttainabilityResult{}, err
 			}
 			if !attainable {
-				request.State = policystore.StateErrorReceived
-				request.StateVersion++
-				request.ErrorFamily = policystore.ErrorFamilySemantic
-				request.FailureCode = policywire.ErrorQuorumUnattainable
-				request.UpdatedAt = now.UTC().Unix()
-				if err := setExactPolicyReservation(ctx, transaction, request); err != nil {
-					return policystore.AttainabilityResult{}, err
-				}
-				if err := updatePolicyRequest(ctx, transaction, request); err != nil {
-					return policystore.AttainabilityResult{}, err
-				}
 				result.Unattainable = append(result.Unattainable, key)
+				result.UnattainableCandidates = append(result.UnattainableCandidates, policystore.AttainabilityCandidate{
+					Key: key, StateVersion: request.StateVersion,
+				})
 			}
-		}
-		if err := finishPolicyMutation(ctx, transaction, meta); err != nil {
-			return policystore.AttainabilityResult{}, err
 		}
 		return result, nil
 	})
@@ -785,7 +785,7 @@ func materializedPolicyHead(request *policystore.Request, now time.Time) (*polic
 
 func terminalPolicyResponse(request *policystore.Request, status policywire.Status) ([]byte, error) {
 	response := policywire.Response{RequestID: request.RequestID, AuthorityID: request.AuthorityID, Purpose: request.Purpose,
-		Status: status, PayloadSHA256: request.PayloadSHA256, BaseDigest: request.BaseDigest, SignerKeyID: request.FrozenSignerKeyID.Value}
+		Status: status, PayloadSHA256: request.PayloadSHA256, BaseDigest: request.BaseDigest, SignerKeyID: terminalPolicySignerKeyID(request)}
 	if status == policywire.StatusApproved {
 		response.ManifestEnvelopeB64 = base64.StdEncoding.EncodeToString(request.ResultEnvelope)
 	}
@@ -794,6 +794,16 @@ func terminalPolicyResponse(request *policystore.Request, status policywire.Stat
 		response.Retryable = request.FailureCode == policywire.ErrorPolicyMaterializationFailed
 	}
 	return policywire.MarshalResponse(response)
+}
+
+func terminalPolicySignerKeyID(request *policystore.Request) string {
+	if request != nil && isMatrix2A(*request) {
+		return request.ExpectedSignerKeyID
+	}
+	if request != nil && request.FrozenSignerKeyID.Valid {
+		return request.FrozenSignerKeyID.Value
+	}
+	return ""
 }
 
 func publishPolicyTerminal(request *policystore.Request, state policystore.State, body []byte, status int, now time.Time) {

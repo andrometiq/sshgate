@@ -3,13 +3,17 @@ package signerkit
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"strconv"
 	"sync"
 	"time"
 
+	"github.com/karthikeyan5/sshgate/src/policy"
 	"github.com/karthikeyan5/sshgate/src/policyauthority"
 	"github.com/karthikeyan5/sshgate/src/policywire"
 )
@@ -105,31 +109,45 @@ type AuditVerdict struct {
 // shape. Digests are lowercase hexadecimal; it never carries manifest bytes,
 // command literals, signatures, or envelopes.
 type PolicyAuditMetadata struct {
-	EventID            string `json:"event_id"`
-	AuthorityID        string `json:"authority_id,omitempty"`
-	Purpose            string `json:"purpose"`
-	Principal          string `json:"principal"`
-	TupleDigest        string `json:"tuple_digest"`
-	Phase              string `json:"phase"`
-	StateVersion       uint64 `json:"state_version"`
-	RequestID          string `json:"request_id"`
-	HostKeyFP          string `json:"host_key_fp"`
-	PayloadSHA256      string `json:"payload_sha256"`
-	CandidateDigest    string `json:"candidate_digest"`
-	HeadDigest         string `json:"head_digest,omitempty"`
-	Epoch              uint64 `json:"epoch"`
-	Revision           uint64 `json:"revision"`
-	MissAction         string `json:"miss_action"`
-	Growth             string `json:"growth"`
-	EntryCount         int    `json:"entry_count"`
-	RevocationCount    int    `json:"revocation_count"`
-	SignerKeyID        string `json:"signer_key_id"`
-	ResultSHA256       string `json:"result_sha256,omitempty"`
-	Outcome            string `json:"outcome,omitempty"`
-	ErrorCode          string `json:"error_code,omitempty"`
-	NoOp               bool   `json:"no_op,omitempty"`
-	VerifiedOperator   string `json:"verified_operator,omitempty"`
-	OperatorAuthMethod string `json:"operator_auth_method,omitempty"`
+	EventID            string               `json:"event_id"`
+	AuthorityID        string               `json:"authority_id,omitempty"`
+	Purpose            string               `json:"purpose"`
+	Principal          string               `json:"principal"`
+	TupleDigest        string               `json:"tuple_digest"`
+	Phase              string               `json:"phase"`
+	StateVersion       uint64               `json:"state_version"`
+	RequestID          string               `json:"request_id"`
+	HostKeyFP          string               `json:"host_key_fp"`
+	PayloadSHA256      string               `json:"payload_sha256"`
+	CandidateDigest    string               `json:"candidate_digest"`
+	HeadDigest         string               `json:"head_digest,omitempty"`
+	Epoch              uint64               `json:"epoch"`
+	Revision           uint64               `json:"revision"`
+	MissAction         string               `json:"miss_action"`
+	Growth             string               `json:"growth"`
+	EntryCount         int                  `json:"entry_count"`
+	RevocationCount    int                  `json:"revocation_count"`
+	SignerKeyID        string               `json:"signer_key_id"`
+	ResultSHA256       string               `json:"result_sha256,omitempty"`
+	Outcome            string               `json:"outcome,omitempty"`
+	ErrorCode          string               `json:"error_code,omitempty"`
+	NoOp               bool                 `json:"no_op,omitempty"`
+	VerifiedOperator   string               `json:"verified_operator,omitempty"`
+	OperatorAuthMethod string               `json:"operator_auth_method,omitempty"`
+	Evidence           *PolicyAuditEvidence `json:"evidence,omitempty"`
+}
+
+// PolicyAuditEvidence keeps caller expectation, custody, and predecessor
+// snapshots distinct in the durable audit record. The declaration order is a
+// wire contract.
+type PolicyAuditEvidence struct {
+	ExpectedSignerKeyID      string `json:"expected_signer_key_id,omitempty"`
+	FrozenSignerKeyID        string `json:"frozen_signer_key_id,omitempty"`
+	FrozenSignerPublicKeyB64 string `json:"frozen_signer_public_key_b64,omitempty"`
+	TrustedEpoch             string `json:"trusted_epoch,omitempty"`
+	TrustedRevision          string `json:"trusted_revision,omitempty"`
+	ClaimedEpoch             string `json:"claimed_epoch,omitempty"`
+	ClaimedRevision          string `json:"claimed_revision,omitempty"`
 }
 
 type policyAuditMetadataWire PolicyAuditMetadata
@@ -177,12 +195,76 @@ func validatePolicyAuditAuthority(metadata PolicyAuditMetadata) error {
 		if metadata.AuthorityID != "" {
 			return errors.New("policy audit metadata: policy_not_supported must omit authority_id")
 		}
+		if metadata.Evidence != nil {
+			return errors.New("policy audit metadata: policy_not_supported must omit evidence")
+		}
 		return nil
 	}
 	if !policyauthority.ValidAuthorityID(metadata.AuthorityID) {
 		return errors.New("policy audit metadata: authority_id must be pauth_ plus 32 lowercase hexadecimal characters")
 	}
+	if err := validatePolicyAuditEvidence(metadata.Evidence); err != nil {
+		return err
+	}
 	return nil
+}
+
+func validatePolicyAuditEvidence(evidence *PolicyAuditEvidence) error {
+	if evidence == nil {
+		return nil
+	}
+	if !validAuditHex(evidence.ExpectedSignerKeyID, 64) {
+		return errors.New("policy audit evidence: expected signer key ID is invalid")
+	}
+	frozenID := evidence.FrozenSignerKeyID != ""
+	frozenKey := evidence.FrozenSignerPublicKeyB64 != ""
+	if frozenID != frozenKey || (frozenID && !validAuditHex(evidence.FrozenSignerKeyID, 64)) {
+		return errors.New("policy audit evidence: frozen signer pair is incomplete or invalid")
+	}
+	if frozenKey {
+		decoded, err := base64.StdEncoding.DecodeString(evidence.FrozenSignerPublicKeyB64)
+		if err != nil || len(decoded) != ed25519.PublicKeySize || base64.StdEncoding.EncodeToString(decoded) != evidence.FrozenSignerPublicKeyB64 {
+			return errors.New("policy audit evidence: frozen signer public key is invalid")
+		}
+		derived, err := policy.SignerKeyID(ed25519.PublicKey(decoded))
+		if err != nil || derived != evidence.FrozenSignerKeyID {
+			return errors.New("policy audit evidence: frozen signer key ID does not match public key")
+		}
+	}
+	if err := validatePolicyAuditEvidencePair("trusted predecessor", evidence.TrustedEpoch, evidence.TrustedRevision); err != nil {
+		return err
+	}
+	return validatePolicyAuditEvidencePair("claimed predecessor", evidence.ClaimedEpoch, evidence.ClaimedRevision)
+}
+
+func validatePolicyAuditEvidencePair(name, epoch, revision string) error {
+	if (epoch == "") != (revision == "") {
+		return fmt.Errorf("policy audit evidence: %s is incomplete", name)
+	}
+	if epoch == "" {
+		return nil
+	}
+	if !canonicalAuditUint64(epoch) || !canonicalAuditUint64(revision) {
+		return fmt.Errorf("policy audit evidence: %s is invalid", name)
+	}
+	return nil
+}
+
+func canonicalAuditUint64(value string) bool {
+	parsed, err := strconv.ParseUint(value, 10, 64)
+	return err == nil && strconv.FormatUint(parsed, 10) == value
+}
+
+func validAuditHex(value string, length int) bool {
+	if len(value) != length {
+		return false
+	}
+	for index := range value {
+		if (value[index] < '0' || value[index] > '9') && (value[index] < 'a' || value[index] > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // AuditRecoveryMetadata is the exact additive payload of the durable sink's

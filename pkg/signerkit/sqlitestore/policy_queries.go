@@ -86,8 +86,13 @@ func (store *policyDB) ListRecovery(ctx context.Context, authorityID string, now
 		updated, principal, requestID = after.UpdatedAt, after.Principal, after.RequestID
 	}
 	rows, err := store.database.QueryContext(ctx, `SELECT `+policyColumnNames(policystore.RequestColumns[:])+`
-		FROM policy_requests WHERE authority_id=? AND storage_kind='full' AND state IN
-		('received_unaudited','rejection_unaudited','rejection_error_received','approved_materializing','approved_unexposed','no_op_unexposed','denial_received','error_received') AND
+		FROM policy_requests r WHERE authority_id=? AND storage_kind='full' AND (state IN
+		('received_unaudited','rejection_unaudited','rejection_error_received','approved_materializing','approved_unexposed','no_op_unexposed','denial_received','error_received') OR
+		(state='pending' AND NOT EXISTS (SELECT 1 FROM policy_votes v WHERE v.principal=r.principal AND v.request_id=r.request_id AND v.audited=0) AND
+		 ((SELECT count(*) FROM policy_votes v WHERE v.principal=r.principal AND v.request_id=r.request_id AND v.audited=1 AND v.decision='approve') >= r.required_approvals OR
+		  (r.deny_veto=1 AND (SELECT count(*) FROM policy_votes v WHERE v.principal=r.principal AND v.request_id=r.request_id AND v.audited=1 AND v.decision='deny') > 0) OR
+		  ((SELECT count(*) FROM policy_votes v WHERE v.principal=r.principal AND v.request_id=r.request_id AND v.audited=1 AND v.decision='approve') +
+		   (r.eligible_voter_count - (SELECT count(*) FROM policy_votes v WHERE v.principal=r.principal AND v.request_id=r.request_id AND v.audited=1)) < r.required_approvals)))) AND
 		(recovery_lease_owner='' OR recovery_lease_until<=? OR recovery_lease_until>?) AND
 		(updated_at>? OR (updated_at=? AND principal>?) OR (updated_at=? AND principal=? AND request_id>?))
 		ORDER BY updated_at,principal,request_id LIMIT ?`, authorityID, now.UTC().Unix(), now.Add(2*time.Minute).UTC().Unix(),

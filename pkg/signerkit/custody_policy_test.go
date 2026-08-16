@@ -187,3 +187,44 @@ func TestBaseManifestCustodyHoldsLockAcrossExternalSign(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestBaseManifestCustodyGuardHoldsRotationAcrossCommit(t *testing.T) {
+	privateKey, publicKey := goldenSignerKey()
+	d := &Daemon{Signer: privateKey}
+	_, keyID, err := d.SnapshotBaseManifestSigner()
+	if err != nil {
+		t.Fatal(err)
+	}
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	committed := make(chan error, 1)
+	go func() {
+		committed <- d.WithBaseManifestSignerIfCurrent(keyID, publicKey, func() error {
+			close(entered)
+			<-release
+			return nil
+		})
+	}()
+	<-entered
+	rotatedKey, _ := altSignerKey()
+	rotated := make(chan error, 1)
+	go func() { rotated <- d.RotateTo(rotatedKey) }()
+	select {
+	case err := <-rotated:
+		t.Fatalf("rotation crossed custody-guarded commit: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(release)
+	if err := <-committed; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-rotated; err != nil {
+		t.Fatal(err)
+	}
+	if err := d.WithBaseManifestSignerIfCurrent(keyID, publicKey, func() error { return nil }); !errors.Is(err, ErrSignerKeyChanged) {
+		t.Fatalf("stale pair guard = %v; want ErrSignerKeyChanged", err)
+	}
+	if err := d.WithBaseManifestSignerIfCurrent(keyID, publicKey, nil); err == nil {
+		t.Fatal("nil custody commit callback accepted")
+	}
+}

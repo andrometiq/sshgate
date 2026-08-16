@@ -29,6 +29,13 @@
 // AttachHuman mount the two planes on the shared mux, and TestPlaneSeparation
 // asserts both directions.
 //
+// The additive policy-authority plane is mounted only through AttachPolicy.
+// Production composition uses StartPolicy, which owns the shared maintenance
+// lease, database, secure archive, durable audit readiness, one-transaction
+// safety scan, startup roster sweep, and the separate ROSTER and RECOVERY
+// workers. Policy readiness is independent of the ordinary /v1 plane; a sticky
+// durable-audit failure closes policy responses without stopping /v1.
+//
 // The wire the machine plane speaks is BYTE-FROZEN: the frozen
 // HostedServerBackend client in pkg/signerkit is the oracle (wire_frozen_test.go),
 // so /v1/sign, /v1/poll and /healthz cannot drift without failing to decode.

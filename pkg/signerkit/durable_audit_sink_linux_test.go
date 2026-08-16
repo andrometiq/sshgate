@@ -5,6 +5,7 @@ package signerkit
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/karthikeyan5/sshgate/src/policy"
 	"golang.org/x/sys/unix"
 )
 
@@ -70,6 +72,52 @@ func TestDurableAuditReadyAppendAndStickyIdentityFailure(t *testing.T) {
 	second := sink.PolicyAuditReady(context.Background())
 	if first == nil || second == nil || first.Error() != second.Error() {
 		t.Fatalf("identity failure was not sticky: first=%v second=%v", first, second)
+	}
+}
+
+func TestPolicyAuditEvidenceOrderedCanonicalEncoding(t *testing.T) {
+	_, publicKey := goldenSignerKey()
+	keyID, err := policy.SignerKeyID(publicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	evidence := PolicyAuditEvidence{
+		ExpectedSignerKeyID: keyID, FrozenSignerKeyID: keyID,
+		FrozenSignerPublicKeyB64: base64.StdEncoding.EncodeToString(publicKey),
+		TrustedEpoch:             "1", TrustedRevision: "2", ClaimedEpoch: "3", ClaimedRevision: "4",
+	}
+	encoded, err := json.Marshal(evidence)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `{"expected_signer_key_id":"` + keyID + `","frozen_signer_key_id":"` + keyID + `","frozen_signer_public_key_b64":"` + base64.StdEncoding.EncodeToString(publicKey) + `","trusted_epoch":"1","trusted_revision":"2","claimed_epoch":"3","claimed_revision":"4"}`
+	if string(encoded) != want {
+		t.Fatalf("evidence bytes = %s; want %s", encoded, want)
+	}
+	metadata := PolicyAuditMetadata{AuthorityID: "pauth_0123456789abcdef0123456789abcdef", Evidence: &evidence}
+	canonical, err := json.Marshal(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded PolicyAuditMetadata
+	if err := json.Unmarshal(canonical, &decoded); err != nil || decoded.Evidence == nil || decoded.Evidence.ClaimedRevision != "4" {
+		t.Fatalf("strict evidence round trip = %+v, %v", decoded.Evidence, err)
+	}
+
+	bad := evidence
+	bad.FrozenSignerKeyID = strings.Repeat("0", 64)
+	if _, err := json.Marshal(PolicyAuditMetadata{AuthorityID: metadata.AuthorityID, Evidence: &bad}); err == nil {
+		t.Fatal("derived frozen key-ID corruption accepted")
+	}
+	bad = evidence
+	bad.TrustedRevision = ""
+	if _, err := json.Marshal(PolicyAuditMetadata{AuthorityID: metadata.AuthorityID, Evidence: &bad}); err == nil {
+		t.Fatal("partial trusted predecessor evidence accepted")
+	}
+	bad = evidence
+	bad.ClaimedEpoch = "01"
+	if _, err := json.Marshal(PolicyAuditMetadata{AuthorityID: metadata.AuthorityID, Evidence: &bad}); err == nil {
+		t.Fatal("noncanonical predecessor integer accepted")
 	}
 }
 

@@ -550,8 +550,12 @@ func TestPolicyVoteUnauditedBarrierAndConflictFencing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(reconciled.Unattainable) != 0 {
-		t.Fatalf("reconciliation overtook unaudited vote: %+v", reconciled)
+	if len(reconciled.UnattainableCandidates) != 1 {
+		t.Fatalf("read-only reconciliation did not enumerate blocked candidate: %+v", reconciled)
+	}
+	candidate := reconciled.UnattainableCandidates[0]
+	if _, err := store.StageQuorumUnattainable(ctx, candidate.Key, candidate.StateVersion, input.Now.Add(3*time.Second)); !errors.Is(err, policystore.ErrUnauditedVote) {
+		t.Fatalf("per-key staging crossed unaudited-vote barrier: %v", err)
 	}
 	fetched, err := store.Fetch(ctx, request.Key())
 	if err != nil || fetched.State != policystore.StatePending || !bytes.Equal(fetched.PendingResponse, request.PendingResponse) {
@@ -570,6 +574,123 @@ func TestPolicyVoteUnauditedBarrierAndConflictFencing(t *testing.T) {
 	if !errors.Is(err, policystore.ErrVoteConflict) {
 		t.Fatalf("opposite audited vote error = %v", err)
 	}
+}
+
+func TestPolicySafetyScanUsesOneRootHookAndFailsOnCounterDrift(t *testing.T) {
+	database, store, _, _, _, _ := newPolicyStoreHarness(t, 1, false)
+	ctx := context.Background()
+	scanner, ok := store.(policystore.SafetyScanner)
+	if !ok {
+		t.Fatal("policy store does not implement SafetyScanner")
+	}
+	rootChecks := 0
+	if err := scanner.SafetyScan(ctx, func(request *policystore.Request) error {
+		if request != nil {
+			t.Fatalf("empty ledger unexpectedly inspected tombstone %+v", request.Key())
+		}
+		rootChecks++
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if rootChecks != 1 {
+		t.Fatalf("root hook count = %d; want one in the complete snapshot", rootChecks)
+	}
+	injected := errors.New("archive invariant failed")
+	if err := scanner.SafetyScan(ctx, func(*policystore.Request) error { return injected }); !errors.Is(err, injected) {
+		t.Fatalf("archive scan failure = %v; want injected error", err)
+	}
+	if _, err := database.db.Exec(`UPDATE policy_authority_meta SET logical_used_bytes=1 WHERE singleton=1`); err != nil {
+		t.Fatal(err)
+	}
+	err := scanner.SafetyScan(ctx, func(*policystore.Request) error { return nil })
+	var drift *policystore.CounterDriftError
+	if !errors.As(err, &drift) || drift.Counter != "logical_used_bytes" || drift.Stored != 1 || drift.Recomputed != 0 {
+		t.Fatalf("safety scan drift = %v (%+v)", err, drift)
+	}
+}
+
+func TestPolicyRecoveryCompletionClearsLeaseAndOutcomeReadyPendingIsListed(t *testing.T) {
+	t.Run("activation to pending", func(t *testing.T) {
+		database, store, public, _, keyID, _ := newPolicyStoreHarness(t, 1, false)
+		addPolicyVoter(t, database, "voter-a")
+		now := time.Now().UTC().Truncate(time.Second)
+		begin, err := store.Begin(context.Background(), policyBootstrapInput(t, public, keyID, authorityID("a"), "machine", "a", 1, now))
+		if err != nil {
+			t.Fatal(err)
+		}
+		owner := strings.Repeat("w", policystore.MaxIdentityBytes)
+		lease, err := store.AcquireRecoveryLease(context.Background(), begin.Request.Key(), owner, now, 2*time.Minute)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fenced := store.Fenced(lease)
+		request, err := fenced.MarkSubmissionAudited(context.Background(), begin.Request.Key(), begin.Request.StateVersion)
+		if err != nil {
+			t.Fatal(err)
+		}
+		request, err = fenced.ActivateSubmission(context.Background(), request.Key(), request.StateVersion, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if request.State != policystore.StatePending || request.RecoveryLeaseOwner != "" || request.RecoveryLeaseUntil != 0 {
+			t.Fatalf("activation completion retained lease: %+v", request)
+		}
+	})
+
+	t.Run("vote acknowledgement without outcome", func(t *testing.T) {
+		database, store, public, _, keyID, _ := newPolicyStoreHarness(t, 2, false)
+		addPolicyVoter(t, database, "voter-a")
+		addPolicyVoter(t, database, "voter-b")
+		now := time.Now().UTC().Truncate(time.Second)
+		begin, err := store.Begin(context.Background(), policyBootstrapInput(t, public, keyID, authorityID("a"), "machine", "b", 1, now))
+		if err != nil {
+			t.Fatal(err)
+		}
+		request, _ := store.MarkSubmissionAudited(context.Background(), begin.Request.Key(), begin.Request.StateVersion)
+		request, _ = store.ActivateSubmission(context.Background(), request.Key(), request.StateVersion, now)
+		vote, err := store.PrepareVote(context.Background(), policystore.VoteInput{ReviewID: request.ReviewID, Operator: "voter-a", Decision: policystore.DecisionApprove, AuthnMethod: policystore.AuthnSession, Now: now})
+		if err != nil {
+			t.Fatal(err)
+		}
+		lease, err := store.AcquireRecoveryLease(context.Background(), request.Key(), strings.Repeat("w", policystore.MaxIdentityBytes), now, 2*time.Minute)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.Fenced(lease).PublishVoteAudit(context.Background(), request.Key(), "voter-a", vote.Vote.AuditStateVersion); err != nil {
+			t.Fatal(err)
+		}
+		request, err = store.GetByReviewID(context.Background(), request.ReviewID)
+		if err != nil || request.RecoveryLeaseOwner != "" || request.RecoveryLeaseUntil != 0 {
+			t.Fatalf("completed vote item retained lease: %+v, %v", request, err)
+		}
+	})
+
+	t.Run("audited threshold pending is recovery work", func(t *testing.T) {
+		database, store, public, _, keyID, _ := newPolicyStoreHarness(t, 1, false)
+		addPolicyVoter(t, database, "voter-a")
+		now := time.Now().UTC().Truncate(time.Second)
+		begin, err := store.Begin(context.Background(), policyBootstrapInput(t, public, keyID, authorityID("a"), "machine", "c", 1, now))
+		if err != nil {
+			t.Fatal(err)
+		}
+		request, _ := store.MarkSubmissionAudited(context.Background(), begin.Request.Key(), begin.Request.StateVersion)
+		request, _ = store.ActivateSubmission(context.Background(), request.Key(), request.StateVersion, now)
+		vote, err := store.PrepareVote(context.Background(), policystore.VoteInput{ReviewID: request.ReviewID, Operator: "voter-a", Decision: policystore.DecisionApprove, AuthnMethod: policystore.AuthnSession, Now: now})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.PublishVoteAudit(context.Background(), request.Key(), "voter-a", vote.Vote.AuditStateVersion); err != nil {
+			t.Fatal(err)
+		}
+		page, err := store.ListRecovery(context.Background(), authorityID("a"), now, nil, 64)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(page.Requests) != 1 || page.Requests[0].State != policystore.StatePending || page.Requests[0].Key() != request.Key() {
+			t.Fatalf("outcome-ready pending recovery page = %+v", page.Requests)
+		}
+	})
 }
 
 func TestPolicyMatrix2BQuorumUnattainableUsesRejectionPublication(t *testing.T) {
@@ -596,6 +717,14 @@ func TestPolicyMatrix2BQuorumUnattainableUsesRejectionPublication(t *testing.T) 
 	}
 	if len(reconciled.Unattainable) != 1 || reconciled.Unattainable[0] != request.Key() {
 		t.Fatalf("reconciliation result = %+v", reconciled)
+	}
+	beforeStage, err := store.GetByReviewID(ctx, request.ReviewID)
+	if err != nil || beforeStage.State != policystore.StatePending {
+		t.Fatalf("read-only reconciliation mutated request: %+v, %v", beforeStage, err)
+	}
+	candidate := reconciled.UnattainableCandidates[0]
+	if _, err := store.StageQuorumUnattainable(ctx, candidate.Key, candidate.StateVersion, input.Now.Add(2*time.Second)); err != nil {
+		t.Fatalf("per-key quorum staging: %v", err)
 	}
 	request, err = store.GetByReviewID(ctx, request.ReviewID)
 	if err != nil {

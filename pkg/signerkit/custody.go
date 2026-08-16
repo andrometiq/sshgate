@@ -144,6 +144,34 @@ func (d *Daemon) SnapshotBaseManifestSigner() (ed25519.PublicKey, string, error)
 	return publicKey, keyID, nil
 }
 
+// WithBaseManifestSignerIfCurrent holds policy custody across one short durable
+// commit. The callback must not perform external I/O and must preserve the
+// custody -> policy-store lock order.
+func (d *Daemon) WithBaseManifestSignerIfCurrent(expectedKeyID string, expectedPublicKey ed25519.PublicKey, commit func() error) error {
+	if commit == nil {
+		return errors.New("base manifest custody commit callback is nil")
+	}
+	d.custodyMu.RLock()
+	defer d.custodyMu.RUnlock()
+
+	signer, err := d.resolveSignerLocked()
+	if err != nil {
+		return err
+	}
+	publicKey, err := exactEd25519PublicKey(signer)
+	if err != nil {
+		return err
+	}
+	keyID, err := policy.SignerKeyID(publicKey)
+	if err != nil {
+		return err
+	}
+	if keyID != expectedKeyID || !bytes.Equal(publicKey, expectedPublicKey) {
+		return fmt.Errorf("%w: current %s; expected %s", ErrSignerKeyChanged, keyID, expectedKeyID)
+	}
+	return commit()
+}
+
 // MaterializeBaseManifest validates and signs exactPayload while holding
 // custodyMu.RLock for the complete operation. Lock and RotateTo therefore
 // linearize outside the mint, and a post-prompt rotation fails with

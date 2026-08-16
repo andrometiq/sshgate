@@ -355,8 +355,14 @@ type TallyResult struct {
 }
 
 type AttainabilityResult struct {
-	Examined     []Key
-	Unattainable []Key
+	Examined               []Key
+	Unattainable           []Key
+	UnattainableCandidates []AttainabilityCandidate
+}
+
+type AttainabilityCandidate struct {
+	Key          Key
+	StateVersion uint64
 }
 
 type Lease struct {
@@ -505,6 +511,13 @@ type Store interface {
 	Fenced(Lease) RecoveryStore
 }
 
+// SafetyScanner performs the serving readiness scan as one side-effect-free
+// database snapshot. inspectArchive first receives nil for root/shard/binding
+// validation, then every tombstone while that snapshot remains held.
+type SafetyScanner interface {
+	SafetyScan(context.Context, func(*Request) error) error
+}
+
 type RecoveryStore interface {
 	MarkSubmissionAudited(context.Context, Key, uint64) (*Request, error)
 	MarkRejectionSubmissionAudited(context.Context, Key, uint64) (*Request, error)
@@ -513,7 +526,6 @@ type RecoveryStore interface {
 	PublishVoteAudit(context.Context, Key, string, uint64) (TallyResult, error)
 	ClaimDenial(context.Context, Key, uint64, time.Time) (*Request, error)
 	ClaimApproval(context.Context, Key, uint64, string, time.Time, time.Duration) (WorkLease, error)
-	ReconcilePendingAttainability(context.Context, string, time.Time) (AttainabilityResult, error)
 	StageQuorumUnattainable(context.Context, Key, uint64, time.Time) (*Request, error)
 	MarkPreMintAudited(context.Context, WorkLease) (*Request, error)
 	PersistMaterialized(context.Context, WorkLease, []byte, time.Time) (*Request, error)

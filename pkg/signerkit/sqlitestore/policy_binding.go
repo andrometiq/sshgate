@@ -201,6 +201,70 @@ func (store *policyDB) VerifyAuthorityBinding(ctx context.Context) (policystore.
 	}, nil
 }
 
+// SafetyScan verifies the complete bounded policy ledger in one
+// BEGIN IMMEDIATE snapshot and performs no mutation. Archive inspection stays
+// inside that snapshot so readiness never relies on a resumable cursor or a
+// synthesized snapshot-equivalence protocol.
+func (store *policyDB) SafetyScan(ctx context.Context, inspectArchive func(*policystore.Request) error) error {
+	_, err := withPolicyImmediate(ctx, store.database, func(transaction *sql.Tx) (struct{}, error) {
+		if err := requirePolicyMigration(ctx, transaction); err != nil {
+			return struct{}{}, err
+		}
+		if err := verifyPolicySchema(ctx, transaction); err != nil {
+			return struct{}{}, err
+		}
+		meta, err := readPolicyMeta(ctx, transaction)
+		if err != nil {
+			return struct{}{}, err
+		}
+		if err := verifyPolicyRosterIdentities(ctx, transaction, meta.PolicyVoterRole, meta.VoteStepUpRequired); err != nil {
+			return struct{}{}, err
+		}
+		if err := verifyPolicyKeyBindings(ctx, transaction, meta.AuthorityID, false); err != nil {
+			return struct{}{}, err
+		}
+		if _, err := scanPolicyLedger(ctx, transaction, meta); err != nil {
+			return struct{}{}, err
+		}
+		if inspectArchive == nil {
+			var tombstones int
+			if err := transaction.QueryRowContext(ctx, "SELECT count(*) FROM policy_requests WHERE storage_kind='tombstone'").Scan(&tombstones); err != nil {
+				return struct{}{}, err
+			}
+			if tombstones != 0 {
+				return struct{}{}, errors.New("policy safety scan: archive inspector is required for tombstones")
+			}
+			return struct{}{}, nil
+		}
+		// A nil request is the once-per-snapshot root/binding/shard hook.
+		if err := inspectArchive(nil); err != nil {
+			return struct{}{}, fmt.Errorf("policy safety scan: inspect archive root: %w", err)
+		}
+		rows, err := transaction.QueryContext(ctx, `SELECT `+policyColumnNames(policystore.RequestColumns[:])+` FROM policy_requests WHERE storage_kind='tombstone' ORDER BY principal,request_id`)
+		if err != nil {
+			return struct{}{}, err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			fields, err := scanPolicyFields(rows, policystore.RequestColumns[:])
+			if err != nil {
+				return struct{}{}, err
+			}
+			request, err := policystore.RequestFromFields(fields)
+			if err != nil {
+				return struct{}{}, err
+			}
+			if err := inspectArchive(&request); err != nil {
+				return struct{}{}, fmt.Errorf("policy safety scan: inspect archive %s/%s: %w", request.Principal, request.RequestID, err)
+			}
+		}
+		return struct{}{}, rows.Err()
+	})
+	return err
+}
+
+var _ policystore.SafetyScanner = (*policyDB)(nil)
+
 func verifyPolicyRosterIdentities(ctx context.Context, queryer policyQueryer, role string, stepUp bool) error {
 	query := `SELECT u.id FROM users u WHERE u.role=? AND EXISTS
 		(SELECT 1 FROM totp_secrets t WHERE t.user_id=u.id) ORDER BY u.id`
@@ -915,8 +979,7 @@ func validateStoredPolicyFailure(request *policystore.Request) error {
 func policyResponseMatchesRequest(response policywire.DecodedResponse, request *policystore.Request) bool {
 	return response.Wire.RequestID == request.RequestID && response.Wire.AuthorityID == request.AuthorityID &&
 		response.Wire.Purpose == request.Purpose && response.Wire.PayloadSHA256 == request.PayloadSHA256 &&
-		response.Wire.BaseDigest == request.BaseDigest && request.FrozenSignerKeyID.Valid &&
-		response.Wire.SignerKeyID == request.FrozenSignerKeyID.Value
+		response.Wire.BaseDigest == request.BaseDigest && response.Wire.SignerKeyID == terminalPolicySignerKeyID(request)
 }
 
 func validatePolicyVoteRecord(vote *policystore.Vote, request *policystore.Request) error {
