@@ -227,6 +227,7 @@ func policyFetchResult(request *policystore.Request) policystore.FetchResult {
 	}
 	if result.Class == policystore.RowLive && request.SubmissionAudited && request.State != policystore.StateRejectionUnaudited && request.State != policystore.StateRejectionErrorReceived {
 		result.Visibility = policystore.VisibilityPending
+		result.PendingResponse = slices.Clone(request.PendingResponse)
 	}
 	return result
 }
@@ -422,11 +423,13 @@ func enforcePolicyAdmission(ctx context.Context, queryer policyQueryer, meta pol
 		return err
 	}
 	if matrix2A {
-		var recent, retained int64
-		var retainedBytes sql.NullInt64
+		var recent, retained, retainedBytes int64
 		cutoff := now.UTC().Unix() - policystore.RejectionWindowSeconds
-		if err := queryer.QueryRowContext(ctx, `SELECT coalesce(sum(CASE WHEN created_at>? THEN 1 ELSE 0 END),0),count(*),sum(reserved_bytes) FROM policy_requests WHERE principal=? AND error_family='semantic-rejection' AND failure_code IN ('invalid_policy_request','policy_request_in_progress','signer_key_changed','stale_policy_head','policy_key_transition_required')`, cutoff, request.Principal).Scan(&recent, &retained, &retainedBytes); err != nil {
+		if err := queryer.QueryRowContext(ctx, `SELECT coalesce(sum(CASE WHEN created_at>? THEN 1 ELSE 0 END),0),count(*),coalesce(sum(CASE WHEN storage_kind='full' THEN length(canonical_request)+length(payload) ELSE reserved_bytes END),0) FROM policy_requests WHERE principal=? AND error_family='semantic-rejection' AND failure_code IN ('invalid_policy_request','policy_request_in_progress','signer_key_changed','stale_policy_head','policy_key_transition_required')`, cutoff, request.Principal).Scan(&recent, &retained, &retainedBytes); err != nil {
 			return fmt.Errorf("check policy rejection budgets: %w", err)
+		}
+		if retainedBytes < 0 {
+			return fmt.Errorf("%w: negative rejection byte census", policystore.ErrCorrupt)
 		}
 		if recent >= policystore.RejectionWindowLimit {
 			oldest := int64(0)
@@ -436,7 +439,7 @@ func enforcePolicyAdmission(ctx context.Context, queryer policyQueryer, meta pol
 		if retained >= policystore.RejectionRetainedRowLimit {
 			return &policystore.CapacityError{Kind: policystore.CapacityRetainedRows}
 		}
-		if retainedBytes.Valid && uint64(retainedBytes.Int64)+request.ReservedBytes > meta.MaxRejectionReservedBytesPerPrincipal {
+		if uint64(retainedBytes)+rejectionFloor(request) > meta.MaxRejectionReservedBytesPerPrincipal {
 			return &policystore.CapacityError{Kind: policystore.CapacityRetainedBytes}
 		}
 	}

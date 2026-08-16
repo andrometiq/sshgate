@@ -232,8 +232,12 @@ func reservationComponentsForRequest(request *policystore.Request) (policystore.
 			if err != nil {
 				return policystore.ReservationComponents{}, err
 			}
+			growth, err := policystore.RowGrowthMaximum(nil, true)
+			if err != nil {
+				return policystore.ReservationComponents{}, err
+			}
 			return policystore.ReservationComponents{Admission: request.ReservedBytes, Terminal: terminal.Matrix2A,
-				TerminalPublication: terminal.Publication, Matrix2A: true}, nil
+				TerminalPublication: terminal.Publication, Growth: growth, Matrix2A: true}, nil
 		}
 		return policystore.Matrix2AReservation(request.CanonicalRequest, request.Payload)
 	}
@@ -305,39 +309,25 @@ func expectedRequestRemaining(ctx context.Context, queryer policyQueryer, reques
 	if err != nil {
 		return 0, err
 	}
-	if components.Matrix2A {
-		return components.Total()
-	}
-	var voteBytes int64
-	if err := queryer.QueryRowContext(ctx, `SELECT COALESCE(SUM(logical_bytes),0) FROM policy_votes WHERE principal=? AND request_id=?`, request.Principal, request.RequestID).Scan(&voteBytes); err != nil {
-		return 0, err
-	}
-	if voteBytes < 0 || uint64(voteBytes) > components.Votes {
-		return 0, fmt.Errorf("%w: vote reservation consumption", policystore.ErrCorrupt)
-	}
-	publication := uint64(policywire.MaxResponseFrameBytes) + 16
-	resultEnvelope, err := policystore.SignedEnvelopeLength(policy.MaxPolicyPayloadBytes)
-	if err != nil {
-		return 0, err
-	}
-	resultMaximum := resultEnvelope + 64
-	remaining := components.Admission
-	switch request.State {
-	case policystore.StateReceivedUnaudited, policystore.StatePending:
-		remaining += components.Votes - uint64(voteBytes)
-		if uint64(len(request.PendingResponse)) > components.Terminal {
-			return 0, fmt.Errorf("%w: pending response exceeds commitment", policystore.ErrCorrupt)
+	var consumedVotes uint64
+	if !components.Matrix2A {
+		var voteBytes int64
+		if err := queryer.QueryRowContext(ctx, `SELECT COALESCE(SUM(logical_bytes),0) FROM policy_votes WHERE principal=? AND request_id=?`, request.Principal, request.RequestID).Scan(&voteBytes); err != nil {
+			return 0, err
 		}
-		remaining += components.Terminal - uint64(len(request.PendingResponse))
-		remaining += components.Head
-	case policystore.StateApprovedMaterializing:
-		remaining += resultMaximum + publication + components.Head
-	case policystore.StateApprovedUnexposed:
-		remaining += publication + components.Head
-	case policystore.StateNoOpUnexposed, policystore.StateDenialReceived, policystore.StateErrorReceived:
-		remaining += publication
-	default:
-		return 0, fmt.Errorf("%w: unsupported reservation state %s", policystore.ErrCorrupt, request.State)
+		if voteBytes < 0 || uint64(voteBytes) > components.Votes {
+			return 0, fmt.Errorf("%w: vote reservation consumption", policystore.ErrCorrupt)
+		}
+		consumedVotes = uint64(voteBytes)
+	}
+	remaining, err := policystore.DeriveRemaining(policystore.RemainingInput{
+		Components: components, State: request.State, ConsumedVotes: consumedVotes,
+		ConsumedTerminal:     uint64(len(request.PendingResponse)),
+		ClaimedGroupConsumed: request.ClaimedHeadEnvelope != nil,
+		LeaseOwnerConsumed:   request.RecoveryLeaseGeneration > 0,
+	})
+	if err != nil {
+		return 0, fmt.Errorf("%w: reservation state %s: %v", policystore.ErrCorrupt, request.State, err)
 	}
 	if remaining > math.MaxInt64 {
 		return 0, errors.New("policy remaining commitment exceeds MaxInt64")

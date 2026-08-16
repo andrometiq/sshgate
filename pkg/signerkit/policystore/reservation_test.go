@@ -145,10 +145,63 @@ func TestExactHeadGrowthBootstrapAndSuccessor(t *testing.T) {
 	}
 }
 
+func TestRowGrowthMaximumIsDerived(t *testing.T) {
+	t.Parallel()
+	trusted := candidateHeadFixture(t)
+	growth, err := RowGrowthMaximum(&trusted, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantClaimed := uint64(len(trusted.ManifestEnvelope) + len(trusted.BaseDigest) + len(trusted.SignerKeyID) +
+		len(trusted.SignerPublicKey) + len(trusted.EpochBE) + len(trusted.RevisionBE) + 8)
+	wantSpelling := uint64((len(StateApprovedMaterializing) - len(StateReceivedUnaudited)) +
+		len(ErrorFamilySemantic) + len(policywire.ErrorPolicyMaterializationFailed))
+	if growth.ClaimedGroup != wantClaimed || growth.LeaseOwner != MaxIdentityBytes || growth.Spelling != wantSpelling {
+		t.Fatalf("successor G = %+v; want claimed=%d owner=%d spelling=%d", growth, wantClaimed, MaxIdentityBytes, wantSpelling)
+	}
+	bootstrap, err := RowGrowthMaximum(nil, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bootstrap.ClaimedGroup != 0 || bootstrap.LeaseOwner != MaxIdentityBytes || bootstrap.Spelling != 51 {
+		t.Fatalf("bootstrap G = %+v", bootstrap)
+	}
+	rejection, err := RowGrowthMaximum(nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rejection.ClaimedGroup != 0 || rejection.LeaseOwner != MaxIdentityBytes || rejection.Spelling != 5 {
+		t.Fatalf("Matrix-2a G = %+v", rejection)
+	}
+	if total, err := rejection.Total(); err != nil || total != MaxIdentityBytes+5 {
+		t.Fatalf("Matrix-2a G total = %d, %v", total, err)
+	}
+	accepted, err := AcceptedReservation([]byte{'r'}, []byte{'p'}, trusted, &trusted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if accepted.Growth != growth {
+		t.Fatalf("AcceptedReservation G = %+v; want %+v", accepted.Growth, growth)
+	}
+	rejected, err := Matrix2AReservation([]byte{'r'}, []byte{'p'})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rejected.Growth != rejection {
+		t.Fatalf("Matrix2AReservation G = %+v; want %+v", rejected.Growth, rejection)
+	}
+	remaining, err := AdmissionRemaining(rejected, nil)
+	total, totalErr := rejected.Total()
+	if err != nil || totalErr != nil || remaining != total {
+		t.Fatalf("Matrix-2a admission remaining/total = %d/%d, %v/%v", remaining, total, err, totalErr)
+	}
+}
+
 func TestDerivedReservationTransitions(t *testing.T) {
 	t.Parallel()
 	components := ReservationComponents{Admission: 10, Votes: 100, Terminal: 100,
-		TerminalPending: 10, TerminalResult: 30, TerminalPublication: 60, Head: 50}
+		TerminalPending: 10, TerminalResult: 30, TerminalPublication: 60, Head: 50,
+		Growth: RowGrowthCommitments{ClaimedGroup: 40, LeaseOwner: 30, Spelling: 10}}
 	received := RemainingInput{Components: components, State: StateReceivedUnaudited, ConsumedTerminal: 10}
 	pending := received
 	pending.State = StatePending
@@ -159,6 +212,10 @@ func TestDerivedReservationTransitions(t *testing.T) {
 	if audit.Before != audit.After || audit.Released != 0 {
 		t.Fatalf("audit flip moved reservation: %+v", audit)
 	}
+	transition, err := DeriveTransition(received, pending, 0)
+	if err != nil || transition.Released != components.Growth.Spelling {
+		t.Fatalf("first state transition = %+v, %v", transition, err)
+	}
 	voted := pending
 	voted.ConsumedVotes = 20
 	if transition, err := DeriveTransition(pending, voted, 20); err != nil || transition.Released != 0 {
@@ -166,7 +223,10 @@ func TestDerivedReservationTransitions(t *testing.T) {
 	}
 	materializing := voted
 	materializing.State = StateApprovedMaterializing
-	transition, err := DeriveTransition(voted, materializing, 0)
+	materializing.ClaimedGroupConsumed = true
+	materializing.LeaseOwnerConsumed = true
+	claimWrite := components.Growth.ClaimedGroup + components.Growth.LeaseOwner
+	transition, err = DeriveTransition(voted, materializing, claimWrite)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -195,8 +255,21 @@ func TestDerivedReservationTransitions(t *testing.T) {
 		t.Fatalf("terminal transition = %+v", transition)
 	}
 
-	rejection := ReservationComponents{Admission: 10, Terminal: 100, TerminalPublication: 100, Matrix2A: true}
-	staged := RemainingInput{Components: rejection, State: StateRejectionErrorReceived}
+	rejection := ReservationComponents{Admission: 10, Terminal: 100, TerminalPublication: 100,
+		Growth: RowGrowthCommitments{LeaseOwner: 30, Spelling: 10}, Matrix2A: true}
+	admitted := RemainingInput{Components: rejection, State: StateRejectionUnaudited}
+	leased := admitted
+	leased.LeaseOwnerConsumed = true
+	transition, err = DeriveTransition(admitted, leased, rejection.Growth.LeaseOwner)
+	if err != nil || transition.Released != 0 {
+		t.Fatalf("Matrix-2a first lease = %+v, %v", transition, err)
+	}
+	staged := leased
+	staged.State = StateRejectionErrorReceived
+	transition, err = DeriveTransition(leased, staged, rejection.Growth.Spelling)
+	if err != nil || transition.Released != 0 {
+		t.Fatalf("Matrix-2a first state transition = %+v, %v", transition, err)
+	}
 	terminal := staged
 	terminal.State = StateError
 	transition, err = DeriveTransition(staged, terminal, 20)
@@ -219,26 +292,75 @@ func TestStateReachabilityDerivedOracle(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: %v", state, err)
 		}
-		if state.Terminal() && (reachable.Votes || reachable.Terminal || reachable.Head || reachable.Admission) {
+		if state.Terminal() && (reachable.Votes || reachable.Terminal || reachable.Head || reachable.Admission || reachable.Growth) {
 			t.Errorf("non-2a terminal %s retained components: %+v", state, reachable)
 		}
 		if state != StatePending && state != StateReceivedUnaudited && reachable.Votes {
 			t.Errorf("%s retains V", state)
+		}
+		if !state.Terminal() && !reachable.Growth {
+			t.Errorf("%s does not retain G", state)
 		}
 	}
 	reachable, err := StateReachability(StateError, true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reachable.Admission || reachable.Votes || reachable.Terminal || reachable.Head {
+	if !reachable.Admission || reachable.Votes || reachable.Terminal || reachable.Head || reachable.Growth {
 		t.Fatalf("Matrix-2a terminal reachability = %+v", reachable)
+	}
+}
+
+func TestRowGrowthRemainingMilestones(t *testing.T) {
+	t.Parallel()
+	accepted := ReservationComponents{Growth: RowGrowthCommitments{ClaimedGroup: 40, LeaseOwner: 128, Spelling: 51}}
+	for _, test := range []struct {
+		name           string
+		state          State
+		claimed, owner bool
+		want           uint64
+	}{
+		{name: "admission", state: StateReceivedUnaudited, want: 40 + 128 + 51},
+		{name: "pending", state: StatePending, want: 40 + 128},
+		{name: "materializing", state: StateApprovedMaterializing, claimed: true, owner: true},
+		{name: "no-op retains unconsumed", state: StateNoOpUnexposed, want: 40 + 128},
+		{name: "denial retains unconsumed", state: StateDenialReceived, want: 40 + 128},
+		{name: "pre-claim error retains unconsumed", state: StateErrorReceived, want: 40 + 128},
+		{name: "post-claim error", state: StateErrorReceived, claimed: true, owner: true},
+		{name: "publication releases remainder", state: StateError, want: 0},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := DeriveRemaining(RemainingInput{Components: accepted, State: test.state,
+				ClaimedGroupConsumed: test.claimed, LeaseOwnerConsumed: test.owner})
+			if err != nil || got != test.want {
+				t.Fatalf("remaining G = %d, %v; want %d", got, err, test.want)
+			}
+		})
+	}
+
+	rejection := ReservationComponents{Growth: RowGrowthCommitments{LeaseOwner: 128, Spelling: 5}, Matrix2A: true}
+	for _, test := range []struct {
+		state State
+		owner bool
+		want  uint64
+	}{
+		{state: StateRejectionUnaudited, want: 133},
+		{state: StateRejectionErrorReceived, want: 128},
+		{state: StateRejectionErrorReceived, owner: true, want: 0},
+		{state: StateError, owner: true, want: 0},
+	} {
+		got, err := DeriveRemaining(RemainingInput{Components: rejection, State: test.state, LeaseOwnerConsumed: test.owner})
+		if err != nil || got != test.want {
+			t.Fatalf("Matrix-2a %s owner=%t remaining G = %d, %v; want %d", test.state, test.owner, got, err, test.want)
+		}
 	}
 }
 
 func TestEveryLegalStateTransitionHasNonNegativeMonotoneRelease(t *testing.T) {
 	t.Parallel()
 	components := ReservationComponents{Admission: 10, Votes: 100, Terminal: 100,
-		TerminalPending: 10, TerminalResult: 30, TerminalPublication: 60, Head: 50}
+		TerminalPending: 10, TerminalResult: 30, TerminalPublication: 60, Head: 50,
+		Growth: RowGrowthCommitments{Spelling: 10}}
 	image := func(state State) RemainingInput {
 		return RemainingInput{Components: components, State: state, ConsumedVotes: 20, ConsumedTerminal: 5}
 	}
@@ -273,7 +395,8 @@ func TestEveryLegalStateTransitionHasNonNegativeMonotoneRelease(t *testing.T) {
 		}
 	}
 
-	rejection := ReservationComponents{Admission: 10, Terminal: 60, TerminalPublication: 60, Matrix2A: true}
+	rejection := ReservationComponents{Admission: 10, Terminal: 60, TerminalPublication: 60,
+		Growth: RowGrowthCommitments{Spelling: 10}, Matrix2A: true}
 	rejectionImage := func(state State) RemainingInput {
 		return RemainingInput{Components: rejection, State: state}
 	}

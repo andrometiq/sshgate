@@ -550,22 +550,27 @@ func TestMigration6ApprovedTombstoneRetainsResultDigest(t *testing.T) {
 		t.Fatalf("audit materialized result: %v", err)
 	}
 	if _, err := database.db.Exec(`UPDATE policy_requests SET state='approved',terminal_response=x'7b7d',
-		 terminal_http_status=200,resolved_at=10,reserved_bytes=0
-		WHERE principal='alice' AND request_id=?`, request); err != nil {
+		 terminal_http_status=200,resolved_at=10,reserved_bytes=0,
+		 recovery_lease_owner='',recovery_lease_until=0
+		 WHERE principal='alice' AND request_id=?`, request); err != nil {
 		t.Fatalf("publish approval: %v", err)
 	}
 	if _, err := database.db.Exec(policyTestCompactSQL,
 		archiveID("a"), hex64("b"), hex64("c"), "alice", request); err != nil {
 		t.Fatalf("compact approved terminal with retained result digest: %v", err)
 	}
-	var storage, storedDigest string
+	var storage, storedDigest, leaseOwner string
+	var leaseUntil, leaseGeneration int64
 	var envelope []byte
-	if err := database.db.QueryRow(`SELECT storage_kind,result_envelope,result_sha256 FROM policy_requests
-		WHERE principal='alice' AND request_id=?`, request).Scan(&storage, &envelope, &storedDigest); err != nil {
+	if err := database.db.QueryRow(`SELECT storage_kind,result_envelope,result_sha256,
+		recovery_lease_owner,recovery_lease_until,recovery_lease_generation FROM policy_requests
+		WHERE principal='alice' AND request_id=?`, request).
+		Scan(&storage, &envelope, &storedDigest, &leaseOwner, &leaseUntil, &leaseGeneration); err != nil {
 		t.Fatal(err)
 	}
-	if storage != "tombstone" || envelope != nil || storedDigest != resultDigest {
-		t.Fatalf("approved tombstone storage/envelope/digest = %s/%x/%s", storage, envelope, storedDigest)
+	if storage != "tombstone" || envelope != nil || storedDigest != resultDigest || leaseOwner != "" || leaseUntil != 0 || leaseGeneration != 1 {
+		t.Fatalf("approved tombstone storage/envelope/digest/lease = %s/%x/%s %q/%d/%d",
+			storage, envelope, storedDigest, leaseOwner, leaseUntil, leaseGeneration)
 	}
 }
 
@@ -632,21 +637,27 @@ func TestMigration6SuccessorNoOpKeepsClaimedPredecessorAbsent(t *testing.T) {
 		t.Fatalf("stage leased successor no-op error without claimed predecessor: %v", err)
 	}
 	if _, err := database.db.Exec(`UPDATE policy_requests SET state='error',terminal_response=x'7b7d',
-		 terminal_http_status=409,resolved_at=10,reserved_bytes=0
-		WHERE principal='bob' AND request_id=?`, errorRequest); err != nil {
+		 terminal_http_status=409,resolved_at=10,reserved_bytes=0,
+		 recovery_lease_owner='',recovery_lease_until=0
+		 WHERE principal='bob' AND request_id=?`, errorRequest); err != nil {
 		t.Fatalf("publish successor no-op error: %v", err)
 	}
 	if _, err := database.db.Exec(policyTestCompactSQL,
 		archiveID("a"), hex64("b"), hex64("c"), "bob", errorRequest); err != nil {
 		t.Fatalf("compact successor no-op publication error: %v", err)
 	}
-	var errorStorage, errorResultDigest string
-	if err := database.db.QueryRow(`SELECT storage_kind,result_sha256 FROM policy_requests
-		WHERE principal='bob' AND request_id=?`, errorRequest).Scan(&errorStorage, &errorResultDigest); err != nil {
+	var errorStorage, errorResultDigest, errorLeaseOwner string
+	var errorLeaseUntil, errorLeaseGeneration int64
+	if err := database.db.QueryRow(`SELECT storage_kind,result_sha256,recovery_lease_owner,
+		recovery_lease_until,recovery_lease_generation FROM policy_requests
+		WHERE principal='bob' AND request_id=?`, errorRequest).
+		Scan(&errorStorage, &errorResultDigest, &errorLeaseOwner, &errorLeaseUntil, &errorLeaseGeneration); err != nil {
 		t.Fatal(err)
 	}
-	if errorStorage != "tombstone" || errorResultDigest != hex64("8") {
-		t.Fatalf("publication-error tombstone storage/digest = %s/%s", errorStorage, errorResultDigest)
+	if errorStorage != "tombstone" || errorResultDigest != hex64("8") || errorLeaseOwner != "" ||
+		errorLeaseUntil != 0 || errorLeaseGeneration != 1 {
+		t.Fatalf("publication-error tombstone storage/digest/lease = %s/%s %q/%d/%d",
+			errorStorage, errorResultDigest, errorLeaseOwner, errorLeaseUntil, errorLeaseGeneration)
 	}
 }
 

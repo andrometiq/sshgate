@@ -79,6 +79,9 @@ func TestPolicyStoreBootstrapLifecycleAndCompaction(t *testing.T) {
 	if begin.Lookup.Kind != policystore.LookupExact || begin.Request.State != policystore.StateReceivedUnaudited {
 		t.Fatalf("Begin result = %+v", begin)
 	}
+	if fetched, fetchErr := store.Fetch(ctx, begin.Request.Key()); fetchErr != nil || fetched.PendingResponse != nil {
+		t.Fatalf("unavailable live Fetch carried pending bytes: %+v, %v", fetched, fetchErr)
+	}
 	request := begin.Request
 	request, err = store.MarkSubmissionAudited(ctx, request.Key(), request.StateVersion)
 	if err != nil {
@@ -102,10 +105,19 @@ func TestPolicyStoreBootstrapLifecycleAndCompaction(t *testing.T) {
 	if _, err := store.PublishVoteAudit(ctx, request.Key(), "voter", vote.Vote.AuditStateVersion); err != nil {
 		t.Fatal(err)
 	}
-	lease, err := store.ClaimApproval(ctx, request.Key(), vote.Vote.AuditStateVersion, "worker", now.Add(3*time.Second), time.Minute)
+	for _, ttl := range []time.Duration{time.Minute, 2*time.Minute + time.Second} {
+		if _, err := store.ClaimApproval(ctx, request.Key(), vote.Vote.AuditStateVersion, "worker", now.Add(3*time.Second), ttl); err == nil {
+			t.Fatalf("ClaimApproval accepted TTL %s", ttl)
+		}
+	}
+	lease, err := store.ClaimApproval(ctx, request.Key(), vote.Vote.AuditStateVersion, "worker", now.Add(3*time.Second), 2*time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
+	if !lease.Until.Equal(now.Add(123 * time.Second)) {
+		t.Fatalf("approval lease until = %s; want %s", lease.Until, now.Add(123*time.Second))
+	}
+	publicationGeneration := lease.Generation
 	if _, err := store.MarkPreMintAudited(ctx, lease); err != nil {
 		t.Fatal(err)
 	}
@@ -125,8 +137,14 @@ func TestPolicyStoreBootstrapLifecycleAndCompaction(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if request.ReservedBytes != 0 || request.State != policystore.StateApproved {
-		t.Fatalf("published request state/reserve = %s/%d", request.State, request.ReservedBytes)
+	if request.ReservedBytes != 0 || request.State != policystore.StateApproved ||
+		request.RecoveryLeaseOwner != "" || request.RecoveryLeaseUntil != 0 ||
+		request.RecoveryLeaseGeneration != publicationGeneration {
+		t.Fatalf("published request state/reserve/lease = %s/%d %q/%d/%d", request.State, request.ReservedBytes,
+			request.RecoveryLeaseOwner, request.RecoveryLeaseUntil, request.RecoveryLeaseGeneration)
+	}
+	if fetched, fetchErr := store.Fetch(ctx, request.Key()); fetchErr != nil || fetched.PendingResponse != nil {
+		t.Fatalf("terminal Fetch carried pending bytes: %+v, %v", fetched, fetchErr)
 	}
 	// A successor request carrying byte-identical payload takes the no-op path:
 	// it has no approval claim/predecessor claim, does not enter the vote queue,
@@ -182,8 +200,13 @@ func TestPolicyStoreBootstrapLifecycleAndCompaction(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if compacted.Request.StorageKind != policystore.StorageTombstone {
-		t.Fatalf("storage kind = %s", compacted.Request.StorageKind)
+	if compacted.Request.StorageKind != policystore.StorageTombstone || compacted.Request.RecoveryLeaseOwner != "" ||
+		compacted.Request.RecoveryLeaseUntil != 0 || compacted.Request.RecoveryLeaseGeneration != publicationGeneration {
+		t.Fatalf("tombstone storage/lease = %s %q/%d/%d", compacted.Request.StorageKind,
+			compacted.Request.RecoveryLeaseOwner, compacted.Request.RecoveryLeaseUntil, compacted.Request.RecoveryLeaseGeneration)
+	}
+	if fetched, fetchErr := store.Fetch(ctx, request.Key()); fetchErr != nil || fetched.PendingResponse != nil {
+		t.Fatalf("tombstone Fetch carried pending bytes: %+v, %v", fetched, fetchErr)
 	}
 	terminal, err := ResolveTerminalArchive(compacted.Request, encoded)
 	if err != nil {
@@ -244,6 +267,41 @@ func TestPolicyStoreExactIDPrecedesAdmissionValidation(t *testing.T) {
 	retry, err = store.Begin(ctx, input)
 	if err != nil || retry.Lookup.Kind != policystore.LookupExact {
 		t.Fatalf("exact retry = %+v, %v", retry, err)
+	}
+}
+
+func TestPolicyFetchResultPendingResponseVisibility(t *testing.T) {
+	t.Parallel()
+	source := []byte(`{"status":"pending"}`)
+	request := &policystore.Request{StorageKind: policystore.StorageFull, State: policystore.StatePending,
+		SubmissionAudited: true, PendingResponse: source}
+	result := policyFetchResult(request)
+	if result.Class != policystore.RowLive || result.Visibility != policystore.VisibilityPending || !bytes.Equal(result.PendingResponse, source) {
+		t.Fatalf("pending FetchResult = %+v", result)
+	}
+	result.PendingResponse[0] = 'X'
+	if source[0] == 'X' {
+		t.Fatal("pending FetchResult aliases the stored response")
+	}
+
+	for _, test := range []struct {
+		name    string
+		request policystore.Request
+	}{
+		{name: "live unavailable", request: policystore.Request{StorageKind: policystore.StorageFull,
+			State: policystore.StateReceivedUnaudited, PendingResponse: source}},
+		{name: "rejection live", request: policystore.Request{StorageKind: policystore.StorageFull,
+			State: policystore.StateRejectionErrorReceived, SubmissionAudited: true, PendingResponse: source}},
+		{name: "terminal", request: policystore.Request{StorageKind: policystore.StorageFull,
+			State: policystore.StateApproved, SubmissionAudited: true, PendingResponse: source}},
+		{name: "tombstone", request: policystore.Request{StorageKind: policystore.StorageTombstone,
+			State: policystore.StateApproved, SubmissionAudited: true, PendingResponse: source}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := policyFetchResult(&test.request); got.PendingResponse != nil {
+				t.Fatalf("FetchResult carried pending bytes: %+v", got)
+			}
+		})
 	}
 }
 
@@ -366,7 +424,7 @@ func TestPolicyTunedRejectionCapRoundTripsThroughBinding(t *testing.T) {
 }
 
 func TestPolicyMatrix2AReservationFloorAndAuditAcknowledgements(t *testing.T) {
-	_, store, public, _, keyID, _ := newPolicyStoreHarness(t, 1, false)
+	database, store, public, _, keyID, _ := newPolicyStoreHarness(t, 1, false)
 	ctx := context.Background()
 	input := policyBootstrapInput(t, public, keyID, authorityID("a"), "machine", "3", 2, time.Unix(3000, 0))
 	begin, err := store.Begin(ctx, input)
@@ -377,27 +435,59 @@ func TestPolicyMatrix2AReservationFloorAndAuditAcknowledgements(t *testing.T) {
 	if request.State != policystore.StateRejectionUnaudited || request.FailureCode != policywire.ErrorInvalidPolicyRequest {
 		t.Fatalf("rejection admission = %s/%s", request.State, request.FailureCode)
 	}
-	initial := request.ReservedBytes
-	request, err = store.MarkRejectionSubmissionAudited(ctx, request.Key(), request.StateVersion)
-	if err != nil || request.ReservedBytes != initial {
-		t.Fatalf("submission acknowledgement moved reserve: %d/%v", request.ReservedBytes, err)
-	}
-	request, err = store.StageRejectionError(ctx, request.Key(), request.StateVersion, input.Now.Add(time.Second))
+	components, err := policystore.Matrix2AReservation(input.CanonicalRequest, input.Payload)
 	if err != nil {
 		t.Fatal(err)
 	}
+	wantInitial, err := components.Total()
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial := request.ReservedBytes
+	if initial != wantInitial || initial <= components.Floor() {
+		t.Fatalf("Matrix-2a admission reserve = %d; want %d above floor %d", initial, wantInitial, components.Floor())
+	}
+	lease, err := store.AcquireRecoveryLease(ctx, request.Key(), "rejection-worker", time.Now().UTC(), 2*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, err = loadPolicyRequest(ctx, database.db, request.Key())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if request.ReservedBytes != initial-components.Growth.LeaseOwner {
+		t.Fatalf("first rejection lease reserve = %d; want %d", request.ReservedBytes, initial-components.Growth.LeaseOwner)
+	}
+	fenced := store.Fenced(lease)
+	request, err = fenced.MarkRejectionSubmissionAudited(ctx, request.Key(), request.StateVersion)
+	wantAfterLease := initial - components.Growth.LeaseOwner
+	if err != nil || request.ReservedBytes != wantAfterLease {
+		t.Fatalf("submission acknowledgement reserve = %d/%v; want %d", request.ReservedBytes, err, wantAfterLease)
+	}
+	beforeStage := request.ReservedBytes
+	request, err = fenced.StageRejectionError(ctx, request.Key(), request.StateVersion, input.Now.Add(time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if request.ReservedBytes != beforeStage-components.Growth.Spelling {
+		t.Fatalf("rejection staging reserve = %d; want %d", request.ReservedBytes, beforeStage-components.Growth.Spelling)
+	}
 	staged := request.ReservedBytes
-	request, err = store.MarkRejectionTerminalAudited(ctx, request.Key(), request.StateVersion)
+	request, err = fenced.MarkRejectionTerminalAudited(ctx, request.Key(), request.StateVersion)
 	if err != nil || request.ReservedBytes != staged {
 		t.Fatalf("terminal acknowledgement moved reserve: %d/%v", request.ReservedBytes, err)
 	}
-	request, err = store.PublishRejection(ctx, request.Key(), request.StateVersion, input.Now.Add(2*time.Second))
+	request, err = fenced.PublishRejection(ctx, request.Key(), request.StateVersion, input.Now.Add(2*time.Second))
 	if err != nil {
 		t.Fatal(err)
 	}
 	floor := uint64(len(input.CanonicalRequest) + len(input.Payload))
-	if request.ReservedBytes != floor || request.TerminalHTTPStatus.Value != 400 {
+	if request.ReservedBytes != floor || request.TerminalHTTPStatus.Value != 400 || request.RecoveryLeaseOwner != "" ||
+		request.RecoveryLeaseUntil != 0 || request.RecoveryLeaseGeneration != lease.Generation {
 		t.Fatalf("published Matrix-2a reserve/status = %d/%d; want %d/400", request.ReservedBytes, request.TerminalHTTPStatus.Value, floor)
+	}
+	if _, err := store.VerifyAuthorityBinding(ctx); err != nil {
+		t.Fatalf("Matrix-2a publication scan equality: %v", err)
 	}
 	fetched, err := store.Fetch(ctx, request.Key())
 	if err != nil || fetched.Class != policystore.RowTerminal || fetched.Visibility != "" || fetched.TerminalHTTPStatus != 400 {
@@ -415,8 +505,11 @@ func TestPolicyMatrix2AReservationFloorAndAuditAcknowledgements(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if compacted.Request.ReservedBytes != floor {
-		t.Fatalf("Matrix-2a tombstone reserve = %d; want floor %d", compacted.Request.ReservedBytes, floor)
+	if compacted.Request.ReservedBytes != floor || compacted.Request.RecoveryLeaseOwner != "" ||
+		compacted.Request.RecoveryLeaseUntil != 0 || compacted.Request.RecoveryLeaseGeneration != lease.Generation {
+		t.Fatalf("Matrix-2a tombstone reserve/lease = %d %q/%d/%d; want floor %d and cleared generation %d",
+			compacted.Request.ReservedBytes, compacted.Request.RecoveryLeaseOwner, compacted.Request.RecoveryLeaseUntil,
+			compacted.Request.RecoveryLeaseGeneration, floor, lease.Generation)
 	}
 	if _, err := ResolveTerminalArchive(compacted.Request, encoded); err != nil {
 		t.Fatalf("resolve Matrix-2a tombstone: %v", err)
@@ -447,7 +540,7 @@ func TestPolicyVoteUnauditedBarrierAndConflictFencing(t *testing.T) {
 	if !errors.Is(err, policystore.ErrUnavailable) {
 		t.Fatalf("opposite unaudited vote error = %v", err)
 	}
-	if _, err := store.ClaimApproval(ctx, request.Key(), prepared.Vote.AuditStateVersion, "worker", input.Now.Add(3*time.Second), time.Minute); !errors.Is(err, policystore.ErrUnauditedVote) {
+	if _, err := store.ClaimApproval(ctx, request.Key(), prepared.Vote.AuditStateVersion, "worker", input.Now.Add(3*time.Second), 2*time.Minute); !errors.Is(err, policystore.ErrUnauditedVote) {
 		t.Fatalf("claim across unaudited vote error = %v", err)
 	}
 	if _, err := database.db.Exec(`DELETE FROM totp_secrets WHERE user_id='voter-a'`); err != nil {
@@ -461,8 +554,13 @@ func TestPolicyVoteUnauditedBarrierAndConflictFencing(t *testing.T) {
 		t.Fatalf("reconciliation overtook unaudited vote: %+v", reconciled)
 	}
 	fetched, err := store.Fetch(ctx, request.Key())
-	if err != nil || fetched.State != policystore.StatePending {
+	if err != nil || fetched.State != policystore.StatePending || !bytes.Equal(fetched.PendingResponse, request.PendingResponse) {
 		t.Fatalf("unaudited-vote barrier changed request: %+v, %v", fetched, err)
+	}
+	fetched.PendingResponse[0] ^= 0xff
+	refetched, err := store.Fetch(ctx, request.Key())
+	if err != nil || !bytes.Equal(refetched.PendingResponse, request.PendingResponse) {
+		t.Fatalf("Fetch pending response was not defensively copied: %+v, %v", refetched, err)
 	}
 	if _, err := store.PublishVoteAudit(ctx, request.Key(), "voter-a", prepared.Vote.AuditStateVersion); err != nil {
 		t.Fatal(err)
@@ -560,6 +658,39 @@ func TestPolicyFrozenAuthRejectsMethodAndFactorDowngrade(t *testing.T) {
 }
 
 func TestPolicyMatrix2AAdmissionBudgets(t *testing.T) {
+	t.Run("first row retained bytes", func(t *testing.T) {
+		database := openPolicyTestDB(t)
+		public, _, err := ed25519.GenerateKey(nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		keyID, err := policy.SignerKeyID(public)
+		if err != nil {
+			t.Fatal(err)
+		}
+		input := largeRejectedPolicyInput(t, public, keyID, 1, time.Unix(6500, 0).UTC())
+		floor := uint64(len(input.CanonicalRequest) + len(input.Payload))
+		config := testPolicyConfig("machine", 1, false)
+		config.MaxRejectionReservedBytesPerPrincipal = floor - 1
+		digest, err := policystore.ConfigDigest(config)
+		if err != nil {
+			t.Fatal(err)
+		}
+		store := database.PolicyStore()
+		if err := store.BindAuthority(context.Background(), policystore.AuthorityBinding{
+			AuthorityID: authorityID("a"), ArchiveID: config.ArchiveID, AccountingVersion: policystore.AccountingVersion,
+			ConfigDigest: digest, SignerKeyID: keyID, SignerPublicKey: public,
+			MaxRejectionReservedBytesPerPrincipal: floor - 1, Config: config,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		_, err = store.Begin(context.Background(), input)
+		var capacity *policystore.CapacityError
+		if !errors.As(err, &capacity) || capacity.Kind != policystore.CapacityRetainedBytes {
+			t.Fatalf("first-row retained-byte exhaustion error = %v", err)
+		}
+	})
+
 	t.Run("rolling window", func(t *testing.T) {
 		_, store, public, _, keyID, _ := newPolicyStoreHarness(t, 1, false)
 		now := time.Unix(7000, 0).UTC()
@@ -593,11 +724,50 @@ func TestPolicyMatrix2AAdmissionBudgets(t *testing.T) {
 	})
 
 	t.Run("retained bytes", func(t *testing.T) {
-		_, store, public, _, keyID, _ := newPolicyStoreHarness(t, 1, false)
+		database := openPolicyTestDB(t)
+		public, _, err := ed25519.GenerateKey(nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		keyID, err := policy.SignerKeyID(public)
+		if err != nil {
+			t.Fatal(err)
+		}
 		first := largeRejectedPolicyInput(t, public, keyID, 1, time.Unix(9000, 0).UTC())
-		terminalizePolicyRejection(t, store, first)
+		floor := uint64(len(first.CanonicalRequest) + len(first.Payload))
+		config := testPolicyConfig("machine", 1, false)
+		config.MaxRejectionReservedBytesPerPrincipal = floor
+		digest, err := policystore.ConfigDigest(config)
+		if err != nil {
+			t.Fatal(err)
+		}
+		store := database.PolicyStore()
+		if err := store.BindAuthority(context.Background(), policystore.AuthorityBinding{
+			AuthorityID: authorityID("a"), ArchiveID: config.ArchiveID, AccountingVersion: policystore.AccountingVersion,
+			ConfigDigest: digest, SignerKeyID: keyID, SignerPublicKey: public,
+			MaxRejectionReservedBytesPerPrincipal: floor, Config: config,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		begin, err := store.Begin(context.Background(), first)
+		if err != nil {
+			t.Fatalf("full Matrix-2a floor admission: %v", err)
+		}
+		if begin.Request.ReservedBytes <= floor {
+			t.Fatalf("full Matrix-2a reserve = %d; want transient reserve above floor %d", begin.Request.ReservedBytes, floor)
+		}
+		var globalReserved uint64
+		if err := database.db.QueryRow(`SELECT logical_reserved_bytes FROM policy_authority_meta WHERE singleton=1`).Scan(&globalReserved); err != nil {
+			t.Fatal(err)
+		}
+		if globalReserved != begin.Request.ReservedBytes {
+			t.Fatalf("global reserve = %d; want full transient reserve %d", globalReserved, begin.Request.ReservedBytes)
+		}
+		if _, err := store.VerifyAuthorityBinding(context.Background()); err != nil {
+			t.Fatalf("full Matrix-2a floor safety scan: %v", err)
+		}
 		second := largeRejectedPolicyInput(t, public, keyID, 2, time.Unix(9001, 0).UTC())
-		_, err := store.Begin(context.Background(), second)
+		_, err = store.Begin(context.Background(), second)
 		var capacity *policystore.CapacityError
 		if !errors.As(err, &capacity) || capacity.Kind != policystore.CapacityRetainedBytes {
 			t.Fatalf("retained-byte exhaustion error = %v", err)
@@ -606,11 +776,38 @@ func TestPolicyMatrix2AAdmissionBudgets(t *testing.T) {
 }
 
 func TestPolicyMatrix2BTerminalizesWithEveryRejectionBudgetSaturated(t *testing.T) {
-	database, store, public, _, keyID, _ := newPolicyStoreHarness(t, 2, false)
+	database := openPolicyTestDB(t)
+	public, _, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyID, err := policy.SignerKeyID(public)
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseTime := time.Unix(10_000, 0).UTC()
+	large := largeRejectedPolicyInput(t, public, keyID, 1000, baseTime.Add(2*time.Second))
+	small := policyBootstrapInputNumber(t, public, keyID, authorityID("a"), "machine", 1001, 2, baseTime)
+	largeFloor := uint64(len(large.CanonicalRequest) + len(large.Payload))
+	smallFloor := uint64(len(small.CanonicalRequest) + len(small.Payload))
+	rejectionCap := largeFloor + uint64(policystore.RejectionRetainedRowLimit-1)*smallFloor
+	config := testPolicyConfig("machine", 2, false)
+	config.MaxRejectionReservedBytesPerPrincipal = rejectionCap
+	digest, err := policystore.ConfigDigest(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := database.PolicyStore()
+	if err := store.BindAuthority(context.Background(), policystore.AuthorityBinding{
+		AuthorityID: authorityID("a"), ArchiveID: config.ArchiveID, AccountingVersion: policystore.AccountingVersion,
+		ConfigDigest: digest, SignerKeyID: keyID, SignerPublicKey: public,
+		MaxRejectionReservedBytesPerPrincipal: rejectionCap, Config: config,
+	}); err != nil {
+		t.Fatal(err)
+	}
 	addPolicyVoter(t, database, "voter-a")
 	addPolicyVoter(t, database, "voter-b")
 	ctx := context.Background()
-	baseTime := time.Unix(10_000, 0).UTC()
 	accepted := policyBootstrapInputNumber(t, public, keyID, authorityID("a"), "machine", 1, 1, baseTime)
 	begin, err := store.Begin(ctx, accepted)
 	if err != nil {
@@ -625,7 +822,6 @@ func TestPolicyMatrix2BTerminalizesWithEveryRejectionBudgetSaturated(t *testing.
 		t.Fatal(err)
 	}
 
-	large := largeRejectedPolicyInput(t, public, keyID, 1000, baseTime.Add(2*time.Second))
 	largeTerminal := terminalizePolicyRejection(t, store, large)
 	largeRecord, err := store.SnapshotTerminalArchive(ctx, largeTerminal.Key(), largeTerminal.StateVersion)
 	if err != nil {
@@ -640,14 +836,6 @@ func TestPolicyMatrix2BTerminalizesWithEveryRejectionBudgetSaturated(t *testing.
 		t.Fatal(err)
 	}
 	largeTerminal = largeCompaction.Request
-	largeReservation, err := policystore.Matrix2AReservation(large.CanonicalRequest, large.Payload)
-	if err != nil {
-		t.Fatal(err)
-	}
-	largeAdmission, err := largeReservation.Total()
-	if err != nil {
-		t.Fatal(err)
-	}
 	recentTime := baseTime.Add(100 * time.Duration(policystore.RejectionWindowSeconds+1) * time.Second)
 	for index := 0; index < policystore.RejectionRetainedRowLimit-1; index++ {
 		admittedAt := baseTime.Add(time.Duration(index+2) * time.Duration(policystore.RejectionWindowSeconds+1) * time.Second)
@@ -667,9 +855,9 @@ func TestPolicyMatrix2BTerminalizesWithEveryRejectionBudgetSaturated(t *testing.
 		t.Fatal(err)
 	}
 	if retainedRows != policystore.RejectionRetainedRowLimit || recentRows != policystore.RejectionWindowLimit ||
-		retainedBytes+largeAdmission <= policystore.DefaultRejectionReservedBytes {
+		retainedBytes != rejectionCap || retainedBytes+largeFloor <= rejectionCap {
 		t.Fatalf("budgets are not saturated: rows=%d recent=%d bytes=%d next-large=%d large-floor=%d",
-			retainedRows, recentRows, retainedBytes, largeAdmission, largeTerminal.ReservedBytes)
+			retainedRows, recentRows, retainedBytes, largeFloor, largeTerminal.ReservedBytes)
 	}
 	if _, err := database.db.Exec(`DELETE FROM totp_secrets WHERE user_id='voter-b'`); err != nil {
 		t.Fatal(err)
@@ -842,7 +1030,21 @@ func TestPolicySuccessorPredecessorAndFinalPublicationRace(t *testing.T) {
 	if _, err := store.PublishVoteAudit(ctx, request.Key(), "voter-a", vote.Vote.AuditStateVersion); err != nil {
 		t.Fatal(err)
 	}
-	lease, err := store.ClaimApproval(ctx, request.Key(), vote.Vote.AuditStateVersion, "worker", input.Now.Add(3*time.Second), time.Minute)
+	claimBefore, err := loadPolicyRequest(ctx, database.db, request.Key())
+	if err != nil {
+		t.Fatal(err)
+	}
+	components, err := reservationComponentsForRequest(claimBefore)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantClaimedCharge := uint64(len(claimBefore.TrustedHeadEnvelope) + len(claimBefore.TrustedHeadDigest.Value) +
+		len(claimBefore.TrustedHeadKeyID.Value) + len(claimBefore.TrustedHeadPublicKey) +
+		len(claimBefore.TrustedHeadEpochBE) + len(claimBefore.TrustedHeadRevisionBE) + 8)
+	if components.Growth.ClaimedGroup != wantClaimedCharge {
+		t.Fatalf("claimed-group reservation = %d; want exact census %d", components.Growth.ClaimedGroup, wantClaimedCharge)
+	}
+	lease, err := store.ClaimApproval(ctx, request.Key(), vote.Vote.AuditStateVersion, "worker", input.Now.Add(3*time.Second), 2*time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -856,6 +1058,19 @@ func TestPolicySuccessorPredecessorAndFinalPublicationRace(t *testing.T) {
 		request.ClaimedHeadDigest != request.TrustedHeadDigest || request.ClaimedHeadKeyID != request.TrustedHeadKeyID ||
 		request.ClaimedHeadRowVersion != request.TrustedHeadRowVersion {
 		t.Fatalf("successor claimed predecessor set = %+v", request)
+	}
+	wantClaimedRemaining, err := policystore.DeriveRemaining(policystore.RemainingInput{Components: components,
+		State: policystore.StateApprovedMaterializing, ClaimedGroupConsumed: true, LeaseOwnerConsumed: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if request.ReservedBytes != wantClaimedRemaining ||
+		request.LogicalBytes+request.ReservedBytes > claimBefore.LogicalBytes+claimBefore.ReservedBytes {
+		t.Fatalf("successor claim reserve/commitment: before=%d/%d after=%d/%d want reserve=%d",
+			claimBefore.LogicalBytes, claimBefore.ReservedBytes, request.LogicalBytes, request.ReservedBytes, wantClaimedRemaining)
+	}
+	if _, err := store.VerifyAuthorityBinding(ctx); err != nil {
+		t.Fatalf("successor claim scan equality: %v", err)
 	}
 	if _, err := store.MarkPreMintAudited(ctx, lease); err != nil {
 		t.Fatal(err)
@@ -950,17 +1165,36 @@ func TestPolicyRecoveryLeaseTakeoverAndOwnerClearFence(t *testing.T) {
 	if _, err := store.AcquireRecoveryLease(ctx, begin.Request.Key(), "worker-a", now, 0); err == nil {
 		t.Fatal("zero recovery lease TTL accepted")
 	}
+	if _, err := store.AcquireRecoveryLease(ctx, begin.Request.Key(), "worker-a", now, time.Minute); err == nil {
+		t.Fatal("short recovery lease TTL accepted")
+	}
 	if _, err := store.AcquireRecoveryLease(ctx, begin.Request.Key(), "worker-a", now, 2*time.Minute+time.Second); err == nil {
 		t.Fatal("overlong recovery lease TTL accepted")
 	}
-	first, err := store.AcquireRecoveryLease(ctx, begin.Request.Key(), "worker-a", now, 2*time.Minute)
+	if err := database.ClearPolicyRecoveryLease(ctx, begin.Request.ReviewID); !errors.Is(err, policystore.ErrLeaseLost) {
+		t.Fatalf("generation-zero empty owner clear = %v", err)
+	}
+	firstOwner := strings.Repeat("w", policystore.MaxIdentityBytes)
+	first, err := store.AcquireRecoveryLease(ctx, begin.Request.Key(), firstOwner, now, 2*time.Minute)
 	if err != nil || !first.Until.Equal(now.Add(2*time.Minute)) {
 		t.Fatalf("first recovery lease = %+v, %v", first, err)
 	}
-	if _, err := store.AcquireRecoveryLease(ctx, begin.Request.Key(), "worker-b", now.Add(time.Second), time.Minute); !errors.Is(err, policystore.ErrUnavailable) {
+	firstRequest, err := loadPolicyRequest(ctx, database.db, begin.Request.Key())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstRequest.ReservedBytes+policystore.MaxIdentityBytes != begin.Request.ReservedBytes ||
+		firstRequest.LogicalBytes+firstRequest.ReservedBytes != begin.Request.LogicalBytes+begin.Request.ReservedBytes {
+		t.Fatalf("first owner did not consume its whole allowance: before=%d/%d after=%d/%d",
+			begin.Request.LogicalBytes, begin.Request.ReservedBytes, firstRequest.LogicalBytes, firstRequest.ReservedBytes)
+	}
+	if _, err := store.VerifyAuthorityBinding(ctx); err != nil {
+		t.Fatalf("first lease scan equality: %v", err)
+	}
+	if _, err := store.AcquireRecoveryLease(ctx, begin.Request.Key(), "worker-b", now.Add(time.Second), 2*time.Minute); !errors.Is(err, policystore.ErrUnavailable) {
 		t.Fatalf("live recovery lease takeover = %v", err)
 	}
-	second, err := store.AcquireRecoveryLease(ctx, begin.Request.Key(), "worker-b", now.Add(2*time.Minute+time.Second), time.Minute)
+	second, err := store.AcquireRecoveryLease(ctx, begin.Request.Key(), "worker-b", now.Add(2*time.Minute+time.Second), 2*time.Minute)
 	if err != nil || second.Generation != first.Generation+1 {
 		t.Fatalf("expired recovery lease takeover = %+v, %v", second, err)
 	}
@@ -979,6 +1213,37 @@ func TestPolicyRecoveryLeaseTakeoverAndOwnerClearFence(t *testing.T) {
 	}
 	if request.RecoveryLeaseOwner != "" || request.RecoveryLeaseUntil != 0 || request.RecoveryLeaseGeneration != second.Generation+1 {
 		t.Fatalf("owner clear result = %+v", request)
+	}
+	if request.ReservedBytes != firstRequest.ReservedBytes {
+		t.Fatalf("takeover/clear restored owner allowance: %d != %d", request.ReservedBytes, firstRequest.ReservedBytes)
+	}
+	if err := database.ClearPolicyRecoveryLease(ctx, begin.Request.ReviewID); err != nil {
+		t.Fatalf("post-lease empty owner clear = %v", err)
+	}
+	request, err = loadPolicyRequest(ctx, database.db, begin.Request.Key())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if request.ReservedBytes != firstRequest.ReservedBytes || request.RecoveryLeaseGeneration != second.Generation+2 {
+		t.Fatalf("post-lease empty clear reserve/generation = %d/%d", request.ReservedBytes, request.RecoveryLeaseGeneration)
+	}
+	third, err := store.AcquireRecoveryLease(ctx, begin.Request.Key(), "worker-c", now.Add(4*time.Minute), 2*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ReleaseRecoveryLease(ctx, third); err != nil {
+		t.Fatal(err)
+	}
+	request, err = loadPolicyRequest(ctx, database.db, begin.Request.Key())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if request.ReservedBytes != firstRequest.ReservedBytes || request.RecoveryLeaseOwner != "" ||
+		request.RecoveryLeaseUntil != 0 || request.RecoveryLeaseGeneration != third.Generation {
+		t.Fatalf("reacquire/release result = %+v", request)
+	}
+	if _, err := store.VerifyAuthorityBinding(ctx); err != nil {
+		t.Fatalf("reacquire scan equality: %v", err)
 	}
 }
 
@@ -1110,7 +1375,7 @@ func TestPolicyVoteRaces(t *testing.T) {
 		if _, err := store.PublishVoteAudit(ctx, request.Key(), "voter-b", deny.Vote.AuditStateVersion); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := store.ClaimApproval(ctx, request.Key(), deny.Vote.AuditStateVersion, "worker", time.Unix(16_004, 0).UTC(), time.Minute); !errors.Is(err, policystore.ErrConflict) {
+		if _, err := store.ClaimApproval(ctx, request.Key(), deny.Vote.AuditStateVersion, "worker", time.Unix(16_004, 0).UTC(), 2*time.Minute); !errors.Is(err, policystore.ErrConflict) {
 			t.Fatalf("approval overtook deny veto: %v", err)
 		}
 		claimed, err := store.ClaimDenial(ctx, request.Key(), deny.Vote.AuditStateVersion, time.Unix(16_004, 0).UTC())
@@ -1142,7 +1407,7 @@ func TestPolicyVoteRaces(t *testing.T) {
 				defer wait.Done()
 				<-start
 				_, err := store.ClaimApproval(ctx, request.Key(), vote.Vote.AuditStateVersion,
-					fmt.Sprintf("worker-%d", index), time.Unix(17_003, 0).UTC(), time.Minute)
+					fmt.Sprintf("worker-%d", index), time.Unix(17_003, 0).UTC(), 2*time.Minute)
 				outcomes <- err
 			}()
 		}
@@ -1333,7 +1598,7 @@ func publishPolicyBootstrap(t *testing.T, store policystore.Store, public ed2551
 	if _, err := store.PublishVoteAudit(ctx, request.Key(), "voter-a", vote.Vote.AuditStateVersion); err != nil {
 		t.Fatal(err)
 	}
-	lease, err := store.ClaimApproval(ctx, request.Key(), vote.Vote.AuditStateVersion, "worker", now.Add(3*time.Second), time.Minute)
+	lease, err := store.ClaimApproval(ctx, request.Key(), vote.Vote.AuditStateVersion, "worker", now.Add(3*time.Second), 2*time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}

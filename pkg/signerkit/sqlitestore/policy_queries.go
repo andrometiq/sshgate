@@ -254,10 +254,10 @@ func (store *policyDB) AcquireRecoveryLease(ctx context.Context, key policystore
 	if err := policystore.ValidateIdentity(workerID); err != nil {
 		return policystore.Lease{}, err
 	}
-	if ttl <= 0 || ttl > time.Duration(policystore.RecoveryLeaseMaxTTLSeconds)*time.Second {
-		return policystore.Lease{}, errors.New("policy recovery lease TTL is outside bounds")
+	if ttl != time.Duration(policystore.RecoveryLeaseMaxTTLSeconds)*time.Second {
+		return policystore.Lease{}, errors.New("policy recovery lease TTL must be exactly 120 seconds")
 	}
-	request, err := store.mutatePolicyRequest(ctx, key, func(_ context.Context, _ *sql.Tx, request *policystore.Request) error {
+	request, err := store.mutatePolicyRequest(ctx, key, func(ctx context.Context, transaction *sql.Tx, request *policystore.Request) error {
 		if request.State.Terminal() || (request.RecoveryLeaseOwner != "" && request.RecoveryLeaseUntil > now.UTC().Unix() && request.RecoveryLeaseUntil <= now.Add(2*time.Minute).UTC().Unix()) {
 			return policystore.ErrUnavailable
 		}
@@ -267,7 +267,7 @@ func (store *policyDB) AcquireRecoveryLease(ctx context.Context, key policystore
 		request.RecoveryLeaseGeneration++
 		request.RecoveryLeaseOwner = workerID
 		request.RecoveryLeaseUntil = now.Add(ttl).UTC().Unix()
-		return nil
+		return setExactPolicyReservation(ctx, transaction, request)
 	})
 	if err != nil {
 		return policystore.Lease{}, err
@@ -298,6 +298,10 @@ func (store *policyDB) ClearRecoveryLease(ctx context.Context, reviewID string) 
 		request, err := loadPolicyRequestByReviewID(ctx, transaction, reviewID)
 		if err != nil {
 			return struct{}{}, err
+		}
+		// Do not fabricate the durable first-owner-consumption marker.
+		if !request.State.Terminal() && request.RecoveryLeaseOwner == "" && request.RecoveryLeaseGeneration == 0 {
+			return struct{}{}, policystore.ErrLeaseLost
 		}
 		if request.RecoveryLeaseGeneration >= uint64(^uint64(0)>>1) {
 			return struct{}{}, fmt.Errorf("%w: recovery lease generation exhausted", policystore.ErrCorrupt)

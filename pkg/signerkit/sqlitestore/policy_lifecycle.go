@@ -214,8 +214,8 @@ func (store *policyDB) ClaimApproval(ctx context.Context, key policystore.Key, e
 	if err := policystore.ValidateIdentity(workerID); err != nil {
 		return policystore.WorkLease{}, err
 	}
-	if ttl <= 0 || ttl > time.Duration(policystore.RecoveryLeaseMaxTTLSeconds)*time.Second {
-		return policystore.WorkLease{}, errors.New("policy work lease TTL is outside bounds")
+	if ttl != time.Duration(policystore.RecoveryLeaseMaxTTLSeconds)*time.Second {
+		return policystore.WorkLease{}, errors.New("policy work lease TTL must be exactly 120 seconds")
 	}
 	request, err := store.mutatePolicyRequest(ctx, key, func(ctx context.Context, transaction *sql.Tx, request *policystore.Request) error {
 		if request.State != policystore.StatePending || request.StateVersion != expectedVersion {

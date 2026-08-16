@@ -692,7 +692,13 @@ BEGIN SELECT RAISE(ABORT, 'terminal publication changed staged result'); END;
 CREATE TRIGGER IF NOT EXISTS policy_request_same_state_reservation
 BEFORE UPDATE ON policy_requests
 WHEN NEW.state = OLD.state AND NEW.reserved_bytes IS NOT OLD.reserved_bytes AND
-     NOT (OLD.state = 'pending' AND NEW.state_version = OLD.state_version + 1)
+	 NOT ((OLD.state = 'pending' AND NEW.state_version = OLD.state_version + 1) OR
+	      (OLD.recovery_lease_owner = '' AND OLD.recovery_lease_until = 0 AND
+	       OLD.recovery_lease_generation = 0 AND NEW.recovery_lease_owner <> '' AND
+	       NEW.recovery_lease_until > 0 AND NEW.recovery_lease_generation = 1 AND
+	       OLD.state_version = NEW.state_version AND
+	       OLD.reserved_bytes = NEW.reserved_bytes + 128 AND
+	       NEW.logical_bytes + NEW.reserved_bytes <= OLD.logical_bytes + OLD.reserved_bytes))
 BEGIN SELECT RAISE(ABORT, 'reservation changed without a covered write'); END;
 
 CREATE TRIGGER IF NOT EXISTS policy_request_matrix_2b_fence

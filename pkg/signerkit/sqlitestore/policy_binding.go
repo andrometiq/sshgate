@@ -489,7 +489,7 @@ func scanPolicyLedgerMode(ctx context.Context, queryer policyQueryer, meta polic
 		}
 		if isMatrix2A(request) {
 			rejectionRows[request.Principal]++
-			if err := addCounterMap(rejectionBytes, request.Principal, request.ReservedBytes); err != nil {
+			if err := addCounterMap(rejectionBytes, request.Principal, rejectionFloor(&request)); err != nil {
 				rows.Close()
 				return counters, err
 			}

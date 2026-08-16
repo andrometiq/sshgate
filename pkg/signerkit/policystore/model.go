@@ -301,6 +301,7 @@ type FetchResult struct {
 	Class              RowClass
 	Visibility         Visibility
 	State              State
+	PendingResponse    []byte
 	TerminalHTTPStatus int
 	TerminalResponse   []byte
 	Archive            *ArchiveRef

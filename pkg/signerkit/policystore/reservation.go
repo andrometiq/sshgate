@@ -20,12 +20,17 @@ type ReservationComponents struct {
 	TerminalPending     uint64
 	TerminalResult      uint64
 	TerminalPublication uint64
-	Head                uint64 // H
+	Head                uint64               // H
+	Growth              RowGrowthCommitments // G
 	Matrix2A            bool
 }
 
 func (components ReservationComponents) Total() (uint64, error) {
-	return checkedAdd(components.Admission, components.Votes, components.Terminal, components.Head)
+	growth, err := components.Growth.Total()
+	if err != nil {
+		return 0, err
+	}
+	return checkedAdd(components.Admission, components.Votes, components.Terminal, components.Head, growth)
 }
 
 func (components ReservationComponents) Floor() uint64 {
@@ -33,6 +38,64 @@ func (components ReservationComponents) Floor() uint64 {
 		return components.Admission
 	}
 	return 0
+}
+
+type RowGrowthCommitments struct {
+	ClaimedGroup uint64
+	LeaseOwner   uint64
+	Spelling     uint64
+}
+
+func (commitments RowGrowthCommitments) Total() (uint64, error) {
+	return checkedAdd(commitments.ClaimedGroup, commitments.LeaseOwner, commitments.Spelling)
+}
+
+// RowGrowthMaximum derives G from the exact trusted predecessor image and the
+// closed lifecycle vocabularies.
+func RowGrowthMaximum(trusted *Head, matrix2A bool) (RowGrowthCommitments, error) {
+	acceptedSpelling, rejectionSpelling, err := spellingAllowances()
+	if err != nil {
+		return RowGrowthCommitments{}, err
+	}
+	commitments := RowGrowthCommitments{LeaseOwner: MaxIdentityBytes, Spelling: acceptedSpelling}
+	if matrix2A {
+		commitments.Spelling = rejectionSpelling
+		return commitments, nil
+	}
+	commitments.ClaimedGroup, err = claimedGroupCharge(trusted)
+	return commitments, err
+}
+
+func claimedGroupCharge(trusted *Head) (uint64, error) {
+	if trusted == nil {
+		return 0, nil
+	}
+	return checkedAdd(uint64(len(trusted.ManifestEnvelope)), uint64(len(trusted.BaseDigest)),
+		uint64(len(trusted.SignerKeyID)), uint64(len(trusted.SignerPublicKey)),
+		uint64(len(trusted.EpochBE)), uint64(len(trusted.RevisionBE)), 8)
+}
+
+func spellingAllowances() (uint64, uint64, error) {
+	stateGrowth := len(StateApprovedMaterializing) - len(StateReceivedUnaudited)
+	rejectionGrowth := len(StateRejectionErrorReceived) - len(StateRejectionUnaudited)
+	if stateGrowth < 0 || rejectionGrowth < 0 {
+		return 0, 0, errors.New("policy store: invalid lifecycle spelling growth")
+	}
+	longestFamily := longestText(ErrorFamilySemantic, ErrorFamilyProcessing, ErrorFamilyPublication)
+	longestCode := longestText(policywire.ErrorSignerKeyChanged, policywire.ErrorStalePolicyHead,
+		policywire.ErrorPolicyMaterializationFailed, policywire.ErrorQuorumUnattainable)
+	accepted, err := checkedAdd(uint64(stateGrowth), uint64(longestFamily), uint64(longestCode))
+	return accepted, uint64(rejectionGrowth), err
+}
+
+func longestText[T ~string](values ...T) int {
+	longest := 0
+	for _, value := range values {
+		if len(value) > longest {
+			longest = len(value)
+		}
+	}
+	return longest
 }
 
 // MaximalVote constructs, then charges, the maximal schema-legal vote row.
@@ -252,8 +315,12 @@ func AcceptedReservation(canonicalRequest, payload []byte, candidate Head, trust
 	if err != nil {
 		return ReservationComponents{}, err
 	}
+	g, err := RowGrowthMaximum(trusted, false)
+	if err != nil {
+		return ReservationComponents{}, err
+	}
 	components := ReservationComponents{Admission: a, Votes: v, Terminal: t.Accepted,
-		TerminalPending: t.Pending, TerminalResult: t.Result, TerminalPublication: t.Publication, Head: h}
+		TerminalPending: t.Pending, TerminalResult: t.Result, TerminalPublication: t.Publication, Head: h, Growth: g}
 	_, err = components.Total()
 	return components, err
 }
@@ -270,8 +337,12 @@ func Matrix2AReservation(canonicalRequest, payload []byte) (ReservationComponent
 	if err != nil {
 		return ReservationComponents{}, err
 	}
+	g, err := RowGrowthMaximum(nil, true)
+	if err != nil {
+		return ReservationComponents{}, err
+	}
 	components := ReservationComponents{Admission: a, Terminal: t.Matrix2A,
-		TerminalPublication: t.Publication, Matrix2A: true}
+		TerminalPublication: t.Publication, Growth: g, Matrix2A: true}
 	_, err = components.Total()
 	return components, err
 }
@@ -290,7 +361,11 @@ func AdmissionRemaining(components ReservationComponents, pendingResponse []byte
 	if charge > components.Terminal {
 		return 0, errors.New("policy store: pending write exceeds terminal commitment")
 	}
-	return checkedAdd(components.Admission, components.Votes, components.Terminal-charge, components.Head)
+	growth, err := components.Growth.Total()
+	if err != nil {
+		return 0, err
+	}
+	return checkedAdd(components.Admission, components.Votes, components.Terminal-charge, components.Head, growth)
 }
 
 func CheckGlobalHeadroom(logicalUsedBytes, logicalReservedBytes uint64) error {
@@ -302,17 +377,19 @@ func CheckGlobalHeadroom(logicalUsedBytes, logicalReservedBytes uint64) error {
 }
 
 type RemainingInput struct {
-	Components       ReservationComponents
-	State            State
-	ConsumedVotes    uint64
-	ConsumedTerminal uint64
-	HeadConsumed     bool
+	Components           ReservationComponents
+	State                State
+	ConsumedVotes        uint64
+	ConsumedTerminal     uint64
+	HeadConsumed         bool
+	ClaimedGroupConsumed bool
+	LeaseOwnerConsumed   bool
 }
 
 func (components ReservationComponents) validateTerminalSplit() error {
 	if components.Matrix2A {
 		if components.TerminalPending != 0 || components.TerminalResult != 0 ||
-			components.TerminalPublication != components.Terminal {
+			components.TerminalPublication != components.Terminal || components.Growth.ClaimedGroup != 0 {
 			return errors.New("policy store: invalid Matrix-2a terminal commitment split")
 		}
 		return nil
@@ -324,7 +401,7 @@ func (components ReservationComponents) validateTerminalSplit() error {
 	return nil
 }
 
-type Reachability struct{ Admission, Votes, Terminal, Head bool }
+type Reachability struct{ Admission, Votes, Terminal, Head, Growth bool }
 
 // StateReachability derives which writes remain reachable from the state graph.
 func StateReachability(state State, matrix2A bool) (Reachability, error) {
@@ -341,12 +418,12 @@ func StateReachability(state State, matrix2A bool) (Reachability, error) {
 		if state != StateRejectionUnaudited && state != StateRejectionErrorReceived {
 			return Reachability{}, errors.New("policy store: invalid Matrix-2a state")
 		}
-		return Reachability{Admission: true, Terminal: true}, nil
+		return Reachability{Admission: true, Terminal: true, Growth: true}, nil
 	}
 	if state == StateRejectionUnaudited || state == StateRejectionErrorReceived {
 		return Reachability{}, errors.New("policy store: rejection state without Matrix-2a origin")
 	}
-	reachable := Reachability{Admission: true, Terminal: true}
+	reachable := Reachability{Admission: true, Terminal: true, Growth: true}
 	reachable.Votes = state == StateReceivedUnaudited || state == StatePending
 	switch state {
 	case StateReceivedUnaudited, StatePending, StateApprovedMaterializing, StateApprovedUnexposed:
@@ -394,6 +471,21 @@ func DeriveRemaining(input RemainingInput) (uint64, error) {
 	}
 	if reachable.Head && !input.HeadConsumed {
 		values = append(values, input.Components.Head)
+	}
+	if reachable.Growth {
+		if !input.ClaimedGroupConsumed {
+			values = append(values, input.Components.Growth.ClaimedGroup)
+		}
+		if !input.LeaseOwnerConsumed {
+			values = append(values, input.Components.Growth.LeaseOwner)
+		}
+		admissionState := StateReceivedUnaudited
+		if input.Components.Matrix2A {
+			admissionState = StateRejectionUnaudited
+		}
+		if input.State == admissionState {
+			values = append(values, input.Components.Growth.Spelling)
+		}
 	}
 	return checkedAdd(values...)
 }
