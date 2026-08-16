@@ -699,10 +699,10 @@ func loadPolicyRequestByReviewID(ctx context.Context, queryer policyQueryer, rev
 func validateFrozenVoter(ctx context.Context, queryer policyQueryer, meta policyMeta, request *policystore.Request, operator string, method policystore.AuthnMethod) error {
 	var voters []string
 	if err := json.Unmarshal(request.EligibleVotersJSON, &voters); err != nil || !slices.Contains(voters, operator) {
-		return policystore.ErrUnavailable
+		return policystore.ErrNotEligible
 	}
 	if (request.VoteStepUpRequired && method != policystore.AuthnTOTP) || (!request.VoteStepUpRequired && method != policystore.AuthnSession) {
-		return policystore.ErrUnavailable
+		return policystore.ErrNotEligible
 	}
 	var valid int
 	query := `SELECT count(*) FROM users u WHERE u.id=? AND u.role=? AND EXISTS (SELECT 1 FROM totp_secrets t WHERE t.user_id=u.id)`
@@ -713,7 +713,7 @@ func validateFrozenVoter(ctx context.Context, queryer policyQueryer, meta policy
 		return err
 	}
 	if valid != 1 {
-		return policystore.ErrUnavailable
+		return policystore.ErrNotEligible
 	}
 	return nil
 }

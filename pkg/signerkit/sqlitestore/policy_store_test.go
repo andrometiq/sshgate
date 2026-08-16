@@ -576,6 +576,41 @@ func TestPolicyVoteUnauditedBarrierAndConflictFencing(t *testing.T) {
 	}
 }
 
+func TestPolicyVoteEligibilityFailuresAreTyped(t *testing.T) {
+	database, store, public, _, keyID, _ := newPolicyStoreHarness(t, 1, false)
+	addPolicyVoter(t, database, "voter-a")
+	ctx := context.Background()
+	input := policyBootstrapInput(t, public, keyID, authorityID("a"), "machine", "5", 1, time.Unix(5000, 0))
+	begin, err := store.Begin(ctx, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, err := store.MarkSubmissionAudited(ctx, begin.Request.Key(), begin.Request.StateVersion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, err = store.ActivateSubmission(ctx, request.Key(), request.StateVersion, input.Now.Add(time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, vote := range []policystore.VoteInput{
+		{ReviewID: request.ReviewID, Operator: "outsider", Decision: policystore.DecisionApprove, AuthnMethod: policystore.AuthnSession, Now: input.Now.Add(2 * time.Second)},
+		{ReviewID: request.ReviewID, Operator: "voter-a", Decision: policystore.DecisionApprove, AuthnMethod: policystore.AuthnTOTP, Now: input.Now.Add(2 * time.Second)},
+	} {
+		if _, err := store.PrepareVote(ctx, vote); !errors.Is(err, policystore.ErrNotEligible) {
+			t.Fatalf("ineligible vote %+v error = %v; want ErrNotEligible", vote, err)
+		}
+	}
+	if _, err := database.db.Exec(`DELETE FROM totp_secrets WHERE user_id='voter-a'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.PrepareVote(ctx, policystore.VoteInput{ReviewID: request.ReviewID, Operator: "voter-a",
+		Decision: policystore.DecisionApprove, AuthnMethod: policystore.AuthnSession, Now: input.Now.Add(3 * time.Second)}); !errors.Is(err, policystore.ErrNotEligible) {
+		t.Fatalf("unusable frozen voter factor error = %v; want ErrNotEligible", err)
+	}
+}
+
 func TestPolicySafetyScanUsesOneRootHookAndFailsOnCounterDrift(t *testing.T) {
 	database, store, _, _, _, _ := newPolicyStoreHarness(t, 1, false)
 	ctx := context.Background()

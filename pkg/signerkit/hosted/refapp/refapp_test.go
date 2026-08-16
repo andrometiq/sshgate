@@ -13,6 +13,8 @@ import (
 var wantAssets = []string{
 	"index.html", "login.html", "pending.html", "request.html", "audit.html",
 	"app.js", "index.js", "login.js", "pending.js", "request.js", "audit.js", "app.css",
+	"policy-pending.html", "policy-request.html", "policy-audit.html",
+	"policy-common.js", "policy-pending.js", "policy-request.js", "policy-audit.js",
 }
 
 func TestAssetsEmbedded(t *testing.T) {
@@ -110,7 +112,7 @@ func TestAssetsSelfContained(t *testing.T) {
 }
 
 func TestHTMLHasNoInlineScript(t *testing.T) {
-	for _, name := range []string{"index.html", "login.html", "pending.html", "request.html", "audit.html"} {
+	for _, name := range []string{"index.html", "login.html", "pending.html", "request.html", "audit.html", "policy-pending.html", "policy-request.html", "policy-audit.html"} {
 		b, err := fs.ReadFile(refapp.Assets, "assets/"+name)
 		if err != nil {
 			t.Fatal(err)
@@ -118,6 +120,37 @@ func TestHTMLHasNoInlineScript(t *testing.T) {
 		if strings.Contains(string(b), "<script>") {
 			t.Errorf("%s contains inline script forbidden by CSP", name)
 		}
+	}
+}
+
+func TestPolicyAssetsHaveOnlyTextNodeDataSinks(t *testing.T) {
+	for _, name := range []string{"policy-common.js", "policy-pending.js", "policy-request.js", "policy-audit.js"} {
+		b, err := fs.ReadFile(refapp.Assets, "assets/"+name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		source := string(b)
+		for _, forbidden := range []string{"innerHTML", "insertAdjacentHTML", "document.write", "setAttribute", ".style", ".href", "location.", ".outerHTML", "createContextualFragment"} {
+			if strings.Contains(source, forbidden) {
+				t.Errorf("%s contains forbidden policy data sink %q", name, forbidden)
+			}
+		}
+	}
+	common, err := fs.ReadFile(refapp.Assets, "assets/policy-common.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{"textContent", "createTextNode", "PolicyRenderBudget", "policyMaxItems = 40", "policyMaxVotes = 256", "policyMaxPreviewBytes = 512"} {
+		if !strings.Contains(string(common), required) {
+			t.Errorf("policy-common.js does not pin %q", required)
+		}
+	}
+	request, err := fs.ReadFile(refapp.Assets, "assets/policy-request.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(request), "PERMANENT REMOTE POLICY AUTHORITY") {
+		t.Fatal("policy request UI lacks the permanent-authority banner")
 	}
 }
 

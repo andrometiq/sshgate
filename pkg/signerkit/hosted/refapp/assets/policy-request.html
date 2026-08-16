@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Policy review · SSHGate Signer</title>
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+  <header>
+    <span class="brand">SSHGate Signer</span>
+    <nav><a href="policy-pending.html">Policy queue</a><a class="active" href="policy-request.html">Policy review</a><a href="policy-audit.html">Policy audit</a><a href="#" id="logout">Log out</a></nav>
+  </header>
+  <main>
+    <section class="card">
+      <h1>PERMANENT REMOTE POLICY AUTHORITY</h1>
+      <p class="status error">Approval permanently changes which remote commands may be authorized. Verify every identity, digest, count, axis, and semantic change.</p>
+    </section>
+    <label for="policy-review-id">Review ID</label>
+    <input id="policy-review-id" type="text" autocomplete="off" spellcheck="false" placeholder="pr_…">
+    <p><button id="load-review" type="button">Load stored review</button></p>
+    <p class="status" id="status" aria-live="polite"></p>
+    <div id="policy-review"></div>
+    <section id="policy-step-up" hidden>
+      <label for="policy-step-up-code">Fresh TOTP code</label>
+      <input id="policy-step-up-code" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="6-digit code">
+    </section>
+    <div class="actions">
+      <button class="primary" id="policy-approve" type="button">Approve permanent policy</button>
+      <button class="danger" id="policy-deny" type="button">Deny</button>
+    </div>
+  </main>
+  <script src="app.js"></script>
+  <script src="policy-common.js"></script>
+  <script src="policy-request.js"></script>
+</body>
+</html>

@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Policy audit · SSHGate Signer</title>
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+  <header>
+    <span class="brand">SSHGate Signer</span>
+    <nav><a href="policy-pending.html">Policy queue</a><a href="policy-request.html">Policy review</a><a class="active" href="policy-audit.html">Policy audit</a><a href="#" id="logout">Log out</a></nav>
+  </header>
+  <main>
+    <h1>Permanent policy audit</h1>
+    <p class="sub">Enter an opaque review ID to inspect its frozen key and digest evidence and audited votes.</p>
+    <label for="policy-audit-id">Review ID</label>
+    <input id="policy-audit-id" type="text" autocomplete="off" spellcheck="false" placeholder="pr_…">
+    <p><button id="load-audit" type="button">Load audit evidence</button></p>
+    <p class="status" id="status" aria-live="polite"></p>
+    <div id="policy-audit"></div>
+  </main>
+  <script src="app.js"></script>
+  <script src="policy-common.js"></script>
+  <script src="policy-audit.js"></script>
+</body>
+</html>

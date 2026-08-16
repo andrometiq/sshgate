@@ -151,7 +151,19 @@ The credentials are structurally separated:
 | Static UI | `/`, `/*.html`, `/*.js`, `/app.css` | Login page is public; data APIs remain session-gated |
 | Health | `GET /healthz` | Public liveness only |
 
-The embedded UI has no external assets and enforces a restrictive Content Security Policy. It renders the exact command, command SHA-256, target server, host-key fingerprint, validity, tally, voters, and final audit rows.
+The policy human surface is five session-only JSON routes under
+`/ui/policy`: the full pending queue, request detail, approve, deny, and audit.
+Its dedicated reference pages render the admission-frozen
+`sshgate-policy-review-v2` document, frozen signer/digest evidence, and audited
+votes using text nodes only. Terminal tombstones retain their opaque review ID;
+detail and audit resolve the verified content-addressed archive record instead
+of consulting the current policy head. The ordinary command UI and its v1
+routes remain separate and unchanged.
+
+The embedded UI has no external assets and enforces a restrictive Content
+Security Policy. The ordinary pages render the exact command, command SHA-256,
+target server, host-key fingerprint, validity, tally, voters, and final audit
+rows.
 
 ## Current scope and limits
 

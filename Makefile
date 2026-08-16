@@ -166,7 +166,7 @@ test:
 
 test-refapp-js:
 	@command -v node >/dev/null 2>&1 || { echo "test-refapp-js: node is required to verify the hosted WebAuthn browser adapter" >&2; exit 1; }
-	node --test pkg/signerkit/hosted/refapp/test/app.test.js
+	node --test pkg/signerkit/hosted/refapp/test/*.test.js
 
 # Phase-1 e2e against a real Docker SSH target. Skipped automatically
 # if `docker compose` is unavailable. Excluded from `make test` so

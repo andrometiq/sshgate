@@ -55,13 +55,18 @@ func (server *Server) AttachPolicy(config *PolicyAPIConfig) error {
 		return errors.New("hosted: AttachPolicy: policy plane already attached")
 	}
 	machine := server.policyMachineDispatch(server.policyReady(config.Engine.Readiness(), server.withAuth(server.policyMachineLimit(config.Handler))))
-	human := server.policyReady(config.Engine.Readiness(), config.Handler)
+	humanHandler, err := newPolicyHumanHandler(config.Engine, config.Archive, server.Human)
+	if err != nil {
+		return fmt.Errorf("hosted: AttachPolicy: human handler: %w", err)
+	}
+	human := server.policyReady(config.Engine.Readiness(), server.Human.withSession(humanHandler.ServeAuthenticated))
 	server.mux.Handle("GET /ui/policy/pending", human)
 	server.mux.Handle("GET /ui/policy/requests/{review_id}", human)
 	server.mux.Handle("POST /ui/policy/requests/{review_id}/approve", human)
 	server.mux.Handle("POST /ui/policy/requests/{review_id}/deny", human)
 	server.mux.Handle("GET /ui/policy/requests/{review_id}/audit", human)
 	server.policyMachine = machine
+	server.policyHuman = human
 	server.policy = config
 	return nil
 }

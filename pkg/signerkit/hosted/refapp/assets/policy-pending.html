@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Policy queue · SSHGate Signer</title>
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+  <header>
+    <span class="brand">SSHGate Signer</span>
+    <nav><a class="active" href="policy-pending.html">Policy queue</a><a href="policy-request.html">Policy review</a><a href="policy-audit.html">Policy audit</a><a href="#" id="logout">Log out</a></nav>
+  </header>
+  <main>
+    <h1>Permanent policy requests</h1>
+    <p class="sub">Copy a review ID into Policy review before deciding. Policy identifiers are displayed as text and never inserted into links.</p>
+    <p class="status" id="status" aria-live="polite"></p>
+    <div id="policy-list"></div>
+    <p><button id="refresh" type="button">Refresh</button></p>
+  </main>
+  <script src="app.js"></script>
+  <script src="policy-common.js"></script>
+  <script src="policy-pending.js"></script>
+</body>
+</html>

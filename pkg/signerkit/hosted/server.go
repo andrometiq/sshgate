@@ -98,6 +98,7 @@ type Server struct {
 	policyClosed     bool
 	policyRosterWait time.Duration
 	policyMachine    http.Handler
+	policyHuman      http.Handler
 	policyPostLimit  *machineRateLimiter
 	policyGetLimit   *machineRateLimiter
 }
@@ -233,6 +234,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.logRequest(w, r, s.policyMachine.ServeHTTP)
 		return
 	}
+	if s.policyHuman != nil && isPolicyHumanPath(r.URL.Path, r.URL.EscapedPath()) {
+		s.logRequest(w, r, s.policyHuman.ServeHTTP)
+		return
+	}
 	s.logRequest(w, r, s.mux.ServeHTTP)
 }
 
@@ -240,6 +245,16 @@ func isPolicyV2Path(path, escapedPath string) bool {
 	for _, target := range []string{path, escapedPath} {
 		target = strings.TrimLeft(target, "/")
 		if target == "v2" || strings.HasPrefix(target, "v2/") {
+			return true
+		}
+	}
+	return false
+}
+
+func isPolicyHumanPath(path, escapedPath string) bool {
+	for _, target := range []string{path, escapedPath} {
+		target = strings.TrimLeft(target, "/")
+		if target == "ui/policy" || strings.HasPrefix(target, "ui/policy/") {
 			return true
 		}
 	}

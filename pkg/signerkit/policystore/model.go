@@ -447,6 +447,10 @@ var (
 	ErrAuthorityMismatch = errors.New("policy store: authority mismatch")
 )
 
+// ErrNotEligible preserves the historical unavailable classification while
+// letting the human route expose the narrower frozen-eligibility failure.
+var ErrNotEligible = fmt.Errorf("policy store: voter is not eligible: %w", ErrUnavailable)
+
 type CounterDriftError struct {
 	Counter            string
 	Stored, Recomputed uint64
