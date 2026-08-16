@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -15,7 +16,7 @@ func configFixture() ConfigDigestInput {
 	input.DenyVeto = true
 	input.AllowSelfApprove = false
 	input.PolicyVoterRole = "operator"
-	input.VoterEligibilityVersion = "sshgate-policy-voters-v1"
+	input.VoterEligibilityVersion = VoterEligibilityVersion
 	input.VoteAuthMethodsJSON = []byte(`["session"]`)
 	input.ArchiveID = "parch_0123456789abcdef0123456789abcdef"
 	input.ReviewRendererVersion = "sshgate-policy-review-v2"
@@ -60,7 +61,7 @@ func TestConfigDigestFrozenFraming(t *testing.T) {
 	if want := independentConfigDigest(input); got != want {
 		t.Fatalf("digest = %s, want %s", got, want)
 	}
-	const golden = "dc6d98b148b60577a76d6cceaf53cb6b4a058478a5e0379170caa8a384c997b4"
+	const golden = "38f1440b97335062b089b60f81a62126983a46eaf978474c64010ee4741ab134"
 	if got != golden {
 		t.Fatalf("config digest golden changed: got %s want %s", got, golden)
 	}
@@ -111,5 +112,23 @@ func TestConfigDigestPerturbations(t *testing.T) {
 		if err := invalid.Validate(); err == nil {
 			t.Error("invalid persisted configuration validated")
 		}
+	}
+}
+
+func TestVoterEligibilityVersionExactGrammar(t *testing.T) {
+	base := configFixture()
+	for _, value := range []string{
+		"", "sshgate-policy-voters-v1", "sshgate-policy-voter-eligibility-v2",
+		" sshgate-policy-voter-eligibility-v1", "sshgate-policy-voter-eligibility-v1\n",
+		strings.Repeat("x", 65), "sshgate-policy-voter-eligibility-v1\x7f", "sshgate-policy-voter-eligibility-v1é",
+	} {
+		candidate := base
+		candidate.VoterEligibilityVersion = value
+		if err := candidate.Validate(); err == nil {
+			t.Errorf("voter eligibility version %q validated", value)
+		}
+	}
+	if err := base.Validate(); err != nil {
+		t.Fatalf("exact voter eligibility version rejected: %v", err)
 	}
 }

@@ -16,7 +16,9 @@ async function loadPolicyAudit() {
     root.appendChild(card);
     policyLine(card, 'review ID', result.data.review_id, budget);
     policyLine(card, 'state', result.data.state, budget);
-    renderPolicyKeysAndDigests(result.data, card, budget);
+    renderPolicyKeys(result.data, card, budget);
+    policyHeading(card, 'Frozen counts and digests', budget);
+    renderPolicyDigests(result.data, null, card, budget);
     if (result.data.terminal_http_status != null) policyLine(card, 'terminal HTTP status', result.data.terminal_http_status, budget);
     renderPolicyVotes(result.data.votes, card, budget);
     setStatus('', '');

@@ -450,7 +450,11 @@ func readPinnedPolicyPublicKey(path string) (ed25519.PublicKey, error) {
 }
 
 func readPinnedPolicyPublicKeyForUID(path string, euid uint32) (ed25519.PublicKey, error) {
-	before, err := os.Lstat(path)
+	return readPinnedPolicyPublicKeyForUIDWithLstat(path, euid, os.Lstat)
+}
+
+func readPinnedPolicyPublicKeyForUIDWithLstat(path string, euid uint32, lstat func(string) (os.FileInfo, error)) (ed25519.PublicKey, error) {
+	before, err := lstat(path)
 	if err != nil {
 		return nil, err
 	}
@@ -466,7 +470,7 @@ func readPinnedPolicyPublicKeyForUID(path string, euid uint32) (ed25519.PublicKe
 	if err != nil {
 		return nil, err
 	}
-	after, err := os.Lstat(path)
+	after, err := lstat(path)
 	if err != nil {
 		return nil, err
 	}

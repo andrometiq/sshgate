@@ -9,6 +9,9 @@ const policyMaxVotes = 256;
 const policyMaxPreviewBytes = 512;
 const policyMaxRenderedNodes = 10000;
 const policyMaxRenderedText = 1024 * 1024;
+// Mirrors the canonical collection bounds in src/policy/model.go.
+const policyMaxBaseEntries = 256n;
+const policyMaxRevokedPermitIDs = 4096n;
 const policyHex64Pattern = /^[0-9a-f]{64}$/;
 const policyRequestIDPattern = /^pm_[0-9a-f]{32}$/;
 const policyAuthorityIDPattern = /^pauth_[0-9a-f]{32}$/;
@@ -197,7 +200,7 @@ function validatePolicyReview(detail) {
   policyDecimal(review.epoch, 'epoch');
   policyDecimal(review.revision, 'revision');
   if (logicalChanges !== BigInt(review.items.length)) throw new Error('invalid policy logical-change count');
-  if (entryCount > 256n || revocationCount > 256n) throw new Error('invalid policy object counts');
+  if (entryCount > policyMaxBaseEntries || revocationCount > policyMaxRevokedPermitIDs) throw new Error('invalid policy object counts');
   if (review.bootstrap && entryCount > 32n) throw new Error('bootstrap entry bound exceeded');
   if (!review.bootstrap && logicalChanges > 32n) throw new Error('revision change bound exceeded');
   if (review.bootstrap !== (detail.digests.trusted_head_digest == null)) throw new Error('invalid bootstrap digest evidence');
@@ -276,14 +279,22 @@ function validatePolicyPending(pending) {
   }
 }
 
-function renderPolicyKeysAndDigests(detail, root, budget) {
+function renderPolicyKeys(detail, root, budget) {
   policyHeading(root, 'Frozen signer evidence', budget);
   policyLine(root, 'expected signer key ID', detail.keys.expected_signer_key_id, budget);
   if (detail.keys.frozen_signer_key_id != null) policyLine(root, 'frozen signer key ID', detail.keys.frozen_signer_key_id, budget);
   if (detail.keys.frozen_signer_public_key_b64 != null) policyLine(root, 'frozen signer public key (base64)', detail.keys.frozen_signer_public_key_b64, budget);
   policyLine(root, 'custody mismatch', detail.keys.mismatch, budget);
+}
+
+function renderPolicyDigests(detail, review, root, budget) {
   policyLine(root, 'candidate/base digest', detail.digests.candidate_base_digest, budget);
-  if (detail.digests.trusted_head_digest != null) policyLine(root, 'signer-owned-head digest', detail.digests.trusted_head_digest, budget);
+  if (detail.digests.trusted_head_digest != null) {
+    policyLine(root, 'signer-owned-head digest', detail.digests.trusted_head_digest, budget);
+  } else if (review != null) {
+    if (!review.bootstrap) throw new Error('non-bootstrap review lacks a signer-owned-head digest');
+    policyLine(root, 'signer-owned-head digest', 'absent: explicit bootstrap', budget);
+  }
 }
 
 function renderPolicyVotes(votes, root, budget) {
@@ -306,7 +317,9 @@ function renderPolicyReview(detail, root) {
     policyHeading(card, 'Admission evidence', budget);
     policyLine(card, 'review ID', detail.review_id, budget);
     policyLine(card, 'state', detail.state, budget);
-    renderPolicyKeysAndDigests(detail, card, budget);
+    renderPolicyKeys(detail, card, budget);
+    policyHeading(card, 'Frozen counts and digests', budget);
+    renderPolicyDigests(detail, null, card, budget);
     policyLine(card, 'stored semantic review', 'absent at admission', budget);
     policyLine(card, 'approvals', detail.tally.approvals, budget);
     policyLine(card, 'denials', detail.tally.denials, budget);
@@ -323,7 +336,7 @@ function renderPolicyReview(detail, root) {
   policyLine(card, 'request principal', review.principal, budget);
   policyLine(card, 'authority ID', review.authority_id, budget);
   policyLine(card, 'host fingerprint', review.host, budget);
-  renderPolicyKeysAndDigests(detail, card, budget);
+  renderPolicyKeys(detail, card, budget);
 
   policyHeading(card, 'Policy axes and version', budget);
   policyLine(card, 'named preset', policyPreset(review), budget);
@@ -335,10 +348,7 @@ function renderPolicyReview(detail, root) {
   policyLine(card, 'bootstrap', review.bootstrap, budget);
 
   policyHeading(card, 'Frozen counts and digests', budget);
-  if (detail.digests.trusted_head_digest == null) {
-    if (!review.bootstrap) throw new Error('non-bootstrap review lacks a signer-owned-head digest');
-    policyLine(card, 'signer-owned-head digest', 'absent: explicit bootstrap', budget);
-  }
+  renderPolicyDigests(detail, review, card, budget);
   policyLine(card, 'entry count', review.entry_count, budget);
   policyLine(card, 'revocation count', review.revocation_count, budget);
   policyLine(card, 'logical-change count', review.logical_change_count, budget);

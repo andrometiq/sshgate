@@ -1,6 +1,9 @@
 package redact
 
-import "bytes"
+import (
+	"bytes"
+	"sort"
+)
 
 // RedactString runs the streaming Layer-1 redactor over s in one shot and
 // returns the scrubbed result. It is the canonical way to scrub a string
@@ -35,4 +38,44 @@ func RedactString(s string, salt [32]byte, rules []Rule) (string, bool) {
 		return s, false
 	}
 	return buf.String(), true
+}
+
+// ExactRedactedBytes proves how many original bytes the canonical redactor
+// replaced. It refuses ambiguous overlapping matches and any divergence from
+// the supplied redacted output.
+func ExactRedactedBytes(s string, salt [32]byte, rules []Rule, redacted string) (hidden int, ok bool) {
+	defer func() {
+		if recover() != nil {
+			hidden = 0
+			ok = false
+		}
+	}()
+	full := make([]Rule, 0, len(rules)+1)
+	full = append(full, markerForgeryRule())
+	full = append(full, rules...)
+	scanner := newScanner(salt, full)
+	raw := scanner.rawMatches([]byte(s))
+	if len(raw) == 0 {
+		return 0, false
+	}
+	sort.Slice(raw, func(i, j int) bool {
+		if raw[i].Start != raw[j].Start {
+			return raw[i].Start < raw[j].Start
+		}
+		return raw[i].End < raw[j].End
+	})
+	hidden = 0
+	previousEnd := -1
+	for _, match := range raw {
+		if match.Start < 0 || match.End <= match.Start || match.End > len(s) || match.Start < previousEnd {
+			return 0, false
+		}
+		hidden += match.End - match.Start
+		previousEnd = match.End
+	}
+	reconstructed, count := scanner.redact(nil, []byte(s), raw)
+	if count != len(raw) || string(reconstructed) != redacted {
+		return 0, false
+	}
+	return hidden, true
 }

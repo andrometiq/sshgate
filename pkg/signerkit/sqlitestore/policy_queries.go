@@ -23,7 +23,7 @@ func (store *policyDB) GetByReviewID(ctx context.Context, reviewID string) (*pol
 	if len(reviewID) != 35 || reviewID[:3] != "pr_" || !lowerHex(reviewID[3:]) {
 		return nil, policystore.ErrNotFound
 	}
-	if _, err := store.VerifyAuthorityBinding(ctx); err != nil {
+	if _, err := store.readBoundPolicyMeta(ctx); err != nil {
 		return nil, err
 	}
 	request, err := loadPolicyRequestByReviewID(ctx, store.database, reviewID)
@@ -38,11 +38,11 @@ func (store *policyDB) ListPending(ctx context.Context, authorityID string, afte
 	if err != nil {
 		return policystore.PendingPage{}, err
 	}
-	binding, err := store.VerifyAuthorityBinding(ctx)
+	meta, err := store.readBoundPolicyMeta(ctx)
 	if err != nil {
 		return policystore.PendingPage{}, err
 	}
-	if authorityID != binding.AuthorityID {
+	if authorityID != meta.AuthorityID {
 		return policystore.PendingPage{}, policystore.ErrAuthorityMismatch
 	}
 	created, principal, requestID := int64(-1), "", ""
@@ -74,11 +74,11 @@ func (store *policyDB) ListRecovery(ctx context.Context, authorityID string, now
 	if err != nil {
 		return policystore.RecoveryPage{}, err
 	}
-	binding, err := store.VerifyAuthorityBinding(ctx)
+	meta, err := store.readBoundPolicyMeta(ctx)
 	if err != nil {
 		return policystore.RecoveryPage{}, err
 	}
-	if authorityID != binding.AuthorityID {
+	if authorityID != meta.AuthorityID {
 		return policystore.RecoveryPage{}, policystore.ErrAuthorityMismatch
 	}
 	updated, principal, requestID := int64(-1), "", ""
@@ -118,11 +118,11 @@ func (store *policyDB) ListUnauditedVotes(ctx context.Context, authorityID strin
 	if err != nil {
 		return policystore.VoteRecoveryPage{}, err
 	}
-	binding, err := store.VerifyAuthorityBinding(ctx)
+	meta, err := store.readBoundPolicyMeta(ctx)
 	if err != nil {
 		return policystore.VoteRecoveryPage{}, err
 	}
-	if authorityID != binding.AuthorityID {
+	if authorityID != meta.AuthorityID {
 		return policystore.VoteRecoveryPage{}, policystore.ErrAuthorityMismatch
 	}
 	updated, principal, requestID := int64(-1), "", ""
@@ -186,13 +186,13 @@ func (store *policyDB) listTerminals(ctx context.Context, authorityID string, cu
 	if err != nil {
 		return policystore.TerminalPage{}, err
 	}
-	binding, err := store.VerifyAuthorityBinding(ctx)
+	meta, err := store.readBoundPolicyMeta(ctx)
 	if err != nil {
 		return policystore.TerminalPage{}, err
 	}
 	if authorityID == "" {
-		authorityID = binding.AuthorityID
-	} else if authorityID != binding.AuthorityID {
+		authorityID = meta.AuthorityID
+	} else if authorityID != meta.AuthorityID {
 		return policystore.TerminalPage{}, policystore.ErrAuthorityMismatch
 	}
 	resolved, principal, requestID := int64(^uint64(0)>>1), "\U0010ffff", "\U0010ffff"

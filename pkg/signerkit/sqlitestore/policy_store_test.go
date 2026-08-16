@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -322,6 +323,81 @@ func TestPolicyAuthorityMismatchAndCounterDriftFailClosed(t *testing.T) {
 	}
 	if _, err := store.VerifyAuthorityBinding(ctx); !errors.Is(err, policystore.ErrCounterDrift) {
 		t.Fatalf("counter drift verification error = %v", err)
+	}
+	// Serving reads validate only the persisted binding meta. A maintenance
+	// ledger scan still catches the drift above, but an unrelated absent lookup
+	// must not turn a request into a full-ledger scan.
+	input := policyBootstrapInputNumber(t, public, keyID, authorityID("a"), "machine", 9000, 1, time.Unix(9000, 0))
+	lookup, err := store.Lookup(ctx, input.Key, input.Tuple)
+	if err != nil || lookup.Kind != policystore.LookupAbsent {
+		t.Fatalf("serving lookup under unrelated counter drift = %+v, %v", lookup, err)
+	}
+	reads := []struct {
+		name    string
+		run     func() error
+		wantErr error
+	}{
+		{name: "Fetch", wantErr: policystore.ErrNotFound, run: func() error { _, err := store.Fetch(ctx, input.Key); return err }},
+		{name: "VerifiedHead", wantErr: policystore.ErrNotFound, run: func() error { _, err := store.VerifiedHead(ctx, input.Tuple.HostKeyFP); return err }},
+		{name: "GetByReviewID", wantErr: policystore.ErrNotFound, run: func() error { _, err := store.GetByReviewID(ctx, reviewID("9")); return err }},
+		{name: "ListPending", run: func() error { _, err := store.ListPending(ctx, authorityID("a"), nil, 1); return err }},
+		{name: "ListRecovery", run: func() error { _, err := store.ListRecovery(ctx, authorityID("a"), input.Now, nil, 1); return err }},
+		{name: "ListUnauditedVotes", run: func() error { _, err := store.ListUnauditedVotes(ctx, authorityID("a"), nil, 1); return err }},
+		{name: "ListRecentTerminals", run: func() error { _, err := store.ListRecentTerminals(ctx, authorityID("a"), nil, 1); return err }},
+		{name: "ListVotes", wantErr: policystore.ErrNotFound, run: func() error { _, err := store.ListVotes(ctx, input.Key, nil, 1); return err }},
+	}
+	for _, read := range reads {
+		t.Run(read.name, func(t *testing.T) {
+			err := read.run()
+			if (read.wantErr == nil && err != nil) || (read.wantErr != nil && !errors.Is(err, read.wantErr)) {
+				t.Fatalf("serving read under unrelated counter drift = %v; want %v", err, read.wantErr)
+			}
+		})
+	}
+	// Test-only trigger removal permits a durable-meta tamper that production
+	// SQL correctly prevents, so the serving helper's own validation is observed.
+	if _, err := database.db.Exec(`DROP TRIGGER policy_meta_immutable`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.db.Exec(`UPDATE policy_authority_meta SET config_digest=? WHERE singleton=1`, hex64("f")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Lookup(ctx, input.Key, input.Tuple); !errors.Is(err, policystore.ErrAuthorityMismatch) {
+		t.Fatalf("serving lookup accepted invalid bound meta: %v", err)
+	}
+}
+
+func TestPolicyServingBindingReadRequiresMigrationMarker(t *testing.T) {
+	database, store, public, _, keyID, _ := newPolicyStoreHarness(t, 1, false)
+	input := policyBootstrapInputNumber(t, public, keyID, authorityID("a"), "machine", 9001, 1, time.Unix(9001, 0))
+	if _, err := database.db.Exec(`DELETE FROM schema_migrations WHERE version=6`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Lookup(context.Background(), input.Key, input.Tuple); err == nil || !strings.Contains(err.Error(), "migration 6 is not installed") {
+		t.Fatalf("serving lookup without migration marker = %v", err)
+	}
+}
+
+func TestPolicyConfigDigestRoundTripsFromPersistedMeta(t *testing.T) {
+	database, _, _, _, _, config := newPolicyStoreHarness(t, 1, false)
+	meta, err := readPolicyMeta(context.Background(), database.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	persisted := meta.config()
+	if !reflect.DeepEqual(persisted, config) {
+		t.Fatalf("persisted config round-trip differs:\n got  %+v\n want %+v", persisted, config)
+	}
+	digest, err := policystore.ConfigDigest(persisted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if digest != meta.ConfigDigest {
+		t.Fatalf("persisted meta config digest = %q; recomputed %q", meta.ConfigDigest, digest)
+	}
+	const persistedGolden = "4b1f424af194bfbd63e40a347a98380152c28cd3a62fe8b6a04abcbd94fd90aa"
+	if meta.ConfigDigest != persistedGolden {
+		t.Fatalf("persisted meta config digest = %q; want R47 golden %q", meta.ConfigDigest, persistedGolden)
 	}
 }
 
@@ -1136,6 +1212,96 @@ func TestPolicyCrossPrincipalCollisionAndExpectedKeyPrecedence(t *testing.T) {
 	}
 }
 
+func TestPolicyConcurrentBootstrapAndSuccessorAdmission(t *testing.T) {
+	type raceResult struct {
+		begin policystore.BeginResult
+		err   error
+	}
+	run := func(t *testing.T, store policystore.Store, inputs [2]policystore.BeginInput) {
+		t.Helper()
+		if inputs[0].Key != inputs[1].Key {
+			t.Fatal("admission race fixture must contend on one principal/request key")
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		start := make(chan struct{})
+		results := make(chan raceResult, len(inputs))
+		var wait sync.WaitGroup
+		for _, input := range inputs {
+			input := input
+			wait.Add(1)
+			go func() {
+				defer wait.Done()
+				<-start
+				begin, err := store.Begin(ctx, input)
+				results <- raceResult{begin: begin, err: err}
+			}()
+		}
+		close(start)
+		wait.Wait()
+		close(results)
+
+		winners, losers := 0, 0
+		for result := range results {
+			if result.err != nil {
+				t.Fatalf("concurrent admission: %v", result.err)
+			}
+			switch request := result.begin.Request; {
+			case request != nil && request.State == policystore.StateReceivedUnaudited && result.begin.Lookup.Kind == policystore.LookupExact:
+				winners++
+			case request == nil && result.begin.Lookup.Kind == policystore.LookupConflict:
+				losers++
+			default:
+				t.Fatalf("concurrent admission result = %+v", result.begin)
+			}
+		}
+		if winners != 1 || losers != 1 {
+			t.Fatalf("concurrent admission winners=%d losers=%d; want 1/1", winners, losers)
+		}
+	}
+
+	t.Run("bootstrap", func(t *testing.T) {
+		database, store, public, _, keyID, _ := newPolicyStoreHarness(t, 1, false)
+		addPolicyVoter(t, database, "voter-a")
+		now := time.Unix(11_500, 0).UTC()
+		first := policyBootstrapInputNumber(t, public, keyID, authorityID("a"), "machine", 2100, 1, now)
+		secondManifest, err := policy.ParseBaseManifest(first.Payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		identity, err := policy.NewShellExactIdentity([]byte("echo bootstrap contender"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		secondManifest.Entries = []policy.BaseEntry{{ID: "pa_oob_0123456789abcdef0123456789abcdef", Identity: identity, Source: policy.EntrySourceOutOfBand}}
+		second := policyBeginInputForManifest(t, public, keyID, authorityID("a"), "machine", 2100, secondManifest, now)
+		run(t, store, [2]policystore.BeginInput{
+			first,
+			second,
+		})
+	})
+
+	t.Run("successor", func(t *testing.T) {
+		database, store, public, private, keyID, _ := newPolicyStoreHarness(t, 1, false)
+		addPolicyVoter(t, database, "voter-a")
+		now := time.Unix(11_600, 0).UTC()
+		predecessor := publishPolicyBootstrap(t, store, public, private, keyID, 2200, now)
+		manifest := func(command string) policy.BaseManifest {
+			identity, err := policy.NewShellExactIdentity([]byte(command))
+			if err != nil {
+				t.Fatal(err)
+			}
+			return policy.BaseManifest{Schema: policy.SchemaV1, Host: predecessor.HostKeyFP, Epoch: 1, Revision: 2,
+				MissAction: policy.MissActionAsk, Growth: policy.GrowthSignToAdd,
+				Entries: []policy.BaseEntry{{ID: "pa_oob_0123456789abcdef0123456789abcdef", Identity: identity, Source: policy.EntrySourceOutOfBand}}}
+		}
+		run(t, store, [2]policystore.BeginInput{
+			policySuccessorInput(t, public, keyID, predecessor, 2201, manifest("echo one"), now.Add(10*time.Second)),
+			policySuccessorInput(t, public, keyID, predecessor, 2201, manifest("echo two"), now.Add(10*time.Second)),
+		})
+	})
+}
+
 func TestPolicySuccessorPredecessorAndFinalPublicationRace(t *testing.T) {
 	database, store, public, private, keyID, _ := newPolicyStoreHarness(t, 1, false)
 	addPolicyVoter(t, database, "voter-a")
@@ -1362,8 +1528,115 @@ func TestPolicyRecoveryLeaseTakeoverAndOwnerClearFence(t *testing.T) {
 	if err != nil || second.Generation != first.Generation+1 {
 		t.Fatalf("expired recovery lease takeover = %+v, %v", second, err)
 	}
-	if _, err := store.Fenced(first).MarkSubmissionAudited(ctx, begin.Request.Key(), begin.Request.StateVersion); !errors.Is(err, policystore.ErrLeaseLost) {
-		t.Fatalf("old recovery generation mutation = %v", err)
+	oldGeneration := store.Fenced(first)
+	oldWork := policystore.WorkLease{Lease: first, StateVersion: begin.Request.StateVersion}
+	mutations := []struct {
+		name string
+		run  func() error
+	}{
+		{name: "MarkSubmissionAudited", run: func() error {
+			_, err := oldGeneration.MarkSubmissionAudited(ctx, begin.Request.Key(), begin.Request.StateVersion)
+			return err
+		}},
+		{name: "MarkRejectionSubmissionAudited", run: func() error {
+			_, err := oldGeneration.MarkRejectionSubmissionAudited(ctx, begin.Request.Key(), begin.Request.StateVersion)
+			return err
+		}},
+		{name: "ActivateSubmission", run: func() error {
+			_, err := oldGeneration.ActivateSubmission(ctx, begin.Request.Key(), begin.Request.StateVersion, now)
+			return err
+		}},
+		{name: "StageRejectionError", run: func() error {
+			_, err := oldGeneration.StageRejectionError(ctx, begin.Request.Key(), begin.Request.StateVersion, now)
+			return err
+		}},
+		{name: "PublishVoteAudit", run: func() error {
+			_, err := oldGeneration.PublishVoteAudit(ctx, begin.Request.Key(), "voter-a", begin.Request.StateVersion)
+			return err
+		}},
+		{name: "ClaimDenial", run: func() error {
+			_, err := oldGeneration.ClaimDenial(ctx, begin.Request.Key(), begin.Request.StateVersion, now)
+			return err
+		}},
+		{name: "ClaimApproval", run: func() error {
+			_, err := oldGeneration.ClaimApproval(ctx, begin.Request.Key(), begin.Request.StateVersion, "worker-a", now, 2*time.Minute)
+			return err
+		}},
+		{name: "StageQuorumUnattainable", run: func() error {
+			_, err := oldGeneration.StageQuorumUnattainable(ctx, begin.Request.Key(), begin.Request.StateVersion, now)
+			return err
+		}},
+		{name: "MarkPreMintAudited", run: func() error { _, err := oldGeneration.MarkPreMintAudited(ctx, oldWork); return err }},
+		{name: "PersistMaterialized", run: func() error {
+			_, err := oldGeneration.PersistMaterialized(ctx, oldWork, []byte("stale"), now)
+			return err
+		}},
+		{name: "MarkResultAudited", run: func() error {
+			_, err := oldGeneration.MarkResultAudited(ctx, begin.Request.Key(), begin.Request.StateVersion)
+			return err
+		}},
+		{name: "PublishApproved", run: func() error {
+			_, err := oldGeneration.PublishApproved(ctx, begin.Request.Key(), begin.Request.StateVersion, now)
+			return err
+		}},
+		{name: "MarkNoOpTerminalAudited", run: func() error {
+			_, err := oldGeneration.MarkNoOpTerminalAudited(ctx, begin.Request.Key(), begin.Request.StateVersion)
+			return err
+		}},
+		{name: "PublishNoOp", run: func() error {
+			_, err := oldGeneration.PublishNoOp(ctx, begin.Request.Key(), begin.Request.StateVersion, now)
+			return err
+		}},
+		{name: "StageIntakeKeyError", run: func() error {
+			_, err := oldGeneration.StageIntakeKeyError(ctx, begin.Request.Key(), begin.Request.StateVersion, now)
+			return err
+		}},
+		{name: "StageMaterializationError", run: func() error {
+			_, err := oldGeneration.StageMaterializationError(ctx, oldWork, policywire.ErrorPolicyMaterializationFailed, now)
+			return err
+		}},
+		{name: "StageNoOpError", run: func() error {
+			_, err := oldGeneration.StageNoOpError(ctx, begin.Request.Key(), begin.Request.StateVersion, policywire.ErrorStalePolicyHead, now)
+			return err
+		}},
+		{name: "StagePublicationError", run: func() error {
+			_, err := oldGeneration.StagePublicationError(ctx, begin.Request.Key(), begin.Request.StateVersion, policywire.ErrorStalePolicyHead, now)
+			return err
+		}},
+		{name: "MarkErrorTerminalAudited", run: func() error {
+			_, err := oldGeneration.MarkErrorTerminalAudited(ctx, begin.Request.Key(), begin.Request.StateVersion)
+			return err
+		}},
+		{name: "PublishError", run: func() error {
+			_, err := oldGeneration.PublishError(ctx, begin.Request.Key(), begin.Request.StateVersion, now)
+			return err
+		}},
+		{name: "MarkDenialTerminalAudited", run: func() error {
+			_, err := oldGeneration.MarkDenialTerminalAudited(ctx, begin.Request.Key(), begin.Request.StateVersion)
+			return err
+		}},
+		{name: "PublishDenied", run: func() error {
+			_, err := oldGeneration.PublishDenied(ctx, begin.Request.Key(), begin.Request.StateVersion, now)
+			return err
+		}},
+		{name: "MarkRejectionTerminalAudited", run: func() error {
+			_, err := oldGeneration.MarkRejectionTerminalAudited(ctx, begin.Request.Key(), begin.Request.StateVersion)
+			return err
+		}},
+		{name: "PublishRejection", run: func() error {
+			_, err := oldGeneration.PublishRejection(ctx, begin.Request.Key(), begin.Request.StateVersion, now)
+			return err
+		}},
+	}
+	for _, mutation := range mutations {
+		t.Run(mutation.name, func(t *testing.T) {
+			if err := mutation.run(); !errors.Is(err, policystore.ErrLeaseLost) {
+				t.Fatalf("old recovery generation mutation = %v; want lease lost", err)
+			}
+		})
+	}
+	if err := store.ReleaseRecoveryLease(ctx, first); !errors.Is(err, policystore.ErrLeaseLost) {
+		t.Fatalf("old recovery generation release = %v; want lease lost", err)
 	}
 	if err := database.ClearPolicyRecoveryLease(ctx, begin.Request.ReviewID); err != nil {
 		t.Fatal(err)
@@ -2022,7 +2295,7 @@ func testPolicyConfig(requester string, approvals uint64, stepUp bool) policysto
 	config.RequiredApprovals = approvals
 	config.DenyVeto = true
 	config.PolicyVoterRole = "operator"
-	config.VoterEligibilityVersion = "v1"
+	config.VoterEligibilityVersion = policystore.VoterEligibilityVersion
 	config.VoteStepUpRequired = stepUp
 	config.VoteAuthMethodsJSON = []byte(`["session"]`)
 	if stepUp {

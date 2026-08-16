@@ -84,6 +84,42 @@ func TestReadPinnedPolicyPublicKeyRejectsUnsafeFilePredicates(t *testing.T) {
 	})
 }
 
+func TestReadPinnedPolicyPublicKeyRejectsPostOpenPathSubstitution(t *testing.T) {
+	directory := t.TempDir()
+	path := filepath.Join(directory, "policy.pub")
+	replacement := filepath.Join(directory, "replacement.pub")
+	displaced := filepath.Join(directory, "displaced.pub")
+	for name, content := range map[string]string{
+		path:        strings.Repeat("a", 64),
+		replacement: strings.Repeat("b", 64),
+	} {
+		if err := os.WriteFile(name, []byte(content), 0o600); err != nil {
+			t.Fatalf("write %s: %v", filepath.Base(name), err)
+		}
+	}
+
+	lstatCalls := 0
+	lstat := func(name string) (os.FileInfo, error) {
+		lstatCalls++
+		if lstatCalls == 2 {
+			if err := os.Rename(path, displaced); err != nil {
+				t.Fatalf("displace opened key: %v", err)
+			}
+			if err := os.Rename(replacement, path); err != nil {
+				t.Fatalf("substitute key path: %v", err)
+			}
+		}
+		return os.Lstat(name)
+	}
+
+	if _, err := readPinnedPolicyPublicKeyForUIDWithLstat(path, uint32(os.Geteuid()), lstat); err == nil || !strings.Contains(err.Error(), "changed") {
+		t.Fatalf("post-open substitution error = %v; want changed-file rejection", err)
+	}
+	if lstatCalls != 2 {
+		t.Fatalf("Lstat calls = %d; want initial and post-open checks", lstatCalls)
+	}
+}
+
 func TestReadPinnedPolicyPublicKeyRejectsBadContentGrammar(t *testing.T) {
 	for _, test := range []struct {
 		name    string

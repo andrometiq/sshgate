@@ -80,7 +80,7 @@ func (store *policyHumanTestStore) PrepareVote(_ context.Context, input policyst
 func newPolicyHumanHandlerFixture(t testing.TB) (*policyHumanHandler, *policyHumanTestStore, *policystore.Request, *testPolicyCore) {
 	t.Helper()
 	core := newTestPolicyCore(t)
-	review := []byte(`{"contract":"sshgate-policy-review-v2","purpose":"base_manifest_sign_v1","principal":"machine","request_id":"pm_11111111111111111111111111111111","review_id":"pr_11111111111111111111111111111111","authority_id":"pauth_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","host":"SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","bootstrap":true,"epoch":"1","revision":"1","miss_action":"ask","growth":"sign-to-add","entry_count":"0","revocation_count":"0","logical_change_count":"1","axes_changed":true,"items":[{"kind":"axes"}],"warnings":[],"marker":"\u003cscript\u003e"}`)
+	review := []byte(`{"contract":"sshgate-policy-review-v2","purpose":"base_manifest_sign_v1","principal":"machine","request_id":"pm_11111111111111111111111111111111","review_id":"pr_11111111111111111111111111111111","authority_id":"pauth_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","host":"SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","bootstrap":true,"epoch":"1","revision":"1","miss_action":"ask","growth":"sign-to-add","entry_count":"0","revocation_count":"0","logical_change_count":"1","axes_changed":true,"items":[{"kind":"axes"}],"warnings":[]}`)
 	digest := sha256.Sum256(review)
 	row := &policystore.Request{Principal: "machine", RequestID: "pm_11111111111111111111111111111111",
 		ReviewID: "pr_11111111111111111111111111111111", AuthorityID: testPolicyAuthority,

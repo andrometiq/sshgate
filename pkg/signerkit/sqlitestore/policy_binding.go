@@ -201,6 +201,24 @@ func (store *policyDB) VerifyAuthorityBinding(ctx context.Context) (policystore.
 	}, nil
 }
 
+// readBoundPolicyMeta is the serving-path binding check. Startup and
+// maintenance use VerifyAuthorityBinding/SafetyScan for the complete ledger
+// verification; per-request reads only need the installed migration marker and
+// the validated immutable meta binding.
+func (store *policyDB) readBoundPolicyMeta(ctx context.Context) (policyMeta, error) {
+	if err := requirePolicyMigration(ctx, store.database); err != nil {
+		return policyMeta{}, err
+	}
+	meta, err := readPolicyMeta(ctx, store.database)
+	if err != nil {
+		return policyMeta{}, err
+	}
+	if err := validatePolicyMeta(meta); err != nil {
+		return policyMeta{}, err
+	}
+	return meta, nil
+}
+
 // SafetyScan verifies the complete bounded policy ledger in one
 // BEGIN IMMEDIATE snapshot and performs no mutation. Archive inspection stays
 // inside that snapshot so readiness never relies on a resumable cursor or a

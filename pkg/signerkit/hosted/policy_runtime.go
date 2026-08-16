@@ -7,6 +7,8 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/karthikeyan5/sshgate/pkg/signerkit"
@@ -37,8 +39,8 @@ func (server *Server) AttachPolicy(config *PolicyAPIConfig) error {
 	if server.Human == nil {
 		return errors.New("hosted: AttachPolicy: human plane must be attached")
 	}
-	if server.MachineClientID == "" {
-		return errors.New("hosted: AttachPolicy: MachineClientID is required")
+	if err := policystore.ValidateIdentity(server.MachineClientID); err != nil {
+		return fmt.Errorf("hosted: AttachPolicy: MachineClientID: %w", err)
 	}
 	if config.Engine.audit != config.DurableAudit {
 		return errors.New("hosted: AttachPolicy: engine and route durable audits differ")
@@ -160,17 +162,22 @@ func (server *Server) StartPolicyWorkers(parent context.Context) error {
 
 func (server *Server) runRosterWorker(ctx context.Context, engine *PolicyEngine) {
 	defer server.policyWorkers.Done()
-	interval := server.policyRosterWait
-	if interval <= 0 {
-		interval = policyRosterSweepInterval
+	ticks := server.policyRosterTick
+	var ticker *time.Ticker
+	if ticks == nil {
+		interval := server.policyRosterWait
+		if interval <= 0 {
+			interval = policyRosterSweepInterval
+		}
+		ticker = time.NewTicker(interval)
+		ticks = ticker.C
+		defer ticker.Stop()
 	}
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
+		case <-ticks:
 			if err := engine.RosterSweep(ctx); err != nil && !errors.Is(err, context.Canceled) {
 				server.Logger.Printf("policy roster sweep failed: %v", err)
 			}
@@ -260,11 +267,17 @@ type PolicyRuntime struct {
 	Audit    signerkit.DurableAuditSink
 	Lease    *policyarchive.MaintenanceLease
 	stopHTTP func() error
-	closed   bool
+	store    policystore.Store
+	binding  policystore.AuthorityBinding
+
+	completionOnce sync.Once
+	completionErr  error
+	closed         atomic.Bool
 }
 
-// StartPolicy performs the frozen serving order. In particular, lease
-// acquisition happens inside this function before OpenDatabase is invoked.
+// StartPolicy performs the frozen serving order through route mounting. It
+// returns with policy readiness false so the caller can begin ordinary HTTP
+// service before CompleteStartup runs the initial safety gates.
 func StartPolicy(ctx context.Context, config PolicyStartupConfig) (_ *PolicyRuntime, returnedErr error) {
 	if config.DatabasePath == "" || config.ArchiveRoot == "" || config.OpenDatabase == nil || config.OpenAudit == nil || config.BuildServer == nil || config.BuildHandler == nil || config.StopIntake == nil || config.Core == nil {
 		return nil, errors.New("hosted policy startup: incomplete configuration")
@@ -294,6 +307,7 @@ func StartPolicy(ctx context.Context, config PolicyStartupConfig) (_ *PolicyRunt
 	if store == nil {
 		return nil, errors.New("hosted policy startup: database has no policy store")
 	}
+	runtime.store = store
 
 	archive, err := policyarchive.OpenServing(config.ArchiveRoot, lease)
 	if err != nil {
@@ -320,6 +334,19 @@ func StartPolicy(ctx context.Context, config PolicyStartupConfig) (_ *PolicyRunt
 	binding := config.Binding
 	binding.SignerKeyID = keyID
 	binding.SignerPublicKey = append([]byte(nil), publicKey...)
+	runtime.binding = binding
+	if err := binding.Config.Validate(); err != nil {
+		return nil, fmt.Errorf("hosted policy startup: validate binding config: %w", err)
+	}
+	if binding.Config.VoterEligibilityVersion != policystore.VoterEligibilityVersion {
+		return nil, errors.New("hosted policy startup: binding voter eligibility version mismatch")
+	}
+	if binding.Config.ReviewRendererVersion != policyreview.RendererVersion || config.ReviewRendererVersion != policyreview.RendererVersion {
+		return nil, errors.New("hosted policy startup: review renderer version mismatch")
+	}
+	if binding.Config.ReviewRulesDigest != policyreview.RulesDigest() || config.ReviewRulesDigest != policyreview.RulesDigest() {
+		return nil, errors.New("hosted policy startup: review rules digest mismatch")
+	}
 	if err := store.BindAuthority(ctx, binding); err != nil {
 		return nil, fmt.Errorf("hosted policy startup: bind authority: %w", err)
 	}
@@ -357,48 +384,70 @@ func StartPolicy(ctx context.Context, config PolicyStartupConfig) (_ *PolicyRunt
 	if err := server.AttachPolicy(&PolicyAPIConfig{Engine: engine, Handler: handler, Archive: archive, Lease: lease, DurableAudit: audit}); err != nil {
 		return nil, err
 	}
+	return runtime, nil
+}
 
-	scanner, ok := store.(policystore.SafetyScanner)
+// CompleteStartup runs exactly once after the owning HTTP listener is live.
+// A failure is sticky for this runtime: policy remains unready, workers do not
+// start, and the already-listening ordinary plane remains available.
+func (runtime *PolicyRuntime) CompleteStartup(ctx context.Context) error {
+	if runtime == nil {
+		return errors.New("hosted policy startup: nil runtime")
+	}
+	runtime.completionOnce.Do(func() {
+		if runtime.closed.Load() {
+			runtime.completionErr = errors.New("hosted policy startup: runtime is closed")
+			return
+		}
+		runtime.completionErr = runtime.completeStartup(ctx)
+		if runtime.completionErr != nil && runtime.Engine != nil {
+			runtime.Engine.Readiness().MarkUnready()
+		}
+	})
+	return runtime.completionErr
+}
+
+func (runtime *PolicyRuntime) completeStartup(ctx context.Context) error {
+	scanner, ok := runtime.store.(policystore.SafetyScanner)
 	if !ok {
-		return nil, errors.New("hosted policy startup: policy store has no one-transaction safety scanner")
+		return errors.New("hosted policy startup: policy store has no one-transaction safety scanner")
 	}
 	if err := scanner.SafetyScan(ctx, func(tombstone *policystore.Request) error {
 		if tombstone == nil {
-			if err := archive.VerifyBinding(binding.ArchiveID, binding.AuthorityID); err != nil {
+			if err := runtime.Archive.VerifyBinding(runtime.binding.ArchiveID, runtime.binding.AuthorityID); err != nil {
 				return err
 			}
-			return archive.VerifyShards()
+			return runtime.Archive.VerifyShards()
 		}
 		reference := tombstone.ArchiveRef()
 		if reference == nil {
 			return fmt.Errorf("%w: tombstone has incomplete archive reference", policystore.ErrCorrupt)
 		}
-		encoded, err := archive.ReadObject(policyarchive.ObjectRef{SHA256: reference.ObjectSHA256, Bytes: reference.RecordBytes})
+		encoded, err := runtime.Archive.ReadObject(policyarchive.ObjectRef{SHA256: reference.ObjectSHA256, Bytes: reference.RecordBytes})
 		if err != nil {
 			return err
 		}
 		_, err = sqlitestore.ResolveTerminalArchive(tombstone, encoded)
 		return err
 	}); err != nil {
-		return nil, fmt.Errorf("hosted policy startup: safety scan: %w", err)
+		return fmt.Errorf("hosted policy startup: safety scan: %w", err)
 	}
-	if err := engine.RosterSweep(ctx); err != nil {
-		return nil, fmt.Errorf("hosted policy startup: roster sweep: %w", err)
+	if err := runtime.Engine.RosterSweep(ctx); err != nil {
+		return fmt.Errorf("hosted policy startup: roster sweep: %w", err)
 	}
-	if err := engine.Readiness().SetReady(ctx); err != nil {
-		return nil, fmt.Errorf("hosted policy startup: set readiness: %w", err)
+	if err := runtime.Engine.Readiness().SetReady(ctx); err != nil {
+		return fmt.Errorf("hosted policy startup: set readiness: %w", err)
 	}
-	if err := server.StartPolicyWorkers(ctx); err != nil {
-		return nil, err
+	if err := runtime.Server.StartPolicyWorkers(ctx); err != nil {
+		return err
 	}
-	return runtime, nil
+	return nil
 }
 
 func (runtime *PolicyRuntime) Close() error {
-	if runtime == nil || runtime.closed {
+	if runtime == nil || !runtime.closed.CompareAndSwap(false, true) {
 		return nil
 	}
-	runtime.closed = true
 	var err error
 	if runtime.Server != nil {
 		runtime.Server.MarkPolicyUnready()

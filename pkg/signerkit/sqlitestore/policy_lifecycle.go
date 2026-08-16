@@ -260,14 +260,18 @@ func (store *policyDB) ClaimApproval(ctx context.Context, key policystore.Key, e
 			}
 			copyClaimedHead(request, head)
 		}
-		if request.RecoveryLeaseGeneration >= uint64(^uint64(0)>>1) {
-			return fmt.Errorf("%w: recovery lease generation exhausted", policystore.ErrCorrupt)
-		}
 		request.State = policystore.StateApprovedMaterializing
 		request.StateVersion++
-		request.RecoveryLeaseOwner = workerID
-		request.RecoveryLeaseUntil = now.Add(ttl).UTC().Unix()
-		request.RecoveryLeaseGeneration++
+		if store.fence == nil {
+			if request.RecoveryLeaseGeneration >= uint64(^uint64(0)>>1) {
+				return fmt.Errorf("%w: recovery lease generation exhausted", policystore.ErrCorrupt)
+			}
+			request.RecoveryLeaseOwner = workerID
+			request.RecoveryLeaseUntil = now.Add(ttl).UTC().Unix()
+			request.RecoveryLeaseGeneration++
+		} else if workerID != store.fence.Owner {
+			return policystore.ErrLeaseLost
+		}
 		request.UpdatedAt = now.UTC().Unix()
 		return setExactPolicyReservation(ctx, transaction, request)
 	})

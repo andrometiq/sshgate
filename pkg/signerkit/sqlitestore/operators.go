@@ -83,22 +83,25 @@ func (s *DB) GetUserByName(ctx context.Context, username string) (*store.User, e
 	return scanUser(row, username)
 }
 
-// CountAuthenticatableUsers returns users with at least one TOTP or WebAuthn
-// factor, optionally excluding one requester ID for self-approval policy
-// validation. It is deployment introspection, not part of the portable Store
+// CountEligiblePolicyVoters mirrors the voter-freeze predicate used by policy
+// admission. It is deployment introspection, not part of the portable Store
 // mechanism interface.
-func (s *DB) CountAuthenticatableUsers(ctx context.Context, excludeID string) (int, error) {
+func (s *DB) CountEligiblePolicyVoters(ctx context.Context, role, requesterID string, allowSelf, stepUp bool) (int, error) {
 	var count int
 	err := s.db.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM users u
-		WHERE (? = '' OR u.id <> ?)
+		WHERE u.role = ?
+		  AND (? = 1 OR u.id <> ?)
 		  AND (
-			EXISTS (SELECT 1 FROM totp_secrets t WHERE t.user_id = u.id)
-			OR EXISTS (SELECT 1 FROM webauthn_credentials w WHERE w.user_id = u.id)
+			(? = 1 AND EXISTS (SELECT 1 FROM totp_secrets t WHERE t.user_id = u.id))
+			OR (? = 0 AND (
+				EXISTS (SELECT 1 FROM totp_secrets t WHERE t.user_id = u.id)
+				OR EXISTS (SELECT 1 FROM webauthn_credentials w WHERE w.user_id = u.id)
+			))
 		  )
-	`, excludeID, excludeID).Scan(&count)
+	`, role, boolInteger(allowSelf), requesterID, boolInteger(stepUp), boolInteger(stepUp)).Scan(&count)
 	if err != nil {
-		return 0, fmt.Errorf("count authenticatable users: %w", err)
+		return 0, fmt.Errorf("count eligible policy voters: %w", err)
 	}
 	return count, nil
 }

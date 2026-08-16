@@ -143,6 +143,54 @@ test('complete semantic content labels digests, presets, additions, removals, re
   }
 });
 
+test('complete review DOM follows the frozen semantic evidence order', () => {
+  const context = loadPolicy();
+  const requestHTML = fs.readFileSync(path.join(__dirname, '..', 'assets', 'policy-request.html'), 'utf8');
+  assert.ok(requestHTML.indexOf('PERMANENT REMOTE POLICY AUTHORITY') < requestHTML.indexOf('id="policy-review"'));
+  const detail = detailWith([
+    added('added-01', 4, 'echo'),
+    {kind: 'removed', id: 'removed-01'},
+    {kind: 'revoked', id: 'revoked-01'},
+    {kind: 'axes'},
+  ], {axes_changed: true, entry_count: '1', revocation_count: '1'});
+  const root = new FakeNode('div');
+  context.__policyTest.renderPolicyReview(detail, root);
+
+  const card = root.children[0];
+  const domText = [];
+  function collectEvidenceNodes(node) {
+    if (node.tag === 'h2' || node.className === 'row') domText.push(node.textContent);
+    for (const child of node.children) {
+      if (typeof child !== 'string') collectEvidenceNodes(child);
+    }
+  }
+  collectEvidenceNodes(card);
+  const orderedEvidence = [
+    'Request identity',
+    'review ID',
+    'request ID',
+    'host fingerprint',
+    'Frozen signer evidence',
+    'expected signer key ID',
+    'Policy axes and version',
+    'named preset',
+    'Frozen counts and digests',
+    'candidate/base digest',
+    'signer-owned-head digest',
+    'entry count',
+    'Complete semantic diff',
+    'added entry ID',
+    'removed entry ID',
+    'newly revoked entry ID',
+  ];
+  let previous = -1;
+  for (const label of orderedEvidence) {
+    const index = domText.findIndex((text, candidate) => candidate > previous && text.startsWith(label));
+    assert.notEqual(index, -1, `${label} is missing or out of order`);
+    previous = index;
+  }
+});
+
 test('acknowledged rejection without a review document still renders frozen forensic evidence', () => {
   const context = loadPolicy();
   const detail = detailWith([]);
@@ -163,6 +211,21 @@ test('bootstrap review renders signer-owned-head digest absence explicitly', () 
   const root = new FakeNode('div');
   context.__policyTest.renderPolicyReview(detail, root);
   assert.match(root.textContent, /signer-owned-head digestabsent: explicit bootstrap/);
+  assert.ok(root.textContent.indexOf('Frozen counts and digests') < root.textContent.indexOf('candidate/base digest'));
+  assert.ok(root.textContent.indexOf('candidate/base digest') < root.textContent.indexOf('signer-owned-head digestabsent: explicit bootstrap'));
+});
+
+test('canonical policy object counts accept max and reject max plus one', () => {
+  const context = loadPolicy();
+  assert.doesNotThrow(() => context.__policyTest.validatePolicyReview(detailWith([], {
+    entry_count: '256', revocation_count: '4096', logical_change_count: '0',
+  })));
+  assert.throws(() => context.__policyTest.validatePolicyReview(detailWith([], {
+    entry_count: '257', revocation_count: '4096', logical_change_count: '0',
+  })), /invalid policy object counts/);
+  assert.throws(() => context.__policyTest.validatePolicyReview(detailWith([], {
+    entry_count: '256', revocation_count: '4097', logical_change_count: '0',
+  })), /invalid policy object counts/);
 });
 
 test('P7 item, preview, bootstrap literal, and aggregate bounds fail at max plus one', () => {

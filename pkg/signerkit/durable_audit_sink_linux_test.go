@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/karthikeyan5/sshgate/src/policy"
+	"github.com/karthikeyan5/sshgate/src/policywire"
 	"golang.org/x/sys/unix"
 )
 
@@ -118,6 +119,49 @@ func TestPolicyAuditEvidenceOrderedCanonicalEncoding(t *testing.T) {
 	bad.ClaimedEpoch = "01"
 	if _, err := json.Marshal(PolicyAuditMetadata{AuthorityID: metadata.AuthorityID, Evidence: &bad}); err == nil {
 		t.Fatal("noncanonical predecessor integer accepted")
+	}
+}
+
+func TestPolicyAuditEvidencePresenceMatrix(t *testing.T) {
+	_, publicKey := goldenSignerKey()
+	keyID, err := policy.SignerKeyID(publicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authorityID := "pauth_0123456789abcdef0123456789abcdef"
+	bootstrap := PolicyAuditEvidence{
+		ExpectedSignerKeyID: keyID, FrozenSignerKeyID: keyID,
+		FrozenSignerPublicKeyB64: base64.StdEncoding.EncodeToString(publicKey),
+	}
+	encoded, err := json.Marshal(PolicyAuditMetadata{AuthorityID: authorityID, Evidence: &bootstrap})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(encoded, []byte(`"trusted_`)) || bytes.Contains(encoded, []byte(`"claimed_`)) {
+		t.Fatalf("bootstrap evidence invented predecessor fields: %s", encoded)
+	}
+
+	nullEvidence := []byte(`{"authority_id":"` + authorityID + `","evidence":null}`)
+	var decoded PolicyAuditMetadata
+	if err := json.Unmarshal(nullEvidence, &decoded); err == nil {
+		t.Fatal("explicit null evidence accepted instead of omission")
+	}
+	unknownNested := []byte(`{"authority_id":"` + authorityID + `","evidence":{"expected_signer_key_id":"` + keyID + `","unknown":true}}`)
+	if err := json.Unmarshal(unknownNested, &decoded); err == nil {
+		t.Fatal("unknown nested evidence field accepted")
+	}
+
+	for _, noRow := range []PolicyAuditMetadata{
+		{AuthorityID: authorityID},
+		{ErrorCode: string(policywire.ErrorPolicyNotSupported)},
+	} {
+		encoded, err := json.Marshal(noRow)
+		if err != nil {
+			t.Fatalf("no-row metadata: %v", err)
+		}
+		if bytes.Contains(encoded, []byte(`"evidence"`)) || noRow.Evidence != nil {
+			t.Fatalf("no-row metadata carried evidence: %s", encoded)
+		}
 	}
 }
 

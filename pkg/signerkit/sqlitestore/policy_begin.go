@@ -26,7 +26,7 @@ func (store *policyDB) Lookup(ctx context.Context, key policystore.Key, tuple po
 	if err := validatePolicyLookup(key, tuple); err != nil {
 		return policystore.LookupResult{}, err
 	}
-	if _, err := store.VerifyAuthorityBinding(ctx); err != nil {
+	if _, err := store.readBoundPolicyMeta(ctx); err != nil {
 		return policystore.LookupResult{}, err
 	}
 	request, err := loadPolicyRequest(ctx, store.database, key)
@@ -43,7 +43,7 @@ func (store *policyDB) Fetch(ctx context.Context, key policystore.Key) (policyst
 	if err := validatePolicyKey(key); err != nil {
 		return policystore.FetchResult{}, err
 	}
-	if _, err := store.VerifyAuthorityBinding(ctx); err != nil {
+	if _, err := store.readBoundPolicyMeta(ctx); err != nil {
 		return policystore.FetchResult{}, err
 	}
 	request, err := loadPolicyRequest(ctx, store.database, key)
@@ -57,15 +57,15 @@ func (store *policyDB) VerifiedHead(ctx context.Context, hostKeyFP string) (poli
 	if hostKeyFP == "" {
 		return policystore.VerifiedHeadView{}, errors.New("policy head host fingerprint is empty")
 	}
-	binding, err := store.VerifyAuthorityBinding(ctx)
+	meta, err := store.readBoundPolicyMeta(ctx)
 	if err != nil {
 		return policystore.VerifiedHeadView{}, err
 	}
-	head, err := loadPolicyHead(ctx, store.database, binding.AuthorityID, hostKeyFP)
+	head, err := loadPolicyHead(ctx, store.database, meta.AuthorityID, hostKeyFP)
 	if err != nil {
 		return policystore.VerifiedHeadView{}, err
 	}
-	manifest, err := verifyPolicyHeadRecord(head, binding.AuthorityID)
+	manifest, err := verifyPolicyHeadRecord(head, meta.AuthorityID)
 	if err != nil {
 		return policystore.VerifiedHeadView{}, err
 	}

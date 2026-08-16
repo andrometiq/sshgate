@@ -30,11 +30,12 @@
 // asserts both directions.
 //
 // The additive policy-authority plane is mounted only through AttachPolicy.
-// Production composition uses StartPolicy, which owns the shared maintenance
-// lease, database, secure archive, durable audit readiness, one-transaction
-// safety scan, startup roster sweep, and the separate ROSTER and RECOVERY
-// workers. Policy readiness is independent of the ordinary /v1 plane; a sticky
-// durable-audit failure closes policy responses without stopping /v1.
+// Production composition uses StartPolicy to acquire and mount the policy plane
+// behind false readiness, starts ordinary HTTP service, then calls
+// PolicyRuntime.CompleteStartup for the one-transaction safety scan, startup
+// roster sweep, and separate ROSTER and RECOVERY workers. Policy readiness is
+// independent of the ordinary /v1 plane; a sticky durable-audit failure closes
+// policy responses without stopping /v1.
 //
 // The wire the machine plane speaks is BYTE-FROZEN: the frozen
 // HostedServerBackend client in pkg/signerkit is the oracle (wire_frozen_test.go),

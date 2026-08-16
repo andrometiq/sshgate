@@ -281,6 +281,60 @@ func TestDerivedReservationTransitions(t *testing.T) {
 	}
 }
 
+func TestReservationTransitionClaimLeaseAndCombinedCommitmentOracle(t *testing.T) {
+	t.Parallel()
+	components := ReservationComponents{Admission: 10, Votes: 100, Terminal: 100,
+		TerminalPending: 10, TerminalResult: 30, TerminalPublication: 60, Head: 50,
+		Growth: RowGrowthCommitments{ClaimedGroup: 40, LeaseOwner: 30, Spelling: 10}}
+	received := RemainingInput{Components: components, State: StateReceivedUnaudited, ConsumedTerminal: 10}
+	pending := received
+	pending.State = StatePending
+	held := pending
+	held.LeaseOwnerConsumed = true
+	claimedWithHeldLease := held
+	claimedWithHeldLease.State = StateApprovedMaterializing
+	claimedWithHeldLease.ClaimedGroupConsumed = true
+	synchronousClaim := pending
+	synchronousClaim.State = StateApprovedMaterializing
+	synchronousClaim.ClaimedGroupConsumed = true
+	synchronousClaim.LeaseOwnerConsumed = true
+
+	for _, test := range []struct {
+		name            string
+		before, after   RemainingInput
+		persistedWrites uint64
+	}{
+		{name: "lease consumes owner commitment", before: pending, after: held, persistedWrites: components.Growth.LeaseOwner},
+		{name: "claim reuses held lease", before: held, after: claimedWithHeldLease, persistedWrites: components.Growth.ClaimedGroup},
+		{name: "synchronous claim consumes owner and predecessor", before: pending, after: synchronousClaim,
+			persistedWrites: components.Growth.LeaseOwner + components.Growth.ClaimedGroup},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			transition, err := DeriveTransition(test.before, test.after, test.persistedWrites)
+			if err != nil {
+				t.Fatal(err)
+			}
+			const usedBefore = uint64(1_000)
+			usedAfter, err := checkedAdd(usedBefore, test.persistedWrites)
+			if err != nil {
+				t.Fatal(err)
+			}
+			combinedBefore, err := checkedAdd(usedBefore, transition.Before)
+			if err != nil {
+				t.Fatal(err)
+			}
+			combinedAfter, err := checkedAdd(usedAfter, transition.After)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if combinedAfter > combinedBefore || combinedBefore-combinedAfter != transition.Released {
+				t.Fatalf("used+reserved grew or disagrees with release: before=%d after=%d transition=%+v",
+					combinedBefore, combinedAfter, transition)
+			}
+		})
+	}
+}
+
 func TestStateReachabilityDerivedOracle(t *testing.T) {
 	t.Parallel()
 	for _, state := range AllStates {

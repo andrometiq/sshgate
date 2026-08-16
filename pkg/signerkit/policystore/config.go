@@ -7,8 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
-	"strings"
-	"unicode/utf8"
 )
 
 const (
@@ -18,6 +16,7 @@ const (
 	ArchiveBindingVersion         = "sshgate-policy-archive-binding-v1"
 	DurableAuditVersion           = "sshgate-policy-durable-audit-v2"
 	AuditEventVersion             = "sshgate-policy-audit-event-v2"
+	VoterEligibilityVersion       = "sshgate-policy-voter-eligibility-v1"
 	RejectionWindowLimit          = 16
 	RejectionWindowSeconds        = 600
 	RejectionRetainedRowLimit     = 64
@@ -74,7 +73,7 @@ func (input ConfigDigestInput) Validate() error {
 		return fmt.Errorf("%w: required_approvals %d", ErrInvalidConfig, input.RequiredApprovals)
 	}
 	if input.PolicyVoterRole != "operator" || input.ReviewRendererVersion != "sshgate-policy-review-v2" ||
-		!validConfigText(input.VoterEligibilityVersion) || len(input.VoteAuthMethodsJSON) == 0 {
+		!validVoterEligibilityVersion(input.VoterEligibilityVersion) || len(input.VoteAuthMethodsJSON) == 0 {
 		return fmt.Errorf("%w: invalid policy value", ErrInvalidConfig)
 	}
 	wantMethods := `["session"]`
@@ -101,8 +100,16 @@ func (input ConfigDigestInput) Validate() error {
 	return nil
 }
 
-func validConfigText(value string) bool {
-	return value != "" && utf8.ValidString(value) && !strings.ContainsRune(value, 0)
+func validVoterEligibilityVersion(value string) bool {
+	if len(value) == 0 || len(value) > 64 {
+		return false
+	}
+	for index := range value {
+		if value[index] < 0x21 || value[index] > 0x7e {
+			return false
+		}
+	}
+	return value == VoterEligibilityVersion
 }
 
 // ConfigDigest applies the frozen R47 framing and field order. It intentionally

@@ -122,20 +122,13 @@ func (engine *PolicyEngine) recoverRequest(ctx context.Context, listed *policyst
 	}
 	request := cloneRecoveryLease(listed, lease)
 	operations := engine.store.Fenced(lease)
-	if request.State == policystore.StatePending {
-		tally, tallyErr := engine.recoveryTally(ctx, request)
-		if tallyErr != nil {
-			return tallyErr
-		}
-		return engine.claimTally(ctx, request, tally, operations, true)
-	}
 	var lastErr error
 	for attempt := 0; attempt < policyRecoveryMaxAttempts; attempt++ {
 		attemptContext, cancel, err := engine.recoveryAttemptContext(ctx, lease)
 		if err != nil {
 			return err
 		}
-		lastErr = engine.advance(attemptContext, request, operations, true)
+		lastErr = engine.recoverRequestAttempt(attemptContext, request, operations)
 		cancel()
 		if lastErr == nil || benignPolicyRecoveryError(lastErr) {
 			return lastErr
@@ -150,13 +143,17 @@ func (engine *PolicyEngine) recoverRequest(ctx context.Context, listed *policyst
 			return err
 		}
 	}
+	return engine.finishRecoveryCycle(ctx, listed.ReviewID, lastErr, operations)
+}
+
+func (engine *PolicyEngine) finishRecoveryCycle(ctx context.Context, reviewID string, lastErr error, operations policystore.RecoveryStore) error {
 	var mintErr *policyMintAttemptError
 	if !errors.As(lastErr, &mintErr) {
 		// Audit uncertainty and infrastructure failures retain the lease for
 		// expiry/takeover; inventing a milestone would lose forensic work.
 		return lastErr
 	}
-	fresh, err := engine.store.GetByReviewID(ctx, listed.ReviewID)
+	fresh, err := engine.store.GetByReviewID(ctx, reviewID)
 	if err != nil {
 		return errors.Join(lastErr, err)
 	}
@@ -174,6 +171,17 @@ func (engine *PolicyEngine) recoverRequest(ctx context.Context, listed *policyst
 		return fmt.Errorf("%w: exhaustion staging retained recovery lease", policystore.ErrCorrupt)
 	}
 	return nil
+}
+
+func (engine *PolicyEngine) recoverRequestAttempt(ctx context.Context, request *policystore.Request, operations policystore.RecoveryStore) error {
+	if request.State != policystore.StatePending {
+		return engine.advance(ctx, request, operations, true)
+	}
+	tally, err := engine.recoveryTally(ctx, request)
+	if err != nil {
+		return err
+	}
+	return engine.claimTally(ctx, request, tally, operations, true)
 }
 
 func (engine *PolicyEngine) recoveryTally(ctx context.Context, request *policystore.Request) (policystore.TallyResult, error) {
@@ -252,52 +260,60 @@ func (engine *PolicyEngine) recoverVoteGroup(ctx context.Context, key policystor
 	request = cloneRecoveryLease(request, lease)
 	operations := engine.store.Fenced(lease)
 	var lastErr error
-	var tally policystore.TallyResult
 	for attempt := 0; attempt < policyRecoveryMaxAttempts; attempt++ {
 		attemptContext, cancel, err := engine.recoveryAttemptContext(ctx, lease)
 		if err != nil {
 			return err
 		}
 		lastErr = nil
-		for _, vote := range listed {
-			if vote.Audited {
-				continue
+		if request.State == policystore.StatePending {
+			for _, vote := range listed {
+				if vote.Audited {
+					continue
+				}
+				if err := engine.emitVote(attemptContext, request, vote); err != nil {
+					lastErr = err
+					break
+				}
+				if err := engine.faultAfter(PolicyFaultAfterVoteAudit); err != nil {
+					lastErr = err
+					break
+				}
+				if _, err := operations.PublishVoteAudit(attemptContext, key, vote.Operator, vote.AuditStateVersion); err != nil {
+					lastErr = err
+					break
+				}
+				vote.Audited = true
+				if err := engine.faultAfter(PolicyFaultAfterVoteAcknowledged); err != nil {
+					lastErr = err
+					break
+				}
 			}
-			if err := engine.emitVote(attemptContext, request, vote); err != nil {
-				lastErr = err
-				break
-			}
-			if err := engine.faultAfter(PolicyFaultAfterVoteAudit); err != nil {
-				lastErr = err
-				break
-			}
-			tally, err = operations.PublishVoteAudit(attemptContext, key, vote.Operator, vote.AuditStateVersion)
-			if err != nil {
-				lastErr = err
-				break
-			}
-			vote.Audited = true
-			if err := engine.faultAfter(PolicyFaultAfterVoteAcknowledged); err != nil {
-				lastErr = err
-				break
+		}
+		if lastErr == nil {
+			fresh, fetchErr := engine.store.GetByReviewID(attemptContext, request.ReviewID)
+			if fetchErr != nil {
+				lastErr = fetchErr
+			} else {
+				request = fresh
+				lastErr = engine.recoverRequestAttempt(attemptContext, request, operations)
 			}
 		}
 		cancel()
-		if lastErr == nil {
-			fresh, fetchErr := engine.store.GetByReviewID(ctx, request.ReviewID)
-			if fetchErr != nil {
-				return fetchErr
-			}
-			return engine.claimTally(ctx, fresh, tally, operations, true)
+		if lastErr == nil || benignPolicyRecoveryError(lastErr) {
+			return lastErr
+		}
+		if fresh, fetchErr := engine.store.GetByReviewID(ctx, request.ReviewID); fetchErr == nil {
+			request = fresh
 		}
 		if attempt+1 == policyRecoveryMaxAttempts {
-			return lastErr
+			break
 		}
 		if err := engine.waitRecoveryBackoff(ctx, lease, attempt); err != nil {
 			return err
 		}
 	}
-	return lastErr
+	return engine.finishRecoveryCycle(ctx, request.ReviewID, lastErr, operations)
 }
 
 func (engine *PolicyEngine) findPendingRequest(ctx context.Context, key policystore.Key) (*policystore.Request, error) {

@@ -182,10 +182,10 @@ func TestPolicyAdmissionRendersCompleteReviewWithFreshSalt(t *testing.T) {
 	engine, err := NewPolicyEngine(PolicyEngineConfig{
 		AuthorityID: testPolicyAuthority, WorkerID: "worker", Store: store, Core: core, Audit: &testPolicyAudit{},
 		Now: func() time.Time { return time.Unix(20_000, 0).UTC() }, Random: bytes.NewReader(randomBytes),
-		ReviewRules: []redact.Rule{{ID: "test"}},
-		RedactString: func(_ string, salt [32]byte, _ []redact.Rule) (string, bool) {
+		ReviewRules: []redact.Rule{redact.CompileRule("test", "test", `(<review>)`, []string{"<review>"}, 1, 1, 32)},
+		RedactString: func(value string, salt [32]byte, rules []redact.Rule) (string, bool) {
 			salts = append(salts, salt)
-			return fmt.Sprintf("salt-%02x", salt[0]), true
+			return redact.RedactString(value, salt, rules)
 		},
 	})
 	if err != nil {
@@ -205,7 +205,7 @@ func TestPolicyAdmissionRendersCompleteReviewWithFreshSalt(t *testing.T) {
 			input.ReviewRendererVersion != policyreview.RendererVersion || input.ReviewRulesDigest != policyreview.RulesDigest() {
 			t.Fatalf("review group %d = %+v", index, input)
 		}
-		if marker := fmt.Sprintf(`"text":"salt-%02x"`, index+1); !bytes.Contains(input.ReviewJSON, []byte(marker)) {
+		if marker := redact.FormatMarker(salts[index], []byte("<review>")); !bytes.Contains(input.ReviewJSON, []byte(marker)) {
 			t.Fatalf("review %d missing salt marker %q: %s", index, marker, input.ReviewJSON)
 		}
 	}
@@ -297,21 +297,33 @@ type rosterPolicyStore struct {
 
 type startupPolicyStore struct {
 	policystore.Store
-	bindErr   error
-	scanErr   error
-	rosterErr error
+	bindErr     error
+	scanErr     error
+	rosterErr   error
+	scanStarted chan struct{}
+	scanRelease chan struct{}
+	bindCalls   atomic.Int64
+	rosterCalls atomic.Int64
 }
 
 func (store *startupPolicyStore) BindAuthority(context.Context, policystore.AuthorityBinding) error {
+	store.bindCalls.Add(1)
 	return store.bindErr
 }
 func (store *startupPolicyStore) SafetyScan(_ context.Context, inspect func(*policystore.Request) error) error {
+	if store.scanStarted != nil {
+		close(store.scanStarted)
+	}
+	if store.scanRelease != nil {
+		<-store.scanRelease
+	}
 	if store.scanErr != nil {
 		return store.scanErr
 	}
 	return inspect(nil)
 }
 func (store *startupPolicyStore) ReconcilePendingAttainability(context.Context, string, time.Time) (policystore.AttainabilityResult, error) {
+	store.rosterCalls.Add(1)
 	return policystore.AttainabilityResult{}, store.rosterErr
 }
 func (store *startupPolicyStore) ListUnauditedVotes(context.Context, string, *policystore.RecoveryCursor, int) (policystore.VoteRecoveryPage, error) {
@@ -487,6 +499,77 @@ func TestPolicyEngineFaultMatrixRecoversEveryBoundary(t *testing.T) {
 				fetched.State == policystore.StateApprovedMaterializing || fetched.State == policystore.StateApprovedUnexposed ||
 				fetched.State == policystore.StateDenialReceived || fetched.State == policystore.StateErrorReceived {
 				t.Fatalf("recovery left hidden boundary state %q", fetched.State)
+			}
+			terminals, err := store.ListRecentTerminals(context.Background(), testPolicyAuthority, nil, 2)
+			terminalExpected := point != PolicyFaultAfterSubmissionAudit && point != PolicyFaultAfterSubmissionAcknowledged && point != PolicyFaultAfterSubmissionActivated
+			if !terminalExpected {
+				if err != nil || len(terminals.Requests) != 0 || fetched.State != policystore.StatePending {
+					t.Fatalf("pre-vote recovery after %s = state:%s terminals:%+v err:%v", point, fetched.State, terminals, err)
+				}
+				if _, headErr := store.VerifiedHead(context.Background(), input.Tuple.HostKeyFP); !errors.Is(headErr, policystore.ErrNotFound) {
+					t.Fatalf("pre-vote recovery %s created a head: %v", point, headErr)
+				}
+			} else if err != nil || len(terminals.Requests) != 1 || terminals.Next != nil || terminals.Requests[0].Key() != input.Key {
+				t.Fatalf("terminal cardinality after %s = %+v, %v; want exactly one", point, terminals, err)
+			}
+			if terminalExpected {
+				terminal := terminals.Requests[0]
+				decoded, err := policywire.DecodeResponse(terminal.TerminalResponse)
+				if err != nil {
+					t.Fatalf("terminal response after %s: %v", point, err)
+				}
+				if faultScenario(point) == "approval" {
+					head, headErr := store.VerifiedHead(context.Background(), input.Tuple.HostKeyFP)
+					if headErr != nil || len(terminal.ResultEnvelope) == 0 || !bytes.Equal(head.Head.ManifestEnvelope, terminal.ResultEnvelope) ||
+						decoded.Wire.Status != policywire.StatusApproved {
+						t.Fatalf("approved result/head/terminal after %s = head:%+v err:%v terminal:%+v", point, head, headErr, terminal)
+					}
+				} else {
+					if _, headErr := store.VerifiedHead(context.Background(), input.Tuple.HostKeyFP); !errors.Is(headErr, policystore.ErrNotFound) {
+						t.Fatalf("non-approval %s created a head: %v", point, headErr)
+					}
+					if len(terminal.ResultEnvelope) != 0 || decoded.Wire.Status == policywire.StatusApproved {
+						t.Fatalf("non-approval %s created a result: %+v", point, terminal)
+					}
+				}
+			}
+
+			audit.mu.Lock()
+			calls := append([]signerkit.AuditCall(nil), audit.calls...)
+			verdicts := append([]signerkit.AuditVerdict(nil), audit.verdicts...)
+			audit.mu.Unlock()
+			eventCounts := make(map[string]int)
+			checkEvent := func(metadata *signerkit.PolicyAuditMetadata) {
+				t.Helper()
+				if metadata == nil {
+					return
+				}
+				want := policyauthority.AuditEventID(policyauthority.AuditEvent{
+					AuthorityID: metadata.AuthorityID, Purpose: metadata.Purpose, Principal: metadata.Principal,
+					RequestID: metadata.RequestID, TupleDigest: metadata.TupleDigest,
+					Phase: metadata.Phase, StateVersion: metadata.StateVersion,
+				})
+				if metadata.EventID != want {
+					t.Fatalf("event replay ID after %s = %s; want frozen %s", point, metadata.EventID, want)
+				}
+				eventCounts[metadata.EventID]++
+			}
+			for index := range calls {
+				checkEvent(calls[index].Policy)
+			}
+			for index := range verdicts {
+				checkEvent(verdicts[index].Policy)
+			}
+			switch point {
+			case PolicyFaultAfterSubmissionAudit, PolicyFaultAfterVoteAudit, PolicyFaultAfterPreMintAudit,
+				PolicyFaultAfterResultAudit, PolicyFaultAfterNoMintAudit:
+				replayed := false
+				for _, count := range eventCounts {
+					replayed = replayed || count > 1
+				}
+				if !replayed {
+					t.Fatalf("fault %s did not replay a frozen event ID", point)
+				}
 			}
 		})
 	}
@@ -777,9 +860,6 @@ func TestPolicyServerOwnsTwoWorkersAndJoinsWithoutLeaseClear(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("RECOVERY worker did not run")
 	}
-	if policyRosterSweepInterval != 30*time.Second {
-		t.Fatalf("production roster interval = %s; want 30s", policyRosterSweepInterval)
-	}
 	for sweep := 0; sweep < 3; sweep++ {
 		select {
 		case <-store.rosterSignal:
@@ -887,6 +967,8 @@ func TestPolicyStartupOrdersLeaseDatabaseArchiveAuditMountScanAndWorkers(t *test
 			phases = append(phases, "stop-http")
 			return nil
 		},
+		ReviewRendererVersion: policyreview.RendererVersion,
+		ReviewRulesDigest:     policyreview.RulesDigest(),
 	}
 	runtime, err := StartPolicy(context.Background(), startup)
 	if err != nil {
@@ -899,8 +981,16 @@ func TestPolicyStartupOrdersLeaseDatabaseArchiveAuditMountScanAndWorkers(t *test
 	request.Header.Set("Authorization", "Bearer secret")
 	response := httptest.NewRecorder()
 	runtime.Server.ServeHTTP(response, request)
+	if response.Code != http.StatusServiceUnavailable || runtime.Engine.Readiness().Ready() {
+		t.Fatalf("mounted policy was exposed before completion: code=%d ready=%v", response.Code, runtime.Engine.Readiness().Ready())
+	}
+	if err := runtime.CompleteStartup(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	response = httptest.NewRecorder()
+	runtime.Server.ServeHTTP(response, request)
 	if response.Code != http.StatusNoContent || !runtime.Engine.Readiness().Ready() {
-		t.Fatalf("policy not ready after complete startup: code=%d ready=%v", response.Code, runtime.Engine.Readiness().Ready())
+		t.Fatalf("policy not ready after startup completion: code=%d ready=%v", response.Code, runtime.Engine.Readiness().Ready())
 	}
 	if err := runtime.Close(); err != nil {
 		t.Fatal(err)
@@ -914,6 +1004,119 @@ func TestPolicyStartupOrdersLeaseDatabaseArchiveAuditMountScanAndWorkers(t *test
 	}
 	if err := exclusive.Close(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestPolicyStartupListenerServesV1AndPolicy503DuringDelayedScan(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	store := &startupPolicyStore{scanStarted: started, scanRelease: release}
+	config, _, _ := minimalPolicyStartup(t, store)
+	runtime, err := StartPolicy(context.Background(), config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = runtime.Close() })
+
+	listener := httptest.NewServer(runtime.Server)
+	t.Cleanup(listener.Close)
+	t.Cleanup(func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	})
+	completion := make(chan error, 1)
+	go func() { completion <- runtime.CompleteStartup(context.Background()) }()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("initial safety scan did not start")
+	}
+
+	response, err := http.Get(listener.URL + "/healthz")
+	if err != nil {
+		t.Fatalf("ordinary plane was connection-refused during scan: %v", err)
+	}
+	body, readErr := io.ReadAll(response.Body)
+	response.Body.Close()
+	if readErr != nil || response.StatusCode != http.StatusOK || string(body) != "ok\n" {
+		t.Fatalf("ordinary response during scan = %d %q, readErr=%v", response.StatusCode, body, readErr)
+	}
+
+	request, err := http.NewRequest(http.MethodPost, listener.URL+"/v2/policy/base-manifests", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err = listener.Client().Do(request)
+	if err != nil {
+		t.Fatalf("mounted policy plane was connection-refused during scan: %v", err)
+	}
+	body, readErr = io.ReadAll(response.Body)
+	response.Body.Close()
+	if readErr != nil || response.StatusCode != http.StatusServiceUnavailable || string(body) != "{\"error\":\"policy authority unavailable\"}\n" {
+		t.Fatalf("policy response during scan = %d %q, readErr=%v", response.StatusCode, body, readErr)
+	}
+
+	close(release)
+	select {
+	case err := <-completion:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("startup completion did not finish after scan release")
+	}
+	if !runtime.Engine.Readiness().Ready() {
+		t.Fatal("clean delayed scan did not enable policy readiness")
+	}
+}
+
+func TestPolicyStartupScanFailureKeepsV1ServingAndPolicyDark(t *testing.T) {
+	scanFailure := errors.New("counter drift")
+	store := &startupPolicyStore{scanErr: scanFailure}
+	config, _, _ := minimalPolicyStartup(t, store)
+	runtime, err := StartPolicy(context.Background(), config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = runtime.Close() })
+	listener := httptest.NewServer(runtime.Server)
+	t.Cleanup(listener.Close)
+
+	if err := runtime.CompleteStartup(context.Background()); !errors.Is(err, scanFailure) {
+		t.Fatalf("scan failure = %v", err)
+	}
+	if runtime.Engine.Readiness().Ready() || runtime.Server.policyWorkersRun {
+		t.Fatalf("failed scan enabled policy: ready=%v workers=%v", runtime.Engine.Readiness().Ready(), runtime.Server.policyWorkersRun)
+	}
+	if store.rosterCalls.Load() != 0 {
+		t.Fatalf("failed scan ran startup roster sweep %d times", store.rosterCalls.Load())
+	}
+
+	response, err := http.Get(listener.URL + "/healthz")
+	if err != nil {
+		t.Fatalf("ordinary plane stopped after scan failure: %v", err)
+	}
+	body, readErr := io.ReadAll(response.Body)
+	response.Body.Close()
+	if readErr != nil || response.StatusCode != http.StatusOK || string(body) != "ok\n" {
+		t.Fatalf("ordinary response after scan failure = %d %q, readErr=%v", response.StatusCode, body, readErr)
+	}
+
+	request, err := http.NewRequest(http.MethodPost, listener.URL+"/v2/policy/base-manifests", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err = listener.Client().Do(request)
+	if err != nil {
+		t.Fatalf("policy plane stopped listening after scan failure: %v", err)
+	}
+	body, readErr = io.ReadAll(response.Body)
+	response.Body.Close()
+	if readErr != nil || response.StatusCode != http.StatusServiceUnavailable || string(body) != "{\"error\":\"policy authority unavailable\"}\n" {
+		t.Fatalf("policy response after scan failure = %d %q, readErr=%v", response.StatusCode, body, readErr)
 	}
 }
 
@@ -951,6 +1154,9 @@ func TestPolicyRuntimeShutdownOrder(t *testing.T) {
 	}
 	runtime, err = StartPolicy(context.Background(), config)
 	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.CompleteStartup(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if err := runtime.Close(); err != nil {
@@ -1026,6 +1232,42 @@ func TestPolicyStartupRefusesEveryFailedPrerequisiteBeforeReadiness(t *testing.T
 		}
 	})
 
+	t.Run("compiled review and electorate constants precede bind", func(t *testing.T) {
+		tests := []struct {
+			name   string
+			mutate func(*PolicyStartupConfig)
+		}{
+			{name: "binding renderer", mutate: func(config *PolicyStartupConfig) {
+				config.Binding.Config.ReviewRendererVersion = policyreview.RendererVersion + "-other"
+			}},
+			{name: "binding rules", mutate: func(config *PolicyStartupConfig) {
+				config.Binding.Config.ReviewRulesDigest = strings.Repeat("0", 64)
+			}},
+			{name: "binding voter eligibility", mutate: func(config *PolicyStartupConfig) {
+				config.Binding.Config.VoterEligibilityVersion = "sshgate-policy-voter-eligibility-v2"
+			}},
+			{name: "runtime renderer", mutate: func(config *PolicyStartupConfig) {
+				config.ReviewRendererVersion = policyreview.RendererVersion + "-other"
+			}},
+			{name: "runtime rules", mutate: func(config *PolicyStartupConfig) {
+				config.ReviewRulesDigest = strings.Repeat("0", 64)
+			}},
+		}
+		for _, test := range tests {
+			t.Run(test.name, func(t *testing.T) {
+				store := &startupPolicyStore{}
+				config, _, _ := minimalPolicyStartup(t, store)
+				test.mutate(&config)
+				if runtime, err := StartPolicy(context.Background(), config); err == nil || runtime != nil {
+					t.Fatalf("mismatch reached startup: runtime=%+v err=%v", runtime, err)
+				}
+				if store.bindCalls.Load() != 0 {
+					t.Fatalf("BindAuthority called %d times", store.bindCalls.Load())
+				}
+			})
+		}
+	})
+
 	t.Run("binding failure precedes shards and mount", func(t *testing.T) {
 		bindFailure := errors.New("key reused by another authority")
 		store := &startupPolicyStore{bindErr: bindFailure}
@@ -1078,8 +1320,13 @@ func TestPolicyStartupRefusesEveryFailedPrerequisiteBeforeReadiness(t *testing.T
 				store := &startupPolicyStore{scanErr: test.scanErr, rosterErr: test.rosterErr}
 				config, _, _ := minimalPolicyStartup(t, store)
 				runtime, err := StartPolicy(context.Background(), config)
-				if err == nil || runtime != nil {
-					t.Fatalf("gating prerequisite accepted: runtime=%+v err=%v", runtime, err)
+				if err != nil || runtime == nil {
+					t.Fatalf("mount preparation failed before readiness gate: runtime=%+v err=%v", runtime, err)
+				}
+				t.Cleanup(func() { _ = runtime.Close() })
+				err = runtime.CompleteStartup(context.Background())
+				if err == nil || runtime.Engine.Readiness().Ready() {
+					t.Fatalf("gating prerequisite accepted: ready=%v err=%v", runtime.Engine.Readiness().Ready(), err)
 				}
 				if test.scanErr != nil && !errors.Is(err, test.scanErr) {
 					t.Fatalf("scan failure = %v", err)
@@ -1124,8 +1371,10 @@ func minimalPolicyStartup(t testing.TB, store policystore.Store) (PolicyStartupC
 			server.Human = &HumanAPI{}
 			return server, nil
 		},
-		BuildHandler: func(*PolicyEngine, *policyarchive.Archive) (http.Handler, error) { return http.NotFoundHandler(), nil },
-		StopIntake:   func() error { return nil },
+		BuildHandler:          func(*PolicyEngine, *policyarchive.Archive) (http.Handler, error) { return http.NotFoundHandler(), nil },
+		StopIntake:            func() error { return nil },
+		ReviewRendererVersion: policyreview.RendererVersion,
+		ReviewRulesDigest:     policyreview.RulesDigest(),
 	}
 	return config, databasePath, archiveRoot
 }
@@ -1181,7 +1430,7 @@ func testPolicyStoreConfig(approvals uint64) policystore.ConfigDigestInput {
 	config.RequiredApprovals = approvals
 	config.DenyVeto = true
 	config.PolicyVoterRole = "operator"
-	config.VoterEligibilityVersion = "v1"
+	config.VoterEligibilityVersion = policystore.VoterEligibilityVersion
 	config.VoteAuthMethodsJSON = []byte(`["session"]`)
 	config.ArchiveID = testPolicyArchiveID
 	config.ReviewRendererVersion = policyreview.RendererVersion

@@ -27,7 +27,14 @@ func LiteralPreview(literal []byte, maxBytes int, salt [32]byte, rules []redact.
 	escaped := EscapeBytes([]byte(redacted))
 	changed := redacted != original
 	if len(escaped) <= maxBytes {
-		return escaped, 0, changed, true
+		if !changed {
+			return escaped, 0, false, true
+		}
+		hidden, exact := redact.ExactRedactedBytes(original, salt, rules, redacted)
+		if !exact {
+			return "", 0, true, false
+		}
+		return escaped, hidden, true, true
 	}
 	if changed {
 		return "", 0, true, false

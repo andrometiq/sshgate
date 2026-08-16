@@ -5,6 +5,7 @@ import (
 	"crypto/subtle"
 	"log"
 	"net/http"
+	"path"
 	"strings"
 	"sync"
 	"time"
@@ -97,6 +98,7 @@ type Server struct {
 	policyWorkersRun bool
 	policyClosed     bool
 	policyRosterWait time.Duration
+	policyRosterTick <-chan time.Time
 	policyMachine    http.Handler
 	policyHuman      http.Handler
 	policyPostLimit  *machineRateLimiter
@@ -230,6 +232,20 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Pragma", "no-cache")
 	}
+	if plane := s.dirtyPolicyPlane(r); plane != "" {
+		w.Header().Set("Cache-Control", "no-store")
+		if plane == "human" {
+			w.Header().Set("Pragma", "no-cache")
+		}
+		s.logRequest(w, r, func(writer http.ResponseWriter, _ *http.Request) {
+			if plane == "machine" {
+				writePolicyGeneric(writer, http.StatusNotFound, "not found")
+				return
+			}
+			writeJSONError(writer, http.StatusNotFound, "not found")
+		})
+		return
+	}
 	if s.policyMachine != nil && isPolicyV2Path(r.URL.Path, r.URL.EscapedPath()) {
 		s.logRequest(w, r, s.policyMachine.ServeHTTP)
 		return
@@ -239,6 +255,22 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.logRequest(w, r, s.mux.ServeHTTP)
+}
+
+func (s *Server) dirtyPolicyPlane(request *http.Request) string {
+	raw := request.URL.EscapedPath()
+	cleaned := path.Clean(request.URL.Path)
+	if raw == cleaned {
+		return ""
+	}
+	switch {
+	case s.policyMachine != nil && (cleaned == "/v2/policy" || strings.HasPrefix(cleaned, "/v2/policy/")):
+		return "machine"
+	case s.policyHuman != nil && (cleaned == "/ui/policy" || strings.HasPrefix(cleaned, "/ui/policy/")):
+		return "human"
+	default:
+		return ""
+	}
 }
 
 func isPolicyV2Path(path, escapedPath string) bool {

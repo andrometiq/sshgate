@@ -38,6 +38,29 @@ func TestLiteralPreviewEscapesBoundsAndFailsClosed(t *testing.T) {
 	}
 }
 
+func TestLiteralPreviewCountsExactRedactedSourceBytes(t *testing.T) {
+	rules := []redact.Rule{redact.CompileRule("test", "test", `token=([a-z]+)`, []string{"token="}, 1, 1, 100)}
+	literal := []byte("echo token=secret tail")
+	preview, hidden, changed, ok := LiteralPreview(literal, MaxPreviewBytes, [32]byte{1}, rules, redact.RedactString)
+	if !ok || !changed || hidden != len("secret") || !strings.Contains(preview, redact.MarkerPrefix) {
+		t.Fatalf("redacted preview = %q hidden=%d changed=%t ok=%t", preview, hidden, changed, ok)
+	}
+
+	overlap := append(rules, redact.CompileRule("overlap", "overlap", `(secret)`, []string{"secret"}, 1, 1, 100))
+	if preview, _, changed, ok := LiteralPreview(literal, MaxPreviewBytes, [32]byte{1}, overlap, redact.RedactString); ok || !changed || preview != "" {
+		t.Fatalf("overlapping matches exposed preview = %q changed=%t ok=%t", preview, changed, ok)
+	}
+
+	divergent := func(string, [32]byte, []redact.Rule) (string, bool) { return "changed", true }
+	if preview, _, changed, ok := LiteralPreview(literal, MaxPreviewBytes, [32]byte{1}, rules, divergent); ok || !changed || preview != "" {
+		t.Fatalf("divergent redactor exposed preview = %q changed=%t ok=%t", preview, changed, ok)
+	}
+
+	if preview, _, changed, ok := LiteralPreview(literal, 8, [32]byte{1}, rules, redact.RedactString); ok || !changed || preview != "" {
+		t.Fatalf("truncated redaction exposed preview = %q changed=%t ok=%t", preview, changed, ok)
+	}
+}
+
 func TestBootstrapReviewBoundsExactAndPlusOne(t *testing.T) {
 	manifest := policy.BaseManifest{Entries: make([]policy.BaseEntry, MaxBootstrapEntries)}
 	for index := range manifest.Entries {

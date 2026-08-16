@@ -57,6 +57,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -261,7 +262,7 @@ func run(args []string) int {
 	var httpSrv *http.Server
 	buildServer := func(database *sqlitestore.DB) (*hosted.Server, error) {
 		if *uiEnabled {
-			if err := validateApprovalRoster(policyLifetime, database, strings.TrimSpace(*machineClientID), *requiredApprovals, *allowSelfApprove); err != nil {
+			if err := validateApprovalRoster(policyLifetime, database, strings.TrimSpace(*machineClientID), *requiredApprovals, *allowSelfApprove, *requireStepUp); err != nil {
 				return nil, fmt.Errorf("approval policy: %w", err)
 			}
 		}
@@ -356,15 +357,25 @@ func run(args []string) int {
 		IdleTimeout:  120 * time.Second,
 	}
 
+	listener, err := net.Listen("tcp", httpSrv.Addr)
+	if err != nil {
+		logf("listen: %v", err)
+		return 1
+	}
 	errCh := make(chan error, 1)
 	go func() {
-		logger.Printf("listening on %s (version=%s)", *addr, version)
-		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		logger.Printf("listening on %s (version=%s)", listener.Addr(), version)
+		if err := httpSrv.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 			return
 		}
 		errCh <- nil
 	}()
+	if policyRuntime != nil {
+		if err := policyRuntime.CompleteStartup(policyLifetime); err != nil {
+			logf("policy authority unavailable: %v", err)
+		}
+	}
 
 	select {
 	case <-ctx.Done():
@@ -817,23 +828,26 @@ func readOwnerFile(path, kind string) ([]byte, error) {
 	return raw, nil
 }
 
-func validateApprovalRoster(ctx context.Context, db *sqlitestore.DB, requesterID string, required int, allowSelf bool) error {
-	if _, err := db.GetUser(ctx, requesterID); err != nil {
+func validateApprovalRoster(ctx context.Context, db *sqlitestore.DB, requesterID string, required int, allowSelf, stepUp bool) error {
+	if err := policystore.ValidateIdentity(requesterID); err != nil {
+		return fmt.Errorf("machine client ID: %w", err)
+	}
+	requester, err := db.GetUser(ctx, requesterID)
+	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			return fmt.Errorf("machine client ID %q is not a bootstrapped operator", requesterID)
 		}
 		return fmt.Errorf("load machine client operator: %w", err)
 	}
-	exclude := ""
-	if !allowSelf {
-		exclude = requesterID
+	if requester.Role != store.Role("operator") {
+		return fmt.Errorf("machine client ID %q is not a bootstrapped operator", requesterID)
 	}
-	eligible, err := db.CountAuthenticatableUsers(ctx, exclude)
+	eligible, err := db.CountEligiblePolicyVoters(ctx, "operator", requesterID, allowSelf, stepUp)
 	if err != nil {
 		return err
 	}
 	if eligible < required {
-		return fmt.Errorf("required approvals %d exceed %d authenticatable eligible operators (allow-self-approve=%v)", required, eligible, allowSelf)
+		return fmt.Errorf("required approvals %d exceed %d eligible policy voters (allow-self-approve=%v require-step-up=%v)", required, eligible, allowSelf, stepUp)
 	}
 	return nil
 }

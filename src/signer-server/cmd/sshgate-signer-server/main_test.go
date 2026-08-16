@@ -16,6 +16,7 @@ import (
 	"github.com/karthikeyan5/sshgate/pkg/signerkit/hosted"
 	"github.com/karthikeyan5/sshgate/pkg/signerkit/policystore"
 	"github.com/karthikeyan5/sshgate/pkg/signerkit/sqlitestore"
+	"github.com/karthikeyan5/sshgate/pkg/signerkit/store"
 )
 
 func TestStringListFlag(t *testing.T) {
@@ -337,20 +338,54 @@ func TestValidateApprovalRosterPreventsUnreachableFreshPolicy(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	cfg := hosted.AuthConfig{RPID: "signer.example.com", RPOrigins: []string{"https://signer.example.com"}, SessionTTL: time.Hour}
-	for _, name := range []string{"alice", "bob"} {
-		if err := bootstrapOperator(context.Background(), db, cfg, name, filepath.Join(t.TempDir(), "bootstrap-"+name)); err != nil {
+	ctx := context.Background()
+	users := []struct {
+		id   string
+		role store.Role
+	}{
+		{id: "machine", role: "operator"},
+		{id: "totp-voter", role: "operator"},
+		{id: "webauthn-voter", role: "operator"},
+		{id: "wrong-role", role: "auditor"},
+		{id: "no-factor", role: "operator"},
+	}
+	for _, user := range users {
+		if err := db.CreateUser(ctx, &store.User{ID: user.id, Username: user.id, Role: user.role}); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if err := validateApprovalRoster(context.Background(), db, "alice", 1, false); err != nil {
-		t.Fatalf("one non-self approver should be reachable: %v", err)
+	for _, id := range []string{"machine", "totp-voter", "wrong-role"} {
+		if err := db.SetTOTP(ctx, id, "secret"); err != nil {
+			t.Fatal(err)
+		}
 	}
-	if err := validateApprovalRoster(context.Background(), db, "alice", 2, false); err == nil {
-		t.Fatal("unreachable two-of-one-non-self policy accepted")
+	if err := db.AddCredential(ctx, &store.Credential{UserID: "webauthn-voter", CredentialID: []byte("credential"), Blob: []byte("blob")}); err != nil {
+		t.Fatal(err)
 	}
-	if err := validateApprovalRoster(context.Background(), db, "ghost", 1, false); err == nil {
+
+	if err := validateApprovalRoster(ctx, db, "machine", 2, false, false); err != nil {
+		t.Fatalf("TOTP-or-WebAuthn non-self electorate should be reachable: %v", err)
+	}
+	if err := validateApprovalRoster(ctx, db, "machine", 3, false, false); err == nil {
+		t.Fatal("wrong-role and factorless users counted as eligible voters")
+	}
+	if err := validateApprovalRoster(ctx, db, "machine", 1, false, true); err != nil {
+		t.Fatalf("TOTP non-self electorate should be reachable under step-up: %v", err)
+	}
+	if err := validateApprovalRoster(ctx, db, "machine", 2, false, true); err == nil {
+		t.Fatal("WebAuthn-only voter counted under TOTP step-up")
+	}
+	if err := validateApprovalRoster(ctx, db, "machine", 3, true, false); err != nil {
+		t.Fatalf("allow-self electorate should include machine requester: %v", err)
+	}
+	if err := validateApprovalRoster(ctx, db, "ghost", 1, false, false); err == nil {
 		t.Fatal("unbootstrapped requester identity accepted")
+	}
+	if err := validateApprovalRoster(ctx, db, strings.Repeat("x", policystore.MaxIdentityBytes+1), 1, false, false); !errors.Is(err, policystore.ErrInvalidIdentity) {
+		t.Fatalf("invalid machine requester grammar = %v", err)
+	}
+	if err := validateApprovalRoster(ctx, db, "wrong-role", 1, false, false); err == nil || !strings.Contains(err.Error(), "not a bootstrapped operator") {
+		t.Fatalf("non-operator machine requester accepted: %v", err)
 	}
 }
 

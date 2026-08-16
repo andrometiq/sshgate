@@ -67,6 +67,14 @@ func (s *scanner) findMatches(buf []byte) []match {
 	if len(buf) == 0 || len(s.rules) == 0 {
 		return nil
 	}
+	out := s.rawMatches(buf)
+	return dedupMatches(out)
+}
+
+// rawMatches returns the complete, unresolved rule output. Callers that need
+// to prove an exact source-byte mapping must reject overlaps before the
+// writer's safe union/deduplication changes match cardinality.
+func (s *scanner) rawMatches(buf []byte) []match {
 	out := s.namedMatches(buf)
 	// Step 3: the generic default-deny net (scanGenericRuns). It sits
 	// AFTER the len(s.rules)==0 early return above, so the nil-rules
@@ -75,7 +83,7 @@ func (s *scanner) findMatches(buf []byte) []match {
 	// always runs inside a Writer. dedupMatches merges its output with the
 	// regex matches (earliest-start-wins, tie -> longest).
 	out = append(out, scanGenericRuns(buf)...)
-	return dedupMatches(out)
+	return out
 }
 
 // findNamedMatches returns matches from the named regex ruleset ONLY —
