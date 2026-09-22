@@ -56,19 +56,13 @@ exercise, the agent could emulate) — see roadmap #17 (redefined).
 How development work on SSHGate itself is run (dispatching subagents/workflows
 for design, implementation, or review):
 
-- **The main (orchestrator) session runs the most capable model available.**
-  It does the planning, dispatching, and verification, holds the executive
-  view, and is accountable for the end result. SSHGate work is judgment-heavy
-  (a security backbone with real trust boundaries), so the orchestrator seat
-  is not the place to economize.
-- **Subagents run the right-sized model per task** — the least powerful model
-  that does the job *well*, not the top tier by default:
-  - purely mechanical steps (scaffolding, fixture generation, rote edits to a
-    precise spec) → a fast/cheap model;
-  - integration and general implementation → a standard model;
-  - design, adversarial critique, security analysis, and code review → the
-    strongest tier available to subagents (never below it — these are
-    judgment/recall tasks where a weaker model's mistakes are expensive).
+- **The main (orchestrator) session** does the planning, dispatching, and
+  verification, holds the executive view, and is accountable for the end
+  result. Models come from the operator's harness policy, not from this repo.
+- **Subagents do the heavy lifting.** SSHGate work is judgment-heavy (a
+  security backbone with real trust boundaries): design, adversarial critique,
+  security analysis, and code review never go to a weaker model than the rest
+  of the work.
 - **The orchestrator verifies, never rubber-stamps.** Read the diffs, run the
   build/vet/tests yourself, and confirm green before calling a unit done.
   Catching subagent mistakes is the orchestrator's job.
