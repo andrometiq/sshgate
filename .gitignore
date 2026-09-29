@@ -33,3 +33,7 @@ gate-redteam-report*.jsonl
 # logs, and any other operational notes about the operator's own machines. NEVER
 # committed (this repo mirrors to public GitHub and these hold infra specifics).
 /local-workspace/
+
+# Operator-local agent context and notes. NEVER committed (this repo is public).
+CLAUDE.local.md
+/local-notes/
