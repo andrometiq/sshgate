@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -90,7 +91,7 @@ func TestConfineSpecFor(t *testing.T) {
 				return
 			}
 			want := confine.Spec{Profile: confine.ProfileROv1, Net: true}
-			if spec == nil || *spec != want {
+			if spec == nil || !reflect.DeepEqual(*spec, want) {
 				t.Errorf("spec = %+v, want %+v", spec, want)
 			}
 		})

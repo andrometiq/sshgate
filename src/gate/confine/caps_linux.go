@@ -28,13 +28,20 @@ func setNoNewPrivs() error {
 
 // setRlimits applies per-process size/core bounds and the namespace process bound.
 func setRlimits() error {
+	// §3.2 stage 10: core hygiene must not raise an inherited hard limit.
+	var core unix.Rlimit
+	if err := unix.Getrlimit(unix.RLIMIT_CORE, &core); err != nil {
+		return fmt.Errorf("getrlimit core: %w", err)
+	}
+	core.Max = min(uint64(1), core.Max)
+	core.Cur = core.Max
 	limits := []struct {
 		res  int
 		name string
 		lim  unix.Rlimit
 	}{
 		{unix.RLIMIT_FSIZE, "fsize", unix.Rlimit{Cur: defaultRlimitFsize, Max: defaultRlimitFsize}},
-		{unix.RLIMIT_CORE, "core", unix.Rlimit{Cur: 0, Max: 0}},
+		{unix.RLIMIT_CORE, "core", core},
 		{unix.RLIMIT_NPROC, "nproc", unix.Rlimit{Cur: defaultRlimitNproc, Max: defaultRlimitNproc}},
 	}
 	for _, r := range limits {

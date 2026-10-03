@@ -75,6 +75,68 @@ func main() {
 	}
 	args := os.Args[2:]
 	switch os.Args[1] {
+	case "tiocexcl":
+		fd, err := unix.Open(args[0], unix.O_RDONLY|unix.O_NOCTTY|unix.O_CLOEXEC, 0)
+		if report("open", err) {
+			_, _, e := unix.Syscall(unix.SYS_IOCTL, uintptr(fd), unix.TIOCEXCL, 0)
+			report("tiocexcl", errnoOrNil(e))
+			unix.Close(fd)
+		}
+	case "device-write":
+		fd, err := unix.Open(args[0], unix.O_WRONLY|unix.O_CLOEXEC, 0)
+		if report("open", err) {
+			_, err = unix.Write(fd, []byte("x"))
+			report("write", err)
+			unix.Close(fd)
+		}
+	case "write-sweep":
+		dir := args[0]
+		for _, item := range []struct {
+			name  string
+			flags int
+		}{{"write", unix.O_WRONLY}, {"append", unix.O_WRONLY | unix.O_APPEND}, {"open-trunc", unix.O_WRONLY | unix.O_TRUNC}, {"open-rdonly-trunc", unix.O_RDONLY | unix.O_TRUNC}} {
+			fd, err := unix.Open(dir+"/file", item.flags|unix.O_CLOEXEC, 0)
+			if err == nil {
+				if item.flags&unix.O_WRONLY != 0 {
+					_, err = unix.Write(fd, []byte("changed"))
+				}
+				unix.Close(fd)
+			}
+			report(item.name, err)
+		}
+		report("truncate-path", unix.Truncate(dir+"/file", 0))
+		report("unlink", unix.Unlink(dir+"/remove"))
+		report("rmdir", unix.Rmdir(dir+"/empty"))
+		report("mkdir", unix.Mkdir(dir+"/made", 0700))
+		report("symlink", unix.Symlink("file", dir+"/symlink"))
+		report("link", unix.Link(dir+"/file", dir+"/link"))
+		report("rename", unix.Rename(dir+"/move", dir+"/moved"))
+		report("mkfifo", unix.Mkfifo(dir+"/fifo", 0600))
+	case "core-limit":
+		var limit unix.Rlimit
+		if err := unix.Getrlimit(unix.RLIMIT_CORE, &limit); err != nil {
+			report("getrlimit", err)
+		} else {
+			fmt.Printf("core=%d:%d\n", limit.Cur, limit.Max)
+		}
+	case "mq-errno":
+		name, _ := unix.BytePtrFromString(args[0])
+		fd, _, e := unix.Syscall6(unix.SYS_MQ_OPEN, uintptr(unsafe.Pointer(name)), unix.O_RDONLY|unix.O_NONBLOCK|unix.O_CLOEXEC, 0, 0, 0, 0)
+		report("mq_open", errnoOrNil(e))
+		if e == 0 {
+			unix.Close(int(fd))
+		}
+		buffer := make([]byte, 8192)
+		_, _, e = unix.Syscall6(unix.SYS_MQ_TIMEDRECEIVE, 0, uintptr(unsafe.Pointer(&buffer[0])), uintptr(len(buffer)), 0, 0, 0)
+		report("mq_timedreceive", errnoOrNil(e))
+	case "mq-drain":
+		fd, err := unix.Open(args[0], unix.O_RDONLY|unix.O_NONBLOCK|unix.O_CLOEXEC, 0)
+		if report("open", err) {
+			buffer := make([]byte, 8192)
+			_, _, e := unix.Syscall6(unix.SYS_MQ_TIMEDRECEIVE, uintptr(fd), uintptr(unsafe.Pointer(&buffer[0])), uintptr(len(buffer)), 0, 0, 0)
+			report("mq_timedreceive", errnoOrNil(e))
+			unix.Close(fd)
+		}
 	case "metadata":
 		p := args[0]
 		report("chmod", unix.Chmod(p, 0644))

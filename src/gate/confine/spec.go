@@ -2,6 +2,7 @@ package confine
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -59,6 +60,9 @@ const ProfileROv1 = "ro-v1"
 type Spec struct {
 	Profile  string
 	Net      bool
+	Strict   bool
+	AcceptFS []string
+	Cwd      string
 	ParentNS NSIDs
 	// ForceABI caps the real ABI in tests; -1 forces a landlock-stage abort.
 	ForceABI int
@@ -98,10 +102,18 @@ func (e *SetupError) Error() string {
 	return fmt.Sprintf("jail setup failed at stage %q", e.Stage)
 }
 
-// Jailed wraps the Cmd plus the two private pipes of the re-exec protocol. The
-// caller owns Stdout/Stderr/Stdin/Cancel exactly as for a plain exec.Cmd.
+// Facts records mount-recipe observations; full profile reporting lands with S2.
+type Facts struct {
+	Unmet           []string `json:"unmet,omitempty"`
+	CoverAtAncestor []string `json:"cover_at_ancestor,omitempty"`
+	CwdReset        bool     `json:"cwd_reset,omitempty"`
+}
+
+// Jailed wraps the command and its private setup-report pipes.
 type Jailed struct {
-	Cmd *exec.Cmd
+	Facts  Facts
+	strict bool
+	Cmd    *exec.Cmd
 
 	// cmd is the command string the parent streams to the worker on fd 3.
 	cmd string
@@ -160,7 +172,25 @@ func (j *Jailed) Status() error {
 		return &SetupError{Stage: "unknown"}
 	}
 	buf, _ := io.ReadAll(j.statusR)
-	return statusFromReport(buf)
+	var facts Facts
+	if len(buf) > 0 && buf[0] == 'I' {
+		line, tail, ok := strings.Cut(string(buf), "\n")
+		if !ok {
+			return &SetupError{Stage: "report"}
+		}
+		decoder := json.NewDecoder(strings.NewReader(line[1:]))
+		decoder.DisallowUnknownFields()
+		var extra any
+		if decoder.Decode(&facts) != nil || decoder.Decode(&extra) != io.EOF || (j.strict && len(facts.Unmet) > 0) {
+			return &SetupError{Stage: "report"}
+		}
+		buf = []byte(tail)
+	}
+	if err := statusFromReport(buf); err != nil {
+		return err
+	}
+	j.Facts = facts
+	return nil
 }
 
 // statusFromReport maps the raw fd-4 bytes to Status's result: nil only for

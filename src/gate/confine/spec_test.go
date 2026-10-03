@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"os"
+	"reflect"
 	"syscall"
 	"testing"
 	"time"
@@ -42,7 +44,7 @@ func TestSpecJSONRoundTrip(t *testing.T) {
 	if err := json.Unmarshal(b, &out); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if out != in {
+	if !reflect.DeepEqual(out, in) {
 		t.Errorf("round trip mismatch: got %+v want %+v", out, in)
 	}
 }
@@ -124,7 +126,7 @@ func TestStrictSpecDecode(t *testing.T) {
 		}
 	}
 	var spec Spec
-	if err := decodeSpec(`{"Profile":"ro-v1","ParentNS":{"User":1,"Mnt":2,"Pid":3,"IPC":4},"InjectFailAt":"seccomp:EIO"}`, &spec); err != nil {
+	if err := decodeSpec(`{"Profile":"ro-v1","Cwd":"/","ParentNS":{"User":1,"Mnt":2,"Pid":3,"IPC":4},"InjectFailAt":"seccomp:EIO"}`, &spec); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -181,5 +183,34 @@ func TestWorkerRejectsInvalidSpecBeforeInjection(t *testing.T) {
 				t.Errorf("command ran: %q", output.String())
 			}
 		})
+	}
+}
+
+func TestMountFactsStatus(t *testing.T) {
+	for _, test := range []struct {
+		raw               string
+		strict, wantError bool
+	}{
+		{"I{\"cwd_reset\":true,\"cover_at_ancestor\":[\"cover_at_ancestor@/closed\"]}\nX", false, false},
+		{"I{\"unmet\":[\"fs-view:overlay@/\"]}\nX", false, false},
+		{"I{\"unmet\":[\"fs-view:overlay@/\"]}\nX", true, true},
+		{"I{} {}\nX", false, true}, {"I{}\nXFexec:2\n", false, true},
+	} {
+		reader, writer, err := os.Pipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := writer.WriteString(test.raw); err != nil {
+			t.Fatal(err)
+		}
+		writer.Close()
+		jailed := Jailed{statusR: reader, strict: test.strict}
+		err = jailed.Status()
+		if (err != nil) != test.wantError {
+			t.Errorf("%q: %v", test.raw, err)
+		}
+		if err != nil && !reflect.DeepEqual(jailed.Facts, Facts{}) {
+			t.Error("failed report published facts")
+		}
 	}
 }

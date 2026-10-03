@@ -3,8 +3,8 @@
 // no_new_privs, capability reduction and seccomp. Detect currently selects
 // either the full jail or classifier-only execution; a failed setup never retries.
 //
-// The current mount recipe provides private writable /tmp, /var/tmp and /dev/shm,
-// plus /dev/null. Metadata syscalls and generic fileattr setters are denied even
+// The mount view preserves host /proc and read-only /tmp and /var/tmp. Only
+// private /dev/shm and /dev/null are writable. Unsafe filesystems are covered. Metadata syscalls and generic fileattr setters are denied even
 // on scratch. Root SSH retains DAC_READ_SEARCH for file reads. Network access is
 // controlled by Spec.Net. The kernel-read-only label remains disabled.
 //

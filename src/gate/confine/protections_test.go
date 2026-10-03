@@ -46,7 +46,7 @@ func p12Registry() []prot {
 	nsLegs = append(nsLegs, executor)
 	add("P-NSVERIFY", "RunWorker before setupMounts", nsLegs...)
 	add("P-SHIM-PID1", "RunShim before worker Start", p12Leg("L-SHIM-PID1", "MUTATION-ABORT spec"))
-	for _, stage := range []string{"spec", "cmdread", "mounts", "nnp", "caps", "rlimits", "landlock", "seccomp", "exec"} {
+	for _, stage := range []string{"spec", "cmdread", "mounts", "nnp", "caps", "rlimits", "landlock", "seccomp", "fds", "cwd", "exec"} {
 		legs := []harness.Leg{p12Leg("L-FAULT-"+stage, "MUTATION-EFFECT reached-exec")}
 		if stage == "caps" {
 			root := p12Leg("L-ROOT-STATE", "")
@@ -68,6 +68,15 @@ func p12Registry() []prot {
 	}
 	add("P-SC-TSYNC", "installSeccomp positive return check", p12Leg("L-FAULT-tsync", "MUTATION-EFFECT reached-exec"))
 	add("P-SC-META", "metadata syscalls and generic fileattr ioctls", p12Leg("L-SCRATCH-META", "MUTATION-EFFECT metadata"), p12Leg("L-FILEATTR-ERRNO", "MUTATION-EFFECT fileattr-errno"))
+	protections[len(protections)-1].Class = "multi"
+	mqErrno := p12Leg("L-MQUEUE-ERRNO", "MUTATION-EFFECT mq-errno")
+	mqCover := p12Leg("L-MQUEUE", "")
+	for _, leg := range []*harness.Leg{&mqErrno, &mqCover} {
+		for abi, name := range leg.Names {
+			leg.Names[abi] = strings.Replace(name, "TestJailMatrixP12", "TestJailMatrixP14", 1)
+		}
+	}
+	add("P-MQ", "POSIX mqueue syscall denies", mqErrno, mqCover)
 	protections[len(protections)-1].Class = "multi"
 	add("P-LL-REQUIRED", "applyLandlock ABI floor", p12Leg("L-LL-REQUIRED", "MUTATION-EFFECT reached-exec"))
 	return protections

@@ -1,0 +1,2 @@
+# P1.4: host /proc and /tmp remain visible; private scratch and covers change df.
+df -h → DEV-SHM

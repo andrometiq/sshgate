@@ -5,6 +5,7 @@ package confine
 import (
 	"encoding/json"
 	"io"
+	"path/filepath"
 	"strings"
 	"syscall"
 
@@ -34,10 +35,20 @@ func (s Spec) validate(worker bool) error {
 	if s.Profile != ProfileROv1 || s.ForceABI < ForceNoLandlock {
 		return unix.EINVAL
 	}
+	if (worker || s.Cwd != "") && (!filepath.IsAbs(s.Cwd) || filepath.Clean(s.Cwd) != s.Cwd || strings.ContainsRune(s.Cwd, 0) || len(s.Cwd) > 4096) {
+		return unix.EINVAL
+	}
+	seen := map[string]bool{}
+	for _, class := range s.AcceptFS {
+		if (class != "network" && class != "autofs") || seen[class] {
+			return unix.EINVAL
+		}
+		seen[class] = true
+	}
 	if s.InjectFailAt != "" {
 		stage, errno := s.inject()
 		switch stage {
-		case "spec", "cmdread", "nsverify", "mounts", "nnp", "caps", "rlimits", "landlock", "seccomp", "tsync", "exec":
+		case "spec", "cmdread", "nsverify", "mounts", "private", "setattr", "devnodes", "covers", "scratch", "fds", "cwd", "nnp", "caps", "rlimits", "landlock", "seccomp", "tsync", "exec":
 		default:
 			return unix.EINVAL
 		}

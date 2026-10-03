@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -41,7 +42,7 @@ func TestGateBinaryJailedRead(t *testing.T) {
 	}
 
 	cmd := "sed --i 's/orig/pwned/' " + target + " ; cat " + target +
-		" ; grep -E '^(NoNewPrivs|Seccomp):' /proc/self/status ; cat /proc/1/cmdline"
+		" ; grep -E '^(NoNewPrivs|Seccomp):' /proc/self/status ; awk 'FNR == 1 { n++ } n <= 2 && $1 == \"PPid:\" { ARGV[ARGC++] = \"/proc/\" $2 \"/status\"; if (n == 2) ARGV[ARGC++] = \"/proc/\" $2 \"/cmdline\" } n == 2 && $1 == \"NSpid:\" { print \"worker\", $0 } n == 3 && $1 == \"NSpid:\" { print \"shim\", $0 } n == 4 { print }' /proc/self/status ; echo done"
 	if k := classify.Classify(cmd); k != classify.KindRead {
 		t.Fatalf("precondition: the command must classify as a read, got %v", k)
 	}
@@ -67,8 +68,15 @@ func TestGateBinaryJailedRead(t *testing.T) {
 	if !strings.Contains(out, "NoNewPrivs:\t1") || !strings.Contains(out, "Seccomp:\t2") {
 		t.Errorf("the command did not run under the worker's NNP + seccomp filter: %q", out)
 	}
-	// The shim is the gate process re-execing itself (/proc/self/exe): in this
-	// test the only binary in play is the freshly built gate.
+	// Host /proc reports host PIDs; walk from awk to its shell to the shim.
+	if rung == confine.Rung1Full {
+		for _, role := range []string{"worker", "shim"} {
+			match := regexp.MustCompile(`(?m)^` + role + ` NSpid:\s+(\d+)\s+(\d+)$`).FindStringSubmatch(out)
+			if len(match) != 3 || match[1] == match[2] || (role == "shim" && match[2] != "1") {
+				t.Errorf("invalid %s PID namespace identity: %q", role, out)
+			}
+		}
+	}
 	if rung == confine.Rung1Full && !strings.Contains(out, "/proc/self/exe\x00"+confine.SentinelShim+"\x00") {
 		t.Errorf("pid 1 of the command's pid namespace is not the gate binary's %s shim: %q", confine.SentinelShim, out)
 	}

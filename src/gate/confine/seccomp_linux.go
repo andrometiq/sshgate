@@ -157,8 +157,10 @@ func buildFilter(p filterParams) []unix.SockFilter {
 			a.jeq(s, "deny", "")
 		}
 	}
-	for _, s := range mqueueDeny {
-		a.jeq(s, "deny", "")
+	if !jailmut.On("P-MQ") {
+		for _, s := range mqueueDeny {
+			a.jeq(s, "deny", "")
+		}
 	}
 	if p.denyOpenByHandle {
 		a.jeq(uint32(unix.SYS_OPEN_BY_HANDLE_AT), "deny", "")

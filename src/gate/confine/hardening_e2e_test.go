@@ -88,6 +88,8 @@ func TestJailMatrixP12(t *testing.T) {
 			t.Run("L-FAULT-landlock", func(t *testing.T) { legFault(t, spec, "landlock") })
 			t.Run("L-FAULT-seccomp", func(t *testing.T) { legFault(t, spec, "seccomp") })
 			t.Run("L-FAULT-tsync", func(t *testing.T) { legFault(t, spec, "tsync") })
+			t.Run("L-FAULT-fds", func(t *testing.T) { legFault(t, spec, "fds") })
+			t.Run("L-FAULT-cwd", func(t *testing.T) { legFault(t, spec, "cwd") })
 			t.Run("L-FAULT-exec", func(t *testing.T) { legFault(t, spec, "exec") })
 		})
 	}
@@ -317,7 +319,7 @@ func legScratchMetadata(t *testing.T, spec Spec) {
 			t.Fatalf("SETUP: control %s", control)
 		}
 	}
-	result := runP12(t, spec, "umask 077; printf canary > /tmp/metadata; "+probe+" metadata /tmp/metadata", nil)
+	result := runP12(t, spec, "umask 077; printf canary > /dev/shm/metadata; "+probe+" metadata /dev/shm/metadata", nil)
 	if result.setupErr != nil {
 		t.Fatalf("SETUP: metadata: %+v", result)
 	}

@@ -10,8 +10,9 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
-	"strconv"
+	"strings"
 	"syscall"
 
 	"github.com/karthikeyan5/sshgate/src/gate/confine/jailmut"
@@ -24,6 +25,13 @@ const maxCmdBytes = 1 << 20
 
 // command clones the shim; the command and status travel on fd 3 and fd 4.
 func (s Spec) command(ctx context.Context, cmd string) (*Jailed, error) {
+	if s.Cwd == "" {
+		var cwdErr error
+		s.Cwd, cwdErr = unix.Getwd()
+		if cwdErr != nil || !filepath.IsAbs(s.Cwd) {
+			s.Cwd = "/"
+		}
+	}
 	if !jailmut.On("P-SPEC") && s.validate(false) != nil {
 		return nil, &SetupError{Stage: "spec", Errno: unix.EINVAL}
 	}
@@ -50,11 +58,13 @@ func (s Spec) command(ctx context.Context, cmd string) (*Jailed, error) {
 	}
 
 	c := exec.CommandContext(ctx, "/proc/self/exe", SentinelShim, string(specJSON))
+	c.Dir = "/"
 	c.ExtraFiles = []*os.File{cmdR, statusW} // -> child fd 3 (command), fd 4 (status)
 	c.SysProcAttr = cloneSysProcAttr()
 
 	return &Jailed{
 		Cmd:       c,
+		strict:    s.Strict,
 		cmd:       cmd,
 		cmdW:      cmdW,
 		statusR:   statusR,
@@ -103,6 +113,10 @@ func RunShim(args []string) int {
 
 	if !jailmut.On("P-SHIM-PID1") && os.Getpid() != 1 {
 		_, _ = io.WriteString(statusW, formatFailReport("nsverify", unix.EPERM))
+		return ExitSetupFailed
+	}
+	if err := unix.Prctl(unix.PR_SET_DUMPABLE, 0, 0, 0, 0); err != nil {
+		_, _ = io.WriteString(statusW, formatFailReport("nsverify", errnoOf(err)))
 		return ExitSetupFailed
 	}
 	c := exec.Command("/proc/self/exe", append([]string{SentinelWorker}, args...)...)
@@ -177,11 +191,16 @@ func RunWorker(args []string) int {
 	if !jailmut.On("P-NSVERIFY") && err != nil {
 		return fail("nsverify", err)
 	}
-	err = setupMounts()
+	facts, mountErr := setupMounts(spec)
+	err = mountErr
 	if st, errno := spec.inject(); st == "mounts" {
 		err = errno
 	}
 	if !jailmut.On("P-FAULT-mounts") && err != nil {
+		var setup *SetupError
+		if errors.As(err, &setup) {
+			return fail(setup.Stage, setup.Errno)
+		}
 		return fail("mounts", err)
 	}
 	err = setNoNewPrivs()
@@ -234,11 +253,32 @@ func RunWorker(args []string) int {
 	// inherited WRITABLE fd would otherwise get past both the read-only mount and
 	// Landlock (it is already open), so this is defence in depth on top of the
 	// gate's own O_CLOEXEC discipline.
-	closeInheritedFDs()
+	err = closeInheritedFDs()
+	if stage, errno := spec.inject(); stage == "fds" {
+		err = errno
+	}
+	if !jailmut.On("P-FAULT-fds") && err != nil {
+		return fail("fds", err)
+	}
+	cwd, reset, cwdErr := resolveCwd(spec.Cwd)
+	facts.CwdReset = reset
+	if reset {
+		fmt.Fprintln(os.Stderr, "gate: note: the working directory is not visible in the read view; the read ran from /")
+	}
+	if stage, errno := spec.inject(); stage == "cwd" {
+		cwdErr = errno
+	}
+	if !jailmut.On("P-FAULT-cwd") && cwdErr != nil {
+		return fail("cwd", cwdErr)
+	}
+	if len(facts.Unmet) > 0 || len(facts.CoverAtAncestor) > 0 || facts.CwdReset {
+		raw, _ := json.Marshal(facts)
+		_, _ = fmt.Fprintf(statusW, "I%s\n", raw)
+	}
 	// Report success, then hand off to /bin/sh. The execve closes fd 4 (CLOEXEC),
 	// so the parent reads exactly "X" then EOF.
 	_, _ = io.WriteString(statusW, statusReachedExec)
-	execErr := unix.Exec(execPath, []string{"sh", "-c", cmd}, jailEnv())
+	execErr := unix.Exec(execPath, []string{"sh", "-c", cmd}, jailEnv(cwd))
 	if jailmut.On("P-FAULT-exec") {
 		return ExitSetupFailed
 	}
@@ -260,21 +300,21 @@ func effectiveABI(probed, force int) int {
 
 // writableSet names the private writable mounts and the null device.
 func writableSet() []string {
-	return []string{"/tmp", "/var/tmp", "/dev/shm", "/dev/null"}
+	return []string{"/dev/shm", "/dev/null"}
 }
 
 // jailEnv builds the child environment: the gate's env with the temp/history
 // variables redirected into the jail's writable area, so incidental read-time
 // writes (pagers, shell history, sort -T) land somewhere writable and nothing
 // else breaks.
-func jailEnv() []string {
+func jailEnv(cwd string) []string {
 	overrides := map[string]string{
-		"TMPDIR": "/tmp", "TMP": "/tmp", "TEMP": "/tmp",
-		"HISTFILE": "/tmp/.sh_history", "XDG_CACHE_HOME": "/tmp/.cache",
+		"TMPDIR": "/dev/shm", "TMP": "/dev/shm", "TEMP": "/dev/shm", "TMPPREFIX": "/dev/shm",
+		"HISTFILE": "/dev/shm/.sh_history", "XDG_CACHE_HOME": "/dev/shm/.cache", "XDG_STATE_HOME": "/dev/shm/.state", "XDG_RUNTIME_DIR": "/dev/shm", "LESSHISTFILE": "-", "PWD": cwd,
 	}
 	var out []string
 	for _, kv := range os.Environ() {
-		keep := true
+		keep := !strings.HasPrefix(kv, "SSH_ORIGINAL_COMMAND=")
 		for k := range overrides {
 			if len(kv) > len(k) && kv[:len(k)] == k && kv[len(k)] == '=' {
 				keep = false
@@ -336,26 +376,20 @@ func readCapped(r io.Reader, max int) ([]byte, error) {
 	return buf, nil
 }
 
-// closeInheritedFDs marks every fd >= 3 close-on-exec so only 0/1/2 survive the
-// execve to /bin/sh. fd 4 is already CLOEXEC and fd 3 is closed by the caller, so
-// in practice this closes any stray fd the parent leaked. CLOSE_RANGE_CLOEXEC
-// does not close fd 4 now, so the immediately-following status write still works.
-// Best effort: on a kernel without close_range it falls back to /proc/self/fd,
-// and the primary guarantee remains the gate's own O_CLOEXEC discipline.
-func closeInheritedFDs() {
-	if err := unix.CloseRange(3, ^uint(0), unix.CLOSE_RANGE_CLOEXEC); err == nil {
-		return
+// closeInheritedFDs is fail-closed even on ENOSYS; the supported floor has close_range.
+func closeInheritedFDs() error { return unix.CloseRange(3, ^uint(0), unix.CLOSE_RANGE_CLOEXEC) }
+
+func resolveCwd(cwd string) (string, bool, error) {
+	err := unix.Chdir(cwd)
+	if err == nil {
+		return cwd, false, nil
 	}
-	ents, err := os.ReadDir("/proc/self/fd")
-	if err != nil {
-		return
-	}
-	for _, e := range ents {
-		n, err := strconv.Atoi(e.Name())
-		if err != nil || n < 5 { // 3 closed, 4 already CLOEXEC
-			continue
-		}
-		unix.CloseOnExec(n)
+	switch err {
+	case unix.ENOENT, unix.ENOTDIR, unix.EACCES, unix.ELOOP, unix.ENAMETOOLONG:
+		err = unix.Chdir("/")
+		return "/", true, err
+	default:
+		return "", false, err
 	}
 }
 

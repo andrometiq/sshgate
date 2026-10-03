@@ -189,13 +189,13 @@ define jail-runner
 		{ "$$@"; echo $$? > "$$st"; } 2>&1 | tee -a "$$log"; tee_st=$$?; \
 		[ -f "$$st" ] && [ "$$(cat "$$st")" = 0 ] && [ "$$tee_st" = 0 ] || fail=1; \
 	}; \
-	run_jail go test -race -count=1 -tags=jail_e2e ./src/gate/confine/ -v -run 'TestJailMatrix|TestROFallbackParent|TestDetectUsernsCountUsedUpDenies'; \
+	run_jail go test -race -count=1 -tags=jail_e2e ./src/gate/confine/ -v -run 'TestJailMatrix|TestDetectUsernsCountUsedUpDenies'; \
 	run_jail go test -race -count=1 -v -run 'TestExecWithRedactionConfine' ./src/gate/; \
 	run_jail go test -race -count=1 -tags=jail_e2e -v -run 'TestRunReadJailedRealEffect|TestGateBinaryJailedRead|TestRunReadJailSetupFailureDenies' ./src/gate/cmd/sshgate-gate/; \
 	grep -qE '^FAIL' "$$log" && fail=1; \
 	grep -qE -- '--- SKIP|SKIP rung|no tests to run' "$$log" && fail=1; \
 	if [ "$${SSHGATE_JAIL_CI:-}" = 1 ]; then grep -q 'CONTROL-SKIPPED' "$$log" && fail=1; fi; \
-	for t in TestJailMatrix TestROFallbackParent TestDetectUsernsCountUsedUpDenies TestExecWithRedactionConfinedNamespace TestExecWithRedactionConfinedEROFS TestExecWithRedactionConfineFailClosed TestExecWithRedactionConfineClosesInheritedFDs TestRunReadJailedRealEffect TestGateBinaryJailedRead TestRunReadJailSetupFailureDenies; do \
+	for t in TestJailMatrix TestDetectUsernsCountUsedUpDenies TestExecWithRedactionConfinedNamespace TestExecWithRedactionConfinedEROFS TestExecWithRedactionConfineFailClosed TestExecWithRedactionConfineClosesInheritedFDs TestRunReadJailedRealEffect TestGateBinaryJailedRead TestRunReadJailSetupFailureDenies; do \
 		grep -qE -- "^--- PASS: $$t( |$$)" "$$log" || { echo "test-jail: no PASS line for $$t"; fail=1; }; \
 	done; \
 	[ $$fail = 0 ] || { echo "test-jail: FAILED"; exit 1; }; \
@@ -491,3 +491,12 @@ e2e: preflight test-integration smoke
 # no config/key (Tier-1 first-run) instead of dying and killing the tool surface.
 smoke:
 	@bash scripts/smoke-fresh-install.sh
+
+.PHONY: test-fidelity-smoke
+test-fidelity-smoke:
+	@tmp=$$(mktemp -d) || exit 1; \
+	trap 'rm -rf "$$tmp"' 0; \
+	{ go test -race -count=1 -tags=jail_e2e ./src/gate/confine -v -run '^TestFidelitySmoke$$'; echo $$? > "$$tmp/status"; } 2>&1 | tee "$$tmp/log"; tee_st=$$?; \
+	[ -f "$$tmp/status" ] && [ "$$(cat "$$tmp/status")" = 0 ] && [ "$$tee_st" = 0 ] || exit 1; \
+	! grep -qE -- '--- SKIP|no tests to run' "$$tmp/log" || exit 1; \
+	grep -qE '^--- PASS: TestFidelitySmoke( |$$)' "$$tmp/log"

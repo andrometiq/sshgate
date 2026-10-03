@@ -10,9 +10,6 @@ import (
 	"testing"
 )
 
-// sentinelROFallbackTest re-execs the test binary as roFallbackChild.
-const sentinelROFallbackTest = "__jailtest_rofallback"
-
 // sentinelUsernsFullTest re-execs the test binary as usernsFullChild, and
 // sentinelHoldTest as a process that just holds its user namespace open.
 const (
@@ -56,8 +53,6 @@ func TestMain(m *testing.M) {
 			os.Exit(RunWorker(args))
 		case SentinelProbe:
 			os.Exit(RunProbe(os.Args[2:]))
-		case sentinelROFallbackTest:
-			os.Exit(roFallbackChild(os.Args[2:]))
 		case sentinelUsernsFullTest:
 			os.Exit(usernsFullChild())
 		case sentinelHoldTest:

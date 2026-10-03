@@ -646,9 +646,7 @@ func legProcMem(t *testing.T, spec Spec, probe string) {
 		t.Fatalf("unjailed control could not open /proc/<testpid>/mem (PR_SET_PTRACER ineffective?): %s", out)
 	}
 
-	// Jailed: the fresh /proc hides the host pid, and Landlock restricts ptrace
-	// on a target
-	// outside the jail's domain.
+	// The host /proc stays visible; cross-userns ptrace and Landlock deny memory access.
 	r := runJailedRan(t, spec, probe+" read-mem "+pid)
 	if strings.Contains(r.stdout, "open=ok") {
 		t.Errorf("jailed probe opened /proc/<testpid>/mem (stdout=%q); the read should be blocked", r.stdout)
@@ -659,8 +657,10 @@ func legProcMem(t *testing.T, spec Spec, probe string) {
 }
 
 func legRlimits(t *testing.T, spec Spec) {
+	var core unix.Rlimit
+	mutationSetup(t, unix.Getrlimit(unix.RLIMIT_CORE, &core))
 	r := runJailedRan(t, spec, "cat /proc/self/limits")
-	for name, want := range map[string]string{"Max processes": "256", "Max file size": "1073741824", "Max core file size": "0"} {
+	for name, want := range map[string]string{"Max processes": "256", "Max file size": "1073741824", "Max core file size": strconv.FormatUint(min(uint64(1), core.Max), 10)} {
 		found := false
 		for _, line := range strings.Split(r.stdout, "\n") {
 			if strings.HasPrefix(line, name) {
@@ -835,7 +835,7 @@ func legFailClosed(t *testing.T, spec Spec) {
 
 // Scratch truncation is allowed; host truncation remains covered by legMetadata.
 func legTruncateScratch(t *testing.T, spec Spec) {
-	r := runJailedRan(t, spec, "printf data > /tmp/truncate-test && printf x >> /tmp/truncate-test && truncate -s 0 /tmp/truncate-test && test ! -s /tmp/truncate-test")
+	r := runJailedRan(t, spec, "printf data > /dev/shm/truncate-test && printf x >> /dev/shm/truncate-test && truncate -s 0 /dev/shm/truncate-test && test ! -s /dev/shm/truncate-test")
 	if r.exit != 0 {
 		t.Fatalf("scratch append/truncate failed: %+v", r)
 	}
@@ -844,11 +844,11 @@ func legTruncateScratch(t *testing.T, spec Spec) {
 // legFill proves private tmpfs writes stop at the mount size bound.
 func legFill(t *testing.T, spec Spec) {
 	{
-		// /tmp is a bounded tmpfs inside the jail; a fill stops at its size and
+		// /dev/shm is a bounded tmpfs inside the jail; a fill stops at its size and
 		// the host is untouched. Fill and measure in the SAME jail (a new jail
 		// gets a fresh, empty tmpfs). RLIMIT_FSIZE (1 GiB) is far above the
 		// tmpfs bound, so a size at or below it is the tmpfs size= at work.
-		r := runJailedRan(t, spec, "cat /dev/zero > /tmp/fill 2>/dev/null; echo fillexit=$?; stat -c size=%s /tmp/fill")
+		r := runJailedRan(t, spec, "cat /dev/zero > /dev/shm/fill 2>/dev/null; echo fillexit=$?; stat -c size=%s /dev/shm/fill")
 		var fillExit, size string
 		for _, ln := range strings.Split(r.stdout, "\n") {
 			if v, ok := strings.CutPrefix(ln, "fillexit="); ok {
@@ -1097,29 +1097,6 @@ func legReadCorpus(t *testing.T, spec Spec) {
 	// green; require a floor of real reads so this leg cannot pass vacuously.
 	if ran < 20 {
 		t.Errorf("only %d corpus rows actually ran in the jail; expected at least 20 (corpus/host-control problem)", ran)
-	}
-}
-
-// TestROFallbackParent runs the pre-5.12 read-only remount fallback inside a real
-// rung-1 clone (the live helper is otherwise dead code). It proves the fallback
-// remounts every mount read-only, preserves the kernel-locked per-mount flags,
-// handles an escaped mount point, and mounts /proc after pivot_root.
-func TestROFallbackParent(t *testing.T) {
-	if !Detect().Userns {
-		t.Skip("host has no unprivileged userns; the RO-fallback parent test needs a rung-1 clone")
-	}
-	home := homeDir(t)
-	dir, err := os.MkdirTemp(home, ".sshgate-rofb-")
-	if err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-
-	c := exec.Command("/proc/self/exe", sentinelROFallbackTest, dir, "marker")
-	c.SysProcAttr = cloneSysProcAttr()
-	out, err := c.CombinedOutput()
-	if err != nil {
-		t.Fatalf("RO-fallback child failed: %v\n%s", err, out)
 	}
 }
 
@@ -1456,12 +1433,11 @@ func readCorpusRows(t *testing.T) []string {
 
 func buildProbe(t *testing.T) string {
 	t.Helper()
-	// Build under $HOME, not /tmp: on rung 1 the jail overmounts /tmp with a fresh
-	// tmpfs, so a /tmp binary would be invisible inside the jail. $HOME is part of
+	// Build under $HOME so the helper shares the persistent fixture filesystem. $HOME is part of
 	// the read-only bind, so the helper is visible and executable there.
 	dir, err := os.MkdirTemp(homeDir(t), ".sshgate-jailprobe-")
 	if err != nil {
-		t.Fatalf("mkdir probe dir: %v", err)
+		t.Fatalf("SETUP: mkdir probe dir: %v", err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	bin := filepath.Join(dir, "probe")
@@ -1470,7 +1446,7 @@ func buildProbe(t *testing.T) string {
 	cmd := exec.Command("go", "build", "-o", bin, "./testdata/probe")
 	cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
 	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("build probe helper: %v\n%s", err, out)
+		t.Fatalf("SETUP: build probe helper: %v\n%s", err, out)
 	}
 	return bin
 }
