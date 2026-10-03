@@ -524,10 +524,11 @@ func truncate(s string, max int) string {
 
 // gateDenyNoteFor returns a short remediation line for a write command
 // result whose exit code is a well-known gate deny (77 = missing sig /
-// read-only, 65 = bad/expired sig), or "" otherwise. Reads never carry
-// these codes, so the annotation is write-only. The run_batch layer
-// already folds the full note into the result's Stderr; this keeps the
-// fallback TextContent summary actionable too.
+// read-only, 65 = bad/expired sig), or "" otherwise. A read can exit 77 only
+// when the host's read jail is unavailable, and the gate's own stderr says so,
+// so the annotation is write-only. The run_batch layer already folds the full
+// note into the result's Stderr; this keeps the fallback TextContent summary
+// actionable too.
 func gateDenyNoteFor(r tools.CommandResult) string {
 	if r.Kind != "write" {
 		return ""

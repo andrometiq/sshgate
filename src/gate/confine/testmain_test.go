@@ -3,12 +3,20 @@
 package confine
 
 import (
+	"io"
 	"os"
 	"testing"
 )
 
 // sentinelROFallbackTest re-execs the test binary as roFallbackChild.
 const sentinelROFallbackTest = "__jailtest_rofallback"
+
+// sentinelUsernsFullTest re-execs the test binary as usernsFullChild, and
+// sentinelHoldTest as a process that just holds its user namespace open.
+const (
+	sentinelUsernsFullTest = "__jailtest_usernsfull"
+	sentinelHoldTest       = "__jailtest_hold"
+)
 
 // TestMain dispatches the re-exec sentinels when the test binary is invoked as
 // the jail shim/worker/probe (confine re-execs /proc/self/exe, which is this test
@@ -25,6 +33,11 @@ func TestMain(m *testing.M) {
 			os.Exit(RunProbe(os.Args[2:]))
 		case sentinelROFallbackTest:
 			os.Exit(roFallbackChild(os.Args[2:]))
+		case sentinelUsernsFullTest:
+			os.Exit(usernsFullChild())
+		case sentinelHoldTest:
+			_, _ = io.Copy(io.Discard, os.Stdin) // hold until the parent closes stdin
+			os.Exit(0)
 		}
 	}
 	// Under -race every re-exec'd hop that exits 0 would otherwise sleep 1s at

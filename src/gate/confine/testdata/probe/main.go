@@ -11,6 +11,8 @@
 //	probe shm-rmid  <shmid>                shmctl(IPC_RMID)
 //	probe setflags  <path>                 FS_IOC_SETFLAGS, FS_IOC_FSSETXATTR, file_setattr (+nodump)
 //	probe proc-state <pid>                 prlimit64, setpriority, sched_setaffinity on another pid
+//	probe mq-create <name>                 mq_open(O_CREAT|O_EXCL) of a POSIX message queue
+//	probe mq-unlink <name>                 mq_unlink of a POSIX message queue
 package main
 
 import (
@@ -49,6 +51,13 @@ func report(name string, err error) bool {
 		fmt.Printf("%s=%q\n", name, err.Error())
 	}
 	return false
+}
+
+func errnoOrNil(e unix.Errno) error {
+	if e != 0 {
+		return e
+	}
+	return nil
 }
 
 func ioctlPtr(fd int, req uintptr, p unsafe.Pointer) error {
@@ -140,6 +149,23 @@ func main() {
 		set.Zero()
 		set.Set(0)
 		report("setaffinity", unix.SchedSetaffinity(pid, &set))
+	case "mq-create", "mq-unlink":
+		// Raw syscalls take the queue name without libc's leading slash.
+		name, err := unix.BytePtrFromString(args[0])
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "bad name:", err)
+			os.Exit(2)
+		}
+		if os.Args[1] == "mq-unlink" {
+			_, _, e := unix.Syscall(unix.SYS_MQ_UNLINK, uintptr(unsafe.Pointer(name)), 0, 0)
+			report("mq_unlink", errnoOrNil(e))
+			break
+		}
+		fd, _, e := unix.Syscall6(unix.SYS_MQ_OPEN, uintptr(unsafe.Pointer(name)),
+			uintptr(unix.O_CREAT|unix.O_EXCL|unix.O_RDWR|unix.O_CLOEXEC), 0o600, 0, 0, 0)
+		if report("mq_open", errnoOrNil(e)) {
+			_ = unix.Close(int(fd))
+		}
 	default:
 		fmt.Fprintln(os.Stderr, "unknown op:", os.Args[1])
 		os.Exit(2)

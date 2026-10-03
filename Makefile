@@ -169,22 +169,32 @@ test:
 # exercise ExecWithRedaction end to end — the matrix alone never proves the
 # executor actually entered the jail. The gate-package fail-closed/fd-leak tests
 # use rung 2 (Landlock, no userns), so they run even on an AppArmor-clamped runner.
+# The gate read-path tests run run() on the live rung, and build the real gate
+# binary to drive a forced-command read through its own jail re-exec; both fail
+# on a rung-3 host.
 # Tagged jail_e2e so the matrix is OUT of the default `make test`. It needs an
 # unprivileged user namespace for the rung-1 legs and Landlock for rung-2. Run on
 # the Phase-0 go/no-go host (userns + Landlock), never "green by skip": this target
-# FAILS on any `--- SKIP`/`SKIP rung` as well as on any FAIL.
+# FAILS on any `--- SKIP`/`SKIP rung` as well as on any FAIL. -count=1: the go
+# test cache does not track host jail facts, so a cached replay proves nothing.
 test-jail:
 	@log=$$(mktemp); \
 	echo "== confine jail matrix =="; \
-	go test -race -tags=jail_e2e ./src/gate/confine/ -v -run 'TestJailMatrix|TestROFallbackParent' 2>&1 | tee "$$log"; \
+	go test -race -count=1 -tags=jail_e2e ./src/gate/confine/ -v -run 'TestJailMatrix|TestROFallbackParent|TestDetectUsernsCountUsedUpDenies' 2>&1 | tee "$$log"; \
 	echo "== gate-package real-effect confine tests (rung 2, no userns) =="; \
-	go test -race -v -run 'TestExecWithRedactionConfine' ./src/gate/ 2>&1 | tee -a "$$log"; \
+	go test -race -count=1 -v -run 'TestExecWithRedactionConfine' ./src/gate/ 2>&1 | tee -a "$$log"; \
+	echo "== gate read paths on the live rung (Tier-1, signed, reveal; rung 2 forced; real binary) =="; \
+	go test -race -count=1 -tags=jail_e2e -v -run 'TestRunReadJailedRealEffect|TestGateBinaryJailedRead|TestRunReadJailSetupFailureDenies' ./src/gate/cmd/sshgate-gate/ 2>&1 | tee -a "$$log"; \
 	fail=0; \
 	grep -qE '^FAIL' "$$log" && fail=1; \
 	grep -qE -- '--- SKIP|SKIP rung' "$$log" && { echo "test-jail: a jail test SKIPPED where it should run (userns/Landlock/tooling missing?)"; fail=1; }; \
+	grep -q 'no tests to run' "$$log" && { echo "test-jail: a -run pattern matched no tests"; fail=1; }; \
+	for t in TestJailMatrix TestROFallbackParent TestDetectUsernsCountUsedUpDenies TestExecWithRedactionConfine TestRunReadJailedRealEffect TestGateBinaryJailedRead TestRunReadJailSetupFailureDenies; do \
+		grep -qE -- "^--- PASS: $$t" "$$log" || { echo "test-jail: no PASS line for $$t (renamed, untagged or not run?)"; fail=1; }; \
+	done; \
 	rm -f "$$log"; \
 	if [ $$fail -ne 0 ]; then echo "test-jail: FAILED"; exit 1; fi; \
-	echo "test-jail: OK (no FAIL, no SKIP)"
+	echo "test-jail: OK (no FAIL, no SKIP, every expected test passed)"
 
 test-refapp-js:
 	@command -v node >/dev/null 2>&1 || { echo "test-refapp-js: node is required to verify the hosted WebAuthn browser adapter" >&2; exit 1; }

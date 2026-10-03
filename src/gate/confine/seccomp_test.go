@@ -249,6 +249,22 @@ func TestBuildFilterMetadata(t *testing.T) {
 	}
 }
 
+// TestBuildFilterMQueue: rung 2 shares the host's IPC namespace and Landlock
+// mediates neither mq_unlink nor mq_open's create, so seccomp denies both there
+// and only there (rung 1 has its own IPC namespace).
+func TestBuildFilterMQueue(t *testing.T) {
+	r1 := buildFilter(filterParams{allowInet: true, denyMetadata: false})
+	r2 := buildFilter(filterParams{allowInet: true, denyMetadata: true})
+	for _, nr := range []uint32{unix.SYS_MQ_OPEN, unix.SYS_MQ_UNLINK} {
+		if got := evalFilter(t, r2, dataFor(nr, x8664)); got != actDeny {
+			t.Errorf("mqueue syscall %d on rung 2: got %#x want deny", nr, got)
+		}
+		if got := evalFilter(t, r1, dataFor(nr, x8664)); got != actAllow {
+			t.Errorf("mqueue syscall %d on rung 1: got %#x want allow", nr, got)
+		}
+	}
+}
+
 // TestBuildFilterMetadataIoctls: on rung 2 the inode-flag ioctls are denied
 // whatever the high word of the request, and only on rung 2; ordinary ioctls
 // (including the read-side FS_IOC_GETFLAGS) stay allowed.

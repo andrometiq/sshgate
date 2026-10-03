@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -195,6 +196,34 @@ func ExecWithRedaction(ctx context.Context, cmd string, opts ExecOpts) (res Exec
 		c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	}
 
+	return runRedacted(c, jailed, "/bin/sh", opts)
+}
+
+// ExecArgvWithRedaction runs argv directly — no shell, no jail — with exactly
+// env as the child's environment, through the same stdout/stderr redaction,
+// counting, /dev/null stdin and process-group plumbing as ExecWithRedaction.
+// It is the shell-free exec for the gate's Lane-2 daemon-read allowlist: argv[0]
+// must be an absolute path (never a $PATH lookup), and a nil env yields an EMPTY
+// environment, never the gate's inherited one. opts.Confine must be nil — this
+// door is unjailed by design. Return values follow ExecWithRedaction.
+func ExecArgvWithRedaction(ctx context.Context, argv, env []string, opts ExecOpts) (ExecResult, error) {
+	if len(argv) == 0 || !filepath.IsAbs(argv[0]) {
+		return ExecResult{ExitCode: -1}, errors.New("exec: argv[0] must be an absolute path")
+	}
+	if opts.Confine != nil {
+		return ExecResult{ExitCode: -1}, errors.New("exec: argv exec is never confined")
+	}
+	c := exec.CommandContext(ctx, argv[0], argv[1:]...)
+	c.Env = append([]string{}, env...) // non-nil: os/exec inherits the gate's env only for a nil Env
+	c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	return runRedacted(c, nil, argv[0], opts)
+}
+
+// runRedacted is the shared tail of both exec entry points: it wires the
+// redacting/counting writers and /dev/null stdin onto c, runs it, and maps the
+// outcome to an ExecResult. jailed is non-nil only for a confined command; what
+// names the program in a start-failure error.
+func runRedacted(c *exec.Cmd, jailed *confine.Jailed, what string, opts ExecOpts) (res ExecResult, err error) {
 	// Counting writers sit BELOW any redactor so the tally is the
 	// post-redaction byte/line count that actually reaches the SSH
 	// stream (see ExecResult). One per stream, never shared. CaptureLimit
@@ -260,7 +289,7 @@ func ExecWithRedaction(ctx context.Context, cmd string, opts ExecOpts) (res Exec
 			return ExecResult{ExitCode: -1, Duration: time.Since(start)}, fmt.Errorf("exec: start jail: %w", err)
 		}
 		// Nil-Confine path stays byte-identical to the pre-jail executor.
-		return ExecResult{ExitCode: -1, Duration: time.Since(start)}, fmt.Errorf("exec: start /bin/sh: %w", err)
+		return ExecResult{ExitCode: -1, Duration: time.Since(start)}, fmt.Errorf("exec: start %s: %w", what, err)
 	}
 	if jailed != nil {
 		// Close the parent's child-side pipe ends and stream the command to the

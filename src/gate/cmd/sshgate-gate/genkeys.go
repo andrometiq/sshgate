@@ -57,6 +57,8 @@ func runLocalSubcommand(args []string) int {
 	switch args[0] {
 	case "genkeys":
 		return runGenKeys(args[1:])
+	case "doctor":
+		return runDoctor(args[1:])
 	default:
 		logf("unknown subcommand")
 		return exitDataErr

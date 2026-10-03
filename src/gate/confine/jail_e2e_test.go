@@ -36,6 +36,7 @@ import (
 	"syscall"
 	"testing"
 	"time"
+	"unsafe"
 
 	"golang.org/x/sys/unix"
 )
@@ -138,11 +139,15 @@ func runLegs(t *testing.T, cfg jailCfg, hostABI int, probe string) {
 	t.Run("rlimits_applied", func(t *testing.T) { legRlimits(t, spec) })
 	t.Run("fifo", func(t *testing.T) { legFifo(t, cfg, spec) })
 	t.Run("ipc", func(t *testing.T) { legIPC(t, cfg, spec, probe) })
+	t.Run("posix_mqueue_isolated", func(t *testing.T) { legMQueue(t, spec, probe) })
 	t.Run("fail_closed_before_execve", func(t *testing.T) { legFailClosed(t, spec) })
 
 	if spec.Rung == Rung1Full {
 		// The pid-1 reaper must not hang on a backgrounded child (pid-ns teardown).
 		t.Run("reaper_no_hang", func(t *testing.T) { legReaper(t, spec) })
+		// The jail's own /proc is read-only: its kernel control files are guarded
+		// only by DAC, which a root SSH user passes (rung 1 without Landlock).
+		t.Run("procfs_control_readonly", func(t *testing.T) { legProcfsReadOnly(t, spec) })
 	}
 	if spec.Rung == Rung2Landlock {
 		// Rung 2 shares /proc with the host: seccomp must stop a jailed command
@@ -372,9 +377,9 @@ func bypassCorpus() []bypassRow {
 			},
 		},
 		// --- No file sink: a network-side HTTP POST. Phase 1 keeps inet in front of
-		// the classifier (STEPBACK step 2 "deny inet" is a later step), so the jail
+		// the classifier (denying inet is a later step), so the jail
 		// does not contain it — carved out, not asserted.
-		{name: "curl_json_post", skip: "network-side HTTP POST (curl --json); no file sink, contained by STEPBACK step 2 'deny inet', not Phase 1"},
+		{name: "curl_json_post", skip: "network-side HTTP POST (curl --json); no file sink, contained once inet is denied, not Phase 1"},
 		// --- No file sink: host/kernel-state changes needing CAP_SYS_ADMIN. There
 		// is nothing to seed and the unjailed control cannot run unprivileged, so
 		// these are listed, not asserted.
@@ -826,6 +831,75 @@ func legIPC(t *testing.T, cfg jailCfg, spec Spec, probe string) {
 	}
 }
 
+// legMQueue covers POSIX message queues. Rung 1's CLONE_NEWIPC gives the jail
+// its own queues; rung 2 shares the host's, and Landlock mediates neither
+// mq_unlink nor mq_open's create, so seccomp denies both. Unjailed controls prove
+// the probe really creates and removes a host queue.
+func legMQueue(t *testing.T, spec Spec, probe string) {
+	name := fmt.Sprintf("sshgate-jailtest-%d-%d", os.Getpid(), time.Now().UnixNano())
+	t.Cleanup(func() { mqUnlink(t, name) })
+	unjailed := func(op string) {
+		t.Helper()
+		if out, err := exec.Command(probe, op, name).CombinedOutput(); err != nil {
+			t.Fatalf("unjailed control %s failed (%v): %s", op, err, out)
+		}
+	}
+
+	unjailed("mq-create")
+	if !mqExists(t, name) {
+		t.Fatal("control: the unjailed probe did not create a host queue")
+	}
+	unjailed("mq-unlink")
+	if mqExists(t, name) {
+		t.Fatal("control: the unjailed probe did not remove the host queue")
+	}
+
+	unjailed("mq-create")
+	r := runJailedRan(t, spec, probe+" mq-unlink "+name)
+	if !mqExists(t, name) {
+		t.Errorf("jailed mq_unlink deleted the host queue %q (stdout=%q)", name, r.stdout)
+	}
+	if r.exit == 0 {
+		t.Errorf("jailed mq_unlink exited 0; want it refused (stdout=%q)", r.stdout)
+	}
+	mqUnlink(t, name)
+
+	r = runJailedRan(t, spec, probe+" mq-create "+name)
+	if mqExists(t, name) {
+		t.Errorf("jailed mq_open(O_CREAT) left a queue %q on the host (stdout=%q)", name, r.stdout)
+	}
+}
+
+// mqExists reports whether the host IPC namespace holds the POSIX queue name.
+func mqExists(t *testing.T, name string) bool {
+	t.Helper()
+	fd, _, e := unix.Syscall6(unix.SYS_MQ_OPEN, uintptr(unsafe.Pointer(cstr(t, name))), uintptr(unix.O_RDONLY|unix.O_CLOEXEC), 0, 0, 0, 0)
+	switch e {
+	case 0:
+		_ = unix.Close(int(fd))
+		return true
+	case unix.ENOENT:
+		return false
+	default:
+		t.Fatalf("mq_open(%q) on the host: %v", name, e)
+		return false
+	}
+}
+
+// mqUnlink removes the host queue name, if it exists.
+func mqUnlink(t *testing.T, name string) {
+	_, _, _ = unix.Syscall(unix.SYS_MQ_UNLINK, uintptr(unsafe.Pointer(cstr(t, name))), 0, 0)
+}
+
+func cstr(t *testing.T, s string) *byte {
+	t.Helper()
+	p, err := unix.BytePtrFromString(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
 func legFailClosed(t *testing.T, spec Spec) {
 	stages := []string{"cmdread", "nnp", "caps", "rlimits", "landlock", "seccomp"}
 	if spec.Rung == Rung1Full {
@@ -932,6 +1006,52 @@ func legFill(t *testing.T, cfg jailCfg, spec Spec) {
 		t.Errorf("rung 2: scratch fill reached %d bytes > RLIMIT_FSIZE %d", fi.Size(), defaultRlimitFsize)
 	}
 	_ = os.Remove(fill)
+}
+
+// legProcfsReadOnly proves the rung-1 jail mounts its /proc read-only. The kernel
+// control files (/proc/sys, /proc/sysrq-trigger, /proc/irq, ...) check only DAC
+// on write, so a root SSH user on a host without Landlock would pass that check;
+// the read-only mount is what stops it. The suite runs unprivileged, so the
+// write it attempts is to /proc/self/comm, a file every process may write on the
+// host (the unjailed control) and whose write meets the same mount-level wall as
+// the root-only ones. The jail's mountinfo must show /proc ro, the control files
+// must still exist inside (blocked, not missing), and the fd magic links that
+// /dev/stdout resolves through must keep working.
+func legProcfsReadOnly(t *testing.T, spec Spec) {
+	const write = "echo sshgate-ctl > /proc/self/comm"
+	if out, err := exec.Command("/bin/sh", "-c", write).CombinedOutput(); err != nil {
+		t.Fatalf("unjailed control could not write /proc/self/comm: %v: %s", err, out)
+	}
+	ctl := []string{"/proc/sysrq-trigger", "/proc/sys/kernel/sysrq", "/proc/irq", "/proc/bus", "/proc/fs"}
+	for _, p := range ctl {
+		if _, err := os.Stat(p); err != nil {
+			t.Fatalf("unjailed control: %s missing on this host: %v", p, err)
+		}
+	}
+
+	if r := runJailedRan(t, spec, write); r.exit == 0 || !strings.Contains(r.stderr, "Read-only file system") {
+		t.Errorf("jailed write to /proc/self/comm: exit=%d stderr=%q; want an EROFS failure", r.exit, r.stderr)
+	}
+	if r := runJailedRan(t, spec, "ls -d "+strings.Join(ctl, " ")); r.exit != 0 {
+		t.Errorf("control files not visible in the jail (exit=%d stderr=%q); the leg would be vacuous", r.exit, r.stderr)
+	}
+	r := runJailedRan(t, spec, "cat /proc/self/mountinfo")
+	entries, err := parseMountInfo(strings.NewReader(strings.TrimPrefix(r.stdout, ranCanary+"\n")))
+	if err != nil {
+		t.Fatalf("parse jailed mountinfo: %v", err)
+	}
+	var procOpts []string
+	for _, e := range entries {
+		if e.point == "/proc" {
+			procOpts = e.opts // the last /proc entry is the one a lookup reaches
+		}
+	}
+	if len(procOpts) == 0 || procOpts[0] != "ro" {
+		t.Errorf("jail /proc mount options = %v; want ro", procOpts)
+	}
+	if r := runJailedRan(t, spec, "echo VIA_FD > /dev/stdout"); r.exit != 0 || !strings.Contains(r.stdout, "VIA_FD") {
+		t.Errorf("write through /dev/stdout broke in the jail: exit=%d stdout=%q stderr=%q", r.exit, r.stdout, r.stderr)
+	}
 }
 
 // legReaper proves the rung-1 pid-1 reaper returns as soon as the WORKER exits

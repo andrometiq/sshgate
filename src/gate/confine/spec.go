@@ -70,7 +70,9 @@ type Spec struct {
 	// inet is a later step.
 	AllowInet bool
 	// ScratchDir is the per-session writable dir for rung 2 (Landlock allows
-	// writes only here + /dev/null + the tty). Empty on rung 1 (tmpfs covers it).
+	// writes only here + /dev/null; no tty is granted, since the forced command
+	// runs without a pty and the inherited stdio fds need no Landlock right).
+	// Empty on rung 1 (tmpfs covers it).
 	ScratchDir string
 	// InjectFailAt (TEST-ONLY in practice) names a setup stage at which the
 	// worker must abort WITHOUT execve. Its only possible effect is to abort

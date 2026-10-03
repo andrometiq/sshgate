@@ -40,7 +40,7 @@ const (
 // assemble and evaluate every combination.
 type filterParams struct {
 	allowInet        bool
-	denyMetadata     bool // true on rung 2: Landlock never covers chmod/chown/xattr/utime/fs-flag ioctls
+	denyMetadata     bool // true on rung 2: Landlock never covers chmod/chown/xattr/utime/fs-flag ioctls or POSIX mqueues
 	denyTruncate     bool // true only on rung 2 below Landlock ABI 3 (EROFS/Landlock cover it otherwise)
 	denyTtyIoctl     bool // true only on rung 2 below Landlock ABI 5 (Landlock IOCTL_DEV covers it otherwise)
 	denyOpenByHandle bool // true only for a root SSH user (pairs with CAP_DAC_READ_SEARCH)
@@ -159,6 +159,9 @@ func buildFilter(p filterParams) []unix.SockFilter {
 	}
 	if p.denyMetadata {
 		for _, s := range metadataDeny {
+			a.jeq(s, "deny", "")
+		}
+		for _, s := range mqueueDeny {
 			a.jeq(s, "deny", "")
 		}
 	}

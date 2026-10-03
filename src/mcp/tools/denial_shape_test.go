@@ -24,9 +24,10 @@ func TestNewDenial_ShapePinned(t *testing.T) {
 		{VerdictBadSignature, ActionRetry, true},
 		{VerdictMissingSignature, ActionEscalateToHuman, false}, // M1: exit 77 is NOT retryable
 		{VerdictRevealNeedsReason, ActionProvideReason, false},
+		{VerdictReadJailUnavailable, ActionEscalateToHuman, false},
 	}
-	if len(cases) != 10 {
-		t.Fatalf("expected 10 verdict classes pinned; got %d", len(cases))
+	if len(cases) != 11 {
+		t.Fatalf("expected 11 verdict classes pinned; got %d", len(cases))
 	}
 	for _, tc := range cases {
 		tc := tc

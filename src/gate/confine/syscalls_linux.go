@@ -58,6 +58,14 @@ var metadataDeny = []uint32{
 	unix.SYS_FILE_SETATTR,
 }
 
+// mqueueDeny lists the POSIX message-queue calls that create or remove a queue
+// without Landlock seeing it: mq_unlink removes the inode through an inode hook
+// Landlock does not mediate, and mq_open(O_CREAT) creates the queue before
+// Landlock refuses the open. Denied on rung 2, which shares the host's IPC
+// namespace; rung 1's CLONE_NEWIPC gives the jail queues of its own. A jailed
+// read has no use for a host queue, so mq_open is denied outright.
+var mqueueDeny = []uint32{unix.SYS_MQ_OPEN, unix.SYS_MQ_UNLINK}
+
 // fsIocFssetxattr is _IOW('X', 32, struct fsxattr); absent from x/sys v0.45.0.
 const fsIocFssetxattr = 0x401c5820
 

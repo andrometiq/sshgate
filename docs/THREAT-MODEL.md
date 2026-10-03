@@ -110,6 +110,40 @@ runs without approval — which is why the classifier is discussed honestly belo
   §"Read-only gate hardening (deferred MINORs/MAJORs from security research)".)
   Do not read this as "solved"; read it as "default-deny + a standing regression
   corpus, with one known structural hole".
+- **Kernel confinement of reads — partial and host-dependent.** On a host with
+  unprivileged user namespaces (the full jail) or Landlock (the Landlock-only
+  jail), the gate runs every command the classifier calls a read, signed or not,
+  inside a kernel jail. There it cannot write any file or file metadata outside
+  its own throwaway scratch space (two narrow exceptions are listed below), cannot connect to a local daemon over a Unix
+  socket, and cannot signal or trace other processes (in the Landlock-only jail,
+  blocking signals needs Landlock ABI 6 or newer). What it does **not** cover
+  yet:
+  - **Network side effects are not contained.** The jail still allows internet
+    sockets, so a misjudged read can still send data or trigger a remote action
+    over the network, including against daemons listening on localhost TCP ports.
+  - **Two narrow write paths remain on some hosts.** In the full jail on a host
+    without Landlock, a read can still write into a named pipe (FIFO) that
+    already exists on the host, reaching whatever process reads it; with root
+    as the SSH user that includes root-only daemon FIFOs. The Landlock-only
+    jail has no IPC namespace, so a read can remove or change System V IPC
+    objects, such as shared memory segments, owned by the same user.
+  - **Hosts with neither feature stay classifier-only.** Reads there run
+    unconfined, exactly as before, and the gate's audit log labels them
+    `unconfined`. `gate doctor`, run on the host, reports which level applies;
+    `gate doctor --pin` records the current level as a floor, and the gate then
+    refuses reads rather than run them below it.
+  - **A fixed allowlist of `systemctl` and `docker` read verbs runs outside the
+    jail**, because those reads need a local daemon socket. They run without a
+    shell, from a fixed binary path, with a fixed minimal environment that
+    also stops `docker` from reading the SSH user's own `~/.docker` config.
+  - **Display and scratch differences in the full jail.** Files owned by other
+    users may list as `nobody`/`65534`; access is unchanged. Each read gets a
+    private, empty `/tmp`, `/var/tmp` and `/dev/shm`, so it cannot see the
+    host's files there.
+
+  This does not move the boundary stated above: the classifier still decides
+  what needs a signature; the jail limits what a misjudged read can do on a
+  capable host.
 - **PTY-based escapes and `~/.ssh/rc` execution at the `authorized_keys` layer —
   closed.** The forced-command entry leads with `restrict` (the OpenSSH ≥ 7.2
   deny-all catch-all) and additionally pins

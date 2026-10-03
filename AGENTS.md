@@ -95,6 +95,11 @@ have them check the host's `/var/log/auth.log` and that the key line was pasted 
   signer pubkey (Tier-1): check `status`; with no signer, the user runs `/sshgate:setup` and
   re-tiers as above (a bare re-add of a registered alias is refused). **65** = bad or expired
   signature, usually clock skew or a stale approval: retry once.
+- On hosts that support it, reads run in a kernel jail: they cannot write files or reach
+  Unix-socket daemons (a few `systemctl`/`docker` read verbs excepted) and may see an empty
+  `/tmp`. The network, including localhost TCP services, is not yet restricted.
+  A read denied with 77 and `read jail unavailable` means the host's jail could not be
+  confirmed or set up, so nothing ran; a human runs `gate doctor` on the host.
 - `transfer` failing with `src/dest server not registered for transfer`: that endpoint has no
   transfer key on the signer. The user runs `sshgate xfer-register <alias>`, then you retry.
 

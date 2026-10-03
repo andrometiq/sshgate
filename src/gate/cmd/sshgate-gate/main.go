@@ -18,7 +18,10 @@
 //	70 — EX_SOFTWARE: pubkey file unreadable, corrupt, or has insecure
 //	     mode; also a SSHGATE_UPDATE filesystem/replace failure (old gate
 //	     left intact)
-//	77 — EX_NOPERM: write command without a verified SSHGATE_SIG prefix
+//	77 — EX_NOPERM: write command without a verified SSHGATE_SIG prefix;
+//	     also a read refused because the host's read jail cannot be trusted
+//	     (probe error, rung below the pinned jail-floor, damaged floor) or
+//	     could not be set up; stderr then says "read jail unavailable"
 //
 // Exit codes from the executed inner command are passed through
 // directly (so /bin/sh -c 'exit 42' makes gate exit 42).
@@ -179,7 +182,7 @@ func run() int {
 		kind := classify.Classify(raw)
 		if kind == classify.KindRead {
 			// Tier-1 read-only: unsigned read, never revealed.
-			return execAndAudit(audit, raw, "read", "unsigned", false)
+			return execRead(audit, raw, "unsigned", false)
 		}
 		// KindWrite or KindUnknown (empty/whitespace already handled
 		// upstream — anything else unknown falls through as write).
@@ -261,7 +264,7 @@ func run() int {
 		if signed {
 			status = "signed"
 		}
-		return execAndAudit(audit, innerCmd, "read", status, reveal)
+		return execRead(audit, innerCmd, status, reveal)
 	case classify.KindWrite, classify.KindUnknown:
 		// Fail-safe: unknown is treated as write (classify.Classify
 		// already returns KindWrite for the truly-unknown cases; an
@@ -272,7 +275,7 @@ func run() int {
 			auditNoExec(audit, innerCmd, "write", "denied", exitNoPermVal)
 			return exitNoPermVal
 		}
-		return execAndAudit(audit, innerCmd, "write", "signed", reveal)
+		return execAndAudit(audit, innerCmd, "write", "signed", reveal, execPlan{})
 	default:
 		logf("unexpected classification: %v", kind)
 		auditNoExec(audit, innerCmd, "write", "denied", exitGeneric)
@@ -289,31 +292,62 @@ func run() int {
 // authorised raw (un-redacted) output. reveal can only be true on the
 // signed path (see run()); it is never set for an unsigned read.
 //
+// plan selects how the child runs: Lane-2 argv (shell-free), the read jail,
+// or the zero plan's plain /bin/sh -c (signed writes, rung-3 reads).
+//
 // It returns the gate exit code AND the ExecResult (output metadata) so
 // the caller can feed the Tier-6a audit log. captureLimit (>0 only at the
 // audit all+full level) makes the executor tee a capped copy of the
 // output into the result. On an exec start-failure (exit<0) the gate exit
-// code is normalised to exitGeneric (1).
-func execChild(cmd string, reveal bool, captureLimit int) (int, gate.ExecResult) {
+// code is normalised to exitGeneric (1) — except for a jailed read, where
+// exit<0 means the jail never reached the command (scratch dir, build, start
+// or setup failure): that is a deny, jailDenied is true and the code is 77, so
+// it can never pass for a command that ran and exited 1.
+func execChild(cmd string, reveal bool, captureLimit int, plan execPlan) (rc int, res gate.ExecResult, jailDenied bool) {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
 	// Resolve the redaction ruleset lazily via auditRules() — only this
 	// execute path (and the command-string audit redaction) needs it; a
 	// deny/verify-fail/probe path that never reaches here pays nothing.
 	rules := auditRules()
-	res, err := gate.ExecWithRedaction(ctx, cmd, gate.ExecOpts{
+	opts := gate.ExecOpts{
 		SessionSalt:  sessionSalt,
 		Rules:        rules,
 		Reveal:       reveal,
 		CaptureLimit: captureLimit,
-	})
+	}
+	var err error
+	switch {
+	case plan.argv != nil:
+		res, err = gate.ExecArgvWithRedaction(ctx, plan.argv, lane2Env, opts)
+	case plan.confine != nil && plan.confine.Rung == confine.Rung2Landlock:
+		// Rung 2 has no private tmpfs: Landlock lets the command write only to a
+		// fresh per-command scratch dir, which dies with this command.
+		scratch, merr := os.MkdirTemp("", "sshgate-jail-")
+		if merr != nil {
+			logf("read jail unavailable: scratch dir: %v; the read did not run", merr)
+			return exitNoPermVal, gate.ExecResult{ExitCode: -1}, true
+		}
+		defer os.RemoveAll(scratch)
+		spec := *plan.confine
+		spec.ScratchDir = scratch
+		opts.Confine = &spec
+		res, err = gate.ExecWithRedaction(ctx, cmd, opts)
+	default:
+		opts.Confine = plan.confine
+		res, err = gate.ExecWithRedaction(ctx, cmd, opts)
+	}
 	if err != nil {
 		logf("%v", err)
 	}
 	if res.ExitCode < 0 {
-		return exitGeneric, res
+		if plan.confine != nil {
+			logf("read jail unavailable: the jail could not be set up; the read did not run")
+			return exitNoPermVal, res, true
+		}
+		return exitGeneric, res, false
 	}
-	return res.ExitCode, res
+	return res.ExitCode, res, false
 }
 
 // auditRulesOnce + cachedAuditRules MEMOIZE the production ruleset compile so
@@ -389,7 +423,7 @@ func newAuditLogger() *gate.AuditLogger {
 // code. It is the single exec+audit chokepoint for reads and signed
 // writes. The audit write is fail-open inside Record — a logging failure
 // never affects the returned exit code.
-func execAndAudit(audit *gate.AuditLogger, cmd, classification, approval string, reveal bool) int {
+func execAndAudit(audit *gate.AuditLogger, cmd, classification, approval string, reveal bool, plan execPlan) int {
 	// Only buffer output when the audit level actually wants raw output
 	// (all+full). At every other level captureLimit stays 0 and the
 	// executor streams without buffering — zero added cost on the hot path.
@@ -405,7 +439,12 @@ func execAndAudit(audit *gate.AuditLogger, cmd, classification, approval string,
 	if audit != nil && audit.Level() >= gate.AuditAllFull && !reveal {
 		captureLimit = auditFullCaptureLimit
 	}
-	rc, res := execChild(cmd, reveal, captureLimit)
+	rc, res, jailDenied := execChild(cmd, reveal, captureLimit, plan)
+	if jailDenied {
+		// Nothing ran: record a denial with no output metadata and no rung.
+		auditNoExec(audit, cmd, classification, "denied", rc)
+		return rc
+	}
 	audit.Record(gate.AuditRecord{
 		TS: time.Now().UTC().Unix(),
 		// Redact a secret embedded in the command STRING before persisting it
@@ -431,8 +470,37 @@ func execAndAudit(audit *gate.AuditLogger, cmd, classification, approval string,
 		// so all+meta provably cannot leak raw output either.
 		Stdout: res.Stdout,
 		Stderr: res.Stderr,
+		Rung:   plan.rung,
 	})
 	return rc
+}
+
+// execPlan says how execChild runs a command. The zero value is today's plain
+// /bin/sh -c (the signed-write path). A read sets exactly one of argv (Lane 2,
+// shell-free) or confine (the jail; nil on a rung-3 host), plus its audit rung.
+type execPlan struct {
+	argv    []string
+	confine *confine.Spec
+	rung    string
+}
+
+// execRead runs a command the classifier called a read, on the Tier-1 and
+// signed read paths alike. An exact Lane-2 daemon read runs shell-free and
+// unjailed; everything else runs in the read jail the host supports. If the
+// jail rung cannot be trusted (probe error, live rung below the pinned floor,
+// damaged floor) the read is denied — it never falls back to unconfined.
+// Reveal only switches off output redaction; a revealed read is still jailed.
+func execRead(audit *gate.AuditLogger, cmd, approval string, reveal bool) int {
+	if argv, ok := lane2Argv(cmd); ok {
+		return execAndAudit(audit, cmd, "read", approval, reveal, execPlan{argv: argv, rung: "lane2"})
+	}
+	spec, deny := resolveReadConfine()
+	if deny != "" {
+		logf("read jail unavailable: %s", deny)
+		auditNoExec(audit, cmd, "read", "denied", exitNoPermVal)
+		return exitNoPermVal
+	}
+	return execAndAudit(audit, cmd, "read", approval, reveal, execPlan{confine: spec, rung: rungLabel(spec)})
 }
 
 // auditNoExec records a Tier-6a line for a command that ran NO /bin/sh

@@ -135,11 +135,14 @@ func runUsernsProbe() (cloneErr error, exit int) {
 }
 
 // isDefinitiveAbsence reports whether a clone failure means unprivileged user
-// namespaces are unavailable: disabled (EPERM), unsupported (EINVAL) or over the
-// namespace limit (ENOSPC), as opposed to a transient/unexpected error.
+// namespaces are unavailable: disabled (EPERM) or unsupported (EINVAL), as
+// opposed to a transient/unexpected error. ENOSPC is NOT absence: a zero limit
+// is caught by maxUserns before any clone, so ENOSPC here means the per-user
+// namespace count is used up right now — a passing condition that must deny,
+// never downgrade the jail.
 func isDefinitiveAbsence(err error) bool {
 	e := errnoOf(err)
-	return e == unix.EPERM || e == unix.EINVAL || e == unix.ENOSPC
+	return e == unix.EPERM || e == unix.EINVAL
 }
 
 func readMaxUserns() int {

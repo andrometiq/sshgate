@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/base64"
@@ -289,13 +290,32 @@ func (r *Runner) runRead(ctx context.Context, e registry.Entry, cmd string, cap 
 		return RunOutput{Stdout: outStr, Stderr: errStr, ExitCode: exit, Kind: "read"},
 			fmt.Errorf("ssh exec: %w", err)
 	}
+	var denial *Denial
+	if readJailDenied(exit, stderr) {
+		denial = newDenial(VerdictReadJailUnavailable)
+	}
 	return RunOutput{
 		Stdout:   outStr,
 		Stderr:   errStr,
 		ExitCode: exit,
 		Kind:     "read",
 		Approved: false,
+		Denial:   denial,
 	}, nil
+}
+
+// gateReadJailMarker is the line prefix the gate writes to stderr when it
+// refuses a read because the host's kernel read jail could not be confirmed or
+// set up (src/gate/cmd/sshgate-gate). It shares exit 77 with a missing
+// signature, so the stderr line is what tells the two apart.
+const gateReadJailMarker = "gate: read jail unavailable"
+
+// readJailDenied reports whether a gate exit is the read-jail refusal rather
+// than a signature deny. A command that runs prints the gate's line only if it
+// forges it, and then gets read-jail advice instead of re-tier advice: both
+// stop and escalate to a human, so nothing is unlocked either way.
+func readJailDenied(exit int, stderr []byte) bool {
+	return exit == 77 && bytes.Contains(stderr, []byte(gateReadJailMarker))
 }
 
 // checkKeyReady returns an actionable error when Runner.KeyPath is set
@@ -377,7 +397,12 @@ func (r *Runner) runWrite(ctx context.Context, alias string, e registry.Entry, c
 	}
 	// A gate deny comes back as err=nil with a raw non-zero exit. Annotate
 	// the well-known gate codes so the model gets remediation rather than
-	// a bare "exit 77/65".
+	// a bare "exit 77/65". A signed read (a reveal) can also be refused with
+	// 77 because the host's read jail is unavailable — not a signature issue.
+	if readJailDenied(exit, stderr) {
+		return RunOutput{Stdout: outStr, Stderr: errStr, ExitCode: exit, Kind: "write", Approved: true, Revealed: reveal, AuthMode: authMode, Reason: classifyReason, Denial: newDenial(VerdictReadJailUnavailable)},
+			errors.New("tools: gate refused the read (exit 77): the host's kernel read jail could not be confirmed or set up, so nothing ran; a human runs `~/.sshgate-gate/gate doctor` on the host")
+	}
 	if note := gateDenyNote(exit); note != "" {
 		return RunOutput{Stdout: outStr, Stderr: errStr, ExitCode: exit, Kind: "write", Approved: true, Revealed: reveal, AuthMode: authMode, Reason: classifyReason, Denial: denialForGateExit(exit)},
 			fmt.Errorf("tools: %s", note)

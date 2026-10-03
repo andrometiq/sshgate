@@ -20,8 +20,8 @@ const tmpfsSizeBytes = 64 << 20 // 64 MiB per mount
 
 // setupMounts builds the rung-1 filesystem view in the worker's mount namespace:
 // a recursively read-only /, small writable tmpfs for the scratch dirs, a fresh
-// pid-namespace-local /proc, and a minimal /dev. Must run on the locked thread
-// while the mount-phase caps are still held.
+// read-only pid-namespace-local /proc, and a minimal /dev. Must run on the
+// locked thread while the mount-phase caps are still held.
 //
 // A read-only mount does NOT stop writes to special files: opening a device,
 // FIFO or socket for write skips the mount's ro check. So the host /dev is
@@ -44,8 +44,12 @@ func setupMounts() error {
 			return err
 		}
 	}
-	// 4. Fresh /proc for the new pid namespace (hides host pids, incl. the gate).
-	if err := unix.Mount("proc", "/proc", "proc", unix.MS_NOSUID|unix.MS_NODEV|unix.MS_NOEXEC, ""); err != nil {
+	// 4. Fresh /proc for the new pid namespace (hides host pids, incl. the gate),
+	// mounted read-only: the kernel control files (/proc/sys, /proc/sysrq-trigger
+	// and the rest) are guarded by DAC alone, so a root SSH user on a host without
+	// Landlock could otherwise write them. Reads (ps, top, free, /proc/meminfo)
+	// need no write, and /proc/self/fd/N magic links reopen the target's own mount.
+	if err := unix.Mount("proc", "/proc", "proc", unix.MS_RDONLY|unix.MS_NOSUID|unix.MS_NODEV|unix.MS_NOEXEC, ""); err != nil {
 		return fmt.Errorf("mount /proc: %w", err)
 	}
 	// 5. Minimal /dev (needs the fresh /proc for its fd symlinks and binds).

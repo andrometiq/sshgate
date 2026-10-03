@@ -3,7 +3,12 @@
 package confine
 
 import (
+	"errors"
 	"fmt"
+	"os"
+	"os/exec"
+	"strings"
+	"syscall"
 	"testing"
 
 	"golang.org/x/sys/unix"
@@ -60,7 +65,8 @@ func TestDecideInjected(t *testing.T) {
 		{"max_user_namespaces=0, no landlock", probeFacts{landlockABI: -1, maxUserns: 0}, Rung3Unconfined, false, false},
 		{"clone EPERM (userns disabled)", probeFacts{landlockABI: 10, maxUserns: 100, cloneErr: unix.EPERM, probeExit: -1}, Rung2Landlock, false, false},
 		{"clone EINVAL (no userns support)", probeFacts{landlockABI: 3, maxUserns: -1, cloneErr: unix.EINVAL, probeExit: -1}, Rung2Landlock, false, false},
-		{"clone ENOSPC (namespace limit)", probeFacts{landlockABI: 10, maxUserns: 5, cloneErr: unix.ENOSPC, probeExit: -1}, Rung2Landlock, false, false},
+		{"clone ENOSPC (namespace count used up) -> deny", probeFacts{landlockABI: 10, maxUserns: 5, cloneErr: unix.ENOSPC, probeExit: -1}, Rung2Landlock, false, true},
+		{"clone ENOSPC, no landlock -> deny, never unconfined", probeFacts{landlockABI: -1, maxUserns: 5, cloneErr: unix.ENOSPC, probeExit: -1}, Rung3Unconfined, false, true},
 		{"clone ENOMEM (transient) -> deny", probeFacts{landlockABI: 10, maxUserns: 100, cloneErr: enomem, probeExit: -1}, Rung2Landlock, false, true},
 		{"clamp denies the mount -> landlock", probeFacts{landlockABI: 6, maxUserns: 100, clamp: true, probeExit: probeExitMountDenied}, Rung2Landlock, false, false},
 		{"mount denied, no clamp to explain it -> deny", probeFacts{landlockABI: 10, maxUserns: 100, probeExit: probeExitMountDenied}, Rung2Landlock, false, true},
@@ -86,4 +92,56 @@ func TestRunProbeRefusesOutsideClone(t *testing.T) {
 	if got := RunProbe(nil); got != probeExitNotInClone {
 		t.Fatalf("RunProbe outside the clone = %d, want %d", got, probeExitNotInClone)
 	}
+}
+
+// TestDetectUsernsCountUsedUpDenies reproduces a used-up per-user namespace
+// count on the real kernel: inside a throwaway user namespace it lowers
+// max_user_namespaces to 1 and holds that one slot with a sibling namespace, so
+// Detect's own clone fails with ENOSPC. That is a passing condition on a rung-1
+// host, so Detect must report a ProbeErr (the gate denies) rather than a
+// definitive absence that would downgrade the read jail or drop it entirely.
+func TestDetectUsernsCountUsedUpDenies(t *testing.T) {
+	if !Detect().Userns {
+		t.Skip("SKIP rung: host has no unprivileged userns; the namespace-count test needs one")
+	}
+	c := exec.Command("/proc/self/exe", sentinelUsernsFullTest)
+	c.SysProcAttr = &syscall.SysProcAttr{
+		Cloneflags:  syscall.CLONE_NEWUSER,
+		UidMappings: []syscall.SysProcIDMap{{ContainerID: 0, HostID: os.Getuid(), Size: 1}},
+		GidMappings: []syscall.SysProcIDMap{{ContainerID: 0, HostID: os.Getgid(), Size: 1}},
+		Pdeathsig:   syscall.SIGKILL,
+	}
+	out, err := c.CombinedOutput()
+	if err != nil {
+		t.Fatalf("namespace-count child failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "probe_err_enospc=true") {
+		t.Fatalf("a used-up userns count did not surface as a ProbeErr wrapping ENOSPC:\n%s", out)
+	}
+}
+
+// usernsFullChild is the __jailtest_usernsfull re-exec: root of its own user
+// namespace, so the max_user_namespaces it lowers is that namespace's limit only.
+func usernsFullChild() int {
+	if err := os.WriteFile("/proc/sys/user/max_user_namespaces", []byte("1\n"), 0); err != nil {
+		fmt.Fprintf(os.Stderr, "lower max_user_namespaces: %v\n", err)
+		return 1
+	}
+	hold := exec.Command("/proc/self/exe", sentinelHoldTest)
+	hold.SysProcAttr = &syscall.SysProcAttr{Cloneflags: syscall.CLONE_NEWUSER, Pdeathsig: syscall.SIGKILL}
+	in, err := hold.StdinPipe()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "holder stdin: %v\n", err)
+		return 1
+	}
+	if err := hold.Start(); err != nil {
+		fmt.Fprintf(os.Stderr, "start holder: %v\n", err)
+		return 1
+	}
+	rep := Detect()
+	_ = in.Close()
+	_ = hold.Wait()
+	fmt.Printf("rung=%s userns=%v probe_err=%v notes=%q\n", rep.Rung, rep.Userns, rep.ProbeErr, rep.Notes)
+	fmt.Printf("probe_err_enospc=%v\n", rep.ProbeErr != nil && errors.Is(rep.ProbeErr, unix.ENOSPC))
+	return 0
 }

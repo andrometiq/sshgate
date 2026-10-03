@@ -60,7 +60,7 @@ func writeRights(abi int) uint64 {
 // landlockFileRights is the subset of access rights the kernel accepts on a
 // non-directory inode. Granting directory-only rights (READ_DIR, REMOVE_*,
 // MAKE_*, REFER) on a regular file or device makes LANDLOCK_ADD_RULE fail EINVAL,
-// so a rule on /dev/null (or a tty) must be masked down to these.
+// so a rule on /dev/null must be masked down to these.
 const landlockFileRights = uint64(unix.LANDLOCK_ACCESS_FS_EXECUTE |
 	unix.LANDLOCK_ACCESS_FS_WRITE_FILE |
 	unix.LANDLOCK_ACCESS_FS_READ_FILE |
@@ -105,8 +105,8 @@ func applyLandlock(rung Rung, abi int, writable []string) error {
 	if err := addLandlockRule(rfd, "/", readRights(), false); err != nil {
 		return err
 	}
-	// Writes only beneath the writable set. A missing OPTIONAL path (e.g. a tty
-	// on the no-pty agent path) is skipped; any other open error aborts.
+	// Writes only beneath the writable set. A missing path (e.g. a host without
+	// /var/tmp) is skipped; any other open error aborts.
 	wr := writeRights(abi)
 	for _, p := range writable {
 		if err := addLandlockRule(rfd, p, wr, true); err != nil {

@@ -1,10 +1,10 @@
-// Package confine builds the kernel jail that is SSHGate's Tier-1 wall for
-// unsigned reads (#22). An unsigned command is run inside a user+mount+pid
-// namespace with a read-only, locked view of /, all capabilities dropped, a
-// Landlock ruleset and a seccomp filter — so a command the classifier merely
-// *thinks* is a read cannot change any file, reach a local daemon over a unix
-// socket, or signal other processes. The jail, not the classifier, is what
-// makes "this host is read-only" true.
+// Package confine builds the kernel jail that is SSHGate's wall for commands
+// the classifier calls reads (#22). Such a command is run inside a
+// user+mount+pid namespace with a read-only, locked view of /, all
+// capabilities dropped, a Landlock ruleset and a seccomp filter — so a command
+// the classifier merely *thinks* is a read cannot change any file, reach a
+// local daemon over a unix socket, or signal other processes. The jail, not
+// the classifier, is what makes "this host is read-only" true.
 //
 // # The rung ladder
 //
@@ -17,6 +17,17 @@
 //   - Rung3Unconfined: neither available; no kernel wall (labelled UNCONFINED).
 //     confine never runs a command here — the gate passes a nil
 //     *Spec and keeps today's /bin/sh path.
+//
+// # The writable set
+//
+// Rung 1 may write only to private tmpfs mounts over /tmp, /var/tmp and
+// /dev/shm, plus /dev/null; its fresh /proc is mounted read-only. Rung 2 may
+// write only to the per-command ScratchDir and /dev/null. Two recorded
+// residuals: rung 1 without Landlock can still open an existing host FIFO for
+// write (a read-only mount does not cover special files), and rung 2, having no
+// IPC namespace, can remove or change the same user's System V IPC objects. No tty is granted on
+// either rung: the forced command runs without a pty, and the command's stdio
+// fds are inherited from before Landlock is applied, so they need no rule.
 //
 // # The re-exec model
 //

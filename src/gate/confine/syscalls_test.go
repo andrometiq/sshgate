@@ -54,6 +54,7 @@ func TestMaxKnownSyscallMatchesXSysTable(t *testing.T) {
 func TestDeniedSyscallsWithinCeiling(t *testing.T) {
 	targeted := append([]uint32{}, flatDeny...)
 	targeted = append(targeted, metadataDeny...)
+	targeted = append(targeted, mqueueDeny...)
 	targeted = append(targeted, procStatePidSyscalls...)
 	targeted = append(targeted,
 		uint32(unix.SYS_CLONE), uint32(unix.SYS_CLONE3), uint32(unix.SYS_UNSHARE),
