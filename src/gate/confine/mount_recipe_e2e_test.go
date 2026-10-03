@@ -238,43 +238,7 @@ func legMqueueCover(t *testing.T, spec Spec) {
 }
 
 func legWriteSweep(t *testing.T, spec Spec, submount bool) {
-	base := homeDir(t)
-	root, err := unix.Open("/", unix.O_PATH|unix.O_CLOEXEC, 0)
-	mutationSetup(t, err)
-	rootID, err := mountID(root)
-	unix.Close(root)
-	mutationSetup(t, err)
-	if submount {
-		entries, err := readMountInfo()
-		mutationSetup(t, err)
-		base = ""
-		for _, entry := range entries {
-			if entry.id == rootID || pathWithin(entry.point, "/dev") || entry.point == "/proc" || entry.point == "/sys" {
-				continue
-			}
-			if entry.fstype != "tmpfs" && entry.fstype != "ext4" && entry.fstype != "xfs" {
-				continue
-			}
-			if unix.Access(entry.point, unix.W_OK|unix.X_OK) == nil {
-				base = entry.point
-				break
-			}
-		}
-		if base == "" {
-			t.Fatal("SETUP: no user-writable submount; provision /mnt/sg-sub")
-		}
-	}
-	directory, err := os.MkdirTemp(base, ".sshgate-sweep-")
-	mutationSetup(t, err)
-	t.Cleanup(func() { os.RemoveAll(directory) })
-	fd, err := unix.Open(directory, unix.O_PATH|unix.O_CLOEXEC, 0)
-	mutationSetup(t, err)
-	id, err := mountID(fd)
-	unix.Close(fd)
-	mutationSetup(t, err)
-	if (id != rootID) != submount {
-		t.Fatal("SETUP: fixture on wrong mount")
-	}
+	directory := writeSweepFixture(t, submount)
 	seed := func() {
 		mutationSetup(t, os.RemoveAll(directory))
 		mutationSetup(t, os.Mkdir(directory, 0700))
@@ -315,4 +279,46 @@ func legWriteSweep(t *testing.T, spec Spec, submount bool) {
 			t.Errorf("%s changed", name)
 		}
 	}
+}
+
+func writeSweepFixture(t *testing.T, submount bool) string {
+	t.Helper()
+	base := homeDir(t)
+	root, err := unix.Open("/", unix.O_PATH|unix.O_CLOEXEC, 0)
+	mutationSetup(t, err)
+	rootID, err := mountID(root)
+	unix.Close(root)
+	mutationSetup(t, err)
+	if submount {
+		entries, err := readMountInfo()
+		mutationSetup(t, err)
+		base = ""
+		for _, entry := range entries {
+			if entry.id == rootID || pathWithin(entry.point, "/dev") || entry.point == "/proc" || entry.point == "/sys" {
+				continue
+			}
+			if entry.fstype != "tmpfs" && entry.fstype != "ext4" && entry.fstype != "xfs" {
+				continue
+			}
+			if unix.Access(entry.point, unix.W_OK|unix.X_OK) == nil {
+				base = entry.point
+				break
+			}
+		}
+		if base == "" {
+			t.Fatal("SETUP: no user-writable submount; provision /mnt/sg-sub")
+		}
+	}
+	directory, err := os.MkdirTemp(base, ".sshgate-sweep-")
+	mutationSetup(t, err)
+	t.Cleanup(func() { os.RemoveAll(directory) })
+	fd, err := unix.Open(directory, unix.O_PATH|unix.O_CLOEXEC, 0)
+	mutationSetup(t, err)
+	id, err := mountID(fd)
+	unix.Close(fd)
+	mutationSetup(t, err)
+	if (id != rootID) != submount {
+		t.Fatal("SETUP: fixture on wrong mount")
+	}
+	return directory
 }

@@ -67,3 +67,40 @@ func TestDeniedSyscallsWithinCeiling(t *testing.T) {
 		}
 	}
 }
+
+// Historical family literals remain independent of the production total table.
+var flatDeny = []uint32{
+	// Mount API (the whole family): a jailed command must never remount rw or
+	// clear the RDONLY attr the setup process applied.
+	unix.SYS_MOUNT, unix.SYS_UMOUNT2, unix.SYS_PIVOT_ROOT,
+	unix.SYS_OPEN_TREE, unix.SYS_MOVE_MOUNT, unix.SYS_FSOPEN,
+	unix.SYS_FSMOUNT, unix.SYS_FSPICK, unix.SYS_MOUNT_SETATTR,
+	unix.SYS_FSCONFIG, unix.SYS_OPEN_TREE_ATTR,
+	// Process reach: no ptrace/peek-poke/fd-steal of other processes.
+	unix.SYS_PTRACE, unix.SYS_PROCESS_VM_WRITEV, unix.SYS_PROCESS_VM_READV,
+	unix.SYS_PIDFD_GETFD,
+	// Kernel attack surface.
+	unix.SYS_BPF, unix.SYS_PERF_EVENT_OPEN, unix.SYS_USERFAULTFD,
+	unix.SYS_KEYCTL, unix.SYS_ADD_KEY, unix.SYS_REQUEST_KEY,
+	unix.SYS_IO_URING_SETUP, unix.SYS_IO_URING_ENTER, unix.SYS_IO_URING_REGISTER,
+	unix.SYS_KEXEC_LOAD, unix.SYS_KEXEC_FILE_LOAD,
+	unix.SYS_INIT_MODULE, unix.SYS_FINIT_MODULE, unix.SYS_DELETE_MODULE,
+	unix.SYS_REBOOT, unix.SYS_SWAPON, unix.SYS_SWAPOFF,
+	unix.SYS_SETTIMEOFDAY, unix.SYS_CLOCK_SETTIME, unix.SYS_CLOCK_ADJTIME,
+	unix.SYS_ADJTIMEX,
+	// personality: blocks ADDR_NO_RANDOMIZE, a common exploit-prep step.
+	unix.SYS_PERSONALITY,
+}
+
+// metadataDeny backs up read-only mounts for operations Landlock never governs.
+var metadataDeny = []uint32{
+	unix.SYS_CHMOD, unix.SYS_FCHMOD, unix.SYS_FCHMODAT, unix.SYS_FCHMODAT2,
+	unix.SYS_CHOWN, unix.SYS_LCHOWN, unix.SYS_FCHOWN, unix.SYS_FCHOWNAT,
+	unix.SYS_SETXATTR, unix.SYS_LSETXATTR, unix.SYS_FSETXATTR, unix.SYS_SETXATTRAT,
+	unix.SYS_REMOVEXATTR, unix.SYS_LREMOVEXATTR, unix.SYS_FREMOVEXATTR, unix.SYS_REMOVEXATTRAT,
+	unix.SYS_UTIME, unix.SYS_UTIMES, unix.SYS_FUTIMESAT, unix.SYS_UTIMENSAT,
+	unix.SYS_FILE_SETATTR,
+}
+
+// mqueueDeny also prevents consuming queues through descriptors opened as files.
+var mqueueDeny = []uint32{unix.SYS_MQ_OPEN, unix.SYS_MQ_UNLINK, unix.SYS_MQ_TIMEDSEND, unix.SYS_MQ_TIMEDRECEIVE, unix.SYS_MQ_NOTIFY, unix.SYS_MQ_GETSETATTR}

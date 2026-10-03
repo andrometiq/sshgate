@@ -250,8 +250,7 @@ func main() {
 			fmt.Fprintln(os.Stderr, "bad pid:", err)
 			os.Exit(2)
 		}
-		// Each op changes ANOTHER process's scheduling state. The jail's
-		// seccomp must refuse all three (EPERM); unjailed they succeed.
+		// PID-addressed calls are contained by the jail PID namespace.
 		lim := unix.Rlimit{Cur: 7, Max: 7}
 		report("prlimit", unix.Prlimit(pid, unix.RLIMIT_NOFILE, &lim, nil))
 		// Raise niceness (prio 19): increasing niceness is always permitted, so the
@@ -259,7 +258,16 @@ func main() {
 		report("setpriority", unix.Setpriority(unix.PRIO_PROCESS, pid, 19))
 		var set unix.CPUSet
 		set.Zero()
-		set.Set(0)
+		var available unix.CPUSet
+		if err := unix.SchedGetaffinity(0, &available); err != nil {
+			panic(err)
+		}
+		for cpu := 0; cpu < 1024; cpu++ {
+			if available.IsSet(cpu) {
+				set.Set(cpu)
+				break
+			}
+		}
 		report("setaffinity", unix.SchedSetaffinity(pid, &set))
 	case "mq-create", "mq-unlink":
 		// Raw syscalls take the queue name without libc's leading slash.
@@ -279,6 +287,9 @@ func main() {
 			_ = unix.Close(int(fd))
 		}
 	default:
+		if filterProbe(os.Args[1], args) {
+			break
+		}
 		fmt.Fprintln(os.Stderr, "unknown op:", os.Args[1])
 		os.Exit(2)
 	}

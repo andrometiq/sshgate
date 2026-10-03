@@ -38,6 +38,9 @@ func handledFS(abi int) uint64 {
 	if abi >= 5 {
 		h |= unix.LANDLOCK_ACCESS_FS_IOCTL_DEV
 	}
+	if abi >= 9 && !jailmut.On("P-LL-RESOLVE-UNIX") {
+		h |= landlockAccessFSResolveUnix
+	}
 	return h
 }
 
@@ -55,7 +58,7 @@ func readRights() uint64 {
 // writeRights is what we allow beneath each writable path: everything the ABI
 // handles EXCEPT REFER (no cross-directory link/rename out of the writable set).
 func writeRights(abi int) uint64 {
-	return handledFS(abi) &^ uint64(unix.LANDLOCK_ACCESS_FS_REFER)
+	return handledFS(abi) &^ uint64(unix.LANDLOCK_ACCESS_FS_REFER|landlockAccessFSResolveUnix)
 }
 
 // landlockFileRights is the subset of access rights the kernel accepts on a
@@ -66,7 +69,7 @@ const landlockFileRights = uint64(unix.LANDLOCK_ACCESS_FS_EXECUTE |
 	unix.LANDLOCK_ACCESS_FS_WRITE_FILE |
 	unix.LANDLOCK_ACCESS_FS_READ_FILE |
 	unix.LANDLOCK_ACCESS_FS_TRUNCATE |
-	unix.LANDLOCK_ACCESS_FS_IOCTL_DEV)
+	unix.LANDLOCK_ACCESS_FS_IOCTL_DEV | landlockAccessFSResolveUnix)
 
 // probeLandlockABI returns the host's Landlock ABI, or a value <= 0 when
 // Landlock is unavailable (ENOSYS / not built in).
@@ -88,10 +91,7 @@ func applyLandlock(abi int, writable []string) error {
 		return unix.ENOSYS
 	}
 
-	attr := unix.LandlockRulesetAttr{Access_fs: handledFS(abi)}
-	if abi >= 6 {
-		attr.Scoped = uint64(unix.LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET | unix.LANDLOCK_SCOPE_SIGNAL)
-	}
+	attr := landlockRuleset(abi)
 	rfd, _, errno := unix.Syscall(uintptr(unix.SYS_LANDLOCK_CREATE_RULESET),
 		uintptr(unsafe.Pointer(&attr)), unsafe.Sizeof(attr), 0)
 	if errno != 0 {
@@ -145,4 +145,17 @@ func addLandlockRule(rfd uintptr, path string, rights uint64, skipMissing bool) 
 		return fmt.Errorf("landlock add rule %s: %w", path, errno)
 	}
 	return nil
+}
+
+func landlockRuleset(abi int) unix.LandlockRulesetAttr {
+	attr := unix.LandlockRulesetAttr{Access_fs: handledFS(abi)}
+	if abi >= 6 {
+		if !jailmut.On("P-LL-SCOPE-SIGNAL") {
+			attr.Scoped |= unix.LANDLOCK_SCOPE_SIGNAL
+		}
+		if !jailmut.On("P-LL-SCOPE-ABSTRACT") {
+			attr.Scoped |= unix.LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET
+		}
+	}
+	return attr
 }

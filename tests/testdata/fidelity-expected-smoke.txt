@@ -1,2 +1,5 @@
 # P1.4: host /proc and /tmp remain visible; private scratch and covers change df.
 df -h → DEV-SHM
+# NETLINK_SOCK_DIAG denial uses procfs; interface suffixes and diagnostic detail are absent.
+# Procfs also lacks v6only: [::] endpoints become *, but IPv6 socket rows remain.
+ss -tuna → SS-PROCFS-V6ONLY

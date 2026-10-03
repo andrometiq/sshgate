@@ -21,7 +21,7 @@ import (
 
 type prot = harness.Protection
 
-var registry = p12Registry()
+var registry = append(p12Registry(), p15Registry()...)
 
 func p12Leg(name, marker string) harness.Leg {
 	leg := harness.Leg{Name: name, Package: "./src/gate/confine", Names: map[string]string{"native": "TestJailMatrixP12/native/" + name, "abi1": "TestJailMatrixP12/abi1/" + name}}
@@ -67,7 +67,7 @@ func p12Registry() []prot {
 		add("P-FAULT-"+stage, "RunWorker "+stage+" error check", legs...)
 	}
 	add("P-SC-TSYNC", "installSeccomp positive return check", p12Leg("L-FAULT-tsync", "MUTATION-EFFECT reached-exec"))
-	add("P-SC-META", "metadata syscalls and generic fileattr ioctls", p12Leg("L-SCRATCH-META", "MUTATION-EFFECT metadata"), p12Leg("L-FILEATTR-ERRNO", "MUTATION-EFFECT fileattr-errno"))
+	add("P-SC-META", "metadata syscalls and generic fileattr ioctls", p12Leg("L-SCRATCH-META", "MUTATION-EFFECT metadata"), p12Leg("L-FILEATTR-ERRNO", "MUTATION-EFFECT fileattr-errno"), p15Leg("L-META-ERRNO", "MUTATION-EFFECT errno"))
 	protections[len(protections)-1].Class = "multi"
 	mqErrno := p12Leg("L-MQUEUE-ERRNO", "MUTATION-EFFECT mq-errno")
 	mqCover := p12Leg("L-MQUEUE", "")
@@ -83,7 +83,7 @@ func p12Registry() []prot {
 }
 
 // Filled alongside the literal non-allow seccomp lists when those rows are hooked.
-var mutationSeccompRows = []string{}
+var mutationSeccompRows = strings.Fields(pinnedDeny + " " + pinnedEnosys + " " + pinnedFilters)
 
 func TestMutationRegistryJSON(t *testing.T) {
 	if err := harness.Validate(registry); err != nil {

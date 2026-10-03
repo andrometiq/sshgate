@@ -6,7 +6,12 @@
 // The mount view preserves host /proc and read-only /tmp and /var/tmp. Only
 // private /dev/shm and /dev/null are writable. Unsafe filesystems are covered. Metadata syscalls and generic fileattr setters are denied even
 // on scratch. Root SSH retains DAC_READ_SEARCH for file reads. Network access is
-// controlled by Spec.Net. The kernel-read-only label remains disabled.
+// controlled by Spec.Net: only route netlink and optionally TCP/UDP/ping sockets
+// are admitted; plain-jail Unix sockets and listen are denied. The total amd64
+// syscall table returns ENOSYS for unlisted numbers. Argument allowlists govern
+// clone/unshare, socketpair, fcntl, flock and resource limits; ioctl has named
+// blocks. Landlock additionally scopes signals and abstract Unix sockets at ABI 6
+// and handles pathname Unix resolution at ABI 9. The label remains disabled.
 //
 // The parent re-execs /proc/self/exe as __jail with namespace clone flags. Its
 // pid-1 shim starts __jailexec, which verifies namespaces, builds the mount view,

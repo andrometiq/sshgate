@@ -124,11 +124,11 @@ func TestBuildFilterSocketDomain(t *testing.T) {
 		{"AF_INET denied when inet off", unix.AF_INET, 0, actDeny},
 		{"AF_INET6 denied when inet off", unix.AF_INET6, 0, actDeny},
 		{"netlink route allowed", unix.AF_NETLINK, unix.NETLINK_ROUTE, actAllow},
-		{"netlink sock_diag allowed", unix.AF_NETLINK, unix.NETLINK_SOCK_DIAG, actAllow},
+		{"netlink sock_diag denied", unix.AF_NETLINK, unix.NETLINK_SOCK_DIAG, actDeny},
 		{"netlink other denied", unix.AF_NETLINK, 9 /*NETLINK_AUDIT*/, actDeny},
 	}
 	for _, c := range cases {
-		got := evalFilter(t, f, dataFor(socket, x8664, c.domain, 0, c.proto))
+		got := evalFilter(t, f, dataFor(socket, x8664, c.domain, unix.SOCK_DGRAM, c.proto))
 		if got != c.want {
 			t.Errorf("%s: got %#x want %#x", c.name, got, c.want)
 		}
@@ -136,7 +136,7 @@ func TestBuildFilterSocketDomain(t *testing.T) {
 
 	// With inet allowed, AF_INET/AF_INET6 pass; AF_UNIX stays denied.
 	fi := buildFilter(filterParams{allowInet: true})
-	if got := evalFilter(t, fi, dataFor(socket, x8664, unix.AF_INET)); got != actAllow {
+	if got := evalFilter(t, fi, dataFor(socket, x8664, unix.AF_INET, unix.SOCK_STREAM)); got != actAllow {
 		t.Errorf("AF_INET with inet on: got %#x want allow", got)
 	}
 	if got := evalFilter(t, fi, dataFor(socket, x8664, unix.AF_UNIX)); got != actDeny {
@@ -296,11 +296,11 @@ func TestBuildFilterProcStateUsesPIDNamespace(t *testing.T) {
 }
 
 func TestBuildFilterOpenByHandle(t *testing.T) {
-	f := buildFilter(filterParams{allowInet: true, denyOpenByHandle: false})
-	if got := evalFilter(t, f, dataFor(uint32(unix.SYS_OPEN_BY_HANDLE_AT), x8664)); got != actAllow {
-		t.Errorf("open_by_handle_at default: got %#x want allow", got)
+	f := buildFilter(filterParams{allowInet: true})
+	if got := evalFilter(t, f, dataFor(uint32(unix.SYS_OPEN_BY_HANDLE_AT), x8664)); got != actDeny {
+		t.Errorf("open_by_handle_at default: got %#x want deny", got)
 	}
-	fd := buildFilter(filterParams{allowInet: true, denyOpenByHandle: true})
+	fd := buildFilter(filterParams{allowInet: true})
 	if got := evalFilter(t, fd, dataFor(uint32(unix.SYS_OPEN_BY_HANDLE_AT), x8664)); got != actDeny {
 		t.Errorf("open_by_handle_at for root SSH user: got %#x want deny", got)
 	}
@@ -310,8 +310,8 @@ func TestBuildFilterOpenByHandle(t *testing.T) {
 // the 8-bit field across all parameter combinations (build() panics otherwise).
 func TestFilterJumpOffsetsInRange(t *testing.T) {
 	for _, inet := range []bool{false, true} {
-		for _, handles := range []bool{false, true} {
-			if len(buildFilter(filterParams{allowInet: inet, denyOpenByHandle: handles})) == 0 {
+		for range []bool{false, true} {
+			if len(buildFilter(filterParams{allowInet: inet})) == 0 {
 				t.Fatal("empty filter")
 			}
 		}

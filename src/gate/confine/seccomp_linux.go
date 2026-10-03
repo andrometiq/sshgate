@@ -40,8 +40,7 @@ const (
 // booleans (not a Spec) so buildFilter is purely mechanical and a unit test can
 // assemble and evaluate every combination.
 type filterParams struct {
-	allowInet        bool
-	denyOpenByHandle bool // true only for a root SSH user (pairs with CAP_DAC_READ_SEARCH)
+	allowInet bool
 }
 
 // retErrno builds a SECCOMP_RET_ERRNO action carrying errno in the low 16 bits.
@@ -78,8 +77,17 @@ func (a *bpfAsm) and(k uint32) {
 }
 
 func (a *bpfAsm) cond(op uint16, k uint32, jt, jf string) {
-	a.fixups = append(a.fixups, fixup{idx: len(a.ops), jt: jt, jf: jf})
-	a.ops = append(a.ops, unix.SockFilter{Code: bpfJMP | op | bpfK, K: k})
+	next := fmt.Sprintf("next%d", len(a.ops))
+	if jt == "" {
+		jt = next
+	}
+	if jf == "" {
+		jf = next
+	}
+	a.ops = append(a.ops, unix.SockFilter{Code: bpfJMP | op | bpfK, K: k, Jf: 1})
+	a.ja(jt)
+	a.ja(jf)
+	a.mark(next)
 }
 
 func (a *bpfAsm) jeq(k uint32, jt, jf string)  { a.cond(bpfJEQ, k, jt, jf) }
@@ -129,101 +137,67 @@ func (a *bpfAsm) build() []unix.SockFilter {
 	return a.ops
 }
 
-// buildFilter guards the architecture and unknown syscalls, then applies
-// syscall denies and argument filters. The remaining known calls are allowed.
+// buildFilter dispatches only explicitly reviewed syscall rows.
 func buildFilter(p filterParams) []unix.SockFilter {
 	a := newAsm()
-
-	// 1. Arch gate: anything but x86_64 (i386-compat, x32) is killed.
 	a.ld(offArch)
-	a.jeq(uint32(unix.AUDIT_ARCH_X86_64), "", "kill")
-
-	// 2. x32 guard: the __X32_SYSCALL_BIT distinguishes x32 from amd64.
+	if !jailmut.On("P-SC-ARCH") {
+		a.jeq(uint32(unix.AUDIT_ARCH_X86_64), "", "kill")
+	}
 	a.ld(offNR)
-	a.jset(0x40000000, "kill", "")
-
-	// 3. Unknown-high syscall -> ENOSYS (A still holds nr).
-	a.jgt(uint32(maxKnownSyscall), "enosys", "")
-
-	// 4. clone3 -> ENOSYS so glibc falls back to the arg-filtered legacy clone.
-	a.jeq(uint32(unix.SYS_CLONE3), "enosys", "")
-
-	// Flat denylist (EPERM), plus the conditional metadata/handle entries.
-	for _, s := range flatDeny {
-		a.jeq(s, "deny", "")
+	if !jailmut.On("P-SC-X32") {
+		a.jset(0x40000000, "kill", "")
 	}
-	if !jailmut.On("P-SC-META") {
-		for _, s := range metadataDeny {
-			a.jeq(s, "deny", "")
+	if !jailmut.On("P-SC-CEILING") {
+		a.jgt(uint32(maxKnownSyscall), "enosys", "")
+	}
+
+	var allowed []uint32
+	actions := make([]string, len(syscallTable))
+	for i, row := range syscallTable {
+		action := row.action
+		if action != "allow" && jailmut.On("P-SC-"+row.name) {
+			action = "allow"
+		}
+		if jailmut.On("P-SC-META") && row.why == "metadata" {
+			action = "allow"
+		}
+		if jailmut.On("P-MQ") && row.why == "mqueue" {
+			action = "allow"
+		}
+		actions[i] = action
+		if action == "allow" {
+			allowed = append(allowed, row.nr)
 		}
 	}
-	if !jailmut.On("P-MQ") {
-		for _, s := range mqueueDeny {
-			a.jeq(s, "deny", "")
+	for _, kind := range []string{"deny", "enosys", "filter"} {
+		for i, row := range syscallTable {
+			action := actions[i]
+			if action == kind || kind == "filter" && len(action) > 7 && action[:7] == "filter:" {
+				a.jeq(row.nr, action, "")
+			}
 		}
 	}
-	if p.denyOpenByHandle {
-		a.jeq(uint32(unix.SYS_OPEN_BY_HANDLE_AT), "deny", "")
-	}
-
-	// Argument-filtered dispatch.
-	a.jeq(uint32(unix.SYS_CLONE), "cloneH", "")
-	a.jeq(uint32(unix.SYS_UNSHARE), "unshareH", "")
-	a.jeq(uint32(unix.SYS_SETNS), "setnsH", "")
-	a.jeq(uint32(unix.SYS_IOCTL), "ioctlH", "")
-	a.jeq(uint32(unix.SYS_SOCKET), "socketH", "")
-	a.ja("allow")
-
-	// clone: deny if the legacy flags carry any namespace bit.
-	a.mark("cloneH")
-	a.ld(offArg0)
-	a.and(uint32(nsLegacyCloneBits))
-	a.jeq(0, "allow", "deny")
-
-	// unshare: deny if arg0 carries any namespace bit.
-	a.mark("unshareH")
-	a.ld(offArg0)
-	a.and(uint32(nsCloneBits))
-	a.jeq(0, "allow", "deny")
-
-	// setns: deny if the nstype (arg1) carries any namespace bit.
-	a.mark("setnsH")
-	a.ld(offArg1)
-	a.and(uint32(nsCloneBits))
-	a.jeq(0, "allow", "deny")
-
-	// Block terminal injection and generic VFS fileattr setters.
-	a.mark("ioctlH")
-	a.ld(offArg1)
-	a.jeq(uint32(unix.TIOCSTI), "deny", "")
-	a.jeq(uint32(unix.TIOCLINUX), "deny", "")
-	if !jailmut.On("P-SC-META") {
-		for _, r := range fileattrIoctlDeny {
-			a.jeq(r, "deny", "")
+	for i := 0; i < len(allowed); i++ {
+		first, last := allowed[i], allowed[i]
+		for i+1 < len(allowed) && allowed[i+1] == last+1 {
+			i++
+			last = allowed[i]
 		}
+		next := fmt.Sprintf("range%d", first)
+		if first > 0 {
+			a.jgt(first-1, "", next)
+		}
+		a.jgt(last, next, "")
+		a.ret(uint32(unix.SECCOMP_RET_ALLOW))
+		a.mark(next)
 	}
-	a.ja("allow")
-
-	// socket: AF_UNIX/AF_PACKET denied; AF_NETLINK restricted to ROUTE/SOCK_DIAG
-	// (so ss/ip keep working); AF_INET/AF_INET6 follow the inet policy.
-	a.mark("socketH")
-	a.ld(offArg0)
-	a.jeq(uint32(unix.AF_UNIX), "deny", "")
-	a.jeq(uint32(unix.AF_PACKET), "deny", "")
-	a.jeq(uint32(unix.AF_NETLINK), "netlinkH", "")
-	if !p.allowInet {
-		a.jeq(uint32(unix.AF_INET), "deny", "")
-		a.jeq(uint32(unix.AF_INET6), "deny", "")
+	if jailmut.On("P-SC-TOTAL") {
+		a.ja("allow")
+	} else {
+		a.ja("enosys")
 	}
-	a.ja("allow")
-
-	a.mark("netlinkH")
-	a.ld(offArg2)
-	a.jeq(uint32(unix.NETLINK_ROUTE), "allow", "")
-	a.jeq(uint32(unix.NETLINK_SOCK_DIAG), "allow", "")
-	a.ja("deny")
-
-	// Terminal actions.
+	buildArgumentFilters(a, p)
 	a.mark("allow")
 	a.ret(uint32(unix.SECCOMP_RET_ALLOW))
 	a.mark("deny")
@@ -232,7 +206,6 @@ func buildFilter(p filterParams) []unix.SockFilter {
 	a.ret(retErrno(unix.ENOSYS))
 	a.mark("kill")
 	a.ret(uint32(unix.SECCOMP_RET_KILL_PROCESS))
-
 	return a.build()
 }
 

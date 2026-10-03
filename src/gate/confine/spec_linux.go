@@ -85,6 +85,12 @@ func cloneSysProcAttr() *syscall.SysProcAttr {
 		Setpgid:     true,
 		Pdeathsig:   syscall.SIGKILL,
 	}
+	if jailmut.On("P-CLONE-PID") {
+		attr.Cloneflags &^= syscall.CLONE_NEWPID
+	}
+	if jailmut.On("P-CLONE-IPC") {
+		attr.Cloneflags &^= syscall.CLONE_NEWIPC
+	}
 	if uid == 0 {
 		// A root SSH user needs a full-range identity map: CAP_DAC_READ_SEARCH in
 		// a child userns only applies to inodes whose uid AND gid are mapped in,
@@ -232,8 +238,7 @@ func RunWorker(args []string) int {
 		return fail("landlock", err)
 	}
 	filter := buildFilter(filterParams{
-		allowInet:        spec.Net,
-		denyOpenByHandle: rootSSH,
+		allowInet: spec.Net,
 	})
 	err = installSeccomp(filter, spec)
 	if err != nil {

@@ -271,7 +271,7 @@ func legRootState(t *testing.T, spec Spec) {
 		t.Error("open_by_handle_at did not return EPERM")
 	}
 	// The init-userns capability check also denies handles; pin the filter wall independently.
-	if evalFilter(t, buildFilter(filterParams{denyOpenByHandle: true}), dataFor(unix.SYS_OPEN_BY_HANDLE_AT, x8664)) != actDeny {
+	if evalFilter(t, buildFilter(filterParams{}), dataFor(unix.SYS_OPEN_BY_HANDLE_AT, x8664)) != actDeny {
 		t.Error("root filter permits open_by_handle_at")
 	}
 }

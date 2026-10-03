@@ -3,6 +3,8 @@
 package confine
 
 import (
+	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"os/user"
@@ -62,6 +64,21 @@ func TestFidelitySmoke(t *testing.T) {
 		t.Run(cfg.name, func(t *testing.T) {
 			for _, row := range rows {
 				t.Run(row.name, func(t *testing.T) {
+					var socketAnchors []string
+					if row.name == "ss -tuna" {
+						for _, address := range []struct{ network, local, peer string }{
+							{"tcp4", "127.0.0.1:0", "0.0.0.0:*"},
+							{"tcp6", "[::]:0", "[::]:*"},
+						} {
+							listener, err := net.Listen(address.network, address.local)
+							mutationSetup(t, err)
+							defer listener.Close()
+							socketAnchors = append(socketAnchors, "tcp LISTEN "+listener.Addr().String()+" "+address.peer)
+						}
+						if expected[row.name] != "SS-PROCFS-V6ONLY" {
+							t.Fatal("missing SS-PROCFS-V6ONLY category")
+						}
+					}
 					command := exec.Command("/bin/sh", "-c", row.command)
 					command.Dir = row.cwd
 					baseline, controlErr := command.CombinedOutput()
@@ -74,6 +91,30 @@ func TestFidelitySmoke(t *testing.T) {
 					}
 					if result.exit != 0 {
 						t.Fatalf("smoke command failed: %+v", result)
+					}
+					if row.name == "ss -tuna" {
+						command = exec.Command("/bin/sh", "-c", row.command)
+						command.Dir = row.cwd
+						final, err := command.CombinedOutput()
+						if err != nil {
+							t.Fatalf("SETUP: final ss control: %v: %s", err, final)
+						}
+						for _, output := range []string{string(baseline), string(final)} {
+							sockets, err := smokeSocketRows(output, false)
+							if err != nil {
+								t.Fatalf("SETUP: ss control: %v", err)
+							}
+							for _, anchor := range socketAnchors {
+								if !sockets[anchor] {
+									t.Fatalf("SETUP: ss control missing held listener %s: %s", anchor, output)
+								}
+							}
+						}
+						if err := compareSmokeSockets(string(baseline), result.stdout, string(final), result.stderr); err != nil {
+							t.Errorf("unlisted fidelity difference: %v", err)
+						}
+						t.Log("FIDELITY ss -tuna → SS-PROCFS-V6ONLY")
+						return
 					}
 					before, after := projectIdentity(t, row.name, string(baseline)), result.stdout+result.stderr
 					if row.name == "ps aux" {
@@ -135,17 +176,6 @@ func normalizeSmoke(name, output string) string {
 	}
 	if name == "ip a" {
 		output = regexp.MustCompile(`valid_lft \S+ preferred_lft \S+`).ReplaceAllString(output, "lifetimes")
-	}
-	if name == "ss -tuna" {
-		var lines []string
-		for _, line := range strings.Split(output, "\n") {
-			fields := strings.Fields(line)
-			if len(fields) >= 6 {
-				lines = append(lines, fields[0]+" "+fields[1]+" "+strings.Join(fields[4:], " "))
-			}
-		}
-		sort.Strings(lines)
-		return strings.Join(lines, "\n")
 	}
 	if name == "ls -l /" {
 		var lines []string
@@ -283,5 +313,138 @@ func TestSmokeProcessProjection(t *testing.T) {
 		if stablePS(control, anchors) == stablePS(changed, anchors) {
 			t.Fatal("host process identity loss was hidden")
 		}
+	}
+}
+
+func smokeSocketRows(output string, projectProcfs bool) (map[string]bool, error) {
+	lines := strings.Split(strings.TrimSpace(output), "\n")
+	if strings.Join(strings.Fields(lines[0]), " ") != "Netid State Recv-Q Send-Q Local Address:Port Peer Address:Port" {
+		return nil, fmt.Errorf("ss header: %q", lines[0])
+	}
+	rows := map[string]bool{}
+	iface := regexp.MustCompile(`%[^:\]\s]+`)
+	for _, line := range lines[1:] {
+		fields := strings.Fields(line)
+		if len(fields) != 6 || (fields[0] != "tcp" && fields[0] != "udp") {
+			return nil, fmt.Errorf("ss row: %q", line)
+		}
+		for _, queue := range fields[2:4] {
+			if _, err := strconv.ParseUint(queue, 10, 64); err != nil {
+				return nil, fmt.Errorf("ss queue: %q", line)
+			}
+		}
+		for i := 4; i < 6; i++ {
+			fields[i] = iface.ReplaceAllString(fields[i], "")
+			if projectProcfs {
+				fields[i] = strings.ReplaceAll(fields[i], "[::]:", "*:")
+			}
+		}
+		rows[fields[0]+" "+fields[1]+" "+fields[4]+" "+fields[5]] = true
+	}
+	return rows, nil
+}
+
+func compareSmokeSockets(before, jailed, after, stderr string) error {
+	for _, line := range strings.Split(strings.TrimSpace(stderr), "\n") {
+		if line != "" && line != "Cannot open netlink socket: Operation not permitted" {
+			return fmt.Errorf("ss stderr: %q", line)
+		}
+	}
+	// Procfs lacks v6only; ss prints unspecified IPv6 endpoints as "*".
+	// Project controls only: the jailed rows must retain every socket identity.
+	initial, err := smokeSocketRows(before, true)
+	if err != nil {
+		return err
+	}
+	final, err := smokeSocketRows(after, true)
+	if err != nil {
+		return err
+	}
+	confined, err := smokeSocketRows(jailed, false)
+	if err != nil {
+		return err
+	}
+	stable := 0
+	for row := range initial {
+		if final[row] {
+			stable++
+			if !confined[row] {
+				return fmt.Errorf("ss lost stable socket: %s", row)
+			}
+		}
+	}
+	if stable == 0 {
+		return fmt.Errorf("ss controls contain no stable sockets")
+	}
+	for row := range confined {
+		if !initial[row] && !final[row] {
+			return fmt.Errorf("ss unexpected socket: %s", row)
+		}
+	}
+	return nil
+}
+
+func TestSmokeSocketProjection(t *testing.T) {
+	header := "Netid State Recv-Q Send-Q Local Address:Port Peer Address:Port\n"
+	stable := "tcp LISTEN 0 128 127.0.0.1:1234 0.0.0.0:*\n"
+	scoped := "udp UNCONN 0 0 192.0.2.1%eth0:53 0.0.0.0:*\n"
+	transient := "tcp ESTAB 0 0 127.0.0.1:5678 127.0.0.1:1234\n"
+	ipv6 := "tcp LISTEN 0 128 [::]:3306 [::]:*\n" +
+		"udp UNCONN 0 0 [::]:41641 [::]:*\n" +
+		"udp UNCONN 0 0 [fd7a:115c:a1e0::c]%eth0:52238 [::]:*\n"
+	before, after := header+stable+scoped+ipv6+transient, header+stable+scoped+ipv6
+	jailed := header + strings.Replace(stable, "128", "0", 1) + strings.Replace(scoped, "%eth0", "", 1) + strings.ReplaceAll(strings.ReplaceAll(ipv6, "[::]:", "*:"), "%eth0", "")
+	if err := compareSmokeSockets(before, jailed, after, "Cannot open netlink socket: Operation not permitted\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := compareSmokeSockets(strings.ReplaceAll(before, "[::]:", "[::]%eth0:"), jailed, strings.ReplaceAll(after, "[::]:", "[::]%eth0:"), ""); err != nil {
+		t.Fatal(err)
+	}
+	for _, changed := range []string{header + scoped, strings.Replace(jailed, "1234", "9999", 1), strings.Replace(jailed, "LISTEN", "CLOSE", 1), strings.Replace(jailed, "Netid", "Other", 1), jailed + "unexpected\n",
+		strings.Replace(jailed, "*:3306", "*:3307", 1),
+		strings.Replace(jailed, "[fd7a:115c:a1e0::c]", "[fd7a:115c:a1e0::d]", 1),
+		strings.Replace(jailed, "*:3306", "[::]:3306", 1),
+		header + stable + scoped,
+		jailed + "udp UNCONN 0 0 [::1]:9999 *:*\n"} {
+		if compareSmokeSockets(before, changed, after, "") == nil {
+			t.Fatalf("unlisted change accepted: %q", changed)
+		}
+	}
+	if compareSmokeSockets(before, jailed, after, "unexpected") == nil {
+		t.Fatal("unexpected stderr accepted")
+	}
+}
+
+func TestSmokeSocketProcfsIPv6(t *testing.T) {
+	directory := t.TempDir()
+	// Deterministic procfs records exercise the installed ss inside the real jail.
+	header := "sl local_address remote_address st tx_queue rx_queue tr tm->when retrnsmt uid timeout inode\n"
+	write(t, filepath.Join(directory, "tcp"), header)
+	write(t, filepath.Join(directory, "udp"), header)
+	write(t, filepath.Join(directory, "tcp6"), header+
+		"0: 00000000000000000000000000000000:0CEA 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000 1000 0 12345 1 0000000000000000 100 0 0 10 0\n"+
+		"1: 00000000000000000000000001000000:1234 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000 1000 0 12346 1 0000000000000000 100 0 0 10 0\n")
+	write(t, filepath.Join(directory, "udp6"), header+
+		"0: 00000000000000000000000000000000:A2A9 00000000000000000000000000000000:0000 07 00000000:00000000 00:00000000 00000000 1000 0 12347 2 0000000000000000 0\n")
+	var environment []string
+	for _, table := range []string{"tcp", "tcp6", "udp", "udp6"} {
+		environment = append(environment, "PROC_NET_"+strings.ToUpper(table)+"="+filepath.Join(directory, table))
+	}
+	want := "Netid State Recv-Q Send-Q Local Address:Port Peer Address:Port\n" +
+		"tcp LISTEN 0 0 *:3306 *:*\n" +
+		"tcp LISTEN 0 0 [::1]:4660 *:*\n" +
+		"udp UNCONN 0 0 *:41641 *:*\n"
+	for _, abi := range []int{0, 1} {
+		t.Run(fmt.Sprintf("abi%d", abi), func(t *testing.T) {
+			result := runP12(t, Spec{Profile: ProfileROv1, Net: false, ForceABI: abi, Cwd: "/"}, "ss -tuna", func(jailed *Jailed) {
+				jailed.Cmd.Env = append(jailed.Cmd.Env, environment...)
+			})
+			if result.setupErr != nil || result.exit != 0 {
+				t.Fatalf("ss procfs fixture: %+v", result)
+			}
+			if err := compareSmokeSockets(want, result.stdout, want, result.stderr); err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }
