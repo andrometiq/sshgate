@@ -37,3 +37,6 @@ gate-redteam-report*.jsonl
 # Operator-local agent context and notes. NEVER committed (this repo is public).
 CLAUDE.local.md
 /local-notes/
+
+# agent work log — local only, never committed
+WORKLOG.md

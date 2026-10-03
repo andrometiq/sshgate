@@ -139,5 +139,7 @@ have them check the host's `/var/log/auth.log` and that the key line was pasted 
 - `docs/`: design, threat model and testing docs. `docs/ROADMAP.md` is the canonical roadmap;
   `docs/proposed/` holds dated proposals.
 - `packaging/mcpb/`, `scripts/`, `tests/`: MCPB bundle sources, install scripts, integration tests.
-- `WORKLOG.md`: append-only work log; read its header, last five headings, then the last entry.
-- `archive/YYYY-MM-DD/`: verbatim copies of what housekeeping cut. Search it; never load it.
+- `WORKLOG.md` (local, gitignored): append-only work log; read its header, last five headings,
+  then the last entry.
+- `local-notes/archive/YYYY-MM-DD/` (gitignored): verbatim copies of what housekeeping cut.
+  Search it; never load it.
