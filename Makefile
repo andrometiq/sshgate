@@ -1,7 +1,7 @@
 .PHONY: all build install-local test test-jail test-integration vet clean sshgate-gate-linux \
 	sshgate-mcp-darwin sshgate-signer-telegram-darwin darwin cross sshgate-signer-server \
 	preflight e2e smoke gitleaks release-gate verify-dist verify-repro verify-versions mcpb \
-	test-refapp-js
+	test-refapp-js test-jail-root test-jail-mutate selftest-testjail selftest-jailmut
 
 # ---------------------------------------------------------------------------
 # Verified release channel (spec §11)
@@ -108,6 +108,7 @@ release-gate:
 	@# (GOAMD64 microarch, GOEXPERIMENT, a stray GOFLAGS all change emitted bytes).
 	GOTOOLCHAIN=$(GATE_RELEASE_TOOLCHAIN) CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOAMD64= GOEXPERIMENT= GOFLAGS=-mod=readonly \
 		go build $(GATE_BUILD_FLAGS) -o $(DIST_GATE_BIN) ./src/gate/cmd/sshgate-gate
+	go run ./scripts/jailmut -check-binary $(DIST_GATE_BIN)
 	@# Regenerate the sha256sum-compatible sidecar (basename form so `sha256sum -c`
 	@# passes when run from inside dist/gate/).
 	cd $(DIST_GATE_DIR) && sha256sum sshgate-gate-linux-amd64 > sshgate-gate-linux-amd64.sha256
@@ -177,24 +178,51 @@ test:
 # the Phase-0 go/no-go host (userns + Landlock), never "green by skip": this target
 # FAILS on any `--- SKIP`/`SKIP rung` as well as on any FAIL. -count=1: the go
 # test cache does not track host jail facts, so a cached replay proves nothing.
-test-jail:
-	@log=$$(mktemp); \
-	echo "== confine jail matrix =="; \
-	go test -race -count=1 -tags=jail_e2e ./src/gate/confine/ -v -run 'TestJailMatrix|TestROFallbackParent|TestDetectUsernsCountUsedUpDenies' 2>&1 | tee "$$log"; \
-	echo "== gate-package real-effect confine tests (rung 2, no userns) =="; \
-	go test -race -count=1 -v -run 'TestExecWithRedactionConfine' ./src/gate/ 2>&1 | tee -a "$$log"; \
-	echo "== gate read paths on the live rung (Tier-1, signed, reveal; rung 2 forced; real binary) =="; \
-	go test -race -count=1 -tags=jail_e2e -v -run 'TestRunReadJailedRealEffect|TestGateBinaryJailedRead|TestRunReadJailSetupFailureDenies' ./src/gate/cmd/sshgate-gate/ 2>&1 | tee -a "$$log"; \
-	fail=0; \
+# Each invocation owns its status file; a later pass cannot erase an earlier failure.
+define jail-runner
+	tmp=$$(mktemp -d) || { echo "test-jail: mktemp failed" >&2; exit 1; }; \
+	[ -n "$$tmp" ] && [ -d "$$tmp" ] || { echo "test-jail: invalid mktemp directory" >&2; exit 1; }; \
+	trap 'rm -rf "$$tmp"' 0; \
+	log="$$tmp/log"; fail=0; invocation=0; \
+	run_jail() { \
+		invocation=$$((invocation + 1)); st="$$tmp/status-$$invocation"; \
+		{ "$$@"; echo $$? > "$$st"; } 2>&1 | tee -a "$$log"; tee_st=$$?; \
+		[ -f "$$st" ] && [ "$$(cat "$$st")" = 0 ] && [ "$$tee_st" = 0 ] || fail=1; \
+	}; \
+	run_jail go test -race -count=1 -tags=jail_e2e ./src/gate/confine/ -v -run 'TestJailMatrix|TestROFallbackParent|TestDetectUsernsCountUsedUpDenies'; \
+	run_jail go test -race -count=1 -v -run 'TestExecWithRedactionConfine' ./src/gate/; \
+	run_jail go test -race -count=1 -tags=jail_e2e -v -run 'TestRunReadJailedRealEffect|TestGateBinaryJailedRead|TestRunReadJailSetupFailureDenies' ./src/gate/cmd/sshgate-gate/; \
 	grep -qE '^FAIL' "$$log" && fail=1; \
-	grep -qE -- '--- SKIP|SKIP rung' "$$log" && { echo "test-jail: a jail test SKIPPED where it should run (userns/Landlock/tooling missing?)"; fail=1; }; \
-	grep -q 'no tests to run' "$$log" && { echo "test-jail: a -run pattern matched no tests"; fail=1; }; \
-	for t in TestJailMatrix TestROFallbackParent TestDetectUsernsCountUsedUpDenies TestExecWithRedactionConfine TestRunReadJailedRealEffect TestGateBinaryJailedRead TestRunReadJailSetupFailureDenies; do \
-		grep -qE -- "^--- PASS: $$t" "$$log" || { echo "test-jail: no PASS line for $$t (renamed, untagged or not run?)"; fail=1; }; \
+	grep -qE -- '--- SKIP|SKIP rung|no tests to run' "$$log" && fail=1; \
+	if [ "$${SSHGATE_JAIL_CI:-}" = 1 ]; then grep -q 'CONTROL-SKIPPED' "$$log" && fail=1; fi; \
+	for t in TestJailMatrix TestROFallbackParent TestDetectUsernsCountUsedUpDenies TestExecWithRedactionConfinedNamespace TestExecWithRedactionConfinedEROFS TestExecWithRedactionConfineFailClosed TestExecWithRedactionConfineClosesInheritedFDs TestRunReadJailedRealEffect TestGateBinaryJailedRead TestRunReadJailSetupFailureDenies; do \
+		grep -qE -- "^--- PASS: $$t( |$$)" "$$log" || { echo "test-jail: no PASS line for $$t"; fail=1; }; \
 	done; \
-	rm -f "$$log"; \
-	if [ $$fail -ne 0 ]; then echo "test-jail: FAILED"; exit 1; fi; \
-	echo "test-jail: OK (no FAIL, no SKIP, every expected test passed)"
+	[ $$fail = 0 ] || { echo "test-jail: FAILED"; exit 1; }; \
+	echo "test-jail: OK (every invocation, logger and expected test passed)"
+endef
+
+test-jail:
+	@$(jail-runner)
+
+test-jail-root:
+	@[ "$$(id -u)" = 0 ] || { echo "test-jail-root: run as root" >&2; exit 1; }
+	@$(jail-runner)
+
+# MUTATION_REPORT captures a lane; MUTATION_UNION checks two CI lane reports.
+test-jail-mutate:
+	@tmp=$$(mktemp -d) || { echo "test-jail-mutate: mktemp failed" >&2; exit 1; }; \
+	[ -n "$$tmp" ] && [ -d "$$tmp" ] || exit 1; \
+	trap 'rm -rf "$$tmp"' 0; st="$$tmp/status"; \
+	{ go run ./scripts/jailmut -mutate "$(MUTATE)" -report "$(MUTATION_REPORT)" -union "$(MUTATION_UNION)"; echo $$? > "$$st"; } 2>&1 | tee "$$tmp/log"; tee_st=$$?; \
+	[ -f "$$st" ] && [ "$$(cat "$$st")" = 0 ] && [ "$$tee_st" = 0 ]
+
+selftest-testjail:
+	TESTJAIL_SHELL='$(SHELL)' go test -count=1 ./scripts/jailmut -run '^TestTestJailStatusCapture$$' -v
+
+selftest-jailmut:
+	go test -count=1 ./scripts/jailmut ./src/gate/confine/jailmut/... -run '^TestHarness|^TestRegistryValidation' -v
+	go test -count=1 -tags=jail_mutation ./src/gate/confine/jailmut -run '^TestHarnessHooksOn$$' -v
 
 test-refapp-js:
 	@command -v node >/dev/null 2>&1 || { echo "test-refapp-js: node is required to verify the hosted WebAuthn browser adapter" >&2; exit 1; }
