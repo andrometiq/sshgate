@@ -44,6 +44,7 @@ import (
 
 	"github.com/karthikeyan5/sshgate/src/classify"
 	"github.com/karthikeyan5/sshgate/src/gate"
+	"github.com/karthikeyan5/sshgate/src/gate/confine"
 	"github.com/karthikeyan5/sshgate/src/hostkey"
 	"github.com/karthikeyan5/sshgate/src/redact"
 	redactrules "github.com/karthikeyan5/sshgate/src/redact/rules"
@@ -88,6 +89,20 @@ func main() {
 	// human-only key-generation entry point; see genkeys.go. run() stays
 	// byte-for-byte the SSH_ORIGINAL_COMMAND path and is left unchanged.
 	if len(os.Args) > 1 {
+		// Internal re-exec sentinels for the kernel jail (confine). These are
+		// dispatched BEFORE runLocalSubcommand and run(): they are the gate
+		// re-execing ITSELF to establish the jail, not an operator subcommand and
+		// not an SSH command. They only ever ADD restrictions, so a local caller
+		// gains nothing, and the forced-command path never reaches them (it passes
+		// no argv; the client's command lands in SSH_ORIGINAL_COMMAND).
+		switch os.Args[1] {
+		case confine.SentinelShim:
+			os.Exit(confine.RunShim(os.Args[2:]))
+		case confine.SentinelWorker:
+			os.Exit(confine.RunWorker(os.Args[2:]))
+		case confine.SentinelProbe:
+			os.Exit(confine.RunProbe(os.Args[2:]))
+		}
 		os.Exit(runLocalSubcommand(os.Args[1:]))
 	}
 	os.Exit(run())

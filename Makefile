@@ -1,4 +1,4 @@
-.PHONY: all build install-local test test-integration vet clean sshgate-gate-linux \
+.PHONY: all build install-local test test-jail test-integration vet clean sshgate-gate-linux \
 	sshgate-mcp-darwin sshgate-signer-telegram-darwin darwin cross sshgate-signer-server \
 	preflight e2e smoke gitleaks release-gate verify-dist verify-repro verify-versions mcpb \
 	test-refapp-js
@@ -163,6 +163,28 @@ install-local: build
 
 test:
 	go test -race ./...
+
+# test-jail: the kernel-jail acceptance matrix (confine package, #22 Phase 0) PLUS
+# the gate-package real-effect confine tests (TestExecWithRedactionConfine*), which
+# exercise ExecWithRedaction end to end — the matrix alone never proves the
+# executor actually entered the jail. The gate-package fail-closed/fd-leak tests
+# use rung 2 (Landlock, no userns), so they run even on an AppArmor-clamped runner.
+# Tagged jail_e2e so the matrix is OUT of the default `make test`. It needs an
+# unprivileged user namespace for the rung-1 legs and Landlock for rung-2. Run on
+# the Phase-0 go/no-go host (userns + Landlock), never "green by skip": this target
+# FAILS on any `--- SKIP`/`SKIP rung` as well as on any FAIL.
+test-jail:
+	@log=$$(mktemp); \
+	echo "== confine jail matrix =="; \
+	go test -race -tags=jail_e2e ./src/gate/confine/ -v -run 'TestJailMatrix|TestROFallbackParent' 2>&1 | tee "$$log"; \
+	echo "== gate-package real-effect confine tests (rung 2, no userns) =="; \
+	go test -race -v -run 'TestExecWithRedactionConfine' ./src/gate/ 2>&1 | tee -a "$$log"; \
+	fail=0; \
+	grep -qE '^FAIL' "$$log" && fail=1; \
+	grep -qE -- '--- SKIP|SKIP rung' "$$log" && { echo "test-jail: a jail test SKIPPED where it should run (userns/Landlock/tooling missing?)"; fail=1; }; \
+	rm -f "$$log"; \
+	if [ $$fail -ne 0 ]; then echo "test-jail: FAILED"; exit 1; fi; \
+	echo "test-jail: OK (no FAIL, no SKIP)"
 
 test-refapp-js:
 	@command -v node >/dev/null 2>&1 || { echo "test-refapp-js: node is required to verify the hosted WebAuthn browser adapter" >&2; exit 1; }

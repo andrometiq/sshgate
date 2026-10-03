@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/karthikeyan5/sshgate/src/gate/confine"
 	"github.com/karthikeyan5/sshgate/src/redact"
 )
 
@@ -45,6 +46,13 @@ type ExecOpts struct {
 	// the gate never pays the buffering cost. The cap bounds memory for a
 	// huge command (we keep the head; a truncation marker is appended).
 	CaptureLimit int
+	// Confine, when non-nil, runs the command inside the kernel jail the Spec
+	// describes (rung 1 full namespaces, or rung 2 Landlock) instead of a plain
+	// /bin/sh -c. A nil Confine is byte-for-byte today's path (rung 3 / unset):
+	// the gate passes nil on an unconfined host so this field is purely additive.
+	// The jail only ADDS restrictions; stdout/stderr/stdin/redaction wiring below
+	// is identical either way.
+	Confine *confine.Spec
 }
 
 // ExecResult is the widened return of ExecWithRedaction. It carries the
@@ -168,7 +176,24 @@ func ExecWithRedaction(ctx context.Context, cmd string, opts ExecOpts) (res Exec
 	if strings.TrimSpace(cmd) == "" {
 		return ExecResult{ExitCode: -1}, errors.New("exec: empty command")
 	}
-	c := exec.CommandContext(ctx, "/bin/sh", "-c", cmd)
+	// Select the command: a confined Spec re-execs the gate into the jail (it
+	// sets Path/Args/ExtraFiles AND SysProcAttr, including Setpgid); a nil Spec
+	// is today's /bin/sh path. SysProcAttr is therefore set EXACTLY ONCE — the
+	// unconditional Setpgid assignment that used to live further down is folded
+	// into the else branch so it can never clobber the jail's clone flags.
+	var c *exec.Cmd
+	var jailed *confine.Jailed
+	if opts.Confine != nil {
+		var cerr error
+		jailed, cerr = opts.Confine.Command(ctx, cmd)
+		if cerr != nil {
+			return ExecResult{ExitCode: -1}, fmt.Errorf("exec: build jail: %w", cerr)
+		}
+		c = jailed.Cmd
+	} else {
+		c = exec.CommandContext(ctx, "/bin/sh", "-c", cmd)
+		c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	}
 
 	// Counting writers sit BELOW any redactor so the tally is the
 	// post-redaction byte/line count that actually reaches the SSH
@@ -215,9 +240,8 @@ func ExecWithRedaction(ctx context.Context, cmd string, opts ExecOpts) (res Exec
 	// structurally — independent of whether the classifier happens to flag a
 	// given program-from-stdin form.
 	c.Stdin = nil
-	// Run the child in its own process group so ctx cancellation kills
-	// the whole tree (the shell plus anything it spawned).
-	c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// The child runs in its own process group (Setpgid set above, on BOTH the
+	// confined and unconfined Cmd) so ctx cancellation kills the whole tree.
 	// When ctx is cancelled, send SIGKILL to the whole process group.
 	// exec.CommandContext by default only signals the direct child;
 	// override Cancel so we get the group.
@@ -231,7 +255,17 @@ func ExecWithRedaction(ctx context.Context, cmd string, opts ExecOpts) (res Exec
 
 	start := time.Now()
 	if err := c.Start(); err != nil {
+		if jailed != nil {
+			jailed.Abort()
+			return ExecResult{ExitCode: -1, Duration: time.Since(start)}, fmt.Errorf("exec: start jail: %w", err)
+		}
+		// Nil-Confine path stays byte-identical to the pre-jail executor.
 		return ExecResult{ExitCode: -1, Duration: time.Since(start)}, fmt.Errorf("exec: start /bin/sh: %w", err)
+	}
+	if jailed != nil {
+		// Close the parent's child-side pipe ends and stream the command to the
+		// worker on fd 3 (from a goroutine, so a large command cannot deadlock).
+		_ = jailed.Started()
 	}
 	waitErr := c.Wait()
 	// Flush the redact.Writer instances after the child exits so any
@@ -260,6 +294,19 @@ func ExecWithRedaction(ctx context.Context, cmd string, opts ExecOpts) (res Exec
 		Duration:    dur,
 		Stdout:      outCount.captured(),
 		Stderr:      errCount.captured(),
+	}
+
+	// Fail closed on a jail setup failure: if the worker aborted before execve
+	// (fd-4 status is not "reached exec"), NOTHING ran. The child's exit code
+	// here is the setup-failure sentinel, not a command result, so we return -1
+	// and the SetupError — never a success and never the sh exit code — so the
+	// gate maps it to a deny rather than silently treating a half-built jail as a
+	// completed command.
+	if jailed != nil {
+		if setupErr := jailed.Status(); setupErr != nil {
+			res.ExitCode = -1
+			return res, fmt.Errorf("exec: %w", setupErr)
+		}
 	}
 
 	if waitErr == nil {
