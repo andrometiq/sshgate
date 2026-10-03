@@ -17,8 +17,8 @@ const maxKnownSyscall = unix.SYS_RSEQ_SLICE_YIELD
 // flatDeny lists the syscalls the seccomp filter rejects with EPERM regardless
 // of their arguments. clone/unshare/setns/ioctl/socket are NOT here — they are
 // argument-filtered in buildFilter. clone3 is handled separately (ENOSYS, so
-// glibc falls back to the arg-filtered legacy clone). truncate/ftruncate and
-// open_by_handle_at are conditional and added by buildFilter.
+// glibc falls back to the arg-filtered legacy clone). open_by_handle_at is
+// conditional and added by buildFilter.
 var flatDeny = []uint32{
 	// Mount API (the whole family): a jailed command must never remount rw or
 	// clear the RDONLY attr the setup process applied.
@@ -42,13 +42,7 @@ var flatDeny = []uint32{
 	unix.SYS_PERSONALITY,
 }
 
-// metadataDeny lists the inode-metadata syscalls Landlock does NOT govern at any
-// ABI (chmod/chown/xattr/utime families and file_setattr). On rung 1 EROFS already blocks these on
-// every host path, but on rung 2 (Landlock-only) seccomp must deny them so an
-// unsigned read cannot change a file's mode, owner, xattrs or timestamps. File
-// CREATION, removal and rename stay governed by Landlock (MAKE_*/REMOVE_*/REFER),
-// so they are not here; truncate is handled separately (Landlock ≥ABI 3, else
-// seccomp via denyTruncate).
+// metadataDeny backs up read-only mounts for operations Landlock never governs.
 var metadataDeny = []uint32{
 	unix.SYS_CHMOD, unix.SYS_FCHMOD, unix.SYS_FCHMODAT, unix.SYS_FCHMODAT2,
 	unix.SYS_CHOWN, unix.SYS_LCHOWN, unix.SYS_FCHOWN, unix.SYS_FCHOWNAT,
@@ -58,59 +52,12 @@ var metadataDeny = []uint32{
 	unix.SYS_FILE_SETATTR,
 }
 
-// mqueueDeny lists the POSIX message-queue calls that create or remove a queue
-// without Landlock seeing it: mq_unlink removes the inode through an inode hook
-// Landlock does not mediate, and mq_open(O_CREAT) creates the queue before
-// Landlock refuses the open. Denied on rung 2, which shares the host's IPC
-// namespace; rung 1's CLONE_NEWIPC gives the jail queues of its own. A jailed
-// read has no use for a host queue, so mq_open is denied outright.
-var mqueueDeny = []uint32{unix.SYS_MQ_OPEN, unix.SYS_MQ_UNLINK}
+// mqueueDeny also prevents consuming queues through descriptors opened as files.
+var mqueueDeny = []uint32{unix.SYS_MQ_OPEN, unix.SYS_MQ_UNLINK, unix.SYS_MQ_TIMEDSEND, unix.SYS_MQ_TIMEDRECEIVE, unix.SYS_MQ_NOTIFY, unix.SYS_MQ_GETSETATTR}
 
-// fsIocFssetxattr is _IOW('X', 32, struct fsxattr); absent from x/sys v0.45.0.
 const fsIocFssetxattr = 0x401c5820
 
-// metadataIoctlDeny lists the ioctl requests (arg1 low word) that change inode
-// metadata through a file opened READ-ONLY, so Landlock never sees a write
-// (its IOCTL_DEV right covers device files only). Denied on rung 2 with the
-// metadataDeny table; rung 1 gets EROFS from the read-only mounts.
-var metadataIoctlDeny = []uint32{
-	unix.FS_IOC_SETFLAGS,              // chattr: append-only, immutable, nodump, ...
-	fsIocFssetxattr,                   // xflags, project id, extent size
-	unix.FS_IOC_ENABLE_VERITY,         // makes the file permanently read-only
-	unix.FS_IOC_SET_ENCRYPTION_POLICY, // sets an fscrypt policy on an empty dir
-}
-
-// ttyMutateIoctlDeny lists the tty ioctls (arg1 low word) that change a
-// terminal's state through a read-only fd. Rung 2 shares /dev/pts with the
-// host, so a jailed command could open another same-uid session's pty and
-// retune it. At Landlock ABI ≥5 that is closed by not granting IOCTL_DEV
-// beneath /; below ABI 5 Landlock does not mediate device ioctls, so rung 2
-// denies these with seccomp instead (on every fd, including its own stdio).
-var ttyMutateIoctlDeny = []uint32{
-	unix.TCSETS, unix.TCSETSW, unix.TCSETSF,
-	unix.TCSETA, unix.TCSETAW, unix.TCSETAF,
-	unix.TCSETS2, unix.TCSETSW2, unix.TCSETSF2,
-	unix.TIOCSWINSZ, // also signals SIGWINCH to the tty's foreground group
-	unix.TCFLSH, unix.TCXONC, unix.TIOCSETD, unix.TIOCSPGRP,
-}
-
-// ioprioWhoProcess is IOPRIO_WHO_PROCESS (absent from x/sys v0.45.0): the
-// ioprio_set `which` value that selects a single process by pid.
-const ioprioWhoProcess = 1
-
-// procStatePidSyscalls are the syscalls whose arg0 is a pid and that CHANGE a
-// target process's scheduling state. On rung 2 (no pid namespace, shared /proc,
-// same uid) a jailed unsigned command could otherwise retune any of the SSH
-// uid's host processes — unsigned work must not modify the host. buildFilter
-// denies each of these with EPERM when arg0 (the pid, low word) != 0, so a
-// jailed command keeps the self-targeting (pid 0) forms that ordinary reads use
-// but cannot reach another process. Rung 1 does not need them: the PID namespace
-// hides every host pid. setpriority/ioprio_set are filtered on their
-// (which, who) pair separately (they target a pid via `who`, not arg0).
-var procStatePidSyscalls = []uint32{
-	unix.SYS_SCHED_SETAFFINITY, unix.SYS_SCHED_SETSCHEDULER,
-	unix.SYS_SCHED_SETPARAM, unix.SYS_SCHED_SETATTR,
-}
+var fileattrIoctlDeny = []uint32{unix.FS_IOC_SETFLAGS, 0x40046602, fsIocFssetxattr}
 
 // nsCloneBits is every CLONE_NEW* namespace bit.
 const nsCloneBits = unix.CLONE_NEWNS | unix.CLONE_NEWUSER | unix.CLONE_NEWPID |

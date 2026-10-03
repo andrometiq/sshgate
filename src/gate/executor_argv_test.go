@@ -102,7 +102,7 @@ func TestExecArgvWithRedaction(t *testing.T) {
 		}{
 			"empty argv":        {nil, gate.ExecOpts{}},
 			"relative argv[0]":  {[]string{"echo", "x"}, gate.ExecOpts{}},
-			"confine requested": {[]string{"/bin/echo", "x"}, gate.ExecOpts{Confine: &confine.Spec{Rung: confine.Rung1Full}}},
+			"confine requested": {[]string{"/bin/echo", "x"}, gate.ExecOpts{Confine: &confine.Spec{Profile: confine.ProfileROv1}}},
 		} {
 			res, err := gate.ExecArgvWithRedaction(ctx, tc.argv, nil, tc.opts)
 			if err == nil || res.ExitCode != -1 {

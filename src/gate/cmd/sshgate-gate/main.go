@@ -320,19 +320,6 @@ func execChild(cmd string, reveal bool, captureLimit int, plan execPlan) (rc int
 	switch {
 	case plan.argv != nil:
 		res, err = gate.ExecArgvWithRedaction(ctx, plan.argv, lane2Env, opts)
-	case plan.confine != nil && plan.confine.Rung == confine.Rung2Landlock:
-		// Rung 2 has no private tmpfs: Landlock lets the command write only to a
-		// fresh per-command scratch dir, which dies with this command.
-		scratch, merr := os.MkdirTemp("", "sshgate-jail-")
-		if merr != nil {
-			logf("read jail unavailable: scratch dir: %v; the read did not run", merr)
-			return exitNoPermVal, gate.ExecResult{ExitCode: -1}, true
-		}
-		defer os.RemoveAll(scratch)
-		spec := *plan.confine
-		spec.ScratchDir = scratch
-		opts.Confine = &spec
-		res, err = gate.ExecWithRedaction(ctx, cmd, opts)
 	default:
 		opts.Confine = plan.confine
 		res, err = gate.ExecWithRedaction(ctx, cmd, opts)

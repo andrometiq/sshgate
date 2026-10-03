@@ -25,7 +25,16 @@ func TestJailMatrixP12(t *testing.T) {
 		abi  int
 	}{{"native", 0}, {"abi1", 1}} {
 		t.Run(cfg.name, func(t *testing.T) {
-			spec := Spec{Rung: Rung1Full, ForceABI: cfg.abi, AllowInet: true}
+			spec := Spec{Profile: ProfileROv1, ForceABI: cfg.abi, Net: true}
+			t.Run("L-SCRATCH-META", func(t *testing.T) { legScratchMetadata(t, spec) })
+			t.Run("L-FILEATTR-ERRNO", func(t *testing.T) { legFileattrErrno(t, spec) })
+			t.Run("L-LL-REQUIRED", func(t *testing.T) {
+				p12Control(t, spec)
+				withoutLandlock := spec
+				withoutLandlock.ForceABI = ForceNoLandlock
+				result := runP12(t, withoutLandlock, "echo COMMAND_RAN", nil)
+				expectP12Abort(t, "L-LL-REQUIRED", "landlock", syscall.ENOSYS, result)
+			})
 			if os.Geteuid() == 0 {
 				t.Run("L-ROOT-STATE", func(t *testing.T) { legRootState(t, spec) })
 				t.Run("L-ROOT-NPROC", func(t *testing.T) { legRootNproc(t, spec) })
@@ -183,20 +192,27 @@ func legSpecReject(t *testing.T, abi int) {
 		t.Fatal("SETUP: chmod control did not change mode")
 	}
 	mutationSetup(t, os.Chmod(target, 0600))
-	spec := Spec{Rung: Rung2Landlock, ForceABI: abi, AllowInet: true}
-	result := runP12(t, spec, command, func(j *Jailed) {
-		spec.Rung = Rung(5)
+	spec := Spec{Profile: ProfileROv1, ForceABI: abi, Net: true}
+	p12Control(t, spec)
+	result := runP12(t, spec, command+"; echo COMMAND_RAN", func(j *Jailed) {
+		if err := json.Unmarshal([]byte(j.Cmd.Args[2]), &spec); err != nil {
+			t.Fatal(err)
+		}
+		spec.Profile = "invalid"
 		raw, err := json.Marshal(spec)
 		mutationSetup(t, err)
 		j.Cmd.Args[2] = string(raw)
 	})
 	info, err = os.Stat(target)
 	mutationSetup(t, err)
-	mutationEffect(t, "L-SPEC-REJECT", "chmod", info.Mode().Perm() != 0600)
+	if info.Mode().Perm() != 0600 {
+		t.Fatal("invalid spec changed target mode")
+	}
 	if result.setupErr == nil {
-		if info.Mode().Perm() == 0600 {
-			t.Fatal("SETUP: invalid spec ran but control effect was absent")
+		if result.exit != 0 || !strings.Contains(result.stdout, "COMMAND_RAN\n") {
+			t.Fatalf("SETUP: invalid spec did not finish command: %+v", result)
 		}
+		mutationEffect(t, "L-SPEC-REJECT", "reached-exec", true)
 		return
 	}
 	var setup *SetupError
@@ -288,4 +304,97 @@ func legRootProc(t *testing.T, spec Spec) {
 	if !bytes.Equal(before, after) {
 		t.Fatal("printk changed")
 	}
+}
+
+func legScratchMetadata(t *testing.T, spec Spec) {
+	probe := buildProbe(t)
+	target := filepath.Join(t.TempDir(), "metadata")
+	mutationSetup(t, os.WriteFile(target, []byte("canary"), 0600))
+	control, err := exec.Command(probe, "metadata", target).CombinedOutput()
+	mutationSetup(t, err)
+	for _, op := range []string{"chmod", "chown", "setxattr", "utimensat"} {
+		if !strings.Contains(string(control), op+"=ok\n") {
+			t.Fatalf("SETUP: control %s", control)
+		}
+	}
+	result := runP12(t, spec, "umask 077; printf canary > /tmp/metadata; "+probe+" metadata /tmp/metadata", nil)
+	if result.setupErr != nil {
+		t.Fatalf("SETUP: metadata: %+v", result)
+	}
+	success := 0
+	for _, op := range []string{"chmod", "chown", "setxattr", "utimensat"} {
+		if strings.Contains(result.stdout, op+"=ok\n") {
+			success++
+			continue
+		}
+		if !strings.Contains(result.stdout, op+"=1\n") {
+			t.Fatalf("SETUP: missing EPERM for %s: %+v", op, result)
+		}
+	}
+	switch success {
+	case 0:
+		if result.exit != 1 {
+			t.Fatalf("SETUP: denied metadata exit: %+v", result)
+		}
+	case 4:
+		if result.exit != 0 || !strings.Contains(result.stdout, "mode=644\n") || !strings.Contains(result.stdout, "mtime=1000\n") || !strings.Contains(result.stdout, "xattr=test\n") {
+			t.Fatalf("SETUP: metadata effect incomplete: %+v", result)
+		}
+		mutationEffect(t, "L-SCRATCH-META", "metadata", true)
+	default:
+		t.Fatalf("SETUP: partial metadata mutation: %+v", result)
+	}
+}
+
+func legFileattrErrno(t *testing.T, spec Spec) {
+	probe := buildProbe(t)
+	file, err := os.CreateTemp("/dev/shm", "sshgate-fileattr-")
+	mutationSetup(t, err)
+	target := file.Name()
+	mutationSetup(t, file.Close())
+	t.Cleanup(func() { _ = os.Remove(target) })
+	control, err := exec.Command(probe, "fileattr", target).CombinedOutput()
+	var exit *exec.ExitError
+	if err != nil && !errors.As(err, &exit) {
+		mutationSetup(t, err)
+	}
+	expected := map[string]string{}
+	for _, op := range []string{"setflags", "setflags32", "fssetxattr"} {
+		for _, line := range strings.Split(string(control), "\n") {
+			if strings.HasPrefix(line, op+"=") {
+				expected[op] = line
+			}
+		}
+		if expected[op] == "" || expected[op] == op+"=1" {
+			t.Fatalf("SETUP: fileattr control unavailable: %s", control)
+		}
+	}
+	result := runP12(t, spec, "printf canary > /dev/shm/fileattr; "+probe+" fileattr /dev/shm/fileattr", nil)
+	if result.setupErr != nil || !strings.Contains(result.stdout, "open=ok\n") {
+		t.Fatalf("SETUP: fileattr: %+v", result)
+	}
+	unfiltered := 0
+	for op, want := range expected {
+		if strings.Contains(result.stdout, op+"=1\n") {
+			continue
+		}
+		if !strings.Contains(result.stdout, want+"\n") {
+			t.Fatalf("SETUP: unexpected fileattr response for %s: %+v control=%s", op, result, control)
+		}
+		unfiltered++
+	}
+	if unfiltered != 0 && unfiltered != 3 {
+		t.Fatalf("SETUP: partial fileattr mutation: %+v", result)
+	}
+	expectedExit := 0
+	if exit != nil {
+		expectedExit = exit.ExitCode()
+	}
+	if unfiltered == 3 && result.exit != expectedExit {
+		t.Fatalf("SETUP: fileattr exit differs from control: %+v", result)
+	}
+	if unfiltered == 0 && result.exit != 3 {
+		t.Fatalf("SETUP: denied fileattr exit: %+v", result)
+	}
+	mutationEffect(t, "L-FILEATTR-ERRNO", "fileattr-errno", unfiltered == 3)
 }

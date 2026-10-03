@@ -11,13 +11,11 @@ import (
 	"syscall"
 )
 
-// Rung is the enforcement tier the host supports. Lower = weaker. Ordered so a
-// simple >= answers "at least a Landlock jail?".
+// Rung is the interim probe result: full confinement or classifier-only.
 type Rung int
 
 const (
 	Rung3Unconfined Rung = iota // no kernel wall (labelled UNCONFINED)
-	Rung2Landlock               // Landlock + seccomp + NNP, no namespaces
 	Rung1Full                   // userns+mount+pid ns, ro /, Landlock, seccomp
 )
 
@@ -25,8 +23,6 @@ func (r Rung) String() string {
 	switch r {
 	case Rung1Full:
 		return "full"
-	case Rung2Landlock:
-		return "landlock"
 	case Rung3Unconfined:
 		return "unconfined"
 	default:
@@ -52,40 +48,24 @@ const ExitSetupFailed = 70
 // NSIDs identifies the namespaces inherited from the parent gate.
 type NSIDs struct{ User, Mnt, Pid, IPC uint64 }
 
+const ProfileROv1 = "ro-v1"
+
 // Spec is the fully-resolved confinement policy for ONE command. Built by the
-// gate from Detect (production) or by a test directly (forced rungs). It is the
+// gate from Detect (production) or by a test directly. It is the
 // ONLY thing that selects behaviour — there is no env var or argv an agent can
 // set to change it: the worker reads the Spec from the sentinel argv the parent
 // gate wrote, a path the agent never reaches (the forced command passes no argv;
 // the agent-controlled command travels on fd 3).
 type Spec struct {
+	Profile  string
+	Net      bool
 	ParentNS NSIDs
-	Rung     Rung
-	// ForceABI, when >0, caps the Landlock ruleset to that ABI even on a
-	// higher-ABI host. 0 = use the host's real probed ABI. ForceNoLandlock
-	// emulates a host without Landlock: rung 1 then relies on its read-only
-	// mounts alone, and rung 2 (where Landlock is the only fs wall) aborts at the
-	// landlock stage. TEST-ONLY in practice (production passes 0). It can only
-	// remove Landlock rights; buildFilter compensates for every right a lower ABI
-	// cannot handle (e.g. truncate below ABI 3), so it is not a production bypass.
+	// ForceABI caps the real ABI in tests; -1 forces a landlock-stage abort.
 	ForceABI int
-	// AllowInet controls whether AF_INET/AF_INET6 sockets are allowed in the
-	// jail. Phase 1 passes true (the classifier still stands in front); denying
-	// inet is a later step.
-	AllowInet bool
-	// ScratchDir is the per-session writable dir for rung 2 (Landlock allows
-	// writes only here + /dev/null; no tty is granted, since the forced command
-	// runs without a pty and the inherited stdio fds need no Landlock right).
-	// Empty on rung 1 (tmpfs covers it).
-	ScratchDir string
-	// InjectFailAt (TEST-ONLY in practice) names a setup stage at which the
-	// worker must abort WITHOUT execve. Its only possible effect is to abort
-	// earlier; it can never skip a stage or loosen anything, so carrying it in
-	// the parent-written Spec is not a bypass. Empty in production.
+	// InjectFailAt forces a setup error in tests.
 	InjectFailAt string
 }
 
-// ForceNoLandlock is the ForceABI value that emulates a host with no Landlock.
 const ForceNoLandlock = -1
 
 // Report is the host-probe result for `gate doctor` and the audit line.

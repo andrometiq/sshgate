@@ -87,7 +87,7 @@ func runDoctor(args []string) int {
 		case spec == nil:
 			d.Reads = confine.Rung3Unconfined.String()
 		default:
-			d.Reads = "jailed:" + spec.Rung.String()
+			d.Reads = "jailed:" + rungLabel(spec)
 		}
 	}
 
@@ -117,7 +117,7 @@ func pinFloor(gateDir string, rep confine.Report, floor confine.Rung, floorErr e
 	case rep.ProbeErr != nil:
 		logf("doctor: probe failed (%v); not pinning", rep.ProbeErr)
 		return exitSoftware
-	case rep.Rung < confine.Rung2Landlock:
+	case rep.Rung != confine.Rung1Full:
 		logf("doctor: rung %s has no jail to pin", rep.Rung)
 		return exitSoftware
 	case floorErr != nil:

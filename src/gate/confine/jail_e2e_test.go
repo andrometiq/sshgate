@@ -5,13 +5,8 @@
 // confined commands. Each leg skips with a clear reason when the host lacks the
 // probed feature, so the suite is never "green by skip" silently.
 //
-// The matrix runs the full leg set across eight configurations — rung 1, rung 1
-// with Landlock forced off, rung 2, and rung 2 forced to ABI 1/2/3/4/5 (each an
-// ABI where a rung-2 wall moves between Landlock and seccomp) — plus a
-// dedicated check that rung 2 with no Landlock FAILS CLOSED at the landlock
-// stage (Landlock is rung 2's only fs wall). Every destructive leg carries an
-// UNJAILED control proving the attack works on the host, so a leg that "passes"
-// because the tool was missing or the fs could not support it is impossible.
+// The matrix runs native and forced ABI 1, plus mandatory-Landlock refusal.
+// Every destructive leg retains its unjailed control.
 //
 // Scope (Phase 0/1, honest): these legs prove the file-write, metadata (incl.
 // chattr/xattr), AF_UNIX, FIFO, IPC, tty and fail-closed classes with the
@@ -45,26 +40,13 @@ import (
 // whether it runs the heavy native-only legs (fill, read corpus).
 type jailCfg struct {
 	name     string
-	rung     Rung
 	forceABI int  // 0 = host ABI; ForceNoLandlock = none; >0 = capped
 	native   bool // run the heavy legs (fill, corpus) only on the native rungs
 }
 
-// noLandlock reports whether this config emulates a host with no Landlock.
-func (c jailCfg) noLandlock() bool { return c.forceABI == ForceNoLandlock }
-
-// effABI is the Landlock ABI this config actually enforces with, given the host
-// ABI, mirroring effectiveABI in the worker.
-func (c jailCfg) effABI(hostABI int) int { return effectiveABI(hostABI, c.forceABI) }
-
-// spec builds the Spec for this config, with a fresh scratch dir for rung 2.
 func (c jailCfg) spec(t *testing.T) Spec {
 	t.Helper()
-	s := Spec{Rung: c.rung, AllowInet: true, ForceABI: c.forceABI}
-	if c.rung == Rung2Landlock {
-		s.ScratchDir = t.TempDir()
-	}
-	return s
+	return Spec{Profile: ProfileROv1, Net: true, ForceABI: c.forceABI}
 }
 
 func TestJailMatrix(t *testing.T) {
@@ -74,43 +56,17 @@ func TestJailMatrix(t *testing.T) {
 
 	probe := buildProbe(t) // built ONCE; every leg reuses the same binary
 
-	cfgs := []jailCfg{
-		{name: "rung1", rung: Rung1Full, forceABI: 0, native: true},
-		{name: "rung1_no_landlock", rung: Rung1Full, forceABI: ForceNoLandlock},
-		{name: "rung2", rung: Rung2Landlock, forceABI: 0, native: true},
-		{name: "rung2_abi1", rung: Rung2Landlock, forceABI: 1},
-		{name: "rung2_abi2", rung: Rung2Landlock, forceABI: 2},
-		{name: "rung2_abi3", rung: Rung2Landlock, forceABI: 3},
-		{name: "rung2_abi4", rung: Rung2Landlock, forceABI: 4},
-		{name: "rung2_abi5", rung: Rung2Landlock, forceABI: 5},
-	}
+	cfgs := []jailCfg{{name: "native", native: true}, {name: "abi1", forceABI: 1}}
 
 	for _, cfg := range cfgs {
 		cfg := cfg
-		switch cfg.rung {
-		case Rung1Full:
-			if !rep.Userns {
-				t.Logf("SKIP %s: no unprivileged userns (%v)", cfg.name, rep.ProbeErr)
-				continue
-			}
-		case Rung2Landlock:
-			if rep.LandlockABI < 1 {
-				t.Logf("SKIP %s: Landlock unavailable (abi=%d)", cfg.name, rep.LandlockABI)
-				continue
-			}
-			if cfg.forceABI > 0 && rep.LandlockABI < cfg.forceABI {
-				t.Logf("SKIP %s: host Landlock ABI %d < forced %d", cfg.name, rep.LandlockABI, cfg.forceABI)
-				continue
-			}
-		}
-		t.Run(cfg.name, func(t *testing.T) { runLegs(t, cfg, rep.LandlockABI, probe) })
+		t.Run(cfg.name, func(t *testing.T) { runLegs(t, cfg, probe) })
 	}
 
-	// rung 2 with Landlock forced off must FAIL CLOSED: Landlock is rung 2's only
-	// fs wall, so the worker aborts at the landlock stage and NOTHING runs.
-	if rep.LandlockABI >= 1 {
-		t.Run("rung2_no_landlock_fails_closed", func(t *testing.T) {
-			spec := Spec{Rung: Rung2Landlock, AllowInet: true, ForceABI: ForceNoLandlock, ScratchDir: t.TempDir()}
+	// Landlock is mandatory: without it, nothing may run.
+	{
+		t.Run("no_landlock_fails_closed", func(t *testing.T) {
+			spec := Spec{Profile: ProfileROv1, Net: true, ForceABI: ForceNoLandlock}
 			r := runJailed(t, spec, "echo SHOULD_NOT_RUN")
 			var se *SetupError
 			if !errors.As(r.setupErr, &se) {
@@ -120,13 +76,13 @@ func TestJailMatrix(t *testing.T) {
 				t.Errorf("SetupError stage=%q want landlock", se.Stage)
 			}
 			if strings.Contains(r.stdout, "SHOULD_NOT_RUN") {
-				t.Errorf("command ran despite rung-2 Landlock being unavailable")
+				t.Errorf("command ran despite required Landlock being unavailable")
 			}
 		})
 	}
 }
 
-func runLegs(t *testing.T, cfg jailCfg, hostABI int, probe string) {
+func runLegs(t *testing.T, cfg jailCfg, probe string) {
 	spec := cfg.spec(t)
 	t.Run("reads_work", func(t *testing.T) { legReadsWork(t, spec) })
 	t.Run("bypass_corpus", func(t *testing.T) { legBypassCorpus(t, spec) })
@@ -137,31 +93,18 @@ func runLegs(t *testing.T, cfg jailCfg, hostABI int, probe string) {
 	t.Run("af_unix_denied", func(t *testing.T) { legAFUnix(t, spec, probe) })
 	t.Run("proc_mem_unreadable", func(t *testing.T) { legProcMem(t, spec, probe) })
 	t.Run("rlimits_applied", func(t *testing.T) { legRlimits(t, spec) })
-	t.Run("fifo", func(t *testing.T) { legFifo(t, cfg, spec) })
-	t.Run("ipc", func(t *testing.T) { legIPC(t, cfg, spec, probe) })
+	t.Run("fifo", func(t *testing.T) { legFifo(t, spec) })
+	t.Run("ipc", func(t *testing.T) { legIPC(t, spec, probe) })
 	t.Run("posix_mqueue_isolated", func(t *testing.T) { legMQueue(t, spec, probe) })
 	t.Run("fail_closed_before_execve", func(t *testing.T) { legFailClosed(t, spec) })
 
-	if spec.Rung == Rung1Full {
-		// The pid-1 reaper must not hang on a backgrounded child (pid-ns teardown).
-		t.Run("reaper_no_hang", func(t *testing.T) { legReaper(t, spec) })
-		// The jail's own /proc is read-only: its kernel control files are guarded
-		// only by DAC, which a root SSH user passes (rung 1 without Landlock).
-		t.Run("procfs_control_readonly", func(t *testing.T) { legProcfsReadOnly(t, spec) })
-	}
-	if spec.Rung == Rung2Landlock {
-		// Rung 2 shares /proc with the host: seccomp must stop a jailed command
-		// retuning another same-uid process. (Rung 1's pid namespace hides them.)
-		t.Run("proc_state_isolated", func(t *testing.T) { legProcState(t, spec, probe) })
-		// Rung 2 shares /dev/pts: a jailed command must not retune another
-		// same-uid session's terminal (Landlock IOCTL_DEV at ABI ≥5, seccomp below).
-		t.Run("tty_isolated", func(t *testing.T) { legTtyIsolated(t, spec) })
-		if abi := cfg.effABI(hostABI); abi >= 1 && abi < 3 {
-			t.Run("truncate_seccomp_below_abi3", func(t *testing.T) { legTruncateSeccompBelowABI3(t, spec) })
-		}
-	}
+	t.Run("reaper_no_hang", func(t *testing.T) { legReaper(t, spec) })
+	t.Run("procfs_control_readonly", func(t *testing.T) { legProcfsReadOnly(t, spec) })
+	t.Run("proc_state_isolated", func(t *testing.T) { legProcState(t, spec, probe) })
+	t.Run("tty_isolated", func(t *testing.T) { legTtyIsolated(t, spec) })
+	t.Run("truncate_scratch", func(t *testing.T) { legTruncateScratch(t, spec) })
 	if cfg.native {
-		t.Run("fill_bounded", func(t *testing.T) { legFill(t, cfg, spec) })
+		t.Run("fill_bounded", func(t *testing.T) { legFill(t, spec) })
 		t.Run("read_corpus_clean", func(t *testing.T) { legReadCorpus(t, spec) })
 	}
 }
@@ -492,10 +435,7 @@ func legMetadata(t *testing.T, spec Spec) {
 	}
 }
 
-// legChattr proves the chattr/FS_IOC_SETFLAGS metadata-ioctl path is closed: an
-// unjailed control shows `chattr +d` succeeds on this filesystem, then the jailed
-// run must fail and leave lsattr unchanged (rung 1: EROFS; rung 2: seccomp denies
-// the FS_IOC_SETFLAGS/FS_IOC_FSSETXATTR ioctls and SYS_FILE_SETATTR).
+// legChattr checks generic fileattr setters cannot alter host inode flags.
 func legChattr(t *testing.T, spec Spec, probe string) {
 	if !haveTool(t, "chattr") || !haveTool(t, "lsattr") {
 		t.Skip("chattr/lsattr not installed")
@@ -575,10 +515,7 @@ func allProbeOK(out string) bool {
 	return seen
 }
 
-// legXattr proves the user-xattr path is closed: an unjailed control sets a
-// user.* xattr, then the jailed setfattr -n (add) and -x (remove) against a
-// pre-seeded target must fail and leave the getfattr dump unchanged (rung 1:
-// EROFS; rung 2: Landlock read-only + seccomp SETXATTR/REMOVEXATTR deny).
+// legXattr checks setting and removing host xattrs are blocked.
 func legXattr(t *testing.T, spec Spec, probe string) {
 	if !haveTool(t, "setfattr") || !haveTool(t, "getfattr") {
 		t.Skip("setfattr/getfattr not installed")
@@ -651,7 +588,7 @@ func legXattr(t *testing.T, spec Spec, probe string) {
 
 func legAFUnix(t *testing.T, spec Spec, probe string) {
 	// A real listener under $HOME (visible on every rung — /tmp is overmounted on
-	// rung 1 and Landlock-hidden-from-writes on rung 2), with an unjailed control
+	// the jail), with an unjailed control
 	// dial proving the socket actually accepts connections.
 	home := homeDir(t)
 	dir, err := os.MkdirTemp(home, ".sshgate-jailsock-")
@@ -709,8 +646,8 @@ func legProcMem(t *testing.T, spec Spec, probe string) {
 		t.Fatalf("unjailed control could not open /proc/<testpid>/mem (PR_SET_PTRACER ineffective?): %s", out)
 	}
 
-	// Jailed: the open must FAIL — rung 1 cannot even see the host pid (fresh
-	// /proc), rung 2 is blocked by Landlock's ptrace restriction on a target
+	// Jailed: the fresh /proc hides the host pid, and Landlock restricts ptrace
+	// on a target
 	// outside the jail's domain.
 	r := runJailedRan(t, spec, probe+" read-mem "+pid)
 	if strings.Contains(r.stdout, "open=ok") {
@@ -722,36 +659,26 @@ func legProcMem(t *testing.T, spec Spec, probe string) {
 }
 
 func legRlimits(t *testing.T, spec Spec) {
-	rf := runJailed(t, spec, "ulimit -f")
-	if rf.setupErr != nil {
-		t.Fatalf("ulimit -f setup failure: %v", rf.setupErr)
-	}
-	if strings.TrimSpace(rf.stdout) == "unlimited" {
-		t.Errorf("RLIMIT_FSIZE not applied: ulimit -f = unlimited")
-	}
-	// RLIMIT_NPROC is a rung-1-only bound (namespace-local); rung 2 defers it to
-	// the cgroup harden phase, so only assert it on rung 1.
-	if spec.Rung == Rung1Full {
-		ru := runJailed(t, spec, "ulimit -u")
-		if ru.setupErr != nil {
-			t.Fatalf("ulimit -u setup failure: %v", ru.setupErr)
+	r := runJailedRan(t, spec, "cat /proc/self/limits")
+	for name, want := range map[string]string{"Max processes": "256", "Max file size": "1073741824", "Max core file size": "0"} {
+		found := false
+		for _, line := range strings.Split(r.stdout, "\n") {
+			if strings.HasPrefix(line, name) {
+				found = true
+				values := strings.Fields(strings.TrimPrefix(line, name))
+				if len(values) < 2 || values[0] != want || values[1] != want {
+					t.Errorf("%s: %q", name, line)
+				}
+			}
 		}
-		n, err := strconv.Atoi(strings.TrimSpace(ru.stdout))
-		if err != nil {
-			t.Fatalf("ulimit -u output %q not a number: %v", ru.stdout, err)
-		}
-		if n > defaultRlimitNproc {
-			t.Errorf("RLIMIT_NPROC not applied: ulimit -u = %d > %d", n, defaultRlimitNproc)
+		if !found {
+			t.Errorf("missing limit %s", name)
 		}
 	}
 }
 
-// legFifo covers the special-file write that a read-only MOUNT does not stop
-// (opening a FIFO for write skips the ro check). On rung 1 WITHOUT Landlock this
-// is a recorded residual: the write reaches a reader
-// outside the jail. Every Landlock configuration (and rung 1 with Landlock) must
-// deny the write. An unjailed control proves the FIFO mechanism works.
-func legFifo(t *testing.T, cfg jailCfg, spec Spec) {
+// legFifo proves mandatory Landlock blocks writes to existing host FIFOs.
+func legFifo(t *testing.T, spec Spec) {
 	if !haveTool(t, "mkfifo") {
 		t.Skip("mkfifo not installed")
 	}
@@ -778,26 +705,13 @@ func legFifo(t *testing.T, cfg jailCfg, spec Spec) {
 	})
 	reached := strings.Contains(got, "FIFOWRITE")
 
-	if cfg.rung == Rung1Full && cfg.noLandlock() {
-		// Recorded residual: rung 1 with no Landlock cannot stop a FIFO write.
-		if !reached {
-			t.Logf("note: rung-1-no-Landlock FIFO write did NOT reach the reader (got %q); "+
-				"residual not reproduced here but still documented", got)
-		} else {
-			t.Logf("recorded residual: rung-1-no-Landlock FIFO write reached the reader")
-		}
-		return
-	}
 	if reached {
 		t.Errorf("jailed FIFO write reached the reader (got %q); expected it to be denied", got)
 	}
 }
 
-// legIPC covers SysV shared memory. Rung 1 adds CLONE_NEWIPC, so a host shm id is
-// invalid inside the jail and the segment survives a jailed ipcrm (isolated).
-// Rung 2 has no IPC namespace: a jailed ipcrm of a same-uid segment deletes it —
-// a recorded residual. An unjailed control proves the removal mechanism works.
-func legIPC(t *testing.T, cfg jailCfg, spec Spec, probe string) {
+// legIPC proves the IPC namespace protects host SysV segments.
+func legIPC(t *testing.T, spec Spec, probe string) {
 	// Control: removing a throwaway segment works outside the jail.
 	ctlID := shmCreate(t)
 	if out, err := exec.Command(probe, "shm-rmid", strconv.Itoa(ctlID)).CombinedOutput(); err != nil {
@@ -814,27 +728,15 @@ func legIPC(t *testing.T, cfg jailCfg, spec Spec, probe string) {
 	// runJailedRan prepends the canary, so r.exit stays the probe's own exit code.
 	r := runJailedRan(t, spec, probe+" shm-rmid "+strconv.Itoa(id))
 
-	if cfg.rung == Rung1Full {
-		if !shmExists(id) {
-			t.Errorf("rung 1: host shm segment %d was deleted from inside the jail; CLONE_NEWIPC should isolate it", id)
-		}
-		if r.exit == 0 {
-			t.Errorf("rung 1: jailed shm-rmid exited 0; the host id should be invalid in the new IPC namespace")
-		}
-		return
+	if !shmExists(id) {
+		t.Errorf("rung 1: host shm segment %d was deleted from inside the jail; CLONE_NEWIPC should isolate it", id)
 	}
-	// Rung 2: no IPC namespace — the recorded residual.
-	if shmExists(id) {
-		t.Logf("note: rung-2 jailed shm-rmid did NOT delete host segment %d; residual not reproduced here", id)
-	} else {
-		t.Logf("recorded residual (rung 2 has no IPC namespace): jailed ipcrm deleted host shm segment %d", id)
+	if r.exit == 0 {
+		t.Errorf("rung 1: jailed shm-rmid exited 0; the host id should be invalid in the new IPC namespace")
 	}
 }
 
-// legMQueue covers POSIX message queues. Rung 1's CLONE_NEWIPC gives the jail
-// its own queues; rung 2 shares the host's, and Landlock mediates neither
-// mq_unlink nor mq_open's create, so seccomp denies both. Unjailed controls prove
-// the probe really creates and removes a host queue.
+// legMQueue proves host queue creation and removal are refused.
 func legMQueue(t *testing.T, spec Spec, probe string) {
 	name := fmt.Sprintf("sshgate-jailtest-%d-%d", os.Getpid(), time.Now().UnixNano())
 	t.Cleanup(func() { mqUnlink(t, name) })
@@ -901,10 +803,7 @@ func cstr(t *testing.T, s string) *byte {
 }
 
 func legFailClosed(t *testing.T, spec Spec) {
-	stages := []string{"cmdread", "nnp", "caps", "rlimits", "landlock", "seccomp"}
-	if spec.Rung == Rung1Full {
-		stages = []string{"cmdread", "mounts", "nnp", "caps", "rlimits", "landlock", "seccomp"}
-	}
+	stages := []string{"cmdread", "mounts", "nnp", "caps", "rlimits", "landlock", "seccomp"}
 	for _, stage := range stages {
 		target := seedTarget(t)
 		marker := filepath.Join(filepath.Dir(target), "marker")
@@ -934,37 +833,17 @@ func legFailClosed(t *testing.T, spec Spec) {
 	}
 }
 
-// legTruncateSeccompBelowABI3 proves the seccomp truncate fallback: on rung 2
-// below Landlock ABI 3, truncate/ftruncate are denied by seccomp even for a file
-// inside the writable scratch dir (where the write itself would be allowed).
-func legTruncateSeccompBelowABI3(t *testing.T, spec Spec) {
-	scratch := spec.ScratchDir
-	f := filepath.Join(scratch, "f")
-	if err := os.WriteFile(f, []byte("data"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	// A plain append must SUCCEED (writable area)...
-	if r := runJailedRan(t, spec, "printf x >> "+f); r.exit != 0 {
-		t.Fatalf("append to scratch file failed (exit=%d stderr=%q); scratch should be writable", r.exit, r.stderr)
-	}
-	// ...but truncate of a scratch file must FAIL (seccomp EPERM) and NOT shrink it.
-	g := filepath.Join(scratch, "g")
-	if err := os.WriteFile(g, []byte("keepme"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	gBefore := hashFile(t, g)
-	if r := runJailedRan(t, spec, "truncate -s 0 "+g); r.exit == 0 {
-		t.Errorf("truncate of a writable scratch file succeeded below ABI 3; seccomp should deny it")
-	}
-	if hashFile(t, g) != gBefore {
-		t.Errorf("truncate changed the scratch file despite the seccomp deny")
+// Scratch truncation is allowed; host truncation remains covered by legMetadata.
+func legTruncateScratch(t *testing.T, spec Spec) {
+	r := runJailedRan(t, spec, "printf data > /tmp/truncate-test && printf x >> /tmp/truncate-test && truncate -s 0 /tmp/truncate-test && test ! -s /tmp/truncate-test")
+	if r.exit != 0 {
+		t.Fatalf("scratch append/truncate failed: %+v", r)
 	}
 }
 
-// legFill proves a jailed writable-area fill is bounded and cannot exhaust the
-// host: rung 1 stops at the tmpfs size, rung 2 at RLIMIT_FSIZE per file.
-func legFill(t *testing.T, cfg jailCfg, spec Spec) {
-	if spec.Rung == Rung1Full {
+// legFill proves private tmpfs writes stop at the mount size bound.
+func legFill(t *testing.T, spec Spec) {
+	{
 		// /tmp is a bounded tmpfs inside the jail; a fill stops at its size and
 		// the host is untouched. Fill and measure in the SAME jail (a new jail
 		// gets a fresh, empty tmpfs). RLIMIT_FSIZE (1 GiB) is far above the
@@ -991,21 +870,6 @@ func legFill(t *testing.T, cfg jailCfg, spec Spec) {
 		}
 		return
 	}
-	// Rung 2: the scratch dir is on host disk, bounded per file by RLIMIT_FSIZE.
-	// The write dies with SIGXFSZ at the limit and the file is capped there.
-	fill := filepath.Join(spec.ScratchDir, "fill")
-	r := runJailedRan(t, spec, "cat /dev/zero > "+fill+" 2>/dev/null")
-	if r.exit == 0 {
-		t.Errorf("rung 2: scratch fill exited 0; expected SIGXFSZ at RLIMIT_FSIZE")
-	}
-	fi, err := os.Stat(fill)
-	if err != nil {
-		t.Fatalf("stat scratch fill: %v", err)
-	}
-	if fi.Size() > defaultRlimitFsize {
-		t.Errorf("rung 2: scratch fill reached %d bytes > RLIMIT_FSIZE %d", fi.Size(), defaultRlimitFsize)
-	}
-	_ = os.Remove(fill)
 }
 
 // legProcfsReadOnly proves the rung-1 jail mounts its /proc read-only. The kernel
@@ -1076,11 +940,7 @@ func legReaper(t *testing.T, spec Spec) {
 	}
 }
 
-// legProcState proves rung 2's seccomp wall against a jailed command retuning
-// ANOTHER same-uid host process (rung 1's pid namespace hides host pids, so this
-// is a rung-2-only concern). The targets are throwaway `sleep` processes the test
-// owns — never a whole uid — so a jailed attempt can do no host-wide harm even if
-// the wall regressed. An unjailed control proves the operations work on the host.
+// legProcState proves outside process state is isolated by the PID namespace.
 func legProcState(t *testing.T, spec Spec, probe string) {
 	// Control target: prove prlimit/setpriority/setaffinity WORK unjailed.
 	ctl := startSleeper(t)
@@ -1117,10 +977,7 @@ func legProcState(t *testing.T, spec Spec, probe string) {
 	}
 }
 
-// legTtyIsolated proves a rung-2 jailed command cannot change the terminal
-// state of a pty it did not inherit. The test opens throwaway ptys OUTSIDE the
-// jail; an unjailed `stty -F` control proves the change works on the host, then
-// the jailed attempt must fail and leave termios and winsize unchanged.
+// legTtyIsolated checks host pty termios and window size remain unchanged.
 func legTtyIsolated(t *testing.T, spec Spec) {
 	if !haveTool(t, "stty") {
 		t.Skip("stty not installed")
@@ -1221,6 +1078,10 @@ func legReadCorpus(t *testing.T, spec Spec) {
 			continue
 		}
 		if r.exit == 0 {
+			continue
+		}
+		if os.Geteuid() == 0 && cmd == "dmesg" && strings.Contains(strings.ToLower(r.stderr), "operation not permitted") {
+			t.Log("dmesg denied after dropping CAP_SYSLOG")
 			continue
 		}
 		if isDaemonRow(cmd) {

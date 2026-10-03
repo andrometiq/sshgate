@@ -48,7 +48,7 @@ type ExecOpts struct {
 	// huge command (we keep the head; a truncation marker is appended).
 	CaptureLimit int
 	// Confine, when non-nil, runs the command inside the kernel jail the Spec
-	// describes (rung 1 full namespaces, or rung 2 Landlock) instead of a plain
+	// describes (the ro-v1 profile) instead of a plain
 	// /bin/sh -c. A nil Confine is byte-for-byte today's path (rung 3 / unset):
 	// the gate passes nil on an unconfined host so this field is purely additive.
 	// The jail only ADDS restrictions; stdout/stderr/stdin/redaction wiring below

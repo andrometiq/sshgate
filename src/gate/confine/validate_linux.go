@@ -31,7 +31,7 @@ func decodeSpec(raw string, spec *Spec) error {
 }
 
 func (s Spec) validate(worker bool) error {
-	if s.Rung != Rung1Full && s.Rung != Rung2Landlock || s.ForceABI < ForceNoLandlock {
+	if s.Profile != ProfileROv1 || s.ForceABI < ForceNoLandlock {
 		return unix.EINVAL
 	}
 	if s.InjectFailAt != "" {
@@ -45,7 +45,7 @@ func (s Spec) validate(worker bool) error {
 			return unix.EINVAL
 		}
 	}
-	if worker && s.Rung == Rung1Full && (s.ParentNS.User == 0 || s.ParentNS.Mnt == 0 || s.ParentNS.Pid == 0 || s.ParentNS.IPC == 0) {
+	if worker && (s.ParentNS.User == 0 || s.ParentNS.Mnt == 0 || s.ParentNS.Pid == 0 || s.ParentNS.IPC == 0) {
 		return unix.EINVAL
 	}
 	return nil

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"unsafe"
 
+	"github.com/karthikeyan5/sshgate/src/gate/confine/jailmut"
 	"golang.org/x/sys/unix"
 )
 
@@ -78,16 +79,13 @@ func probeLandlockABI() int {
 	return int(abi)
 }
 
-// applyLandlock builds and enforces the ruleset for the given rung. NNP must
-// already be set. On rung 2 Landlock is the primary fs wall and an ABI < 1
-// aborts; on rung 1 it layers on top of EROFS, and a host whose probed ABI is
-// ≥1 must apply it (abort on any error) — fail closed, never execve half-applied.
-func applyLandlock(rung Rung, abi int, writable []string) error {
+// applyLandlock requires Landlock even when mounts provide another wall.
+func applyLandlock(abi int, writable []string) error {
 	if abi < 1 {
-		if rung == Rung2Landlock {
-			return fmt.Errorf("landlock required on rung 2 but unavailable (abi=%d)", abi)
+		if jailmut.On("P-LL-REQUIRED") {
+			return nil
 		}
-		return nil // rung 1 with no Landlock: EROFS is the wall
+		return unix.ENOSYS
 	}
 
 	attr := unix.LandlockRulesetAttr{Access_fs: handledFS(abi)}

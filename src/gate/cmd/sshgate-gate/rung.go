@@ -11,7 +11,7 @@ import (
 )
 
 // jailFloorFile is the optional operator-written rung floor in the gate dir.
-// It holds one rung name ("full" | "landlock" | "unconfined"). Like gate.pub it
+// It holds one rung name ("full" | "unconfined"). Like gate.pub it
 // is static config: the command path only ever reads it.
 const jailFloorFile = "jail-floor"
 
@@ -41,16 +41,16 @@ func readPinnedFloor(gateDir string) (confine.Rung, error) {
 		return 0, fmt.Errorf("read %s: %w", jailFloorFile, err)
 	}
 	name := strings.TrimSpace(string(b))
-	for _, r := range []confine.Rung{confine.Rung1Full, confine.Rung2Landlock, confine.Rung3Unconfined} {
+	for _, r := range []confine.Rung{confine.Rung1Full, confine.Rung3Unconfined} {
 		if name == r.String() {
 			return r, nil
 		}
 	}
-	return 0, fmt.Errorf("%s holds %q, want full, landlock or unconfined", jailFloorFile, name)
+	return 0, fmt.Errorf("%s holds %q, want full or unconfined", jailFloorFile, name)
 }
 
 // confineSpecFor turns the host probe and the pinned floor into the read jail.
-// It returns a Spec for rung 1 or 2, nil for rung 3 (today's unconfined path),
+// It returns ro-v1 for a full probe, nil for an unconfined probe,
 // or a non-empty deny reason. It never downgrades: a probe that failed for an
 // unexplained reason, or a live rung below the pinned floor, denies.
 func confineSpecFor(rep confine.Report, floor confine.Rung) (*confine.Spec, string) {
@@ -61,9 +61,9 @@ func confineSpecFor(rep confine.Report, floor confine.Rung) (*confine.Spec, stri
 		return nil, fmt.Sprintf("jail rung %s is below the pinned floor %s; refusing to run the read", rep.Rung, floor)
 	}
 	switch rep.Rung {
-	case confine.Rung1Full, confine.Rung2Landlock:
+	case confine.Rung1Full:
 		// Inet stays allowed in this phase; the classifier still stands in front.
-		return &confine.Spec{Rung: rep.Rung, AllowInet: true}, ""
+		return &confine.Spec{Profile: confine.ProfileROv1, Net: true}, ""
 	case confine.Rung3Unconfined:
 		return nil, ""
 	default:
@@ -90,5 +90,5 @@ func rungLabel(spec *confine.Spec) string {
 	if spec == nil {
 		return confine.Rung3Unconfined.String()
 	}
-	return spec.Rung.String()
+	return confine.Rung1Full.String()
 }

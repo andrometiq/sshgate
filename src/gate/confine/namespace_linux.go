@@ -27,8 +27,7 @@ const tmpfsSizeBytes = 64 << 20 // 64 MiB per mount
 // FIFO or socket for write skips the mount's ro check. So the host /dev is
 // replaced by a minimal one (otherwise every device the SSH user can open by DAC
 // — its own ttys, /dev/fuse, group-owned devices — stays writable), and FIFOs
-// elsewhere on the ro bind are left to Landlock, which handles WRITE_FILE. On a
-// rung-1 host WITHOUT Landlock such FIFOs stay writable: a recorded residual.
+// elsewhere on the ro bind require Landlock, which handles WRITE_FILE.
 func setupMounts() error {
 	// 1. Make the whole tree private so nothing we do propagates to the host.
 	if err := unix.Mount("", "/", "", unix.MS_REC|unix.MS_PRIVATE, ""); err != nil {

@@ -36,7 +36,7 @@ func p12Registry() []prot {
 	add := func(id, site string, legs ...harness.Leg) {
 		protections = append(protections, prot{ID: id, Site: site, Class: "single", DirectLeg: legs[0].Name, MutationSets: []harness.MutationSet{{IDs: []string{id}, Legs: legs}}})
 	}
-	add("P-SPEC", "decodeSpec / Spec.validate", p12Leg("L-SPEC-REJECT", "MUTATION-EFFECT chmod"))
+	add("P-SPEC", "decodeSpec / Spec.validate", p12Leg("L-SPEC-REJECT", "MUTATION-EFFECT reached-exec"))
 	nsLegs := []harness.Leg{}
 	for _, name := range []string{"L-NSVERIFY-user", "L-NSVERIFY-mnt", "L-NSVERIFY-pid", "L-NSVERIFY-ipc", "L-NSVERIFY-parent", "L-FAULT-nsverify"} {
 		nsLegs = append(nsLegs, p12Leg(name, "MUTATION-EFFECT reached-exec"))
@@ -67,6 +67,9 @@ func p12Registry() []prot {
 		add("P-FAULT-"+stage, "RunWorker "+stage+" error check", legs...)
 	}
 	add("P-SC-TSYNC", "installSeccomp positive return check", p12Leg("L-FAULT-tsync", "MUTATION-EFFECT reached-exec"))
+	add("P-SC-META", "metadata syscalls and generic fileattr ioctls", p12Leg("L-SCRATCH-META", "MUTATION-EFFECT metadata"), p12Leg("L-FILEATTR-ERRNO", "MUTATION-EFFECT fileattr-errno"))
+	protections[len(protections)-1].Class = "multi"
+	add("P-LL-REQUIRED", "applyLandlock ABI floor", p12Leg("L-LL-REQUIRED", "MUTATION-EFFECT reached-exec"))
 	return protections
 }
 

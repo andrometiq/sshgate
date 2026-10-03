@@ -60,7 +60,7 @@ func TestDoctorReport(t *testing.T) {
 func TestDoctorReportsDeny(t *testing.T) {
 	dir := t.TempDir()
 	withGateDir(t, dir)
-	withDetect(t, confine.Report{Rung: confine.Rung2Landlock, ProbeErr: errors.New("transient")})
+	withDetect(t, confine.Report{Rung: confine.Rung3Unconfined, ProbeErr: errors.New("transient")})
 	_, out := doctorOut(t, "--json")
 	var d doctorReport
 	if err := json.Unmarshal([]byte(out), &d); err != nil {
@@ -99,7 +99,7 @@ func TestDoctorPinEnforced(t *testing.T) {
 		t.Fatalf("readPinnedFloor = %v, %v", got, err)
 	}
 
-	withDetect(t, confine.Report{Rung: confine.Rung2Landlock})
+	withDetect(t, confine.Report{Rung: confine.Rung3Unconfined})
 	if code, _, stderr := runWith(t, "cat /etc/hostname"); code != exitNoPermVal || !strings.Contains(stderr, "below the pinned floor") {
 		t.Errorf("read below the pinned floor: exit = %d, stderr = %q", code, stderr)
 	}
@@ -110,8 +110,8 @@ func TestDoctorPinEnforced(t *testing.T) {
 func TestDoctorPinKeepsOrRaises(t *testing.T) {
 	dir := t.TempDir()
 	withGateDir(t, dir)
-	writeFloor(t, dir, "landlock\n", 0o644)
-	for _, rung := range []confine.Rung{confine.Rung2Landlock, confine.Rung1Full} {
+	writeFloor(t, dir, "unconfined\n", 0o644)
+	for _, rung := range []confine.Rung{confine.Rung1Full, confine.Rung1Full} {
 		withDetect(t, confine.Report{Rung: rung})
 		if code, _ := doctorOut(t, "--pin"); code != exitOK {
 			t.Fatalf("--pin at %s exit = %d", rung, code)
@@ -132,7 +132,8 @@ func TestDoctorPinRefuses(t *testing.T) {
 	}{
 		{name: "probe error", rep: confine.Report{Rung: confine.Rung1Full, ProbeErr: errors.New("x")}},
 		{name: "rung3", rep: confine.Report{Rung: confine.Rung3Unconfined}},
-		{name: "would lower a floor", rep: confine.Report{Rung: confine.Rung2Landlock}, floor: "full\n"},
+		{name: "would lower a floor", rep: confine.Report{Rung: confine.Rung3Unconfined}, floor: "full\n"},
+		{name: "removed landlock floor", rep: confine.Report{Rung: confine.Rung1Full}, floor: "landlock\n"},
 		{name: "damaged floor", rep: confine.Report{Rung: confine.Rung1Full}, floor: "strongest\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

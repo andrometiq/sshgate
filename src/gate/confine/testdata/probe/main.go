@@ -75,6 +75,33 @@ func main() {
 	}
 	args := os.Args[2:]
 	switch os.Args[1] {
+	case "metadata":
+		p := args[0]
+		report("chmod", unix.Chmod(p, 0644))
+		report("chown", unix.Chown(p, os.Getuid(), os.Getgid()))
+		report("setxattr", unix.Setxattr(p, "user.sshgate", []byte("test"), 0))
+		report("utimensat", unix.UtimesNanoAt(unix.AT_FDCWD, p, []unix.Timespec{{Sec: 1000}, {Sec: 1000}}, 0))
+		var stat unix.Stat_t
+		if unix.Stat(p, &stat) == nil {
+			fmt.Printf("mode=%o\nmtime=%d\n", stat.Mode&0777, stat.Mtim.Sec)
+		}
+		value := make([]byte, 16)
+		if n, err := unix.Getxattr(p, "user.sshgate", value); err == nil {
+			fmt.Printf("xattr=%s\n", value[:n])
+		}
+
+	case "fileattr":
+		fd, err := unix.Open(args[0], unix.O_RDONLY|unix.O_CLOEXEC, 0)
+		if !report("open", err) {
+			os.Exit(2)
+		}
+		defer unix.Close(fd)
+		flags := uint32(fsNodumpFl)
+		report("setflags", ioctlPtr(fd, unix.FS_IOC_SETFLAGS, unsafe.Pointer(&flags)))
+		report("setflags32", ioctlPtr(fd, 0x40046602, unsafe.Pointer(&flags)))
+		var fsx [fsxattrSize]byte
+		*(*uint32)(unsafe.Pointer(&fsx[0])) = fsXflagNodump
+		report("fssetxattr", ioctlPtr(fd, fsIocFssetxattr, unsafe.Pointer(&fsx[0])))
 	case "root-state":
 		for _, name := range []string{"uid_map", "gid_map", "status"} {
 			data, err := os.ReadFile("/proc/self/" + name)
@@ -161,7 +188,7 @@ func main() {
 			fmt.Fprintln(os.Stderr, "bad pid:", err)
 			os.Exit(2)
 		}
-		// Each op changes ANOTHER process's scheduling state. On rung 2 the jail's
+		// Each op changes ANOTHER process's scheduling state. The jail's
 		// seccomp must refuse all three (EPERM); unjailed they succeed.
 		lim := unix.Rlimit{Cur: 7, Max: 7}
 		report("prlimit", unix.Prlimit(pid, unix.RLIMIT_NOFILE, &lim, nil))

@@ -22,21 +22,17 @@ import (
 // hostile writer cannot make the worker buffer without bound.
 const maxCmdBytes = 1 << 20
 
-// command builds the Jailed Cmd that runs `sh -c cmd` inside the jail. On rung 1
-// it re-execs the __jail shim with the clone SysProcAttr; on rung 2 it re-execs
-// __jailexec directly. The command travels on fd 3 and the setup status on fd 4,
-// never on argv.
+// command clones the shim; the command and status travel on fd 3 and fd 4.
 func (s Spec) command(ctx context.Context, cmd string) (*Jailed, error) {
 	if !jailmut.On("P-SPEC") && s.validate(false) != nil {
 		return nil, &SetupError{Stage: "spec", Errno: unix.EINVAL}
 	}
-	if s.Rung == Rung1Full {
-		var err error
-		s.ParentNS, err = namespaceIDs()
-		if err != nil {
-			return nil, &SetupError{Stage: "spec", Errno: errnoOf(err)}
-		}
+	var err error
+	s.ParentNS, err = namespaceIDs()
+	if err != nil {
+		return nil, &SetupError{Stage: "spec", Errno: errnoOf(err)}
 	}
+
 	specJSON, err := json.Marshal(s)
 	if err != nil {
 		return nil, fmt.Errorf("confine: marshal spec: %w", err)
@@ -53,19 +49,9 @@ func (s Spec) command(ctx context.Context, cmd string) (*Jailed, error) {
 		return nil, fmt.Errorf("confine: status pipe: %w", err)
 	}
 
-	var sentinel string
-	var attr *syscall.SysProcAttr
-	if s.Rung == Rung1Full {
-		sentinel = SentinelShim
-		attr = cloneSysProcAttr()
-	} else {
-		sentinel = SentinelWorker
-		attr = &syscall.SysProcAttr{Setpgid: true}
-	}
-
-	c := exec.CommandContext(ctx, "/proc/self/exe", sentinel, string(specJSON))
+	c := exec.CommandContext(ctx, "/proc/self/exe", SentinelShim, string(specJSON))
 	c.ExtraFiles = []*os.File{cmdR, statusW} // -> child fd 3 (command), fd 4 (status)
-	c.SysProcAttr = attr
+	c.SysProcAttr = cloneSysProcAttr()
 
 	return &Jailed{
 		Cmd:       c,
@@ -184,21 +170,19 @@ func RunWorker(args []string) int {
 	abi := effectiveABI(probeLandlockABI(), spec.ForceABI)
 	rootSSH := os.Getuid() == 0
 
-	if spec.Rung == Rung1Full {
-		err := verifyNamespaces(spec.ParentNS)
-		if st, errno := spec.inject(); st == "nsverify" {
-			err = errno
-		}
-		if !jailmut.On("P-NSVERIFY") && err != nil {
-			return fail("nsverify", err)
-		}
-		err = setupMounts()
-		if st, errno := spec.inject(); st == "mounts" {
-			err = errno
-		}
-		if !jailmut.On("P-FAULT-mounts") && err != nil {
-			return fail("mounts", err)
-		}
+	err = verifyNamespaces(spec.ParentNS)
+	if st, errno := spec.inject(); st == "nsverify" {
+		err = errno
+	}
+	if !jailmut.On("P-NSVERIFY") && err != nil {
+		return fail("nsverify", err)
+	}
+	err = setupMounts()
+	if st, errno := spec.inject(); st == "mounts" {
+		err = errno
+	}
+	if !jailmut.On("P-FAULT-mounts") && err != nil {
+		return fail("mounts", err)
 	}
 	err = setNoNewPrivs()
 	if st, errno := spec.inject(); st == "nnp" {
@@ -207,21 +191,21 @@ func RunWorker(args []string) int {
 	if !jailmut.On("P-FAULT-nnp") && err != nil {
 		return fail("nnp", err)
 	}
-	err = dropCaps(spec.Rung, rootSSH)
+	err = dropCaps(rootSSH)
 	if st, errno := spec.inject(); st == "caps" {
 		err = errno
 	}
 	if !jailmut.On("P-FAULT-caps") && err != nil {
 		return fail("caps", err)
 	}
-	err = setRlimits(spec.Rung)
+	err = setRlimits()
 	if st, errno := spec.inject(); st == "rlimits" {
 		err = errno
 	}
 	if !jailmut.On("P-FAULT-rlimits") && err != nil {
 		return fail("rlimits", err)
 	}
-	err = applyLandlock(spec.Rung, abi, writableSet(&spec))
+	err = applyLandlock(abi, writableSet())
 	if st, errno := spec.inject(); st == "landlock" {
 		err = errno
 	}
@@ -229,11 +213,8 @@ func RunWorker(args []string) int {
 		return fail("landlock", err)
 	}
 	filter := buildFilter(filterParams{
-		allowInet:        spec.AllowInet,
-		denyMetadata:     spec.Rung == Rung2Landlock,
-		denyTruncate:     spec.Rung == Rung2Landlock && abi < 3,
-		denyTtyIoctl:     spec.Rung == Rung2Landlock && abi < 5,
-		denyOpenByHandle: rootSSH && spec.Rung == Rung1Full,
+		allowInet:        spec.Net,
+		denyOpenByHandle: rootSSH,
 	})
 	err = installSeccomp(filter, spec)
 	if err != nil {
@@ -257,7 +238,7 @@ func RunWorker(args []string) int {
 	// Report success, then hand off to /bin/sh. The execve closes fd 4 (CLOEXEC),
 	// so the parent reads exactly "X" then EOF.
 	_, _ = io.WriteString(statusW, statusReachedExec)
-	execErr := unix.Exec(execPath, []string{"sh", "-c", cmd}, jailEnv(&spec))
+	execErr := unix.Exec(execPath, []string{"sh", "-c", cmd}, jailEnv())
 	if jailmut.On("P-FAULT-exec") {
 		return ExitSetupFailed
 	}
@@ -277,39 +258,19 @@ func effectiveABI(probed, force int) int {
 	}
 }
 
-// writableSet is the per-rung list of paths Landlock lets the jailed command
-// write to.
-func writableSet(spec *Spec) []string {
-	switch spec.Rung {
-	case Rung1Full:
-		return []string{"/tmp", "/var/tmp", "/dev/shm", "/dev/null"}
-	case Rung2Landlock:
-		w := []string{"/dev/null"}
-		if spec.ScratchDir != "" {
-			w = append([]string{spec.ScratchDir}, w...)
-		}
-		return w
-	default:
-		return nil
-	}
+// writableSet names the private writable mounts and the null device.
+func writableSet() []string {
+	return []string{"/tmp", "/var/tmp", "/dev/shm", "/dev/null"}
 }
 
 // jailEnv builds the child environment: the gate's env with the temp/history
 // variables redirected into the jail's writable area, so incidental read-time
 // writes (pagers, shell history, sort -T) land somewhere writable and nothing
 // else breaks.
-func jailEnv(spec *Spec) []string {
-	base := spec.ScratchDir
-	if spec.Rung == Rung1Full {
-		base = "/tmp" // tmpfs inside the jail
-	}
-	overrides := map[string]string{}
-	if base != "" {
-		overrides["TMPDIR"] = base
-		overrides["TMP"] = base
-		overrides["TEMP"] = base
-		overrides["HISTFILE"] = base + "/.sh_history"
-		overrides["XDG_CACHE_HOME"] = base + "/.cache"
+func jailEnv() []string {
+	overrides := map[string]string{
+		"TMPDIR": "/tmp", "TMP": "/tmp", "TEMP": "/tmp",
+		"HISTFILE": "/tmp/.sh_history", "XDG_CACHE_HOME": "/tmp/.cache",
 	}
 	var out []string
 	for _, kv := range os.Environ() {

@@ -16,7 +16,6 @@ import (
 func TestRungString(t *testing.T) {
 	for r, want := range map[Rung]string{
 		Rung1Full:       "full",
-		Rung2Landlock:   "landlock",
 		Rung3Unconfined: "unconfined",
 	} {
 		if got := r.String(); got != want {
@@ -29,10 +28,10 @@ func TestRungString(t *testing.T) {
 // travels as JSON in argv and must survive unchanged.
 func TestSpecJSONRoundTrip(t *testing.T) {
 	in := Spec{
-		Rung:         Rung2Landlock,
+		Profile:      ProfileROv1,
+		ParentNS:     NSIDs{1, 2, 3, 4},
 		ForceABI:     2,
-		AllowInet:    true,
-		ScratchDir:   "/tmp/scratch-xyz",
+		Net:          true,
 		InjectFailAt: "seccomp",
 	}
 	b, err := json.Marshal(in)
@@ -97,42 +96,42 @@ func TestStatusFromReport(t *testing.T) {
 	}
 }
 
-// TestCommandRung3Refused proves Command never builds a jail for rung 3.
-func TestCommandRung3Refused(t *testing.T) {
-	_, err := Spec{Rung: Rung3Unconfined}.Command(context.Background(), "echo hi")
+// An empty profile never requests a jail; unconfined callers use a nil Spec.
+func TestCommandEmptyProfileRefused(t *testing.T) {
+	_, err := Spec{}.Command(context.Background(), "echo hi")
 	if err == nil {
-		t.Fatal("expected an error for rung-3 Command")
+		t.Fatal("expected an error for empty-profile Command")
 	}
 }
 
 func TestStrictSpecDecode(t *testing.T) {
-	t.Run("U-SpecRejectsUnknownRung", func(t *testing.T) {
-		for _, raw := range []string{`{"Rung":5}`, `{"Rung":-1}`, `{"Rung":0}`, `{"Rung":1,"Unexpected":true}`, `{"Rung":1} {}`, `{"Rung":1} garbage`, `null`, `{"Rung":1,"ForceABI":-2}`, `{"Rung":1,"InjectFailAt":"rbind"}`, `{"Rung":1,"InjectFailAt":"nnp:UNKNOWN"}`, `{"Rung":2}`} {
+	t.Run("U-SpecRejectsUnknownProfile", func(t *testing.T) {
+		for _, raw := range []string{`{"Profile":"unknown"}`, `{"Rung":-1}`, `{"Rung":0}`, `{"Profile":"ro-v1","ParentNS":{"User":1,"Mnt":2,"Pid":3,"IPC":4},"Unexpected":true}`, `{"Profile":"ro-v1","ParentNS":{"User":1,"Mnt":2,"Pid":3,"IPC":4}} {}`, `{"Profile":"ro-v1","ParentNS":{"User":1,"Mnt":2,"Pid":3,"IPC":4}} garbage`, `null`, `{"Profile":"ro-v1","ParentNS":{"User":1,"Mnt":2,"Pid":3,"IPC":4},"ForceABI":-2}`, `{"Profile":"ro-v1","ParentNS":{"User":1,"Mnt":2,"Pid":3,"IPC":4},"InjectFailAt":"rbind"}`, `{"Profile":"ro-v1","ParentNS":{"User":1,"Mnt":2,"Pid":3,"IPC":4},"InjectFailAt":"nnp:UNKNOWN"}`, `{"Rung":2}`} {
 			var spec Spec
 			if err := decodeSpec(raw, &spec); err != syscall.EINVAL {
 				t.Errorf("decode %s: got %v want EINVAL", raw, err)
 			}
 		}
 	})
-	for _, rung := range []Rung{-1, 0, 5} {
-		jailed, err := (Spec{Rung: rung}).Command(context.Background(), "true")
+	for _, profile := range []string{"", "landlock", "ro-v2"} {
+		jailed, err := (Spec{Profile: profile}).Command(context.Background(), "true")
 		if jailed != nil {
 			jailed.Abort()
 		}
 		var setup *SetupError
 		if !errors.As(err, &setup) || setup.Stage != "spec" || setup.Errno != syscall.EINVAL {
-			t.Errorf("parent rung %d: got %v", rung, err)
+			t.Errorf("parent profile %s: got %v", profile, err)
 		}
 	}
 	var spec Spec
-	if err := decodeSpec(`{"Rung":1,"InjectFailAt":"seccomp:EIO"}`, &spec); err != nil {
+	if err := decodeSpec(`{"Profile":"ro-v1","ParentNS":{"User":1,"Mnt":2,"Pid":3,"IPC":4},"InjectFailAt":"seccomp:EIO"}`, &spec); err != nil {
 		t.Fatal(err)
 	}
 }
 
 func TestSpecRequiresEveryParentNamespace(t *testing.T) {
 	for _, ids := range []NSIDs{{0, 2, 3, 4}, {1, 0, 3, 4}, {1, 2, 0, 4}, {1, 2, 3, 0}} {
-		raw, err := json.Marshal(Spec{Rung: Rung1Full, ParentNS: ids})
+		raw, err := json.Marshal(Spec{Profile: ProfileROv1, ParentNS: ids})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -145,18 +144,20 @@ func TestSpecRequiresEveryParentNamespace(t *testing.T) {
 
 func TestWorkerRejectsInvalidSpecBeforeInjection(t *testing.T) {
 	for _, raw := range []string{
-		`{"Rung":1,"InjectFailAt":"spec:UNKNOWN"}`,
-		`{"Rung":5,"InjectFailAt":"spec:EIO"}`,
-		`{"Rung":1,"Unknown":true,"InjectFailAt":"spec:EIO"}`,
+		`{"Profile":"ro-v1","ParentNS":{"User":1,"Mnt":2,"Pid":3,"IPC":4},"InjectFailAt":"spec:UNKNOWN"}`,
+		`{"Profile":"unknown","InjectFailAt":"spec:EIO"}`,
+		`{"Profile":"ro-v1","ParentNS":{"User":1,"Mnt":2,"Pid":3,"IPC":4},"Unknown":true,"InjectFailAt":"spec:EIO"}`,
 	} {
 		t.Run(raw, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			jailed, err := (Spec{Rung: Rung2Landlock}).Command(ctx, "echo MUST_NOT_RUN")
+			jailed, err := (Spec{Profile: ProfileROv1}).Command(ctx, "echo MUST_NOT_RUN")
 			if err != nil {
 				t.Fatal(err)
 			}
 			defer jailed.Abort()
+			jailed.Cmd.Args[1] = SentinelWorker
+			jailed.Cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 			jailed.Cmd.Args[2] = raw
 			var output bytes.Buffer
 			jailed.Cmd.Stdout = &output

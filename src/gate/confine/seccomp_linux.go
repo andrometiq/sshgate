@@ -41,9 +41,6 @@ const (
 // assemble and evaluate every combination.
 type filterParams struct {
 	allowInet        bool
-	denyMetadata     bool // true on rung 2: Landlock never covers chmod/chown/xattr/utime/fs-flag ioctls or POSIX mqueues
-	denyTruncate     bool // true only on rung 2 below Landlock ABI 3 (EROFS/Landlock cover it otherwise)
-	denyTtyIoctl     bool // true only on rung 2 below Landlock ABI 5 (Landlock IOCTL_DEV covers it otherwise)
 	denyOpenByHandle bool // true only for a root SSH user (pairs with CAP_DAC_READ_SEARCH)
 }
 
@@ -132,11 +129,8 @@ func (a *bpfAsm) build() []unix.SockFilter {
 	return a.ops
 }
 
-// buildFilter assembles the seccomp program for the given params. Fail-closed by
-// construction: unknown-high and x32 syscalls are rejected, a fixed denylist
-// returns EPERM/ENOSYS, and clone/unshare/setns/ioctl/socket (plus, on rung 2,
-// the process-state syscalls prlimit64/setpriority/ioprio_set/sched_set*) are
-// argument filtered. Everything else is allowed (reads just work).
+// buildFilter guards the architecture and unknown syscalls, then applies
+// syscall denies and argument filters. The remaining known calls are allowed.
 func buildFilter(p filterParams) []unix.SockFilter {
 	a := newAsm()
 
@@ -158,17 +152,13 @@ func buildFilter(p filterParams) []unix.SockFilter {
 	for _, s := range flatDeny {
 		a.jeq(s, "deny", "")
 	}
-	if p.denyMetadata {
+	if !jailmut.On("P-SC-META") {
 		for _, s := range metadataDeny {
 			a.jeq(s, "deny", "")
 		}
-		for _, s := range mqueueDeny {
-			a.jeq(s, "deny", "")
-		}
 	}
-	if p.denyTruncate {
-		a.jeq(uint32(unix.SYS_TRUNCATE), "deny", "")
-		a.jeq(uint32(unix.SYS_FTRUNCATE), "deny", "")
+	for _, s := range mqueueDeny {
+		a.jeq(s, "deny", "")
 	}
 	if p.denyOpenByHandle {
 		a.jeq(uint32(unix.SYS_OPEN_BY_HANDLE_AT), "deny", "")
@@ -180,17 +170,6 @@ func buildFilter(p filterParams) []unix.SockFilter {
 	a.jeq(uint32(unix.SYS_SETNS), "setnsH", "")
 	a.jeq(uint32(unix.SYS_IOCTL), "ioctlH", "")
 	a.jeq(uint32(unix.SYS_SOCKET), "socketH", "")
-	if p.denyMetadata {
-		// Rung 2 only: block retuning ANOTHER host process's scheduling state
-		// (the pid-namespace hides these on rung 1). prlimit64/sched_set* target
-		// a pid in arg0; setpriority/ioprio_set target it via (which, who).
-		a.jeq(uint32(unix.SYS_PRLIMIT64), "pidArg0H", "")
-		for _, s := range procStatePidSyscalls {
-			a.jeq(s, "pidArg0H", "")
-		}
-		a.jeq(uint32(unix.SYS_SETPRIORITY), "setprioH", "")
-		a.jeq(uint32(unix.SYS_IOPRIO_SET), "ioprioH", "")
-	}
 	a.ja("allow")
 
 	// clone: deny if the legacy flags carry any namespace bit.
@@ -211,20 +190,13 @@ func buildFilter(p filterParams) []unix.SockFilter {
 	a.and(uint32(nsCloneBits))
 	a.jeq(0, "allow", "deny")
 
-	// ioctl: deny the terminal-injection requests, on rung 2 the requests that
-	// change inode metadata through a read-only fd, and on rung 2 below ABI 5
-	// the tty state changes.
+	// Block terminal injection and generic VFS fileattr setters.
 	a.mark("ioctlH")
 	a.ld(offArg1)
 	a.jeq(uint32(unix.TIOCSTI), "deny", "")
 	a.jeq(uint32(unix.TIOCLINUX), "deny", "")
-	if p.denyMetadata {
-		for _, r := range metadataIoctlDeny {
-			a.jeq(r, "deny", "")
-		}
-	}
-	if p.denyTtyIoctl {
-		for _, r := range ttyMutateIoctlDeny {
+	if !jailmut.On("P-SC-META") {
+		for _, r := range fileattrIoctlDeny {
 			a.jeq(r, "deny", "")
 		}
 	}
@@ -248,30 +220,6 @@ func buildFilter(p filterParams) []unix.SockFilter {
 	a.jeq(uint32(unix.NETLINK_ROUTE), "allow", "")
 	a.jeq(uint32(unix.NETLINK_SOCK_DIAG), "allow", "")
 	a.ja("deny")
-
-	// prlimit64/sched_set*: the target pid is arg0's low word. pid 0 is "self"
-	// (allowed, so a jailed command's own limits/affinity still work); any other
-	// pid is another host process and is denied on rung 2.
-	a.mark("pidArg0H")
-	a.ld(offArg0)
-	a.jeq(0, "allow", "deny")
-
-	// setpriority(which, who, prio): allow only self (which==PRIO_PROCESS, who==0),
-	// so `renice -p <pid>` and `renice -u <user>` (which==PRIO_USER) are both
-	// denied on rung 2.
-	a.mark("setprioH")
-	a.ld(offArg0)
-	a.jeq(uint32(unix.PRIO_PROCESS), "", "deny")
-	a.ld(offArg1)
-	a.jeq(0, "allow", "deny")
-
-	// ioprio_set(which, who, ioprio): allow only self
-	// (which==IOPRIO_WHO_PROCESS, who==0).
-	a.mark("ioprioH")
-	a.ld(offArg0)
-	a.jeq(ioprioWhoProcess, "", "deny")
-	a.ld(offArg1)
-	a.jeq(0, "allow", "deny")
 
 	// Terminal actions.
 	a.mark("allow")

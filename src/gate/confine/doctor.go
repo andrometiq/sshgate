@@ -106,10 +106,8 @@ func decide(fx probeFacts) Report {
 	}
 
 	switch {
-	case rep.Userns:
+	case rep.Userns && rep.LandlockABI >= 1:
 		rep.Rung = Rung1Full
-	case rep.LandlockABI >= 1:
-		rep.Rung = Rung2Landlock
 	default:
 		rep.Rung = Rung3Unconfined
 	}

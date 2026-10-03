@@ -26,6 +26,12 @@ func TestDetectThisHost(t *testing.T) {
 		t.Skipf("host has no unprivileged userns (rung=%s, landlock_abi=%d): %v",
 			rep.Rung, rep.LandlockABI, rep.ProbeErr)
 	}
+	if rep.LandlockABI < 1 {
+		if rep.Rung != Rung3Unconfined {
+			t.Errorf("no Landlock: rung=%s", rep.Rung)
+		}
+		return
+	}
 	if rep.Rung != Rung1Full {
 		t.Errorf("rung=%s, want full", rep.Rung)
 	}
@@ -42,8 +48,8 @@ func TestDetectThisHost(t *testing.T) {
 
 // TestDetectRungOrdering guards the >= semantics the rung constants promise.
 func TestDetectRungOrdering(t *testing.T) {
-	if !(Rung1Full > Rung2Landlock && Rung2Landlock > Rung3Unconfined) {
-		t.Fatal("rung ordering broken: Full > Landlock > Unconfined must hold")
+	if !(Rung1Full > Rung3Unconfined) {
+		t.Fatal("rung ordering broken: Full > Unconfined must hold")
 	}
 }
 
@@ -59,19 +65,20 @@ func TestDecideInjected(t *testing.T) {
 		userns   bool
 		probeErr bool
 	}{
+		{"namespaces without Landlock", probeFacts{landlockABI: -1, maxUserns: 100}, Rung3Unconfined, true, false},
 		{"probe ok", probeFacts{landlockABI: 10, maxUserns: 100}, Rung1Full, true, false},
 		{"probe ok, clamp overridden by a profile", probeFacts{landlockABI: 6, maxUserns: 100, clamp: true}, Rung1Full, true, false},
-		{"max_user_namespaces=0 -> landlock", probeFacts{landlockABI: 10, maxUserns: 0}, Rung2Landlock, false, false},
+		{"max_user_namespaces=0 -> landlock", probeFacts{landlockABI: 10, maxUserns: 0}, Rung3Unconfined, false, false},
 		{"max_user_namespaces=0, no landlock", probeFacts{landlockABI: -1, maxUserns: 0}, Rung3Unconfined, false, false},
-		{"clone EPERM (userns disabled)", probeFacts{landlockABI: 10, maxUserns: 100, cloneErr: unix.EPERM, probeExit: -1}, Rung2Landlock, false, false},
-		{"clone EINVAL (no userns support)", probeFacts{landlockABI: 3, maxUserns: -1, cloneErr: unix.EINVAL, probeExit: -1}, Rung2Landlock, false, false},
-		{"clone ENOSPC (namespace count used up) -> deny", probeFacts{landlockABI: 10, maxUserns: 5, cloneErr: unix.ENOSPC, probeExit: -1}, Rung2Landlock, false, true},
+		{"clone EPERM (userns disabled)", probeFacts{landlockABI: 10, maxUserns: 100, cloneErr: unix.EPERM, probeExit: -1}, Rung3Unconfined, false, false},
+		{"clone EINVAL (no userns support)", probeFacts{landlockABI: 3, maxUserns: -1, cloneErr: unix.EINVAL, probeExit: -1}, Rung3Unconfined, false, false},
+		{"clone ENOSPC (namespace count used up) -> deny", probeFacts{landlockABI: 10, maxUserns: 5, cloneErr: unix.ENOSPC, probeExit: -1}, Rung3Unconfined, false, true},
 		{"clone ENOSPC, no landlock -> deny, never unconfined", probeFacts{landlockABI: -1, maxUserns: 5, cloneErr: unix.ENOSPC, probeExit: -1}, Rung3Unconfined, false, true},
-		{"clone ENOMEM (transient) -> deny", probeFacts{landlockABI: 10, maxUserns: 100, cloneErr: enomem, probeExit: -1}, Rung2Landlock, false, true},
-		{"clamp denies the mount -> landlock", probeFacts{landlockABI: 6, maxUserns: 100, clamp: true, probeExit: probeExitMountDenied}, Rung2Landlock, false, false},
-		{"mount denied, no clamp to explain it -> deny", probeFacts{landlockABI: 10, maxUserns: 100, probeExit: probeExitMountDenied}, Rung2Landlock, false, true},
-		{"other mount error -> deny", probeFacts{landlockABI: 10, maxUserns: 100, probeExit: probeExitMountError}, Rung2Landlock, false, true},
-		{"probe killed -> deny", probeFacts{landlockABI: 10, maxUserns: 100, probeExit: -1}, Rung2Landlock, false, true},
+		{"clone ENOMEM (transient) -> deny", probeFacts{landlockABI: 10, maxUserns: 100, cloneErr: enomem, probeExit: -1}, Rung3Unconfined, false, true},
+		{"clamp denies the mount -> landlock", probeFacts{landlockABI: 6, maxUserns: 100, clamp: true, probeExit: probeExitMountDenied}, Rung3Unconfined, false, false},
+		{"mount denied, no clamp to explain it -> deny", probeFacts{landlockABI: 10, maxUserns: 100, probeExit: probeExitMountDenied}, Rung3Unconfined, false, true},
+		{"other mount error -> deny", probeFacts{landlockABI: 10, maxUserns: 100, probeExit: probeExitMountError}, Rung3Unconfined, false, true},
+		{"probe killed -> deny", probeFacts{landlockABI: 10, maxUserns: 100, probeExit: -1}, Rung3Unconfined, false, true},
 	}
 	for _, c := range cases {
 		rep := decide(c.fx)

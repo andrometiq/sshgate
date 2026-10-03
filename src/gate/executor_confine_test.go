@@ -19,7 +19,7 @@ import (
 // TestConfineCommandSetsCloneFlags checks the command builder; the executor
 // clobber seam below exercises the actual execution path.
 func TestConfineCommandSetsCloneFlags(t *testing.T) {
-	jailed, err := confine.Spec{Rung: confine.Rung1Full}.Command(context.Background(), "true")
+	jailed, err := confine.Spec{Profile: confine.ProfileROv1}.Command(context.Background(), "true")
 	if err != nil {
 		t.Fatalf("build jail command: %v", err)
 	}
@@ -41,22 +41,17 @@ func TestConfineCommandSetsCloneFlags(t *testing.T) {
 	}
 }
 
-// TestConfineRung2NoCloneFlags proves rung 2 uses the uniform re-exec path
-// WITHOUT namespace clone flags (Landlock + seccomp are its wall).
-func TestConfineRung2NoCloneFlags(t *testing.T) {
-	jailed, err := confine.Spec{Rung: confine.Rung2Landlock, ScratchDir: t.TempDir()}.
-		Command(context.Background(), "true")
-	if err != nil {
-		t.Fatalf("build jail command: %v", err)
-	}
-	defer jailed.Abort()
-
-	sa := jailed.Cmd.SysProcAttr
-	if sa == nil || !sa.Setpgid {
-		t.Fatal("rung-2 Cmd must set Setpgid")
-	}
-	if sa.Cloneflags != 0 {
-		t.Errorf("rung-2 Cmd must not set clone flags, got %#x", sa.Cloneflags)
+// Every accepted profile uses the shim and all four namespaces.
+func TestConfineProfileAlwaysClones(t *testing.T) {
+	for _, abi := range []int{0, 1} {
+		jailed, err := (confine.Spec{Profile: confine.ProfileROv1, ForceABI: abi}).Command(context.Background(), "true")
+		if err != nil {
+			t.Fatal(err)
+		}
+		jailed.Abort()
+		if jailed.Cmd.Args[1] != confine.SentinelShim || jailed.Cmd.SysProcAttr.Cloneflags != syscall.CLONE_NEWUSER|syscall.CLONE_NEWNS|syscall.CLONE_NEWPID|syscall.CLONE_NEWIPC || !jailed.Cmd.SysProcAttr.Setpgid {
+			t.Fatalf("invalid command: %+v", jailed.Cmd)
+		}
 	}
 }
 
@@ -65,18 +60,8 @@ func TestConfineRung2NoCloneFlags(t *testing.T) {
 // a capable host, but does not fail on a restricted CI runner).
 func requireUserns(t *testing.T) {
 	t.Helper()
-	if !confine.Detect().Userns {
+	if confine.Detect().Rung != confine.Rung1Full {
 		t.Skip("host has no unprivileged userns; rung-1 ExecWithRedaction test needs it")
-	}
-}
-
-// requireLandlock skips a rung-2 test when the host has no Landlock (rung 2's only
-// fs wall). Rung 2 needs no userns, so these tests run on the AppArmor-clamped
-// tests.yml runner where requireUserns would skip.
-func requireLandlock(t *testing.T) {
-	t.Helper()
-	if confine.Detect().LandlockABI < 1 {
-		t.Skip("host has no Landlock; rung-2 ExecWithRedaction test needs it")
 	}
 }
 
@@ -91,7 +76,7 @@ func TestExecWithRedactionConfinedNamespace(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read host user ns: %v", err)
 	}
-	spec := confine.Spec{Rung: confine.Rung1Full, AllowInet: true}
+	spec := confine.Spec{Profile: confine.ProfileROv1, Net: true}
 	res, err := ExecWithRedaction(context.Background(), "readlink /proc/self/ns/user",
 		ExecOpts{Confine: &spec, CaptureLimit: 4096})
 	if err != nil {
@@ -124,7 +109,7 @@ func TestExecWithRedactionConfinedEROFS(t *testing.T) {
 	if err := os.WriteFile(target, []byte("orig"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	spec := confine.Spec{Rung: confine.Rung1Full, AllowInet: true}
+	spec := confine.Spec{Profile: confine.ProfileROv1, Net: true}
 	res, err := ExecWithRedaction(context.Background(), "echo pwned > "+target,
 		ExecOpts{Confine: &spec})
 	if err != nil {
@@ -145,11 +130,10 @@ func TestExecWithRedactionConfinedEROFS(t *testing.T) {
 // TestExecWithRedactionConfineFailClosed proves the fail-closed contract at the
 // executor boundary: an injected setup failure makes ExecWithRedaction return
 // ExitCode -1 and a wrapped *confine.SetupError (a deny), never exit 0, and the
-// command never runs. It uses rung 2 (Landlock, no userns) so it runs on the
-// AppArmor-clamped CI runner too — not only where a rung-1 jail is available.
+// command never runs.
 func TestExecWithRedactionConfineFailClosed(t *testing.T) {
-	requireLandlock(t)
-	spec := confine.Spec{Rung: confine.Rung2Landlock, AllowInet: true, ScratchDir: t.TempDir(), InjectFailAt: "seccomp"}
+	requireUserns(t)
+	spec := confine.Spec{Profile: confine.ProfileROv1, Net: true, InjectFailAt: "seccomp"}
 	res, err := ExecWithRedaction(context.Background(), "echo SHOULD_NOT_RUN",
 		ExecOpts{Confine: &spec, CaptureLimit: 4096})
 	if res.ExitCode != -1 {
@@ -170,10 +154,9 @@ func TestExecWithRedactionConfineFailClosed(t *testing.T) {
 // TestExecWithRedactionConfineClosesInheritedFDs proves the worker closes any fd
 // above stderr before execve: a NON-CLOEXEC fd planted in the gate (here fd ->
 // /etc/hostname) must NOT be visible to the jailed command. A writable inherited
-// fd would otherwise get past both the read-only mount and Landlock. Rung 2 keeps
-// the test independent of userns.
+// fd would otherwise get past both the read-only mount and Landlock.
 func TestExecWithRedactionConfineClosesInheritedFDs(t *testing.T) {
-	requireLandlock(t)
+	requireUserns(t)
 	// Plant a non-CLOEXEC fd: syscall.Open does not add O_CLOEXEC, so it survives
 	// fork+execve into the child unless the worker closes it.
 	fd, err := syscall.Open("/etc/hostname", syscall.O_RDONLY, 0)
@@ -185,7 +168,7 @@ func TestExecWithRedactionConfineClosesInheritedFDs(t *testing.T) {
 		t.Skipf("planted fd %d too low to distinguish from the jail's own fds", fd)
 	}
 
-	spec := confine.Spec{Rung: confine.Rung2Landlock, AllowInet: true, ScratchDir: t.TempDir()}
+	spec := confine.Spec{Profile: confine.ProfileROv1, Net: true}
 	// Control first: WITHOUT the jail the planted fd is visible to a child, so the
 	// test proves the jail is what closes it (not some unrelated fd hygiene).
 	ctl := exec.Command("sh", "-c", "readlink /proc/self/fd/"+strconv.Itoa(fd)+" || echo GONE")
@@ -227,7 +210,7 @@ func testExecutorNamespaceClobber(t *testing.T) {
 		return jailed, err
 	}
 	defer func() { confinedCommand = original }()
-	result, err := ExecWithRedaction(context.Background(), "echo EXECUTOR_CANARY", ExecOpts{Confine: &confine.Spec{Rung: confine.Rung1Full}, CaptureLimit: 4096})
+	result, err := ExecWithRedaction(context.Background(), "echo EXECUTOR_CANARY", ExecOpts{Confine: &confine.Spec{Profile: confine.ProfileROv1}, CaptureLimit: 4096})
 	var setup *confine.SetupError
 	if !errors.As(err, &setup) || setup.Stage != "nsverify" || setup.Errno != syscall.EPERM {
 		t.Fatalf("expected nsverify EPERM; result=%+v error=%v", result, err)

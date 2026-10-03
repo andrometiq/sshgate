@@ -41,7 +41,7 @@ func TestReadPinnedFloor(t *testing.T) {
 	}{
 		{name: "absent is no floor", want: confine.Rung3Unconfined},
 		{name: "full", content: "full\n", mode: 0o644, want: confine.Rung1Full},
-		{name: "landlock", content: " landlock ", mode: 0o600, want: confine.Rung2Landlock},
+		{name: "landlock is damaged", content: " landlock ", mode: 0o600, wantErr: true},
 		{name: "unconfined", content: "unconfined", mode: 0o644, want: confine.Rung3Unconfined},
 		{name: "garbage", content: "strong", mode: 0o644, wantErr: true},
 		{name: "empty", content: "\n", mode: 0o644, wantErr: true},
@@ -62,37 +62,36 @@ func TestReadPinnedFloor(t *testing.T) {
 }
 
 func TestConfineSpecFor(t *testing.T) {
-	r1, r2, r3 := confine.Rung1Full, confine.Rung2Landlock, confine.Rung3Unconfined
+	full, unconfined := confine.Rung1Full, confine.Rung3Unconfined
 	for _, tc := range []struct {
 		name     string
 		rep      confine.Report
 		floor    confine.Rung
-		wantRung *confine.Rung // nil = nil spec
+		wantSpec bool
 		wantDeny bool
 	}{
-		{name: "rung1 no floor", rep: confine.Report{Rung: r1}, floor: r3, wantRung: &r1},
-		{name: "rung2 no floor", rep: confine.Report{Rung: r2}, floor: r3, wantRung: &r2},
-		{name: "rung3 no floor is today's path", rep: confine.Report{Rung: r3}, floor: r3},
-		{name: "rung1 above landlock floor", rep: confine.Report{Rung: r1}, floor: r2, wantRung: &r1},
-		{name: "rung1 at full floor", rep: confine.Report{Rung: r1}, floor: r1, wantRung: &r1},
-		{name: "rung2 below full floor", rep: confine.Report{Rung: r2}, floor: r1, wantDeny: true},
-		{name: "rung3 below landlock floor", rep: confine.Report{Rung: r3}, floor: r2, wantDeny: true},
-		{name: "probe error never downgrades", rep: confine.Report{Rung: r2, ProbeErr: errors.New("EAGAIN")}, floor: r3, wantDeny: true},
-		{name: "probe error on rung3", rep: confine.Report{Rung: r3, ProbeErr: errors.New("x")}, floor: r3, wantDeny: true},
-		{name: "unknown rung", rep: confine.Report{Rung: confine.Rung(9)}, floor: r3, wantDeny: true},
+		{name: "full no floor", rep: confine.Report{Rung: full}, floor: unconfined, wantSpec: true},
+		{name: "unconfined no floor", rep: confine.Report{Rung: unconfined}, floor: unconfined},
+		{name: "full at floor", rep: confine.Report{Rung: full}, floor: full, wantSpec: true},
+		{name: "unconfined below floor", rep: confine.Report{Rung: unconfined}, floor: full, wantDeny: true},
+		{name: "probe error full", rep: confine.Report{Rung: full, ProbeErr: errors.New("EAGAIN")}, wantDeny: true},
+		{name: "probe error unconfined", rep: confine.Report{Rung: unconfined, ProbeErr: errors.New("x")}, wantDeny: true},
+		{name: "unknown rung", rep: confine.Report{Rung: confine.Rung(9)}, wantDeny: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			spec, deny := confineSpecFor(tc.rep, tc.floor)
 			if (deny != "") != tc.wantDeny {
 				t.Fatalf("deny = %q, want deny=%v", deny, tc.wantDeny)
 			}
-			switch {
-			case tc.wantDeny || tc.wantRung == nil:
+			if !tc.wantSpec {
 				if spec != nil {
 					t.Errorf("spec = %+v, want nil", spec)
 				}
-			case spec == nil || spec.Rung != *tc.wantRung || !spec.AllowInet || spec.ScratchDir != "" || spec.ForceABI != 0 || spec.InjectFailAt != "":
-				t.Errorf("spec = %+v, want production rung %v spec", spec, *tc.wantRung)
+				return
+			}
+			want := confine.Spec{Profile: confine.ProfileROv1, Net: true}
+			if spec == nil || *spec != want {
+				t.Errorf("spec = %+v, want %+v", spec, want)
 			}
 		})
 	}
@@ -109,8 +108,9 @@ func TestRunReadFailsClosed(t *testing.T) {
 		mode  os.FileMode
 	}{
 		{name: "probe error", rep: confine.Report{Rung: confine.Rung1Full, ProbeErr: errors.New("transient")}},
-		{name: "below pinned floor", rep: confine.Report{Rung: confine.Rung2Landlock}, floor: "full", mode: 0o644},
-		{name: "rung3 below pinned floor", rep: confine.Report{Rung: confine.Rung3Unconfined}, floor: "landlock", mode: 0o644},
+		{name: "below pinned floor", rep: confine.Report{Rung: confine.Rung3Unconfined}, floor: "full", mode: 0o644},
+		{name: "removed landlock floor unconfined", rep: confine.Report{Rung: confine.Rung3Unconfined}, floor: "landlock", mode: 0o644},
+		{name: "removed landlock floor full", rep: confine.Report{Rung: confine.Rung1Full}, floor: "landlock", mode: 0o644},
 		{name: "insecure floor", rep: confine.Report{Rung: confine.Rung1Full}, floor: "full", mode: 0o666},
 		{name: "garbage floor", rep: confine.Report{Rung: confine.Rung1Full}, floor: "maximum", mode: 0o644},
 	} {
@@ -275,23 +275,20 @@ func TestRunReadJailedRealEffect(t *testing.T) {
 		assertAudit(t, dir, "signed", rung.String(), true)
 	})
 
-	t.Run("rung 2 read is jailed with a per-command scratch dir", func(t *testing.T) {
-		if confine.Detect().LandlockABI < 1 {
-			t.Skipf("SKIP rung: no Landlock; rung 2 cannot be exercised")
-		}
+	t.Run("profile read uses private scratch", func(t *testing.T) {
 		dir := t.TempDir()
 		withGateDir(t, dir)
-		withDetect(t, confine.Report{Rung: confine.Rung2Landlock})
+		withDetect(t, confine.Report{Rung: confine.Rung1Full})
 		target := seed(t, dir)
 		code, out, stderr := runWith(t, "cat "+target+" && sed --i 's/orig/pwned/' "+target)
 		if !strings.HasPrefix(out, "orig ") || code == exitOK {
 			t.Errorf("exit = %d, stdout = %q, stderr = %q; want the read to work and the edit to fail", code, out, stderr)
 		}
 		assertUnchanged(t, target)
-		assertAudit(t, dir, "unsigned", "landlock", false)
+		assertAudit(t, dir, "unsigned", "full", false)
 
 		// A read that must spill to temp files works only if the jail hands it
-		// a writable per-command TMPDIR: sort with a 1 KiB buffer over ~200 KiB.
+		// private writable scratch: sort with a 1 KiB buffer over ~200 KiB.
 		var big strings.Builder
 		for i := 19999; i >= 0; i-- {
 			fmt.Fprintf(&big, "line-%05d\n", i)
@@ -306,7 +303,7 @@ func TestRunReadJailedRealEffect(t *testing.T) {
 		}
 		left, _ := filepath.Glob(filepath.Join(os.TempDir(), "sshgate-jail-*"))
 		if len(left) != 0 {
-			t.Errorf("rung-2 scratch dirs outlived the command: %v", left)
+			t.Errorf("host scratch dirs outlived the command: %v", left)
 		}
 	})
 
@@ -328,13 +325,10 @@ func TestRunReadJailedRealEffect(t *testing.T) {
 }
 
 // TestRunReadJailSetupFailureDenies: when the jail never reaches the command —
-// the worker aborts before execve, or the rung-2 scratch dir cannot be made —
+// the worker aborts before execve, or a removed floor is pinned —
 // nothing ran, so the gate exits 77 and audits a denial with no rung. It must
 // never look like a command that ran and exited 1 (grep with no match).
 func TestRunReadJailSetupFailureDenies(t *testing.T) {
-	if confine.Detect().LandlockABI < 1 {
-		t.Skipf("SKIP rung: no Landlock; rung 2 cannot be exercised")
-	}
 	check := func(t *testing.T, dir, target string, code int, out, stderr string) {
 		t.Helper()
 		// The MCP tells this 77 from a missing signature by this exact line.
@@ -362,12 +356,13 @@ func TestRunReadJailSetupFailureDenies(t *testing.T) {
 	}
 
 	t.Run("worker aborts before execve", func(t *testing.T) {
+		liveRung(t)
 		dir := t.TempDir()
 		withGateDir(t, dir)
 		target := seed(t, dir)
 		plan := execPlan{
-			confine: &confine.Spec{Rung: confine.Rung2Landlock, AllowInet: true, InjectFailAt: "seccomp"},
-			rung:    confine.Rung2Landlock.String(),
+			confine: &confine.Spec{Profile: confine.ProfileROv1, Net: true, InjectFailAt: "seccomp"},
+			rung:    confine.Rung1Full.String(),
 		}
 		var code int
 		var out string
@@ -379,12 +374,12 @@ func TestRunReadJailSetupFailureDenies(t *testing.T) {
 		check(t, dir, target, code, out, stderr)
 	})
 
-	t.Run("rung 2 scratch dir cannot be made", func(t *testing.T) {
+	t.Run("removed landlock floor denies before execution", func(t *testing.T) {
 		dir := t.TempDir()
 		withGateDir(t, dir)
-		withDetect(t, confine.Report{Rung: confine.Rung2Landlock})
+		withDetect(t, confine.Report{Rung: confine.Rung3Unconfined})
 		target := seed(t, dir)
-		t.Setenv("TMPDIR", filepath.Join(dir, "missing"))
+		writeFloor(t, dir, "landlock\n", 0o644)
 		code, out, stderr := runWith(t, "sed --i 's/orig/ran/' "+target)
 		check(t, dir, target, code, out, stderr)
 	})
