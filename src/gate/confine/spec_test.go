@@ -3,11 +3,14 @@
 package confine
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"syscall"
 	"testing"
+	"time"
 )
 
 func TestRungString(t *testing.T) {
@@ -99,5 +102,83 @@ func TestCommandRung3Refused(t *testing.T) {
 	_, err := Spec{Rung: Rung3Unconfined}.Command(context.Background(), "echo hi")
 	if err == nil {
 		t.Fatal("expected an error for rung-3 Command")
+	}
+}
+
+func TestStrictSpecDecode(t *testing.T) {
+	t.Run("U-SpecRejectsUnknownRung", func(t *testing.T) {
+		for _, raw := range []string{`{"Rung":5}`, `{"Rung":-1}`, `{"Rung":0}`, `{"Rung":1,"Unexpected":true}`, `{"Rung":1} {}`, `{"Rung":1} garbage`, `null`, `{"Rung":1,"ForceABI":-2}`, `{"Rung":1,"InjectFailAt":"rbind"}`, `{"Rung":1,"InjectFailAt":"nnp:UNKNOWN"}`, `{"Rung":2}`} {
+			var spec Spec
+			if err := decodeSpec(raw, &spec); err != syscall.EINVAL {
+				t.Errorf("decode %s: got %v want EINVAL", raw, err)
+			}
+		}
+	})
+	for _, rung := range []Rung{-1, 0, 5} {
+		jailed, err := (Spec{Rung: rung}).Command(context.Background(), "true")
+		if jailed != nil {
+			jailed.Abort()
+		}
+		var setup *SetupError
+		if !errors.As(err, &setup) || setup.Stage != "spec" || setup.Errno != syscall.EINVAL {
+			t.Errorf("parent rung %d: got %v", rung, err)
+		}
+	}
+	var spec Spec
+	if err := decodeSpec(`{"Rung":1,"InjectFailAt":"seccomp:EIO"}`, &spec); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSpecRequiresEveryParentNamespace(t *testing.T) {
+	for _, ids := range []NSIDs{{0, 2, 3, 4}, {1, 0, 3, 4}, {1, 2, 0, 4}, {1, 2, 3, 0}} {
+		raw, err := json.Marshal(Spec{Rung: Rung1Full, ParentNS: ids})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var decoded Spec
+		if err := decodeSpec(string(raw), &decoded); err != syscall.EINVAL {
+			t.Errorf("parent IDs %+v: %v", ids, err)
+		}
+	}
+}
+
+func TestWorkerRejectsInvalidSpecBeforeInjection(t *testing.T) {
+	for _, raw := range []string{
+		`{"Rung":1,"InjectFailAt":"spec:UNKNOWN"}`,
+		`{"Rung":5,"InjectFailAt":"spec:EIO"}`,
+		`{"Rung":1,"Unknown":true,"InjectFailAt":"spec:EIO"}`,
+	} {
+		t.Run(raw, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			jailed, err := (Spec{Rung: Rung2Landlock}).Command(ctx, "echo MUST_NOT_RUN")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer jailed.Abort()
+			jailed.Cmd.Args[2] = raw
+			var output bytes.Buffer
+			jailed.Cmd.Stdout = &output
+			if err := jailed.Cmd.Start(); err != nil {
+				t.Fatal(err)
+			}
+			if err := jailed.Started(); err != nil {
+				t.Fatal(err)
+			}
+			if err := jailed.Cmd.Wait(); err == nil {
+				t.Fatal("invalid worker spec exited successfully")
+			}
+			report, err := io.ReadAll(jailed.statusR)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(report) != formatFailReport("spec", syscall.EINVAL) {
+				t.Errorf("report=%q want Fspec:EINVAL", report)
+			}
+			if output.Len() != 0 {
+				t.Errorf("command ran: %q", output.String())
+			}
+		})
 	}
 }

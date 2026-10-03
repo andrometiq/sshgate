@@ -18,6 +18,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"strconv"
 	"unsafe"
 
@@ -74,6 +75,28 @@ func main() {
 	}
 	args := os.Args[2:]
 	switch os.Args[1] {
+	case "root-state":
+		for _, name := range []string{"uid_map", "gid_map", "status"} {
+			data, err := os.ReadFile("/proc/self/" + name)
+			if report(name, err) {
+				fmt.Printf("%s:\n%s", name, data)
+			}
+		}
+		_, _, errno := unix.Syscall(unix.SYS_OPEN_BY_HANDLE_AT, ^uintptr(0), 0, 0)
+		fmt.Printf("open_by_handle_at=%d\n", errno)
+	case "root-nproc":
+		if os.Getuid() != 0 {
+			fmt.Fprintln(os.Stderr, "root required")
+			os.Exit(2)
+		}
+		var limit unix.Rlimit
+		if report("getrlimit", unix.Getrlimit(unix.RLIMIT_NPROC, &limit)) {
+			fmt.Printf("nproc=%d:%d\n", limit.Cur, limit.Max)
+		}
+		if report("setrlimit", unix.Setrlimit(unix.RLIMIT_NPROC, &unix.Rlimit{Cur: 0, Max: 0})) {
+			report("fork-root", exec.Command("/bin/true").Run())
+		}
+
 	case "dial-unix":
 		fd, err := unix.Socket(unix.AF_UNIX, unix.SOCK_STREAM|unix.SOCK_CLOEXEC, 0)
 		if report("socket", err) {

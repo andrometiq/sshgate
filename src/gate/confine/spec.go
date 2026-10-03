@@ -49,6 +49,9 @@ const (
 // signal is still the fd-4 status report (see Jailed.Status).
 const ExitSetupFailed = 70
 
+// NSIDs identifies the namespaces inherited from the parent gate.
+type NSIDs struct{ User, Mnt, Pid, IPC uint64 }
+
 // Spec is the fully-resolved confinement policy for ONE command. Built by the
 // gate from Detect (production) or by a test directly (forced rungs). It is the
 // ONLY thing that selects behaviour — there is no env var or argv an agent can
@@ -56,7 +59,8 @@ const ExitSetupFailed = 70
 // gate wrote, a path the agent never reaches (the forced command passes no argv;
 // the agent-controlled command travels on fd 3).
 type Spec struct {
-	Rung Rung
+	ParentNS NSIDs
+	Rung     Rung
 	// ForceABI, when >0, caps the Landlock ruleset to that ABI even on a
 	// higher-ABI host. 0 = use the host's real probed ABI. ForceNoLandlock
 	// emulates a host without Landlock: rung 1 then relies on its read-only
@@ -190,6 +194,9 @@ func statusFromReport(buf []byte) error {
 	case s == "":
 		// EOF with no report: the worker (or shim) died before writing.
 		return &SetupError{Stage: "unknown"}
+	case strings.HasPrefix(s, "XFexec:"):
+		stage, errno := parseFailReport(s[1:])
+		return &SetupError{Stage: stage, Errno: errno}
 	case strings.HasPrefix(s, statusFailPrefix):
 		stage, errno := parseFailReport(s)
 		return &SetupError{Stage: stage, Errno: errno}

@@ -3,8 +3,10 @@
 package confine
 
 import (
+	"encoding/json"
 	"io"
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -28,7 +30,30 @@ func TestMain(m *testing.M) {
 		case SentinelShim:
 			os.Exit(RunShim(os.Args[2:]))
 		case SentinelWorker:
-			os.Exit(RunWorker(os.Args[2:]))
+			args := os.Args[2:]
+			if len(args) == 2 && strings.HasPrefix(args[1], "same-") {
+				var spec Spec
+				if json.Unmarshal([]byte(args[0]), &spec) != nil {
+					os.Exit(99)
+				}
+				ids, err := namespaceIDs()
+				if err != nil {
+					os.Exit(99)
+				}
+				switch args[1] {
+				case "same-user":
+					spec.ParentNS.User = ids.User
+				case "same-mnt":
+					spec.ParentNS.Mnt = ids.Mnt
+				case "same-pid":
+					spec.ParentNS.Pid = ids.Pid
+				case "same-ipc":
+					spec.ParentNS.IPC = ids.IPC
+				}
+				raw, _ := json.Marshal(spec)
+				args = []string{string(raw)}
+			}
+			os.Exit(RunWorker(args))
 		case SentinelProbe:
 			os.Exit(RunProbe(os.Args[2:]))
 		case sentinelROFallbackTest:

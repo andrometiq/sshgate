@@ -21,8 +21,54 @@ import (
 
 type prot = harness.Protection
 
-// P1.1 claims no protections. Registration lands with each protection's legs.
-var registry = []prot{}
+var registry = p12Registry()
+
+func p12Leg(name, marker string) harness.Leg {
+	leg := harness.Leg{Name: name, Package: "./src/gate/confine", Names: map[string]string{"native": "TestJailMatrixP12/native/" + name, "abi1": "TestJailMatrixP12/abi1/" + name}}
+	if marker != "" {
+		leg.Markers = []string{marker}
+	}
+	return leg
+}
+
+func p12Registry() []prot {
+	var protections []prot
+	add := func(id, site string, legs ...harness.Leg) {
+		protections = append(protections, prot{ID: id, Site: site, Class: "single", DirectLeg: legs[0].Name, MutationSets: []harness.MutationSet{{IDs: []string{id}, Legs: legs}}})
+	}
+	add("P-SPEC", "decodeSpec / Spec.validate", p12Leg("L-SPEC-REJECT", "MUTATION-EFFECT chmod"))
+	nsLegs := []harness.Leg{}
+	for _, name := range []string{"L-NSVERIFY-user", "L-NSVERIFY-mnt", "L-NSVERIFY-pid", "L-NSVERIFY-ipc", "L-NSVERIFY-parent", "L-FAULT-nsverify"} {
+		nsLegs = append(nsLegs, p12Leg(name, "MUTATION-EFFECT reached-exec"))
+	}
+	nsLegs = append(nsLegs, p12Leg("L-HOSTMOUNTS-UNCHANGED", ""))
+	executor := harness.Leg{Name: "L-NSVERIFY", Package: "./src/gate", Names: map[string]string{"native": "TestExecWithRedactionConfineNSVerify/native/L-NSVERIFY", "abi1": "TestExecWithRedactionConfineNSVerify/abi1/L-NSVERIFY"}}
+	nsLegs = append(nsLegs, executor)
+	add("P-NSVERIFY", "RunWorker before setupMounts", nsLegs...)
+	add("P-SHIM-PID1", "RunShim before worker Start", p12Leg("L-SHIM-PID1", "MUTATION-ABORT spec"))
+	for _, stage := range []string{"spec", "cmdread", "mounts", "nnp", "caps", "rlimits", "landlock", "seccomp", "exec"} {
+		legs := []harness.Leg{p12Leg("L-FAULT-"+stage, "MUTATION-EFFECT reached-exec")}
+		if stage == "caps" {
+			root := p12Leg("L-ROOT-STATE", "")
+			root.Root = true
+			legs = append(legs, root)
+		}
+		if stage == "rlimits" {
+			root := p12Leg("L-ROOT-NPROC", "")
+			root.Root = true
+			legs = append(legs, root)
+		}
+		if stage == "mounts" {
+			root := p12Leg("L-ROOT-PROC", "")
+			root.Root = true
+			root.CIOnly = true
+			legs = append(legs, root)
+		}
+		add("P-FAULT-"+stage, "RunWorker "+stage+" error check", legs...)
+	}
+	add("P-SC-TSYNC", "installSeccomp positive return check", p12Leg("L-FAULT-tsync", "MUTATION-EFFECT reached-exec"))
+	return protections
+}
 
 // Filled alongside the literal non-allow seccomp lists when those rows are hooked.
 var mutationSeccompRows = []string{}

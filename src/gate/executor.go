@@ -139,6 +139,10 @@ func (c *countingWriter) captured() string {
 	return s
 }
 
+var confinedCommand = func(spec *confine.Spec, ctx context.Context, command string) (*confine.Jailed, error) {
+	return spec.Command(ctx, command)
+}
+
 // ExecWithRedaction runs cmd via "/bin/sh -c <cmd>", streaming the child's
 // stdout and stderr to os.Stdout / os.Stderr. When opts.Rules is non-empty AND
 // opts.Reveal is false, c.Stdout and c.Stderr are wrapped in redact.Writer
@@ -186,7 +190,7 @@ func ExecWithRedaction(ctx context.Context, cmd string, opts ExecOpts) (res Exec
 	var jailed *confine.Jailed
 	if opts.Confine != nil {
 		var cerr error
-		jailed, cerr = opts.Confine.Command(ctx, cmd)
+		jailed, cerr = confinedCommand(opts.Confine, ctx, cmd)
 		if cerr != nil {
 			return ExecResult{ExitCode: -1}, fmt.Errorf("exec: build jail: %w", cerr)
 		}

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"unsafe"
 
+	"github.com/karthikeyan5/sshgate/src/gate/confine/jailmut"
 	"golang.org/x/sys/unix"
 )
 
@@ -290,7 +291,7 @@ func buildFilter(p filterParams) []unix.SockFilter {
 // does NOT report a partial-sync failure through errno — on success it returns 0,
 // but if a thread cannot synchronise it returns the positive offending thread id
 // with errno 0. A naive errno-only check would execve with an incomplete filter.
-func installSeccomp(filter []unix.SockFilter) error {
+func installSeccomp(filter []unix.SockFilter, spec Spec) error {
 	if len(filter) == 0 {
 		return fmt.Errorf("confine: empty seccomp filter")
 	}
@@ -299,11 +300,17 @@ func installSeccomp(filter []unix.SockFilter) error {
 		uintptr(unix.SECCOMP_SET_MODE_FILTER),
 		uintptr(unix.SECCOMP_FILTER_FLAG_TSYNC),
 		uintptr(unsafe.Pointer(&prog)))
-	if errno != 0 {
+	if stage, injected := spec.inject(); stage == "seccomp" {
+		errno = injected
+	}
+	if !jailmut.On("P-FAULT-seccomp") && errno != 0 {
 		return errno
 	}
-	if r1 != 0 {
-		return fmt.Errorf("confine: seccomp TSYNC failed to synchronise thread %d", int(r1))
+	if stage, _ := spec.inject(); stage == "tsync" {
+		r1 = 4242
+	}
+	if !jailmut.On("P-SC-TSYNC") && r1 != 0 {
+		return &SetupError{Stage: "tsync", Errno: unix.EIO}
 	}
 	return nil
 }

@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"syscall"
 
+	"github.com/karthikeyan5/sshgate/src/gate/confine/jailmut"
 	"golang.org/x/sys/unix"
 )
 
@@ -26,8 +27,15 @@ const maxCmdBytes = 1 << 20
 // __jailexec directly. The command travels on fd 3 and the setup status on fd 4,
 // never on argv.
 func (s Spec) command(ctx context.Context, cmd string) (*Jailed, error) {
-	if s.Rung == Rung3Unconfined {
-		return nil, errors.New("confine: Command called for rung 3 (the gate must pass a nil *Spec)")
+	if !jailmut.On("P-SPEC") && s.validate(false) != nil {
+		return nil, &SetupError{Stage: "spec", Errno: unix.EINVAL}
+	}
+	if s.Rung == Rung1Full {
+		var err error
+		s.ParentNS, err = namespaceIDs()
+		if err != nil {
+			return nil, &SetupError{Stage: "spec", Errno: errnoOf(err)}
+		}
 	}
 	specJSON, err := json.Marshal(s)
 	if err != nil {
@@ -107,6 +115,10 @@ func RunShim(args []string) int {
 		return ExitSetupFailed
 	}
 
+	if !jailmut.On("P-SHIM-PID1") && os.Getpid() != 1 {
+		_, _ = io.WriteString(statusW, formatFailReport("nsverify", unix.EPERM))
+		return ExitSetupFailed
+	}
 	c := exec.Command("/proc/self/exe", append([]string{SentinelWorker}, args...)...)
 	c.Stdin, c.Stdout, c.Stderr = os.Stdin, os.Stdout, os.Stderr
 	c.ExtraFiles = []*os.File{cmdR, statusW}
@@ -147,7 +159,11 @@ func RunWorker(args []string) int {
 		return fail("spec", unix.EINVAL)
 	}
 	var spec Spec
-	if err := json.Unmarshal([]byte(args[0]), &spec); err != nil {
+	err := decodeSpec(args[0], &spec)
+	if st, errno := spec.inject(); err == nil && st == "spec" {
+		err = errno
+	}
+	if !jailmut.On("P-FAULT-spec") && err != nil {
 		return fail("spec", err)
 	}
 
@@ -157,10 +173,10 @@ func RunWorker(args []string) int {
 	}
 	cmdBytes, rerr := readCapped(cmdR, maxCmdBytes)
 	_ = cmdR.Close()
-	if spec.InjectFailAt == "cmdread" {
-		return fail("cmdread", unix.EINTR)
+	if st, errno := spec.inject(); st == "cmdread" {
+		rerr = errno
 	}
-	if rerr != nil {
+	if !jailmut.On("P-FAULT-cmdread") && rerr != nil {
 		return fail("cmdread", rerr)
 	}
 	cmd := string(cmdBytes)
@@ -168,41 +184,49 @@ func RunWorker(args []string) int {
 	abi := effectiveABI(probeLandlockABI(), spec.ForceABI)
 	rootSSH := os.Getuid() == 0
 
-	// mounts (rung 1 only) -> NNP -> cap drop -> rlimits -> Landlock -> seccomp.
 	if spec.Rung == Rung1Full {
-		if spec.InjectFailAt == "mounts" {
-			return fail("mounts", unix.EPERM)
+		err := verifyNamespaces(spec.ParentNS)
+		if st, errno := spec.inject(); st == "nsverify" {
+			err = errno
 		}
-		if err := setupMounts(); err != nil {
+		if !jailmut.On("P-NSVERIFY") && err != nil {
+			return fail("nsverify", err)
+		}
+		err = setupMounts()
+		if st, errno := spec.inject(); st == "mounts" {
+			err = errno
+		}
+		if !jailmut.On("P-FAULT-mounts") && err != nil {
 			return fail("mounts", err)
 		}
 	}
-	if spec.InjectFailAt == "nnp" {
-		return fail("nnp", unix.EPERM)
+	err = setNoNewPrivs()
+	if st, errno := spec.inject(); st == "nnp" {
+		err = errno
 	}
-	if err := setNoNewPrivs(); err != nil {
+	if !jailmut.On("P-FAULT-nnp") && err != nil {
 		return fail("nnp", err)
 	}
-	if spec.InjectFailAt == "caps" {
-		return fail("caps", unix.EPERM)
+	err = dropCaps(spec.Rung, rootSSH)
+	if st, errno := spec.inject(); st == "caps" {
+		err = errno
 	}
-	if err := dropCaps(spec.Rung, rootSSH); err != nil {
+	if !jailmut.On("P-FAULT-caps") && err != nil {
 		return fail("caps", err)
 	}
-	if spec.InjectFailAt == "rlimits" {
-		return fail("rlimits", unix.EPERM)
+	err = setRlimits(spec.Rung)
+	if st, errno := spec.inject(); st == "rlimits" {
+		err = errno
 	}
-	if err := setRlimits(spec.Rung); err != nil {
+	if !jailmut.On("P-FAULT-rlimits") && err != nil {
 		return fail("rlimits", err)
 	}
-	if spec.InjectFailAt == "landlock" {
-		return fail("landlock", unix.EPERM)
+	err = applyLandlock(spec.Rung, abi, writableSet(&spec))
+	if st, errno := spec.inject(); st == "landlock" {
+		err = errno
 	}
-	if err := applyLandlock(spec.Rung, abi, writableSet(&spec)); err != nil {
+	if !jailmut.On("P-FAULT-landlock") && err != nil {
 		return fail("landlock", err)
-	}
-	if spec.InjectFailAt == "seccomp" {
-		return fail("seccomp", unix.EPERM)
 	}
 	filter := buildFilter(filterParams{
 		allowInet:        spec.AllowInet,
@@ -211,12 +235,17 @@ func RunWorker(args []string) int {
 		denyTtyIoctl:     spec.Rung == Rung2Landlock && abi < 5,
 		denyOpenByHandle: rootSSH && spec.Rung == Rung1Full,
 	})
-	if err := installSeccomp(filter); err != nil {
+	err = installSeccomp(filter, spec)
+	if err != nil {
+		var setup *SetupError
+		if errors.As(err, &setup) {
+			return fail(setup.Stage, setup.Errno)
+		}
 		return fail("seccomp", err)
 	}
-
-	if spec.InjectFailAt == "exec" {
-		return fail("exec", unix.ENOENT)
+	execPath := "/bin/sh"
+	if st, _ := spec.inject(); st == "exec" {
+		execPath = "/nonexistent/sh"
 	}
 	// Close any inherited fd above stderr on execve so only 0/1/2 survive into the
 	// jailed command. fd 4 (status) is already CLOEXEC and fd 3 (command) is
@@ -228,7 +257,10 @@ func RunWorker(args []string) int {
 	// Report success, then hand off to /bin/sh. The execve closes fd 4 (CLOEXEC),
 	// so the parent reads exactly "X" then EOF.
 	_, _ = io.WriteString(statusW, statusReachedExec)
-	execErr := unix.Exec("/bin/sh", []string{"sh", "-c", cmd}, jailEnv(&spec))
+	execErr := unix.Exec(execPath, []string{"sh", "-c", cmd}, jailEnv(&spec))
+	if jailmut.On("P-FAULT-exec") {
+		return ExitSetupFailed
+	}
 	return fail("exec", execErr) // only reached if execve failed
 }
 

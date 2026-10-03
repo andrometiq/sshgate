@@ -16,12 +16,8 @@ import (
 	"github.com/karthikeyan5/sshgate/src/gate/confine"
 )
 
-// TestConfineCommandSetsCloneFlags is the clobber-guard for the executor's
-// confine branch: when a confined Spec builds the Cmd, its SysProcAttr must carry the
-// rung-1 clone flags and uid/gid maps. If a future refactor reintroduced the old
-// unconditional `c.SysProcAttr = &SysProcAttr{Setpgid:true}` below the branch, it
-// would overwrite these and the jail would silently run in the host namespaces —
-// this test trips first.
+// TestConfineCommandSetsCloneFlags checks the command builder; the executor
+// clobber seam below exercises the actual execution path.
 func TestConfineCommandSetsCloneFlags(t *testing.T) {
 	jailed, err := confine.Spec{Rung: confine.Rung1Full}.Command(context.Background(), "true")
 	if err != nil {
@@ -212,5 +208,38 @@ func TestExecWithRedactionConfineClosesInheritedFDs(t *testing.T) {
 	}
 	if !strings.Contains(res.Stdout, "GONE") {
 		t.Errorf("expected the jailed readlink to fail (fd closed); stdout=%q", res.Stdout)
+	}
+}
+
+func TestExecWithRedactionConfineNamespaceClobber(t *testing.T) { testExecutorNamespaceClobber(t) }
+
+func testExecutorNamespaceClobber(t *testing.T) {
+	before, err := os.ReadFile("/proc/self/mountinfo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := confinedCommand
+	confinedCommand = func(spec *confine.Spec, ctx context.Context, command string) (*confine.Jailed, error) {
+		jailed, err := original(spec, ctx, command)
+		if err == nil {
+			jailed.Cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		}
+		return jailed, err
+	}
+	defer func() { confinedCommand = original }()
+	result, err := ExecWithRedaction(context.Background(), "echo EXECUTOR_CANARY", ExecOpts{Confine: &confine.Spec{Rung: confine.Rung1Full}, CaptureLimit: 4096})
+	var setup *confine.SetupError
+	if !errors.As(err, &setup) || setup.Stage != "nsverify" || setup.Errno != syscall.EPERM {
+		t.Fatalf("expected nsverify EPERM; result=%+v error=%v", result, err)
+	}
+	if strings.Contains(result.Stdout, "EXECUTOR_CANARY") {
+		t.Fatal("command executed after clobber")
+	}
+	after, err := os.ReadFile("/proc/self/mountinfo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(before) != string(after) {
+		t.Fatal("host mountinfo changed")
 	}
 }
