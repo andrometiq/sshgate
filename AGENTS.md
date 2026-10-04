@@ -114,6 +114,15 @@ have them check the host's `/var/log/auth.log` and that the key line was pasted 
 - `configured:false` / "not configured" is the NORMAL Tier-1 state, not a fault. Writes wait
   until `/sshgate:setup` adds a signer.
 
+## What to build next
+
+- Read `docs/BUILD-PLAN.md` before starting any development work. It is the committed build
+  order: work items and their steps run top to bottom, and each step has its own acceptance.
+- Take the first step that is not `done` and whose dependencies are done. Don't start work that
+  is not in the plan; unscheduled ideas live in `docs/ROADMAP.md`.
+- When a step lands, set its status to `done` in the same commit. A change to the order or
+  scope of a step is made in the plan, in the same commit, with the reason in the message.
+
 ## Developing SSHGate
 
 - The main session plans, dispatches and verifies, and is accountable for the result. Models
@@ -136,8 +145,8 @@ have them check the host's `/var/log/auth.log` and that the key line was pasted 
 - `commands/`, `skills/`, `.claude-plugin/`: plugin slash commands, skills and manifest.
 - `dist/gate/`: the committed, hash-published gate binary, the release trust anchor. Only
   `make release-gate` writes it; `make verify-dist` checks it. Never edit it by hand.
-- `docs/`: design, threat model and testing docs. `docs/ROADMAP.md` is the canonical roadmap;
-  `docs/proposed/` holds dated proposals.
+- `docs/`: design, threat model and testing docs. `docs/BUILD-PLAN.md` is the committed build
+  order; `docs/ROADMAP.md` lists unscheduled features; `docs/proposed/` holds dated proposals.
 - `packaging/mcpb/`, `scripts/`, `tests/`: MCPB bundle sources, install scripts, integration tests.
 - `WORKLOG.md` (local, gitignored): append-only work log; read its header, last five headings,
   then the last entry.

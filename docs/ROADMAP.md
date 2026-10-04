@@ -1,8 +1,13 @@
 # SSHGate Roadmap
 
-The forward-looking work for SSHGate, in priority order. This is the single
-canonical roadmap; design rationale for individual items lives in the design and
-decision docs referenced inline.
+> **What to build next is in [BUILD-PLAN.md](BUILD-PLAN.md).** That file is the
+> committed build order, with steps and definitions of done. This roadmap is the
+> list of planned and possible features that are not yet scheduled, plus release
+> status and history. When an item here is scheduled, its definition moves to the
+> build plan and the entry here becomes a pointer.
+
+The forward-looking work for SSHGate, roughly in priority order. Design rationale
+for individual items lives in the design and decision docs referenced inline.
 
 For the security model these items extend, see [design.md](design.md) and
 [approval-architecture.md](approval-architecture.md).
@@ -26,8 +31,8 @@ scope is built, integrated, or release-green.
 
 **v0.2 still has several release-critical chains.** #80's hosted policy authority
 (Units 3/4) remains design and implementation work. #76 approval-assist and #65
-async approval await ratification of their shared contract, then implementation
-after #80. Isolated release-truth, test, and public-hygiene fixes also still need
+async approval are scheduled as work item 2 of [BUILD-PLAN.md](BUILD-PLAN.md).
+Isolated release-truth, test, and public-hygiene fixes also still need
 cross-review, integration, and the combined release gates; the final coordinated
 version, changelog, and distribution cut comes only after that work is settled.
 
@@ -42,11 +47,9 @@ dependent tail follows #22: the background-job verb, #26 explain rendering, #76 
 annotations, then #24 → #81 → #25. See THREAT-MODEL.md for the honest current
 posture ("the classifier only routes; it is not a proof").
 
-**#22 status:** the kernel-jail core and its wiring into the gate's read paths
-have landed, unreleased. On hosts with unprivileged user namespaces or Landlock,
-unsigned reads now run in a kernel jail with no network (TCP/UDP sockets denied)
-until the pin's network permission lands; other hosts stay classifier-only. The
-owner has approved the reframe: the jail is the read-only wall and replaces the argv-exec read path; the doc rewrite follows.
+**#22 status:** the jail is the read-only wall, and replaces the argv-exec read
+path. Phase 1 of the read jail is built, unreleased; its current state and the
+remaining Phases 2–7 are work item 1 of [BUILD-PLAN.md](BUILD-PLAN.md).
 
 **Scope ruling (owner, 2026-07-11, from the feature-table review):** v0.2 keeps its
 declared scope — the shipped baseline, the ordered v0.2 queue, and #22 — and is **not
@@ -124,6 +127,11 @@ these sharpen items already below; the feature-table review decides scheduling):
 ---
 
 ## Work ordering (owner direction, 2026-07-11): safeguard-sensitive work goes last
+
+> The committed order of scheduled work is now [BUILD-PLAN.md](BUILD-PLAN.md):
+> #22 Phases 2–7, then #76/#65, then #81 and the items after it. Where the
+> sequence below differs, the build plan governs. This section records how the
+> v0.2 queue was ordered and keeps the relative order of items not yet scheduled.
 
 The #22 argv-exec + kernel-confinement work — and the adversarial classifier
 **bypass corpus** that feeds it — tripped an automated model safeguard on 2026-07-10
@@ -362,31 +370,11 @@ These are the highest-priority forward items.
   `debugging-remote-servers` skill, so any agent using SSHGate has an efficient,
   opinionated playbook out of the box.
 
-- **Argv-exec structural classifier fix (#22) — a safeguard-gated v0.2 blocker**
-  (promoted 2026-07-10; see *Release status & versioning* above). Replace the fail-closed
-  shell heuristic on the read path with direct execution from a parsed `argv`
-  (`execve`, no intervening `/bin/sh`), so the classifier's view of a command is
-  exactly the view that executes. This eliminates the entire shell-parse-mismatch
-  class (escapes, quoting, separators, substitution, redirects) and ends the
-  per-tool flag arms race. Read *pipelines* are handled by a safe mini-executor
-  that verifies each stage's binary against the read allowlist and wires the
-  stages without a shell, or are routed through approval. Likely combined with
-  kernel-level confinement (read-only mounts + seccomp denying write/exec
-  syscalls) for defense in depth.
+- **Read jail (#22) — scheduled.** The kernel jail is the read-only wall; Phase 1
+  is built and Phases 2–7 are work item 1 of [BUILD-PLAN.md](BUILD-PLAN.md).
 
-- **Transparent gated SSH from a normal terminal (owner direction, filed
-  2026-07-10; prioritize right after #22).** Today the gate is reached through the
-  MCP tool surface. Once #22's argv-exec lands, let an operator `ssh` into a gated
-  host from an ordinary terminal using a gate-routed key: read-classified commands
-  pass through transparently, and only a command that needs a signature interrupts
-  the session. The signing UX is the crux — the likely shape is that the gate
-  returns a hash of the command, the operator gets that hash signed out-of-band, and
-  pastes the signature back — and it must be low-friction. The payoff is reach: once
-  the gate is usable from a bare terminal, any terminal-capable agent (not only an
-  MCP client) can use it, so SSHGate becomes a common tool rather than one plugin.
-  Overlaps but is distinct from #25 (a bespoke gate-is-the-shell REPL) and #23
-  (interactive-prompt forwarding): this is transparent passthrough of a real SSH
-  session. Depends on #22.
+- **Transparent gated SSH from a normal terminal (#81) — scheduled** as the
+  signature terminal, work item 3 of [BUILD-PLAN.md](BUILD-PLAN.md).
 
 - **Interactive prompt / confirmation / password forwarding (Feature 1).** A
   remote command can trigger an interactive prompt mid-run — a `sudo`/password
@@ -474,45 +462,13 @@ These are the highest-priority forward items.
   dist/gate republish) so the probe path can verify the flag it registers;
   until then the tier on that path is taken on faith.
 
-- **Asynchronous approval lifecycle — dispatch-and-continue (owner direction
-  2026-07-04).** Today a write's tool call BLOCKS from request to verdict: one
-  approval in flight, the human must be watching the channel, and the client's
-  wait budget bounds the whole exchange (the known verdict-undelivered /75s
-  issue is a symptom). The end goal: the agent **dispatches N approval
-  requests and goes on with its own work**; the human approves them
-  asynchronously — Telegram today, a web approval surface later (longer
-  cycles, several pending items answered in one sitting) — and the agent
-  collects/gets notified of verdicts when they land, executing only then.
-  Workflow shape identified so far (design questions, not commitments):
-  an async dispatch variant returning a `request_id` immediately;
-  **sign-at-approval, not sign-at-request** (the signer signs when the human
-  decides, so signature TTLs stay short while the *pending request* gets its
-  own longer validity window — a pre-signed long-TTL blob must never sit in a
-  queue); collection via `await_approvals([ids])`/`list_pending_approvals`
-  tools plus an optional local watcher to wake an idle agent (harness-specific;
-  the polling tools stay the portable core); an operator-visible pending
-  queue with cancel/deny-all and single-use nonce-bound verdicts; and batch
-  approval UX that still renders each item for scrutiny (approve-all is a
-  gesture over N displayed items, never a blind blanket). This converges
-  deliberately with the Tier-3 hosted signer (its backend already models a
-  pending approval queue + web auth) and with channel-relay approvals —
-  design once, serve both surfaces. Not scheduled; full design pipeline
-  before any build.
-
-- **LLM approval-assist at the signing surface (owner direction, filed
-  2026-07-10).** The agent requesting a signature supplies the *reason* it wants
-  these commands; the approval surface then runs an LLM pass over
-  (reason, command list) that (a) checks the commands actually match the stated
-  reason, (b) flags anything inappropriate or out of scope, and (c) renders a
-  plain-language summary of what approving would really do — so a human can
-  scrutinize an N-command batch without hand-parsing shell. Native in the hosted
-  signer's web UI (a first-class part of its integration story); the Telegram
-  surface can carry a condensed form. Requires the MCP sign path to carry an
-  agent-supplied reason (`run`/`run_batch` have none today; `request_grant`'s
-  `reason` field is the precedent). Design together with the async approval
-  lifecycle above and the hosted signer, so it is built once for every approval
-  surface. The assist is advisory — the human tap remains the boundary, and a
-  wrong LLM summary must never widen what was actually signed.
+- **Asynchronous approval lifecycle (#65) and LLM approval-assist (#76) —
+  scheduled** together as work item 2 of [BUILD-PLAN.md](BUILD-PLAN.md): a reason on
+  every write, durable approval records, sign-at-approval, an advisory AI assessment of
+  each request, async dispatch with `await_approvals`/`list_pending_approvals`, and
+  operator queue controls. Still unscheduled: an optional local watcher that wakes
+  an idle agent when a verdict lands (harness-specific; the polling tools stay the
+  portable core).
 
 - **Per-gate memory subsystem (owner direction, filed 2026-07-10).** Alongside
   the gate install, give each target server a first-class, centrally-maintained
@@ -643,8 +599,9 @@ anchor above and are marked *(subsumed)*.
   hiccup" — the worst ambiguity for a near-irreversible write. Persist each
   resolved verdict server-side keyed by request id and add a read-only verb so
   the client can re-read the true outcome (approved/denied/timeout) after a lost
-  response, mirroring the existing grant-list reconcile path. *(Largely subsumed
-  — reliable delivery removes most of the ambiguity.)*
+  response, mirroring the existing grant-list reconcile path. *(Scheduled in
+  [BUILD-PLAN.md](BUILD-PLAN.md) work item 2: each verdict is kept in the signer's
+  approval record, and the client re-reads it by request id after a lost response.)*
 
 - **Per-command re-sign within an approved batch.** A single approval mints one
   short signature window for a whole multi-command batch, so slow early commands
@@ -675,11 +632,11 @@ anchor above and are marked *(subsumed)*.
   wrong default) and keeps stop-on-error for any batch containing a write (where
   ordering matters). An explicit `stop_on_error` always wins.
 
-- **Concurrent gated approvals *(subsumed)*.** Firing several gated calls at once
+- **Concurrent gated approvals.** Firing several gated calls at once
   can cross-reject when the local tool-permission prompt and the approval channel
   assume a single pending request. Queue concurrent gated calls or key multiple
-  in-flight approvals by request id. Routing approvals through the shared layer,
-  with per-request delivery, is the clean fix.
+  in-flight approvals by request id. *(Scheduled in [BUILD-PLAN.md](BUILD-PLAN.md)
+  work item 2: every approval is its own record keyed by request id.)*
 
 ---
 

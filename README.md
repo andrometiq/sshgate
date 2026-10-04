@@ -222,6 +222,7 @@ reveal, and box-to-box transfer continue to fail closed and use the local
 Telegram signer instead.
 
 - Architecture and threat model: [`docs/THREAT-MODEL.md`](docs/THREAT-MODEL.md) (start here), then [`docs/design.md`](docs/design.md)
+- What is built next, in order: [`docs/BUILD-PLAN.md`](docs/BUILD-PLAN.md)
 - Roadmap and deferred work: [`docs/ROADMAP.md`](docs/ROADMAP.md)
 - Release history: [`CHANGELOG.md`](CHANGELOG.md)
 
