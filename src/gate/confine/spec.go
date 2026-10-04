@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+
+	"github.com/karthikeyan5/sshgate/src/gate/confine/jailmut"
 )
 
 // Rung is the interim probe result: full confinement or classifier-only.
@@ -72,6 +74,11 @@ type Spec struct {
 
 const ForceNoLandlock = -1
 
+const maxStatusBytes = 1 << 20
+
+// Leave room for the shim's bounded cleanup diagnostic after I/X.
+const maxInfoBytes = maxStatusBytes - 4096
+
 // Report is the host-probe result for `gate doctor` and the audit line.
 type Report struct {
 	Rung                Rung
@@ -102,8 +109,13 @@ func (e *SetupError) Error() string {
 	return fmt.Sprintf("jail setup failed at stage %q", e.Stage)
 }
 
-// Facts records mount-recipe observations; full profile reporting lands with S2.
+// Facts is the worker report after all self-checks pass.
 type Facts struct {
+	coverIDs        map[int]bool
+	Profile         string   `json:"profile"`
+	ABI             int      `json:"abi"`
+	Net             bool     `json:"net"`
+	Lane2           bool     `json:"lane2"`
 	Unmet           []string `json:"unmet,omitempty"`
 	CoverAtAncestor []string `json:"cover_at_ancestor,omitempty"`
 	CwdReset        bool     `json:"cwd_reset,omitempty"`
@@ -114,6 +126,7 @@ type Jailed struct {
 	// CleanupError reports post-execution cleanup failure without changing status.
 	CleanupError string
 	Facts        Facts
+	spec         Spec
 	strict       bool
 	Cmd          *exec.Cmd
 
@@ -121,12 +134,19 @@ type Jailed struct {
 	cmd string
 	// cmdW is the parent's write end of the fd-3 (command) pipe.
 	// statusR is the parent's read end of the fd-4 (status) pipe.
-	cmdW    *os.File
-	statusR *os.File
+	cmdW         *os.File
+	statusR      *os.File
+	statusDone   chan struct{}
+	statusReport workerReport
 	// childEnds are the pipe ends handed to the child via ExtraFiles; the
 	// parent closes its copies in Started (after a successful Start) or Abort
 	// (after a failed Start).
 	childEnds []*os.File
+}
+
+type workerReport struct {
+	data []byte
+	err  error
 }
 
 // Started must be called once, right after Cmd.Start succeeds. It closes the
@@ -138,6 +158,14 @@ func (j *Jailed) Started() error {
 		_ = f.Close()
 	}
 	j.childEnds = nil
+	// Drain before releasing the worker: Facts may exceed the pipe capacity.
+	reader := j.statusR
+	j.statusDone = make(chan struct{})
+	go func() {
+		defer close(j.statusDone)
+		defer reader.Close()
+		j.statusReport.data, j.statusReport.err = io.ReadAll(io.LimitReader(reader, maxStatusBytes))
+	}()
 	go func() {
 		_, _ = io.WriteString(j.cmdW, j.cmd)
 		_ = j.cmdW.Close()
@@ -157,50 +185,119 @@ func (j *Jailed) Abort() {
 	if j.statusR != nil {
 		_ = j.statusR.Close()
 	}
+	if j.statusDone != nil {
+		<-j.statusDone
+	}
 }
 
-// Status must be called after Cmd.Wait. It returns nil ONLY if the worker
-// reported (on the fd-4 status pipe) that it completed every setup stage and
-// reached execve — an 'X' byte, optionally followed by shim cleanup metadata. An explicit
-// "F<stage>:<errno>" report, or EOF with no report (the worker died before
-// reporting) — is a *SetupError, meaning nothing ran.
-func (j *Jailed) Status() error {
+// Status validates the worker's I/X report after Cmd.Wait. Facts are published
+// only on success; the shim may append one cleanup diagnostic after execution.
+func (j *Jailed) Status() (Facts, error) {
 	defer func() {
 		if j.statusR != nil {
 			_ = j.statusR.Close()
 		}
 	}()
+	failure := func(stage string) (Facts, error) { return Facts{}, &SetupError{Stage: stage} }
 	if j.statusR == nil {
-		return &SetupError{Stage: "unknown"}
+		return failure("unknown")
 	}
-	buf, _ := io.ReadAll(j.statusR)
+	var buf []byte
+	var err error
+	if j.statusDone != nil {
+		<-j.statusDone
+		buf, err = j.statusReport.data, j.statusReport.err
+	} else {
+		buf, err = io.ReadAll(io.LimitReader(j.statusR, maxStatusBytes))
+	}
+	if jailmut.On("P-STATUS") {
+		return Facts{Profile: j.spec.Profile, ABI: 1, Net: j.spec.Net}, nil
+	}
+	if err != nil || len(buf) == maxStatusBytes {
+		return failure("report")
+	}
+	if len(buf) == 0 {
+		return failure("unknown")
+	}
+	if buf[0] == 'F' {
+		return Facts{}, statusFromReport(buf)
+	}
+	line, tail, ok := strings.Cut(string(buf), "\n")
+	if !ok || len(line) < 2 || line[0] != 'I' {
+		return failure("report")
+	}
 	var facts Facts
-	if len(buf) > 0 && buf[0] == 'I' {
-		line, tail, ok := strings.Cut(string(buf), "\n")
-		if !ok {
-			return &SetupError{Stage: "report"}
-		}
-		decoder := json.NewDecoder(strings.NewReader(line[1:]))
-		decoder.DisallowUnknownFields()
-		var extra any
-		if decoder.Decode(&facts) != nil || decoder.Decode(&extra) != io.EOF || (j.strict && len(facts.Unmet) > 0) {
-			return &SetupError{Stage: "report"}
-		}
-		buf = []byte(tail)
+	decoder := json.NewDecoder(strings.NewReader(line[1:]))
+	decoder.DisallowUnknownFields()
+	var extra any
+	if decoder.Decode(&facts) != nil || decoder.Decode(&extra) != io.EOF {
+		return failure("report")
 	}
-	if head, reason, ok := strings.Cut(string(buf), "\nC"); ok {
+	// Require the four mandatory fields even where false is the expected value.
+	fields := map[string]json.RawMessage{}
+	keys := json.NewDecoder(strings.NewReader(line[1:]))
+	if token, err := keys.Token(); err != nil || token != json.Delim('{') {
+		return failure("report")
+	}
+	for keys.More() {
+		token, err := keys.Token()
+		key, ok := token.(string)
+		if err != nil || !ok {
+			return failure("report")
+		}
+		switch key {
+		case "profile", "abi", "net", "lane2", "unmet", "cover_at_ancestor", "cwd_reset":
+		default:
+			return failure("report")
+		}
+		if _, duplicate := fields[key]; duplicate {
+			return failure("report")
+		}
+		var value json.RawMessage
+		if keys.Decode(&value) != nil {
+			return failure("report")
+		}
+		fields[key] = value
+	}
+	for _, key := range []string{"profile", "abi", "net", "lane2"} {
+		if value, ok := fields[key]; !ok || string(value) == "null" {
+			return failure("report")
+		}
+	}
+	if facts.Profile != j.spec.Profile || facts.Net != j.spec.Net || facts.Lane2 || facts.ABI < 1 || j.spec.ForceABI > 0 && facts.ABI > j.spec.ForceABI || j.strict && len(facts.Unmet) > 0 {
+		return failure("report")
+	}
+	cleanup := ""
+	if head, reason, ok := strings.Cut(tail, "\nC"); ok {
 		reason = strings.TrimSuffix(reason, "\n")
 		if reason == "" || strings.ContainsAny(reason, "\r\n") {
-			return &SetupError{Stage: "report"}
+			return failure("report")
 		}
-		j.CleanupError = reason
-		buf = []byte(head)
+		cleanup, tail = reason, head
 	}
-	if err := statusFromReport(buf); err != nil {
+	if tail != "X" {
+		if strings.HasPrefix(tail, "XFexec:") {
+			return Facts{}, statusFromReport([]byte(tail))
+		}
+		if strings.HasPrefix(tail, "X") {
+			return failure("exec")
+		}
+		return failure("report")
+	}
+	j.Facts, j.CleanupError = facts, cleanup
+	return facts, nil
+}
+
+func writeExecReport(writer io.Writer, facts Facts) error {
+	raw, err := json.Marshal(facts)
+	if err != nil {
 		return err
 	}
-	j.Facts = facts
-	return nil
+	if len(raw) > maxInfoBytes {
+		return syscall.E2BIG
+	}
+	_, err = fmt.Fprintf(writer, "I%s\nX", raw)
+	return err
 }
 
 // statusFromReport maps the raw fd-4 bytes to Status's result: nil only for

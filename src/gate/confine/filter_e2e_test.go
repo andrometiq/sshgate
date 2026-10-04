@@ -197,8 +197,10 @@ func legFlock(t *testing.T, spec Spec) {
 		}
 		input.Close()
 		waitErr := command.Wait()
-		if j != nil && j.Status() != nil {
-			t.Fatalf("SETUP: jail %v", j.Status())
+		if j != nil {
+			if _, err := j.Status(); err != nil {
+				t.Fatalf("SETUP: jail %v", err)
+			}
 		}
 		if !jailed {
 			mutationSetup(t, waitErr)

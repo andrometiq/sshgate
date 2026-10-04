@@ -179,17 +179,69 @@ func hostAsyncEffect(t *testing.T, specs []Spec, leg string) {
 	mutationEffect(t, leg, "errno", badErrno)
 	mutationEffect(t, leg, "signal", delivered)
 }
+func startRetuneVictim(t *testing.T) *exec.Cmd {
+	t.Helper()
+	if os.Geteuid() != 0 {
+		return startSleeper(t)
+	}
+	victim := exec.Command(buildProbe(t), "retune-victim", "drop")
+	var diagnostic bytes.Buffer
+	victim.Stderr = &diagnostic
+	reader, err := victim.StdoutPipe()
+	mutationSetup(t, err)
+	mutationSetup(t, victim.Start())
+	t.Cleanup(func() {
+		_ = victim.Process.Kill()
+		_ = victim.Wait()
+	})
+	scan := bufio.NewScanner(reader)
+	if !scan.Scan() || scan.Text() != "READY" {
+		_ = victim.Process.Kill()
+		_ = victim.Wait()
+		t.Fatalf("SETUP: retune victim readiness: %v %s", scan.Err(), diagnostic.String())
+	}
+	status, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", victim.Process.Pid))
+	mutationSetup(t, err)
+	for _, field := range []string{"Uid", "CapPrm", "CapEff", "CapInh", "CapBnd", "CapAmb"} {
+		found := false
+		for _, line := range strings.Split(string(status), "\n") {
+			values := strings.Fields(line)
+			if len(values) == 0 || values[0] != field+":" {
+				continue
+			}
+			expected := 2
+			if field == "Uid" {
+				expected = 5
+			}
+			if len(values) != expected {
+				t.Fatalf("SETUP: retune victim malformed %s", line)
+			}
+			for _, value := range values[1:] {
+				n, err := strconv.ParseUint(value, 16, 64)
+				if err != nil || n != 0 {
+					t.Fatalf("SETUP: retune victim nonzero %s", line)
+				}
+			}
+			found = true
+		}
+		if !found {
+			t.Fatalf("SETUP: retune victim missing %s", field)
+		}
+	}
+	return victim
+}
+
 func hostRetuneEffect(t *testing.T, abi int) {
 	probe := buildProbe(t)
 	changed, badErrno := false, false
-	control := startSleeper(t)
+	control := startRetuneVictim(t)
 	initial := readScheduler(t, control.Process.Pid)
 	output, err := exec.Command(probe, "scheduler", strconv.Itoa(control.Process.Pid)).CombinedOutput()
 	if err != nil || initial == readScheduler(t, control.Process.Pid) {
 		t.Fatalf("SETUP: retune control: %v %s", err, output)
 	}
 	for _, spec := range hostPIDSpecs(abi) {
-		victim := startSleeper(t)
+		victim := startRetuneVictim(t)
 		before := readScheduler(t, victim.Process.Pid)
 		out := requireProbeOutput(t, runP12(t, spec, probe+" retune-errno "+strconv.Itoa(victim.Process.Pid), nil))
 		badErrno = badErrno || strings.Count(out, "retune=1\n") != 54
@@ -255,7 +307,7 @@ func hostLifecycle(t *testing.T, abi int) {
 			}
 			_ = jailed.Cmd.Wait()
 			cancel()
-			if err := jailed.Status(); err != nil {
+			if _, err := jailed.Status(); err != nil {
 				t.Fatalf("SETUP: lifecycle jail: %v %s", err, diagnostic.String())
 			}
 			if strings.Count(out.String(), "CHILD=") != 2 {

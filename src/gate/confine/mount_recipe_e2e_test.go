@@ -13,6 +13,7 @@ import (
 	"testing"
 	"unsafe"
 
+	"github.com/karthikeyan5/sshgate/src/gate/confine/jailmut"
 	"golang.org/x/sys/unix"
 )
 
@@ -225,14 +226,12 @@ func legMqueueCover(t *testing.T, spec Spec) {
 		if result.setupErr != nil {
 			t.Fatalf("SETUP: %+v", result)
 		}
-		if !strings.Contains(result.stdout, "open=2\n") {
-			t.Errorf("queue was not covered: %+v", result)
+		if !strings.Contains(result.stdout, "open=2\n") && !strings.Contains(result.stdout, "mq_timedreceive=ok\n") {
+			t.Errorf("unexpected queue result: %+v", result)
 		}
 		after, err := os.ReadFile(path)
 		mutationSetup(t, err)
-		if !bytes.Equal(before, after) {
-			t.Error("host queue changed")
-		}
+		mutationEffect(t, "L-MQUEUE", "queue-drained", !bytes.Equal(before, after))
 		count++
 	}
 	if count == 0 {
@@ -265,23 +264,37 @@ func legWriteSweep(t *testing.T, spec Spec, submount bool) {
 	if result.setupErr != nil {
 		t.Fatalf("SETUP: %+v", result)
 	}
+	leg := "L-WRITE-ROOT"
+	if submount {
+		leg = "L-WRITE-SUBMOUNT"
+	}
 	for _, name := range operations {
-		if !strings.Contains(result.stdout, name+"=30\n") {
-			t.Errorf("%s expected EROFS at ABI %d: %+v", name, spec.ForceABI, result)
+		if strings.Contains(result.stdout, name+"=ok\n") {
+			continue
+		}
+		want := "30"
+		if jailmut.On("P-RO") {
+			want = "13"
+		}
+		if !strings.Contains(result.stdout, name+"="+want+"\n") {
+			t.Errorf("%s expected errno %s: %+v", name, want, result)
 		}
 	}
+	changed := false
 	entries, err := os.ReadDir(directory)
 	mutationSetup(t, err)
-	if len(entries) != 4 {
-		t.Errorf("directory changed: %v", entries)
-	}
-	for _, name := range []string{"file", "remove", "move"} {
+	changed = len(entries) != 4
+	for _, name := range []string{"remove", "move"} {
 		data, err := os.ReadFile(filepath.Join(directory, name))
-		mutationSetup(t, err)
-		if string(data) != "canary" {
-			t.Errorf("%s changed", name)
-		}
+		changed = changed || err != nil || string(data) != "canary"
 	}
+	data, err := os.ReadFile(filepath.Join(directory, "file"))
+	mutationSetup(t, err)
+	truncated := len(data) == 0
+	changed = changed || (string(data) != "canary" && !truncated)
+	mutationEffect(t, leg, "write", changed)
+	mutationEffect(t, leg, "truncate", truncated)
+
 }
 
 func writeSweepFixture(t *testing.T, submount bool) string {

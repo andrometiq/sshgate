@@ -21,7 +21,7 @@ import (
 
 type prot = harness.Protection
 
-var registry = append(append(p12Registry(), p15Registry()...), hostPIDRegistry()...)
+var registry = append(completeRegistry(), statusRegistry()...)
 
 func p12Leg(name, marker string) harness.Leg {
 	leg := harness.Leg{Name: name, Package: "./src/gate/confine", Names: map[string]string{"native": "TestJailMatrixP12/native/" + name, "abi1": "TestJailMatrixP12/abi1/" + name}}
@@ -45,7 +45,7 @@ func p12Registry() []prot {
 	executor := harness.Leg{Markers: []string{"MUTATION-ABORT private"}, Name: "L-NSVERIFY", Package: "./src/gate", Names: map[string]string{"native": "TestExecWithRedactionConfineNSVerify/native/L-NSVERIFY", "abi1": "TestExecWithRedactionConfineNSVerify/abi1/L-NSVERIFY"}}
 	nsLegs = append(nsLegs, executor)
 	add("P-NSVERIFY", "RunWorker before setupMounts", nsLegs...)
-	for _, stage := range []string{"spec", "cmdread", "mounts", "nnp", "caps", "rlimits", "landlock", "seccomp", "fds", "cwd", "session", "exec"} {
+	for _, stage := range []string{"spec", "cmdread", "mounts", "nnp", "caps", "rlimits", "landlock", "seccomp", "fds", "cwd", "session", "selfcheck", "exec"} {
 		legs := []harness.Leg{p12Leg("L-FAULT-"+stage, "MUTATION-EFFECT reached-exec")}
 		if stage == "caps" {
 			root := p12Leg("L-ROOT-STATE", "")
@@ -77,7 +77,7 @@ func p12Registry() []prot {
 	}
 	add("P-MQ", "POSIX mqueue syscall denies", mqErrno, mqCover)
 	protections[len(protections)-1].Class = "multi"
-	add("P-LL-REQUIRED", "applyLandlock ABI floor", p12Leg("L-LL-REQUIRED", "MUTATION-EFFECT reached-exec"))
+	add("P-LL-REQUIRED", "applyLandlock ABI floor", p12Leg("L-LL-REQUIRED", "MUTATION-ABORT selfcheck"))
 	return protections
 }
 

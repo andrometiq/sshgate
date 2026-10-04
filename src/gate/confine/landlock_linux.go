@@ -100,7 +100,11 @@ func applyLandlock(abi int, writable []string) error {
 	defer unix.Close(int(rfd))
 
 	// Reads everywhere.
-	if err := addLandlockRule(rfd, "/", readRights(), false); err != nil {
+	rights := readRights()
+	if jailmut.On("P-LL-FS") {
+		rights = handledFS(abi)
+	}
+	if err := addLandlockRule(rfd, "/", rights, false); err != nil {
 		return err
 	}
 	// Writes only beneath the writable set. A missing path (e.g. a host without

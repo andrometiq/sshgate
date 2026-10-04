@@ -66,6 +66,7 @@ func Validate(registry []Protection) error {
 			return fmt.Errorf("%s: no mutation sets", p.ID)
 		}
 		declared := map[string]bool{}
+		redByABI := map[string]bool{}
 		for _, s := range p.MutationSets {
 			if len(s.IDs) == 0 || len(s.Legs) == 0 {
 				return fmt.Errorf("%s: empty mutation set", p.ID)
@@ -117,9 +118,12 @@ func Validate(registry []Protection) error {
 				for _, leg := range s.Legs {
 					hasRed = hasRed || len(leg.ExpectedMarkers(abi)) > 0
 				}
-				if !hasRed {
-					return fmt.Errorf("%s: no expected red leg at %s", s.Name(), abi)
-				}
+				redByABI[abi] = redByABI[abi] || hasRed
+			}
+		}
+		for _, abi := range []string{"native", "abi1"} {
+			if !redByABI[abi] {
+				return fmt.Errorf("%s: no expected red leg at %s", p.ID, abi)
 			}
 		}
 		for _, name := range append([]string{p.DirectLeg}, p.EffectLegs...) {

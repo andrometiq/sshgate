@@ -75,6 +75,7 @@ type ExecOpts struct {
 // child's 0..255 code, 128+signum when signalled, or -1 if the process
 // never started.
 type ExecResult struct {
+	Jail     *confine.Facts
 	ExitCode int
 	// CleanupError reports post-execution cleanup failure without changing ExitCode.
 	CleanupError string
@@ -347,10 +348,12 @@ func runRedacted(c *exec.Cmd, jailed *confine.Jailed, what string, opts ExecOpts
 	// gate maps it to a deny rather than silently treating a half-built jail as a
 	// completed command.
 	if jailed != nil {
-		if setupErr := jailed.Status(); setupErr != nil {
+		facts, setupErr := jailed.Status()
+		if setupErr != nil {
 			res.ExitCode = -1
 			return res, fmt.Errorf("exec: %w", setupErr)
 		}
+		res.Jail = &facts
 	}
 
 	if jailed != nil {

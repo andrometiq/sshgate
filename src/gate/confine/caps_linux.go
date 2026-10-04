@@ -5,6 +5,8 @@ package confine
 import (
 	"fmt"
 
+	"github.com/karthikeyan5/sshgate/src/gate/confine/jailmut"
+
 	"golang.org/x/sys/unix"
 )
 
@@ -20,6 +22,9 @@ const (
 // unprivileged seccomp filter and a belt against setuid re-elevation (so sudo in
 // the jail cannot gain privilege).
 func setNoNewPrivs() error {
+	if jailmut.On("P-NNP") {
+		return nil
+	}
 	if err := unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0); err != nil {
 		return fmt.Errorf("set no_new_privs: %w", err)
 	}
@@ -64,6 +69,9 @@ func capMask(caps ...int) [2]uint32 {
 // dropCaps clears ambient capabilities and the bounding set after mounting.
 // Root SSH retains only DAC_READ_SEARCH; seccomp denies open_by_handle_at.
 func dropCaps(rootSSH bool) error {
+	if jailmut.On("P-CAPS") {
+		return nil
+	}
 	keepDacRead := rootSSH
 
 	// Drop every bounding-set capability (except a kept one) while

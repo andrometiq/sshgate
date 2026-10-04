@@ -4,6 +4,7 @@ package confine
 
 import (
 	"fmt"
+	"github.com/karthikeyan5/sshgate/src/gate/confine/jailmut"
 	"golang.org/x/sys/unix"
 )
 
@@ -17,7 +18,12 @@ func setupMounts(spec Spec) (mountFacts, error) {
 		name string
 		run  func() error
 	}{
-		{"private", func() error { return unix.Mount("", "/", "", unix.MS_REC|unix.MS_PRIVATE, "") }},
+		{"private", func() error {
+			if jailmut.On("P-PRIVATE") {
+				return nil
+			}
+			return unix.Mount("", "/", "", unix.MS_REC|unix.MS_PRIVATE, "")
+		}},
 		{"setattr", remountRootReadOnly},
 		{"devnodes", bindDevNodes},
 		{"covers", func() (err error) { facts, err = coverMounts(spec); return err }},
@@ -36,7 +42,14 @@ func setupMounts(spec Spec) (mountFacts, error) {
 }
 
 func remountRootReadOnly() error {
-	return unix.MountSetattr(unix.AT_FDCWD, "/", unix.AT_RECURSIVE, &unix.MountAttr{Attr_set: unix.MOUNT_ATTR_RDONLY | unix.MOUNT_ATTR_NODEV | unix.MOUNT_ATTR_NOSUID})
+	flags := uint64(unix.MOUNT_ATTR_RDONLY | unix.MOUNT_ATTR_NODEV | unix.MOUNT_ATTR_NOSUID)
+	if jailmut.On("P-RO") {
+		flags &^= unix.MOUNT_ATTR_RDONLY
+	}
+	if jailmut.On("P-NOSUID") {
+		flags &^= unix.MOUNT_ATTR_NOSUID
+	}
+	return unix.MountSetattr(unix.AT_FDCWD, "/", unix.AT_RECURSIVE, &unix.MountAttr{Attr_set: flags})
 }
 
 func bindDevNodes() error {

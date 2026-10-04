@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"runtime"
 	"strconv"
 	"syscall"
 	"time"
@@ -22,6 +23,38 @@ func hostPIDProbe(op string, args []string) bool {
 		return uintptr(n)
 	}
 	switch op {
+	case "retune-victim":
+		if args[0] == "ready" {
+			fmt.Println("READY")
+			time.Sleep(time.Hour)
+			return true
+		}
+		// Capabilities are per-thread; exec makes this thread the new leader.
+		runtime.LockOSThread()
+		for capability := 0; ; capability++ {
+			err := unix.Prctl(unix.PR_CAPBSET_DROP, uintptr(capability), 0, 0, 0)
+			if err == unix.EINVAL {
+				break
+			}
+			if err != nil {
+				panic(err)
+			}
+		}
+		if err := unix.Prctl(unix.PR_CAP_AMBIENT, unix.PR_CAP_AMBIENT_CLEAR_ALL, 0, 0, 0); err != nil {
+			panic(err)
+		}
+		header := unix.CapUserHeader{Version: unix.LINUX_CAPABILITY_VERSION_3}
+		data := [2]unix.CapUserData{}
+		if err := unix.Capset(&header, &data[0]); err != nil {
+			panic(err)
+		}
+		executable, err := os.Executable()
+		if err != nil {
+			panic(err)
+		}
+		if err := unix.Exec(executable, []string{executable, "retune-victim", "ready"}, os.Environ()); err != nil {
+			panic(err)
+		}
 	case "signal-one":
 		nr, pid := number(args[0]), number(args[1])
 		var info [128]byte

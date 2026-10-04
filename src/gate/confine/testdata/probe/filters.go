@@ -31,6 +31,30 @@ func filterProbe(op string, args []string) bool {
 		report("keyring", err)
 	case "uring":
 		uringProbe(args[0], int(number(args[1])))
+	case "metadata-mount":
+		path := args[0]
+		fd, err := unix.Open(path, unix.O_RDONLY|unix.O_CLOEXEC, 0)
+		if !report("open", err) {
+			return true
+		}
+		defer unix.Close(fd)
+		report("chmod", unix.Chmod(path, 0644))
+		report("chown", unix.Chown(path, os.Getuid(), os.Getgid()))
+		acl := make([]byte, 36)
+		binary.LittleEndian.PutUint32(acl, 2)
+		for i, entry := range []struct{ tag, permissions uint16 }{{1, 6}, {4, 4}, {16, 4}, {32, 0}} {
+			offset := 4 + 8*i
+			binary.LittleEndian.PutUint16(acl[offset:], entry.tag)
+			binary.LittleEndian.PutUint16(acl[offset+2:], entry.permissions)
+			binary.LittleEndian.PutUint32(acl[offset+4:], ^uint32(0))
+		}
+		report("setxattr", unix.Setxattr(path, "system.posix_acl_access", acl, 0))
+		report("removexattr", unix.Removexattr(path+"-remove", "system.posix_acl_access"))
+		report("utimensat", unix.UtimesNanoAt(unix.AT_FDCWD, path, []unix.Timespec{{Sec: 1}, {Sec: 1}}, 0))
+		flags, err := unix.IoctlGetInt(fd, unix.FS_IOC_GETFLAGS)
+		if report("getflags", err) {
+			report("setflags", unix.IoctlSetPointerInt(fd, unix.FS_IOC_SETFLAGS, flags|0x40))
+		}
 	case "metadata-errno":
 		fd, err := unix.Open(args[0], unix.O_RDONLY|unix.O_CLOEXEC, 0)
 		if !report("open", err) {

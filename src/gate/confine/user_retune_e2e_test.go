@@ -62,14 +62,16 @@ func legUserScheduler(t *testing.T, abi int) {
 			}
 			return
 		}
-		changed, badErrno := false, false
+		changed := false
 		for _, spec := range hostPIDSpecs(abi) {
 			output := requireProbeOutput(t, runP12(t, spec, command, nil))
 			after := readScheduler(t, victim.Process.Pid)
 			changed = changed || before.nice != after.nice || before.io != after.io
-			badErrno = badErrno || !strings.Contains(output, "prio-user=1\n") || !strings.Contains(output, "ioprio-user=1\n")
+			// USER calls can retune the victim and still fail on the same-uid shim.
+			if !strings.Contains(output, "prio-user=1\n") || !strings.Contains(output, "ioprio-user=1\n") {
+				t.Errorf("USER retune expected EPERM: %s", output)
+			}
 		}
-		mutationEffect(t, "L-SCHED-USER", "errno", badErrno)
 		mutationEffect(t, "L-SCHED-USER", "retuned", changed)
 		return
 	}

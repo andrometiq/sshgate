@@ -48,7 +48,7 @@ func (s Spec) validate(worker bool) error {
 	if s.InjectFailAt != "" {
 		stage, errno := s.inject()
 		switch stage {
-		case "spec", "cmdread", "nsverify", "mounts", "private", "setattr", "devnodes", "covers", "scratch", "fds", "cwd", "nnp", "caps", "rlimits", "landlock", "seccomp", "tsync", "session", "exec":
+		case "spec", "cmdread", "nsverify", "mounts", "private", "setattr", "devnodes", "covers", "scratch", "fds", "cwd", "nnp", "caps", "rlimits", "landlock", "seccomp", "tsync", "session", "selfcheck", "exec":
 		default:
 			return unix.EINVAL
 		}

@@ -1225,7 +1225,7 @@ func runJailedTimeout(t *testing.T, spec Spec, cmd string, d time.Duration) jail
 	}
 	_ = j.Started()
 	waitErr := j.Cmd.Wait()
-	setupErr := j.Status()
+	_, setupErr := j.Status()
 	return jailResult{exit: exitCodeOf(waitErr), stdout: out.String(), stderr: errb.String(), setupErr: setupErr}
 }
 

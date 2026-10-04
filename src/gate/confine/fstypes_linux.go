@@ -4,6 +4,7 @@ package confine
 
 import (
 	"fmt"
+	"github.com/karthikeyan5/sshgate/src/gate/confine/jailmut"
 	"golang.org/x/sys/unix"
 	"os"
 	"path/filepath"
@@ -268,6 +269,12 @@ func (inspector backingInspector) mount(entry mountEntry) backingClass {
 	return class
 }
 func mountAccepted(entry mountEntry, accept []string, inspector backingInspector) bool {
+	if entry.fstype == "ramfs" && jailmut.On("SAFE-DROP=ramfs") {
+		return false
+	}
+	if entry.fstype == "overlay" && jailmut.On("SAFE-ADD=overlay") {
+		return true
+	}
 	if slices.Contains(networkFstypes, entry.fstype) {
 		return slices.Contains(accept, "network")
 	}
@@ -278,6 +285,9 @@ func mountAccepted(entry mountEntry, accept []string, inspector backingInspector
 		return false
 	}
 	if entry.fstype == "btrfs" || slices.Contains(blockFstypes, entry.fstype) {
+		if jailmut.On("P-BACKING") {
+			return true
+		}
 		class := inspector.mount(entry)
 		return class == backingDirect || class == backingNetwork && slices.Contains(accept, "network")
 	}

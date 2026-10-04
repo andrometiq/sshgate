@@ -7,9 +7,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
 	"os"
 	"reflect"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -172,12 +172,10 @@ func TestWorkerRejectsInvalidSpecBeforeInjection(t *testing.T) {
 			if err := jailed.Cmd.Wait(); err == nil {
 				t.Fatal("invalid worker spec exited successfully")
 			}
-			report, err := io.ReadAll(jailed.statusR)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if string(report) != formatFailReport("spec", syscall.EINVAL) {
-				t.Errorf("report=%q want Fspec:EINVAL", report)
+			_, err = jailed.Status()
+			var setup *SetupError
+			if !errors.As(err, &setup) || setup.Stage != "spec" || setup.Errno != syscall.EINVAL {
+				t.Errorf("report=%v want Fspec:EINVAL", err)
 			}
 			if output.Len() != 0 {
 				t.Errorf("command ran: %q", output.String())
@@ -200,12 +198,12 @@ func TestMountFactsStatus(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := writer.WriteString(test.raw); err != nil {
+		if _, err := writer.WriteString(strings.Replace(test.raw, "I{", `I{"profile":"ro-v1","abi":1,"net":false,"lane2":false,`, 1)); err != nil {
 			t.Fatal(err)
 		}
 		writer.Close()
-		jailed := Jailed{statusR: reader, strict: test.strict}
-		err = jailed.Status()
+		jailed := Jailed{statusR: reader, strict: test.strict, spec: Spec{Profile: ProfileROv1}}
+		_, err = jailed.Status()
 		if (err != nil) != test.wantError {
 			t.Errorf("%q: %v", test.raw, err)
 		}
@@ -224,13 +222,13 @@ func TestCleanupStatusReport(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		_, err = writer.WriteString(test.raw)
+		_, err = writer.WriteString(`I{"profile":"ro-v1","abi":1,"net":false,"lane2":false}` + "\n" + test.raw)
 		if err != nil {
 			t.Fatal(err)
 		}
 		writer.Close()
-		jailed := Jailed{statusR: reader}
-		err = jailed.Status()
+		jailed := Jailed{statusR: reader, spec: Spec{Profile: ProfileROv1}}
+		_, err = jailed.Status()
 		if (err != nil) != test.denied {
 			t.Fatalf("%q: %v", test.raw, err)
 		}

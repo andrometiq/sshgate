@@ -75,6 +75,22 @@ func main() {
 	}
 	args := os.Args[2:]
 	switch os.Args[1] {
+	case "sync":
+		// unix.Sync discards errno; retain it to observe seccomp denial.
+		_, _, errno := unix.Syscall(unix.SYS_SYNC, 0, 0, 0)
+		report("sync", errnoOrNil(errno))
+	case "sc-sweep":
+		syscallSweep(args)
+	case "trace-drain":
+		fd, err := unix.Open(args[0], unix.O_RDONLY|unix.O_NONBLOCK|unix.O_CLOEXEC, 0)
+		if report("open", err) {
+			buffer := make([]byte, 65536)
+			n, err := unix.Read(fd, buffer)
+			if report("read", err) {
+				fmt.Printf("%s", buffer[:n])
+			}
+			unix.Close(fd)
+		}
 	case "tiocexcl":
 		fd, err := unix.Open(args[0], unix.O_RDONLY|unix.O_NOCTTY|unix.O_CLOEXEC, 0)
 		if report("open", err) {

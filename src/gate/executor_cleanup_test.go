@@ -36,7 +36,7 @@ func TestExecutorCleanupErrorStatus(t *testing.T) {
 				return nil, err
 			}
 			jailed.Cmd.Path = "/bin/sh"
-			jailed.Cmd.Args = []string{"sh", "-c", fmt.Sprintf("cat <&3 >/dev/null; printf 'X\\nCinjected cleanup error\\n' >&4; printf 'gate-jail: cleanup: injected cleanup error\\n' >&2; exit %d", code)}
+			jailed.Cmd.Args = []string{"sh", "-c", fmt.Sprintf("cat <&3 >/dev/null; printf 'I{\"profile\":\"ro-v1\",\"abi\":1,\"net\":false,\"lane2\":false}\\nX\\nCinjected cleanup error\\n' >&4; printf 'gate-jail: cleanup: injected cleanup error\\n' >&2; exit %d", code)}
 			jailed.Cmd.SysProcAttr = nil
 			return jailed, nil
 		}

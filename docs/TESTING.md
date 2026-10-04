@@ -570,6 +570,31 @@ persist at mode 0600, reload-after-`Add`. The edge test has an
 
 ## 11. The integration / e2e boundary
 
+For the mount-cover and self-check matrix, run `make test-jail` on Linux with
+user namespaces, Landlock, `/dev/fuse`, and `fusermount3` available. The test
+FUSE daemon is built from `src/gate/confine/testdata/fuseioctl`; its protocol
+tests can run without a mount:
+
+```sh
+export GOCACHE="$PWD/local-workspace/gocache"
+go test -race -count=1 ./src/gate/confine/testdata/fuseioctl
+make test-jail
+make test-jail-mutate MUTATE=P-COVERS
+```
+
+Missing FUSE support reports `NOT-APPLICABLE` outside CI and fails `SETUP` with
+`SSHGATE_JAIL_CI=1`; it never uses a Go test skip. Run both non-root and root CI
+lanes on disposable machines. The root CI lane additionally requires systemd,
+`systemd-mount`, loop devices, `losetup`, `mkfs.ext4`, and `binfmt_misc` for the
+autofs, loop-backing, and fixed-interpreter characterisations. These fixtures
+must not run against a production host. Catalogue controls use disposable git
+repositories and local HTTP listeners. Both dash and bash must be installed.
+The shim-seal singleton mutations are expected to stay green: each leaves the
+other proc-access wall intact. The existing runner prints `NOT-RUN` for their
+lack of a red leg even though it executes and judges their green legs. Use the
+checked lane reports and CI union gate, which require those green outcomes and
+a red proof for every protection at both ABIs.
+
 Docker-backed tests live in `internal/redteam/tripwire_live_test.go` and
 `tests/integration`, behind `//go:build integration` (e.g. `e2e_test.go`,
 `phase2/3/4_test.go`, `helpers_test.go`, `setup_test.go`). The build tag means

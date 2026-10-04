@@ -45,3 +45,44 @@ func TestRegistryValidation(t *testing.T) {
 		})
 	}
 }
+
+func TestRegistryValidationRedundantGreenSets(t *testing.T) {
+	green := Leg{Name: "L-ONE", Package: "./fixture", Names: map[string]string{"native": "TestJail/native/L-ONE", "abi1": "TestJail/abi1/L-ONE"}}
+	red := green
+	red.Markers = []string{"MUTATION-EFFECT write"}
+	joint := MutationSet{IDs: []string{"P-ONE", "P-TWO"}, Legs: []Leg{red}}
+	registry := []Protection{
+		{ID: "P-ONE", Site: "first wall", Class: "multi", MutationSets: []MutationSet{{IDs: []string{"P-ONE"}, Legs: []Leg{green}}, joint}},
+		{ID: "P-TWO", Site: "second wall", Class: "multi", MutationSets: []MutationSet{{IDs: []string{"P-TWO"}, Legs: []Leg{green}}, joint}},
+	}
+	if err := Validate(registry); err != nil {
+		t.Fatal(err)
+	}
+	var reports []Report
+	for _, root := range []bool{false, true} {
+		report := Report{Root: root, CI: true}
+		for _, abi := range []string{"native", "abi1"} {
+			for _, set := range []string{"P-ONE", "P-TWO", "P-ONE,P-TWO"} {
+				report.Outcomes = append(report.Outcomes, Outcome{Set: set, ABI: abi, Leg: "L-ONE", Red: set == "P-ONE,P-TWO"})
+			}
+		}
+		reports = append(reports, report)
+	}
+	if err := CheckUnion(registry, reports); err != nil {
+		t.Fatal(err)
+	}
+	missingGreen := append([]Report(nil), reports...)
+	missingGreen[0].Outcomes = missingGreen[0].Outcomes[1:]
+	if CheckUnion(registry, missingGreen) == nil {
+		t.Fatal("accepted omitted green redundancy proof")
+	}
+	missingRed := append([]Report(nil), reports...)
+	missingRed[0].Outcomes = append([]Outcome(nil), reports[0].Outcomes[:2]...)
+	if CheckUnion(registry, missingRed) == nil {
+		t.Fatal("accepted omitted red proof")
+	}
+	registry[0].MutationSets = registry[0].MutationSets[:1]
+	if Validate(registry) == nil {
+		t.Fatal("accepted protection with green proofs only")
+	}
+}

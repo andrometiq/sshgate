@@ -59,13 +59,16 @@ func (s Spec) command(ctx context.Context, cmd string) (*Jailed, error) {
 	}
 
 	c := exec.CommandContext(ctx, "/proc/self/exe", SentinelShim, string(specJSON))
-	c.Dir = "/"
+	if !jailmut.On("P-CWD") {
+		c.Dir = "/"
+	}
 	c.ExtraFiles = []*os.File{cmdR, statusW} // -> child fd 3 (command), fd 4 (status)
 	c.SysProcAttr = cloneSysProcAttr()
 
 	return &Jailed{
 		Cmd:       c,
 		strict:    s.Strict,
+		spec:      s,
 		cmd:       cmd,
 		cmdW:      cmdW,
 		statusR:   statusR,
@@ -119,7 +122,7 @@ func RunShim(args []string) int {
 		_, _ = io.WriteString(statusW, formatFailReport("shim", errnoOf(err)))
 		return ExitSetupFailed
 	}
-	if err := unix.Prctl(unix.PR_SET_DUMPABLE, 0, 0, 0, 0); err != nil {
+	if err := sealShim(); err != nil {
 		_, _ = io.WriteString(statusW, formatFailReport("nsverify", errnoOf(err)))
 		return ExitSetupFailed
 	}
@@ -136,6 +139,13 @@ func RunShim(args []string) int {
 	if err := c.Start(); err != nil {
 		_, _ = io.WriteString(statusW, formatFailReport("shim", errnoOf(err)))
 		return ExitSetupFailed
+	}
+	if jailmut.On("SHIM-NOCAPS") {
+		if err := clearShimCaps(); err != nil {
+			_, _ = io.WriteString(statusW, formatFailReport("shim", errnoOf(err)))
+			_ = c.Process.Kill()
+			return ExitSetupFailed
+		}
 	}
 	// Keep the status pipe through cleanup; the worker closes it on exec.
 	_ = cmdR.Close()
@@ -235,6 +245,10 @@ func RunWorker(args []string) int {
 		return fail("rlimits", err)
 	}
 	err = applyLandlock(abi, writableSet())
+	restrictedABI := 0
+	if err == nil {
+		restrictedABI = abi
+	}
 	if st, errno := spec.inject(); st == "landlock" {
 		err = errno
 	}
@@ -281,10 +295,14 @@ func RunWorker(args []string) int {
 	if !jailmut.On("P-FAULT-cwd") && cwdErr != nil {
 		return fail("cwd", cwdErr)
 	}
-	if len(facts.Unmet) > 0 || len(facts.CoverAtAncestor) > 0 || facts.CwdReset {
-		raw, _ := json.Marshal(facts)
-		_, _ = fmt.Fprintf(statusW, "I%s\n", raw)
+	err = selfcheck(spec, restrictedABI, &facts)
+	if stage, errno := spec.inject(); stage == "selfcheck" {
+		err = errno
 	}
+	if !jailmut.On("P-FAULT-selfcheck") && err != nil {
+		return fail("selfcheck", err)
+	}
+	facts.Profile, facts.ABI, facts.Net = spec.Profile, restrictedABI, spec.Net
 	err = establishSession()
 	if stage, errno := spec.inject(); stage == "session" {
 		err = errno
@@ -294,7 +312,9 @@ func RunWorker(args []string) int {
 	}
 	// Report success, then hand off to /bin/sh. The execve closes fd 4 (CLOEXEC),
 	// leaving only the shim able to append cleanup metadata.
-	_, _ = io.WriteString(statusW, statusReachedExec)
+	if err := writeExecReport(statusW, facts); err != nil {
+		return fail("report", err)
+	}
 	execErr := unix.Exec(execPath, []string{"sh", "-c", cmd}, jailEnv(cwd))
 	if jailmut.On("P-FAULT-exec") {
 		return ExitSetupFailed
@@ -364,7 +384,18 @@ func readCapped(r io.Reader, max int) ([]byte, error) {
 // closeInheritedFDs is fail-closed even on ENOSYS; the supported floor has close_range.
 func closeInheritedFDs() error { return unix.CloseRange(3, ^uint(0), unix.CLOSE_RANGE_CLOEXEC) }
 
+func sealShim() error {
+	if jailmut.On("P-SHIM-SEAL") {
+		return nil
+	}
+	return unix.Prctl(unix.PR_SET_DUMPABLE, 0, 0, 0, 0)
+}
+
 func resolveCwd(cwd string) (string, bool, error) {
+	if jailmut.On("P-CWD") {
+		actual, err := unix.Getwd()
+		return actual, false, err
+	}
 	err := unix.Chdir(cwd)
 	if err == nil {
 		return cwd, false, nil
@@ -385,4 +416,16 @@ func errnoOf(err error) syscall.Errno {
 		return e
 	}
 	return 0
+}
+
+func clearShimCaps() error {
+	if unix.Gettid() != unix.Getpid() {
+		return unix.EINVAL
+	}
+	header := unix.CapUserHeader{Version: unix.LINUX_CAPABILITY_VERSION_3}
+	data := [2]unix.CapUserData{}
+	if err := unix.Capset(&header, &data[0]); err != nil {
+		return err
+	}
+	return unix.Prctl(unix.PR_CAP_AMBIENT, unix.PR_CAP_AMBIENT_CLEAR_ALL, 0, 0, 0)
 }

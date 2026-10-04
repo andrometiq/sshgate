@@ -33,6 +33,11 @@ func TestJailMatrixP12(t *testing.T) {
 				withoutLandlock := spec
 				withoutLandlock.ForceABI = ForceNoLandlock
 				result := runP12(t, withoutLandlock, "echo COMMAND_RAN", nil)
+				var setup *SetupError
+				if errors.As(result.setupErr, &setup) && setup.Stage == "selfcheck" && result.stdout == "" {
+					mutationAbort(t, "L-LL-REQUIRED", "selfcheck", true)
+					return
+				}
 				expectP12Abort(t, "L-LL-REQUIRED", "landlock", syscall.ENOSYS, result)
 			})
 			if os.Geteuid() == 0 {
@@ -88,6 +93,7 @@ func TestJailMatrixP12(t *testing.T) {
 			t.Run("L-FAULT-tsync", func(t *testing.T) { legFault(t, spec, "tsync") })
 			t.Run("L-FAULT-fds", func(t *testing.T) { legFault(t, spec, "fds") })
 			t.Run("L-FAULT-cwd", func(t *testing.T) { legFault(t, spec, "cwd") })
+			t.Run("L-FAULT-selfcheck", func(t *testing.T) { legFault(t, spec, "selfcheck") })
 			t.Run("L-FAULT-session", func(t *testing.T) { legFault(t, spec, "session") })
 			t.Run("L-FAULT-exec", func(t *testing.T) { legFault(t, spec, "exec") })
 		})
@@ -112,7 +118,8 @@ func runP12(t *testing.T, spec Spec, command string, change func(*Jailed)) jailR
 	mutationSetup(t, jailed.Cmd.Start())
 	_ = jailed.Started()
 	err = jailed.Cmd.Wait()
-	return jailResult{exit: exitCodeOf(err), stdout: out.String(), stderr: diagnostic.String(), setupErr: jailed.Status()}
+	_, setupErr := jailed.Status()
+	return jailResult{exit: exitCodeOf(err), stdout: out.String(), stderr: diagnostic.String(), setupErr: setupErr}
 }
 
 func p12Control(t *testing.T, spec Spec) {
@@ -203,7 +210,9 @@ func legSpecReject(t *testing.T, abi int) {
 	if info.Mode().Perm() != 0600 {
 		t.Fatal("invalid spec changed target mode")
 	}
-	if result.setupErr == nil {
+	// The gate's Facts check may still reject the report after the command ran;
+	// reaching exec is the effect either way.
+	if result.setupErr == nil || strings.Contains(result.stdout, "COMMAND_RAN\n") {
 		if result.exit != 0 || !strings.Contains(result.stdout, "COMMAND_RAN\n") {
 			t.Fatalf("SETUP: invalid spec did not finish command: %+v", result)
 		}
@@ -317,8 +326,11 @@ func legScratchMetadata(t *testing.T, spec Spec) {
 		t.Fatalf("SETUP: metadata: %+v", result)
 	}
 	success := 0
+	// Linux 6.1 tmpfs has no user xattrs: with the filter removed, setxattr
+	// reaches tmpfs and fails EOPNOTSUPP. The filter itself always gives EPERM.
+	xattrUnsupported := strings.Contains(result.stdout, "setxattr=95\n")
 	for _, op := range []string{"chmod", "chown", "setxattr", "utimensat"} {
-		if strings.Contains(result.stdout, op+"=ok\n") {
+		if strings.Contains(result.stdout, op+"=ok\n") || op == "setxattr" && xattrUnsupported {
 			success++
 			continue
 		}
@@ -332,7 +344,7 @@ func legScratchMetadata(t *testing.T, spec Spec) {
 			t.Fatalf("SETUP: denied metadata exit: %+v", result)
 		}
 	case 4:
-		if result.exit != 0 || !strings.Contains(result.stdout, "mode=644\n") || !strings.Contains(result.stdout, "mtime=1000\n") || !strings.Contains(result.stdout, "xattr=test\n") {
+		if result.exit == 0 == xattrUnsupported || !strings.Contains(result.stdout, "mode=644\n") || !strings.Contains(result.stdout, "mtime=1000\n") || !xattrUnsupported && !strings.Contains(result.stdout, "xattr=test\n") {
 			t.Fatalf("SETUP: metadata effect incomplete: %+v", result)
 		}
 		mutationEffect(t, "L-SCRATCH-META", "metadata", true)

@@ -5,6 +5,7 @@ package confine
 import (
 	"bufio"
 	"fmt"
+	"github.com/karthikeyan5/sshgate/src/gate/confine/jailmut"
 	"io"
 	"os"
 	"path/filepath"
@@ -181,6 +182,18 @@ func reachableMounts(entries []mountEntry, rootID int) mountView {
 			if child.point == entry.point {
 				continue
 			} // root stacks and already-resolved stack links
+			shadowed := false
+			for _, sibling := range children[entry.id] {
+				// A later mount at an ancestor hides older descendant mounts
+				// that still have the original parent ID in mountinfo.
+				if !bad[sibling.id] && sibling.point != entry.point && sibling.point != child.point && pathWithin(child.point, sibling.point) {
+					shadowed = true
+					break
+				}
+			}
+			if shadowed {
+				continue
+			}
 			top := child
 			seen := map[int]bool{}
 			for !bad[top.id] && !seen[top.id] {
@@ -196,6 +209,9 @@ func reachableMounts(entries []mountEntry, rootID int) mountView {
 				if !found {
 					break
 				}
+			}
+			if (jailmut.On("P-REACH") || jailmut.On("REACH-R3")) && top.id != child.id {
+				continue
 			}
 			walk(top)
 		}

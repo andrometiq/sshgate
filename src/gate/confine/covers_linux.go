@@ -3,6 +3,7 @@
 package confine
 
 import (
+	"github.com/karthikeyan5/sshgate/src/gate/confine/jailmut"
 	"path/filepath"
 	"strings"
 
@@ -123,6 +124,9 @@ func mountCover(parent int, name string) error {
 
 func coverMounts(spec Spec) (mountFacts, error) {
 	var facts mountFacts
+	if jailmut.On("P-COVERS") {
+		return facts, nil
+	}
 	entries, err := readMountInfo()
 	if err != nil {
 		return facts, err
@@ -141,6 +145,7 @@ func coverMounts(spec Spec) (mountFacts, error) {
 	inspector := backingInspector{sys: "/sys"}
 	accepted := map[int]bool{}
 	covers := map[int]bool{}
+	facts.coverIDs = covers
 	for _, entry := range view.entries {
 		accepted[entry.id] = mountAccepted(entry, spec.AcceptFS, inspector)
 	}
@@ -247,9 +252,6 @@ func coverMounts(spec Spec) (mountFacts, error) {
 				accepted[current.id] = true
 			}
 		}
-	}
-	if spec.Strict && len(facts.Unmet) > 0 {
-		return facts, unix.EPERM
 	}
 	return facts, nil
 }

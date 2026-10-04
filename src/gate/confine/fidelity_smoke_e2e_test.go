@@ -120,6 +120,9 @@ func TestFidelitySmoke(t *testing.T) {
 								t.Fatal("missing SS-PROCFS-V6ONLY category")
 							}
 						}
+						if row.name == "journalctl -n 20" {
+							row.command = fmt.Sprintf("journalctl -n 20 --no-pager -o cat --until=@%d", time.Now().Unix())
+						}
 						command := exec.Command("/bin/sh", "-c", row.command)
 						command.Dir = row.cwd
 						baseline, controlErr := command.CombinedOutput()

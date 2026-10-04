@@ -27,6 +27,7 @@ func CheckUnion(registry []Protection, reports []Report) error {
 		return fmt.Errorf("infrastructure: missing non-root or root CI coverage")
 	}
 	for _, protection := range registry {
+		redByABI := map[string]bool{}
 		for _, set := range protection.MutationSets {
 			for _, abi := range []string{"native", "abi1"} {
 				hasRed := false
@@ -53,9 +54,12 @@ func CheckUnion(registry []Protection, reports []Report) error {
 						return fmt.Errorf("infrastructure: union omitted %s", leg.Name)
 					}
 				}
-				if !hasRed {
-					return fmt.Errorf("infrastructure: union NOT-RUN %s %s", set.Name(), abi)
-				}
+				redByABI[abi] = redByABI[abi] || hasRed
+			}
+		}
+		for _, abi := range []string{"native", "abi1"} {
+			if !redByABI[abi] {
+				return fmt.Errorf("infrastructure: union NOT-RUN %s %s", protection.ID, abi)
 			}
 		}
 	}

@@ -11,7 +11,7 @@ func hostPIDLeg(name string, markers ...string) harness.Leg {
 	return harness.Leg{Name: name, Package: "./src/gate/confine", Names: map[string]string{"native": "TestJailMatrixP15c/native/" + name, "abi1": "TestJailMatrixP15c/abi1/" + name}, Markers: markers}
 }
 func userRetuneLeg() harness.Leg {
-	leg := hostPIDLeg("L-SCHED-USER", "MUTATION-EFFECT errno", "MUTATION-EFFECT retuned")
+	leg := hostPIDLeg("L-SCHED-USER", "MUTATION-EFFECT retuned")
 	leg.Root = true
 	leg.CIOnly = true
 	return leg

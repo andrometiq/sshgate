@@ -25,6 +25,9 @@ func TestReachableMounts(t *testing.T) {
 		{"cover-inside-stack", "1 0 0:1 / / rw - tmpfs x rw\n2 1 0:2 / /a rw - tmpfs x rw\n3 2 0:3 / /a rw - tmpfs x rw\n4 3 0:4 / /a/unsafe rw - fuse x rw\n5 4 0:5 / /a/unsafe ro - tmpfs cover ro\n6 4 0:6 / /a/unsafe/hidden rw - fuse x rw\n", []int{1, 3, 5}, false},
 		{"escaped-name", "1 0 0:1 / / rw - tmpfs x rw\n2 1 0:2 / /with\\040space rw - tmpfs x rw\n3 2 0:3 / /with\\040space/inner\\011tab rw - fuse x rw\n", []int{1, 2, 3}, false},
 		{"root-stack", "1 0 0:1 / / rw - tmpfs x rw\n2 1 0:2 / / rw - fuse x rw\n3 2 0:3 / /hidden rw - tmpfs x rw\n", []int{1}, false},
+		{"ancestor-cover", "1 0 0:1 / / rw - tmpfs x rw\n2 1 0:2 / /a/closed/fuse rw - fuse x rw\n3 1 0:3 / /a/closed ro - tmpfs cover ro\n4 2 0:4 / /a/closed/fuse/nested rw - fuse x rw\n", []int{1, 3}, false},
+		{"ancestor-cover-reversed", "1 0 0:1 / / rw - tmpfs x rw\n3 1 0:3 / /a/closed ro - tmpfs cover ro\n2 1 0:2 / /a/closed/fuse rw - fuse x rw\n", []int{1, 3}, false},
+		{"root-stack-visible-sibling", "1 0 0:1 / / rw - tmpfs x rw\n2 1 0:2 / / rw - fuse x rw\n3 1 0:3 / /visible rw - tmpfs x rw\n", []int{1, 3}, false},
 		{"three-stack", "1 0 0:1 / / rw - tmpfs x rw\n2 1 0:2 / /X rw - fuse x rw\n3 2 0:3 / /X rw - tmpfs x rw\n4 3 0:4 / /X rw - fuse x rw\n", []int{1, 4}, false},
 		{"duplicate", "1 0 0:1 / / rw - tmpfs x rw\n2 1 0:2 / /X rw - tmpfs x rw\n3 1 0:3 / /X rw - fuse x rw\n", []int{1}, true},
 		{"outside-parent", "1 0 0:1 / / rw - tmpfs x rw\n2 1 0:2 / /X rw - tmpfs x rw\n3 2 0:3 / /Y rw - fuse x rw\n", []int{1, 2}, true},
@@ -49,6 +52,12 @@ func TestReachableMounts(t *testing.T) {
 				entry, _ := view.expectedAt("/X/sub")
 				if entry.id != 259 {
 					t.Fatalf("shadowed name lands on %d", entry.id)
+				}
+			}
+			if strings.HasPrefix(test.name, "ancestor-cover") {
+				entry, ok := view.expectedAt("/a/closed/fuse")
+				if !ok || entry.id != 3 {
+					t.Fatalf("covered descendant lookup lands on %d", entry.id)
 				}
 			}
 		})
