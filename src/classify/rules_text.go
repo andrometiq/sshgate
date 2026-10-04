@@ -44,11 +44,9 @@ func sedRule(args []string) Kind {
 	for _, a := range args {
 		// -i, --in-place, and combined flags like -ie or -i.bak all mutate.
 		// GNU getopt also accepts any unambiguous prefix of a long option;
-		// sed has no other long option starting with `--in`, so any
-		// `--in<anything>` arg is `--in-place` (or its `=VALUE` form).
-		// Cited as MAJOR-4 in
-		// docs/security-readonly-bypass.md.
-		if a == "-i" || strings.HasPrefix(a, "--in") {
+		// sed has no other long option starting with `--i`, so `--i`,
+		// `--in`, ... (and their `=SUFFIX` forms) are all `--in-place`.
+		if a == "-i" || strings.HasPrefix(a, "--i") {
 			return KindWrite
 		}
 		// Combined short-flag form: -i.bak, -iE, AND -i bundled AFTER other

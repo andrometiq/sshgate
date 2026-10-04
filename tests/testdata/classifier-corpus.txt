@@ -298,3 +298,15 @@ WRITE	curl --config /tmp/cfg https://example.com
 WRITE	curl --config=/tmp/cfg https://example.com
 # M5 — bare curl read still passes.
 READ	curl https://example.com/status
+
+# --- sed long-option prefix and git config-through-environment ---
+WRITE	sed --i 's/X/Y/' /etc/hosts
+WRITE	sed --i=.bak 's/X/Y/' /etc/hosts
+WRITE	GIT_CONFIG_PARAMETERS="'core.fsmonitor=id'" git status
+WRITE	GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=diff.external GIT_CONFIG_VALUE_0=id git diff HEAD~1
+WRITE	GIT_CONFIG_GLOBAL=/tmp/x git log
+WRITE	env GIT_CONFIG_PARAMETERS="'core.pager=id'" git log
+WRITE	EDITOR=id git log
+WRITE	SYSTEMD_PAGER=id systemctl status nginx
+READ	sed -n '1,5p' /etc/hosts
+READ	git status

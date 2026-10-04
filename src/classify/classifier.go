@@ -345,7 +345,7 @@ func classifySegment(seg string) Kind {
 	i := 0
 	for i < len(tokens) && isAssignment(tokens[i]) {
 		key := tokens[i][:strings.IndexByte(tokens[i], '=')]
-		if dangerousEnvVars[key] {
+		if isDangerousEnvVar(key) {
 			return KindWrite
 		}
 		i++
