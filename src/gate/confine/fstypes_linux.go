@@ -42,7 +42,8 @@ func combineBacking(a, b backingClass) backingClass {
 }
 
 type backingInspector struct {
-	sys string
+	sys  string
+	proc string
 }
 
 // sysfsPresent distinguishes absent optional metadata from broken links and
@@ -212,6 +213,10 @@ func (inspector backingInspector) chain(path string, depth int, seen map[string]
 	return backingCovered
 }
 func (inspector backingInspector) mount(entry mountEntry) backingClass {
+	if (entry.fstype == "ext3" || entry.fstype == "ext4") && !inspector.internalJournal(entry.dev) {
+		return backingCovered
+	}
+
 	if entry.fstype == "btrfs" {
 		filesystems, err := os.ReadDir(filepath.Join(inspector.sys, "fs/btrfs"))
 		if err != nil {
@@ -275,4 +280,31 @@ func mountAccepted(entry mountEntry, accept []string, inspector backingInspector
 		return class == backingDirect || class == backingNetwork && slices.Contains(accept, "network")
 	}
 	return true
+}
+
+// An inode journal shares the data device; external journal identity is unproven.
+func (inspector backingInspector) internalJournal(dev string) bool {
+	path, err := filepath.EvalSymlinks(filepath.Join(inspector.sys, "dev/block", dev))
+	if err != nil || !pathWithin(path, inspector.sys) {
+		return false
+	}
+	name := strings.ReplaceAll(filepath.Base(path), "/", "!")
+	proc := inspector.proc
+	if proc == "" {
+		proc = "/proc"
+	}
+	entries, err := os.ReadDir(filepath.Join(proc, "fs/jbd2"))
+	if err != nil {
+		return false
+	}
+	for _, entry := range entries {
+		suffix, ok := strings.CutPrefix(entry.Name(), name+"-")
+		if !ok || suffix == "" || !entry.IsDir() {
+			continue
+		}
+		if strings.IndexFunc(suffix, func(r rune) bool { return r < '0' || r > '9' }) == -1 {
+			return true
+		}
+	}
+	return false
 }

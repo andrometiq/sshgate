@@ -51,6 +51,7 @@ func RunProbe(args []string) int {
 // apart from detect so decide can be tested with injected results.
 type probeFacts struct {
 	landlockABI int
+	landlockErr unix.Errno
 	seccomp     bool
 	lsms        []string
 	maxUserns   int  // /proc/sys/user/max_user_namespaces; -1 when unreadable
@@ -62,8 +63,10 @@ type probeFacts struct {
 
 // detect probes the host read-only and resolves the strongest usable rung.
 func detect() Report {
+	abi, errno := probeLandlockABI()
 	fx := probeFacts{
-		landlockABI: probeLandlockABI(),
+		landlockABI: abi,
+		landlockErr: errno,
 		seccomp:     unix.Prctl(unix.PR_GET_SECCOMP, 0, 0, 0, 0) == nil,
 		lsms:        readLSMs(),
 		maxUserns:   readMaxUserns(),
@@ -106,6 +109,9 @@ func decide(fx probeFacts) Report {
 		rep.ProbeErr = fmt.Errorf("userns probe child exited %d", fx.probeExit)
 	}
 
+	if fx.landlockErr != 0 && fx.landlockErr != unix.ENOSYS && fx.landlockErr != unix.EOPNOTSUPP {
+		rep.ProbeErr = errors.Join(rep.ProbeErr, fmt.Errorf("landlock probe: %w", fx.landlockErr))
+	}
 	switch {
 	case rep.Userns && rep.LandlockABI >= 1:
 		rep.Rung = Rung1Full

@@ -52,7 +52,7 @@ func hostPIDRegistry() []prot {
 			result[i].Class = "multi"
 			result[i].Partners = []string{"P-LL-SCOPE-SIGNAL"}
 			scope := hostPIDLeg("L-SIGNAL-SCOPE")
-			if probeLandlockABI() < 6 {
+			if abi, _ := probeLandlockABI(); abi < 6 {
 				scope.Markers = []string{"MUTATION-EFFECT signal"}
 			}
 			scope.ABIMarkers = map[string][]string{"abi1": {"MUTATION-EFFECT signal"}}
@@ -62,7 +62,7 @@ func hostPIDRegistry() []prot {
 			result[i].Class = "multi"
 			result[i].Partners = []string{"P-LL-SCOPE-SIGNAL"}
 			scope := hostPIDLeg("L-ASYNC-SCOPE", "MUTATION-EFFECT errno")
-			if probeLandlockABI() < 6 {
+			if abi, _ := probeLandlockABI(); abi < 6 {
 				scope.Markers = append(scope.Markers, "MUTATION-EFFECT signal")
 			}
 			scope.ABIMarkers = map[string][]string{"abi1": {"MUTATION-EFFECT errno", "MUTATION-EFFECT signal"}}

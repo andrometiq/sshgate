@@ -71,15 +71,14 @@ const landlockFileRights = uint64(unix.LANDLOCK_ACCESS_FS_EXECUTE |
 	unix.LANDLOCK_ACCESS_FS_TRUNCATE |
 	unix.LANDLOCK_ACCESS_FS_IOCTL_DEV | landlockAccessFSResolveUnix)
 
-// probeLandlockABI returns the host's Landlock ABI, or a value <= 0 when
-// Landlock is unavailable (ENOSYS / not built in).
-func probeLandlockABI() int {
+// probeLandlockABI preserves failures so only documented absence permits fallback.
+func probeLandlockABI() (int, unix.Errno) {
 	abi, _, errno := unix.Syscall(uintptr(unix.SYS_LANDLOCK_CREATE_RULESET),
 		0, 0, uintptr(unix.LANDLOCK_CREATE_RULESET_VERSION))
 	if errno != 0 {
-		return -1
+		return -1, errno
 	}
-	return int(abi)
+	return int(abi), 0
 }
 
 // applyLandlock requires Landlock even when mounts provide another wall.

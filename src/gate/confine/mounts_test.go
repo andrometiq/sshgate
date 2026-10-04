@@ -151,7 +151,9 @@ func TestBackingClass(t *testing.T) {
 			mkdir(t, driver)
 			link(t, driver, filepath.Join(filepath.Dir(disk), "driver"))
 			link(t, disk, filepath.Join(sys, "dev/block/259:0"))
-			inspector := backingInspector{sys: sys}
+			proc := t.TempDir()
+			mkdir(t, filepath.Join(proc, "fs/jbd2/nvme0n1-8"))
+			inspector := backingInspector{sys: sys, proc: proc}
 			if got := inspector.device("259:0"); got != test.want {
 				t.Fatalf("%v want %v", got, test.want)
 			}
@@ -431,5 +433,64 @@ func TestParseMountInfoLiteralWhitespace(t *testing.T) {
 		if _, err := parseMountInfo(strings.NewReader("1 0 0:1 / " + field + " rw - tmpfs x rw\n")); err == nil {
 			t.Fatalf("accepted non-kernel path escape %q", field)
 		}
+	}
+}
+
+func TestBackingExtJournal(t *testing.T) {
+	for _, test := range []struct {
+		name, fstype, journal string
+		unreadable            bool
+		want                  backingClass
+	}{
+		{"internal", "ext4", "nvme0n1-8", false, backingDirect},
+		{"ext3-internal", "ext3", "nvme0n1-8", false, backingDirect},
+		{"external", "ext4", "nvme1n1", false, backingCovered},
+		{"other-internal", "ext4", "nvme1n1-8", false, backingCovered},
+		{"journal-less", "ext4", "", false, backingCovered},
+		{"unreadable", "ext4", "nvme0n1-8", true, backingCovered},
+		{"ext2", "ext2", "", false, backingDirect},
+		{"bad-inode", "ext4", "nvme0n1-8x", false, backingCovered},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			sys, proc := t.TempDir(), t.TempDir()
+			disk := filepath.Join(sys, "devices/pci/nvme0/nvme0n1")
+			mkdir(t, disk)
+			write(t, filepath.Join(filepath.Dir(disk), "transport"), "pcie")
+			link(t, disk, filepath.Join(sys, "dev/block/259:0"))
+			if test.journal != "" {
+				mkdir(t, filepath.Join(proc, "fs/jbd2", test.journal))
+			}
+			if test.unreadable {
+				directory := filepath.Join(proc, "fs/jbd2")
+				if os.Geteuid() == 0 {
+					// Root bypasses DAC; still exercise ReadDir's error path.
+					if err := os.RemoveAll(directory); err != nil {
+						t.Fatal(err)
+					}
+					write(t, directory, "not a directory")
+				} else {
+					if err := os.Chmod(directory, 0); err != nil {
+						t.Fatal(err)
+					}
+					defer os.Chmod(directory, 0755)
+					if _, err := os.ReadDir(directory); !os.IsPermission(err) {
+						t.Fatalf("fixture must deny readdir: %v", err)
+					}
+				}
+			}
+			inspector := backingInspector{sys: sys, proc: proc}
+			entry := mountEntry{id: 1, point: "/closed/fs", fstype: test.fstype, dev: "259:0", superOpts: []string{"journal_dev=259:0"}}
+			if got := inspector.mount(entry); got != test.want {
+				t.Fatalf("class=%v want %v", got, test.want)
+			}
+			for _, accept := range [][]string{nil, {"network", "autofs"}} {
+				if mountAccepted(entry, accept, inspector) != (test.want == backingDirect) {
+					t.Fatal("mount admission mismatch")
+				}
+				if deniedSubtreeSafe([]mountEntry{entry}, "/closed", accept, inspector) != (test.want == backingDirect) {
+					t.Fatal("denied subtree admission mismatch")
+				}
+			}
+		})
 	}
 }
