@@ -5,7 +5,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"errors"
 	"net"
 	"os"
 	"os/exec"
@@ -148,26 +147,19 @@ func TestGateBinaryJailedRead(t *testing.T) {
 			gate.Env = append(os.Environ(), "PATH="+dir+":"+os.Getenv("PATH"), "SSH_ORIGINAL_COMMAND="+command)
 			var stdout, stderr bytes.Buffer
 			gate.Stdout, gate.Stderr = &stdout, &stderr
-			err = gate.Run()
-			var exitError *exec.ExitError
-			if !errors.As(err, &exitError) || exitError.ExitCode() != 1 || stdout.String() != "socket=1\n" {
-				unexpected(t, "jailed connect: %v, stdout=%q stderr=%q; want socket EPERM and exit 1", err, stdout.String(), stderr.String())
+			if err := gate.Run(); err != nil || stdout.String() != "socket=ok\nconnect=ok\n" {
+				unexpected(t, "jailed connect: %v, stdout=%q stderr=%q; want a connected socket and exit 0", err, stdout.String(), stderr.String())
 			}
-			if err := tcpListener.SetDeadline(time.Now().Add(100 * time.Millisecond)); err != nil {
+			if err := tcpListener.SetDeadline(time.Now().Add(time.Second)); err != nil {
 				unexpected(t, "%v", err)
 				t.FailNow()
 			}
 			connection, err = listener.Accept()
-			if err == nil {
-				connection.Close()
-				unexpected(t, "listener accepted a jailed connection")
+			if err != nil {
+				unexpected(t, "accept jailed connection: %v; reads keep network access", err)
 				t.FailNow()
 			}
-			var networkError net.Error
-			if !errors.As(err, &networkError) || !networkError.Timeout() {
-				unexpected(t, "accept jailed connection: %v; want timeout", err)
-				t.FailNow()
-			}
+			connection.Close()
 		})
 	}
 }

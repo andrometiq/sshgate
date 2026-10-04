@@ -62,8 +62,9 @@ func confineSpecFor(rep confine.Report, floor confine.Rung) (*confine.Spec, stri
 	}
 	switch rep.Rung {
 	case confine.Rung1Full:
-		// Unsigned reads have no network until P2.1 reads the pin.
-		return &confine.Spec{Profile: confine.ProfileROv1, Net: false}, ""
+		// Reads keep network access: the jail stops writes to the host, not
+		// outbound connections (a per-server network pin is planned work).
+		return &confine.Spec{Profile: confine.ProfileROv1, Net: true}, ""
 	case confine.Rung3Unconfined:
 		return nil, ""
 	default:
