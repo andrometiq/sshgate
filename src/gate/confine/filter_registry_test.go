@@ -11,7 +11,7 @@ import (
 import "github.com/karthikeyan5/sshgate/src/gate/confine/jailmut/harness"
 
 func p15Unit(test, name string) harness.Leg {
-	return harness.Leg{Name: name, Package: "./src/gate/confine", Names: map[string]string{"native": test + "/" + name, "abi1": test + "/" + name}, Markers: []string{"MUTATION-EFFECT decision"}}
+	return harness.Leg{Name: name, Package: "./src/gate/confine", Names: map[string]string{"native": test + "/native/" + name, "abi1": test + "/abi1/" + name}, Markers: []string{"MUTATION-EFFECT decision"}}
 }
 func p15Leg(name string, markers ...string) harness.Leg {
 	return harness.Leg{Name: name, Package: "./src/gate/confine", Names: map[string]string{"native": "TestJailMatrixP15/native/" + name, "abi1": "TestJailMatrixP15/abi1/" + name}, Markers: markers}
@@ -137,9 +137,10 @@ func p15Registry() []prot {
 		case "P-SC-LISTEN":
 			p.MutationSets[0].Legs = append(p.MutationSets[0].Legs, p15Leg("L-LISTEN", "MUTATION-EFFECT errno"))
 		case "P-SC-SOCKDIAG":
-			leg := p15Leg("L-SOCKDIAG", "MUTATION-EFFECT errno")
-			leg.CIOnly = true
-			p.MutationSets[0].Legs = append(p.MutationSets[0].Legs, leg)
+			leg := p15Leg("L-SOCKDIAG-AUTOLOAD", "MUTATION-EFFECT module-loaded")
+			leg.Root, leg.CIOnly = true, true
+			leg.Omissions = []string{"root-only", "ci-only", "module-builtin"}
+			p.MutationSets[0].Legs = append(p.MutationSets[0].Legs, p15Leg("L-SOCKDIAG", "MUTATION-EFFECT errno"), leg)
 		case "P-SC-SOCKPAIR":
 			p.Class = "multi"
 			p.Partners = []string{"P-LL-RESOLVE-UNIX", "P-LL-SCOPE-ABSTRACT"}
@@ -186,13 +187,13 @@ func p15Registry() []prot {
 
 func TestRegistryCIOnlyControls(t *testing.T) {
 	controls := map[string]bool{
-		"L-SOCKDIAG":         false,
-		"L-SOCK-SWEEP":       false,
-		"L-SOCK-SWEEP-GRANT": false,
-		"L-CRASH-NO-HELPER":  false,
-		"L-CRASH-LOWER-PIPE": false,
-		"L-RL-NPROC":         false,
-		"L-SCHED-USER":       false,
+		"L-SOCKDIAG-AUTOLOAD": false,
+		"L-SOCK-SWEEP":        false,
+		"L-SOCK-SWEEP-GRANT":  false,
+		"L-CRASH-NO-HELPER":   false,
+		"L-CRASH-LOWER-PIPE":  false,
+		"L-RL-NPROC":          false,
+		"L-SCHED-USER":        false,
 	}
 	for _, protection := range registry {
 		for _, set := range protection.MutationSets {

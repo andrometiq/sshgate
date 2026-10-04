@@ -17,6 +17,7 @@ func TestJailMatrixSyscallSweep(t *testing.T) {
 	}{{"native", 0}, {"abi1", 1}} {
 		t.Run(cfg.name, func(t *testing.T) {
 			t.Run("L-SC-SWEEP", func(t *testing.T) {
+				p := newProof(t, "L-SC-SWEEP")
 				probe := buildProbe(t)
 				var args, expected []string
 				for _, row := range syscallTable {
@@ -25,7 +26,25 @@ func TestJailMatrixSyscallSweep(t *testing.T) {
 						expected = append(expected, row.name)
 					}
 				}
-				output := requireProbeOutputMode(t, runP12(t, Spec{Profile: ProfileROv1, ForceABI: cfg.abi, Net: true}, probe+" sc-sweep "+strings.Join(args, " "), nil), probeExitObservations, expected...)
+				result := runJailed(t, p, Spec{Profile: ProfileROv1, ForceABI: cfg.abi, Net: true}, RunPlan{Mode: Execute, Ops: []ProofOp{{Name: "sweep", Command: probe + " sc-sweep " + strings.Join(args, " "), Validate: func(stdout, stderr string, exit int) error {
+					if stderr != "" || exit != 0 {
+						return fmt.Errorf("sweep status %d stderr %q", exit, stderr)
+					}
+					lines := strings.Split(strings.TrimSuffix(stdout, "\n"), "\n")
+					if len(lines) != len(expected) {
+						return fmt.Errorf("sweep rows %d want %d", len(lines), len(expected))
+					}
+					for i, name := range expected {
+						key, value, ok := strings.Cut(lines[i], "=")
+						errno, err := strconv.Atoi(value)
+						if !ok || key != name || err != nil || errno < 0 || errno > 4095 {
+							return fmt.Errorf("invalid sweep row %q", lines[i])
+						}
+					}
+					return nil
+				}}}})
+				p.Jailed("sweep", result)
+				output := result.stdout
 				for _, row := range syscallTable {
 					if row.action != "deny" && row.action != "enosys" {
 						continue
@@ -45,13 +64,16 @@ func TestJailMatrixSyscallSweep(t *testing.T) {
 				for _, line := range strings.Split(strings.TrimSpace(string(controlOutput)), "\n") {
 					name, value, ok := strings.Cut(line, "=")
 					errno, err := strconv.Atoi(value)
-					if !ok || err != nil {
+					if !ok || err != nil || errno < 0 || errno > 4095 {
 						t.Fatalf("SETUP: malformed sweep control %q", line)
 					}
 					if _, duplicate := observed[name]; duplicate {
 						t.Fatalf("SETUP: duplicate sweep control %s", name)
 					}
 					observed[name] = errno
+				}
+				if len(observed) != len(expected) {
+					t.Fatalf("SETUP: sweep control rows %d want %d", len(observed), len(expected))
 				}
 				// These literal rows require initial-userns capabilities before argument checks.
 				initialCaps := map[string]bool{"KEXEC_LOAD": true, "KEXEC_FILE_LOAD": true, "INIT_MODULE": true, "FINIT_MODULE": true, "DELETE_MODULE": true, "SWAPON": true, "SWAPOFF": true, "SETTIMEOFDAY": true, "OPEN_BY_HANDLE_AT": true}
@@ -79,7 +101,8 @@ func TestJailMatrixSyscallSweep(t *testing.T) {
 						t.Errorf("SETUP: indistinguishable %s control errno %d", row.name, errno)
 					}
 				}
-
+				p.Control("distinction", ControlResult{Valid: !t.Failed(), Detail: "complete per-row namespace control; initial-capability and absent-kernel rows distinguished by BPF unit cases"})
+				p.Finish()
 			})
 		})
 	}

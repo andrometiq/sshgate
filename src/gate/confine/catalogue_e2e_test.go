@@ -44,12 +44,8 @@ func TestJailMatrixCatalogue(t *testing.T) {
 				for _, name := range catalogueMountKinds {
 					t.Run(name, func(t *testing.T) { catalogueMount(t, spec, name == "mount_source_target") })
 				}
-				if os.Geteuid() == 0 && os.Getenv("SSHGATE_JAIL_CI") == "1" {
-					for _, name := range catalogueSysctlKinds {
-						t.Run(name, func(t *testing.T) { catalogueSysctl(t, spec, name == "sysctl_system") })
-					}
-				} else {
-					t.Log("MUTATE-OMITTED(root,ci-only): sysctl_reload_bundle sysctl_system")
+				for _, name := range catalogueSysctlKinds {
+					t.Run(name, func(t *testing.T) { catalogueSysctl(t, spec, name == "sysctl_system") })
 				}
 			})
 		})
@@ -156,7 +152,9 @@ func catalogueChanged(t *testing.T, path string, before catalogueState) bool {
 	return after.exists != before.exists || !bytes.Equal(after.content, before.content)
 }
 func catalogueFile(t *testing.T, spec Spec, row bypassRow) {
+	p := newProof(t, catalogueName(t, []string{"L-CATALOGUE/sed_inplace_abbrev", "L-CATALOGUE/file_compile_bundle", "L-CATALOGUE/tree_bundled_output", "L-CATALOGUE/awk_include_directive", "L-CATALOGUE/zgrep_GREP_injection", "L-CATALOGUE/zdiff_DIFF_injection", "L-CATALOGUE/git_config_set", "L-CATALOGUE/git_branch_new", "L-CATALOGUE/git_remote_add", "L-CATALOGUE/git_diff_output", "L-CATALOGUE/git_show_output", "L-CATALOGUE/git_log_output", "L-CATALOGUE/git_grep_open_files_in_pager", "L-CATALOGUE/file_compile", "L-CATALOGUE/command_v_exec"}))
 	if !catalogueTool(t, row.tool) {
+		p.Omit("tool-unavailable")
 		return
 	}
 	prepare := func() (string, string, catalogueState) {
@@ -170,22 +168,32 @@ func catalogueFile(t *testing.T, spec Spec, row bypassRow) {
 		return command, target, catalogueSnapshot(t, target)
 	}
 	command, target, before := prepare()
-	runHostUnjailed(t, command)
+	control := catalogueControl(t, command)
 	if !catalogueChanged(t, target, before) {
 		t.Fatalf("SETUP: catalogue control %s did not change sink: %s", row.name, command)
 	}
+	p.Control("effect", ControlResult{Valid: true, Detail: "unjailed command changed the sink"})
 	command, target, before = prepare()
-	result := runP12(t, spec, "printf 'CATALOGUE_RAN\\n'; "+command, nil)
-	coverRan(t, result)
-	if !strings.Contains(result.stdout, "CATALOGUE_RAN\n") {
-		unexpected(t, "catalogue command did not execute: %+v", result)
-		t.FailNow()
-	}
-	mutationEffect(t, "L-CATALOGUE/"+row.name, "file", catalogueChanged(t, target, before))
+	result := catalogueRun(t, p, spec, command, control)
+	p.Jailed("command", result)
+	mutationEffect(t, p.caseDef.Name, "file", catalogueChanged(t, target, before))
+	p.Observed("effect", Observation{Valid: true, Sealed: result.validated, Conclusive: true, Detail: "sink snapshot after framed command completion"})
+	p.Finish()
 }
 
 func catalogueNetwork(t *testing.T, spec Spec, kind string) {
+	for _, allow := range []bool{false, true} {
+		name := "deny"
+		if allow {
+			name = "grant"
+		}
+		t.Run(name, func(t *testing.T) { spec.Net = allow; catalogueNetworkAttempt(t, spec, kind) })
+	}
+}
+func catalogueNetworkAttempt(t *testing.T, spec Spec, kind string) {
+	p := newProof(t, catalogueName(t, []string{"L-CATALOGUE/curl_bundled_output/deny", "L-CATALOGUE/curl_bundled_output/grant", "L-CATALOGUE/curl_remote_name/deny", "L-CATALOGUE/curl_remote_name/grant", "L-CATALOGUE/curl_dump_header/deny", "L-CATALOGUE/curl_dump_header/grant", "L-CATALOGUE/curl_cookie_jar/deny", "L-CATALOGUE/curl_cookie_jar/grant", "L-CATALOGUE/curl_json_post/deny", "L-CATALOGUE/curl_json_post/grant"}))
 	if !catalogueTool(t, "curl") {
+		p.Omit("tool-unavailable")
 		return
 	}
 	var requests atomic.Int64
@@ -207,7 +215,7 @@ func catalogueNetwork(t *testing.T, spec Spec, kind string) {
 	seed := []byte("original-content\n")
 	mutationSetup(t, os.WriteFile(sink, seed, 0644))
 	url := listener.URL + "/payload"
-	prefix := "curl --noproxy '*' --max-time 3 "
+	prefix := "curl --silent --show-error --noproxy '*' --max-time 3 "
 	var command string
 	switch kind {
 	case "curl_bundled_output":
@@ -222,33 +230,29 @@ func catalogueNetwork(t *testing.T, spec Spec, kind string) {
 		command = prefix + "--json '{\"admin\":true}' " + url
 	}
 	before := catalogueSnapshot(t, sink)
-	runHostUnjailed(t, command)
+	control := catalogueControl(t, command)
 	if requests.Load() != 1 || (kind == "curl_json_post" && posts.Load() != 1) || (kind != "curl_json_post" && !catalogueChanged(t, sink, before)) {
 		t.Fatalf("SETUP: network control did not land request and sink (%s)", kind)
 	}
 	mutationSetup(t, os.WriteFile(sink, seed, 0644))
-	for _, allow := range []bool{false, true} {
-		name := "deny"
-		if allow {
-			name = "grant"
-		}
-		t.Run(name, func(t *testing.T) {
-			spec.Net = allow
-			before := requests.Load()
-			result := runP12(t, spec, command, nil)
-			coverRan(t, result)
-			received := requests.Load() - before
-			if allow && (received > 1 || kind != "curl_dump_header" && received != 1) {
-				unexpected(t, "network grant received %d requests: %+v", received, result)
-			}
-			if !allow {
-				mutationEffect(t, "L-CATALOGUE/"+kind, "network", received != 0)
-			}
-			after, err := os.ReadFile(sink)
-			mutationSetup(t, err)
-			mutationEffect(t, "L-CATALOGUE/"+kind, "file", !bytes.Equal(after, seed))
-		})
+	p.Control("effect", ControlResult{Valid: true, Detail: "unjailed request and file sink verified"})
+	beforeRequests := requests.Load()
+	result := catalogueRun(t, p, spec, command, control)
+	p.Jailed("command", result)
+	// Close joins active handlers before reading the immutable request counters.
+	listener.Close()
+	received := requests.Load() - beforeRequests
+	if spec.Net && (received > 1 || kind != "curl_dump_header" && received != 1) {
+		unexpected(t, "network grant received %d requests: %+v", received, result)
 	}
+	if !spec.Net {
+		mutationEffect(t, p.caseDef.Name, "network", received != 0)
+	}
+	after, err := os.ReadFile(sink)
+	mutationSetup(t, err)
+	mutationEffect(t, p.caseDef.Name, "file", !bytes.Equal(after, seed))
+	p.Observed("effect", Observation{Valid: true, Sealed: result.validated, Conclusive: true, Detail: "HTTP server joined; sink read after framed command"})
+	p.Finish()
 }
 
 func catalogueNamespace(t *testing.T, root bool) bool {
@@ -269,12 +273,16 @@ func catalogueNamespace(t *testing.T, root bool) bool {
 		command.SysProcAttr.AmbientCaps = []uintptr{unix.CAP_SYS_ADMIN, unix.CAP_SETPCAP}
 	}
 	output, err := command.CombinedOutput()
-	fmt.Print(string(output))
-	propagateFixtureFailure(t, output, err)
+	forwardCoverProof(t, output, err)
 	return false
 }
 func catalogueMount(t *testing.T, spec Spec, longOptions bool) {
-	if !catalogueTool(t, "mount") || !catalogueNamespace(t, os.Geteuid() == 0) {
+	if !catalogueNamespace(t, os.Geteuid() == 0) {
+		return
+	}
+	p := newProof(t, catalogueName(t, []string{"L-CATALOGUE/mount_inline_options", "L-CATALOGUE/mount_source_target"}))
+	if !catalogueTool(t, "mount") {
+		p.Omit("tool-unavailable")
 		return
 	}
 	dir := t.TempDir()
@@ -296,13 +304,14 @@ func catalogueMount(t *testing.T, spec Spec, longOptions bool) {
 		}
 		return false
 	}
-	runHostUnjailed(t, command)
+	control := catalogueControl(t, command)
 	if !mounted() {
 		t.Fatal("SETUP: catalogue mount control had no effect")
 	}
 	mutationSetup(t, unix.Unmount(point, 0))
-	result := runP12(t, spec, command, nil)
-	coverRan(t, result)
+	p.Control("effect", ControlResult{Valid: true, Detail: "unjailed mount appeared in mountinfo"})
+	result := catalogueRun(t, p, spec, command, control)
+	p.Jailed("command", result)
 	if mounted() {
 		unix.Unmount(point, unix.MNT_DETACH)
 		unexpected(t, "catalogue mounted an outside filesystem")
@@ -310,11 +319,28 @@ func catalogueMount(t *testing.T, spec Spec, longOptions bool) {
 	if result.exit == 0 {
 		unexpected(t, "catalogue mount not denied: %+v", result)
 	}
+	p.Observed("effect", Observation{Valid: !t.Failed(), Sealed: result.validated, Conclusive: true, Detail: "mountinfo unchanged after operation completion"})
+	p.Finish()
 }
 func catalogueSysctl(t *testing.T, spec Spec, system bool) {
-	if !catalogueTool(t, "sysctl") || !catalogueNamespace(t, true) {
+	isLane := os.Geteuid() == 0 && os.Getenv("SSHGATE_JAIL_CI") == "1"
+	if isLane && !catalogueNamespace(t, true) {
 		return
 	}
+	p := newProof(t, catalogueName(t, []string{"L-CATALOGUE/sysctl_reload_bundle", "L-CATALOGUE/sysctl_system"}))
+	if os.Geteuid() != 0 {
+		p.Omit("root-only")
+		return
+	}
+	if os.Getenv("SSHGATE_JAIL_CI") != "1" {
+		p.Omit("ci-only")
+		return
+	}
+	if !catalogueTool(t, "sysctl") {
+		p.Omit("tool-unavailable")
+		return
+	}
+
 	// Mask all sysctl configuration sources in this disposable mount namespace.
 	seen := map[string]bool{}
 	for _, path := range []string{"/etc", "/run/sysctl.d", "/usr/local/lib/sysctl.d", "/usr/lib/sysctl.d", "/lib/sysctl.d"} {
@@ -331,19 +357,26 @@ func catalogueSysctl(t *testing.T, spec Spec, system bool) {
 	}
 	original, err := os.ReadFile("/proc/sys/kernel/domainname")
 	mutationSetup(t, err)
-	value := strings.TrimSpace(string(original))
+	value := "sshgate-catalogue-control"
+	if strings.TrimSpace(string(original)) == value {
+		value += "-alternate"
+	}
 	configuration := []byte("kernel.domainname = " + value + "\n")
 	mutationSetup(t, os.WriteFile("/etc/sysctl.conf", configuration, 0644))
 	command := "sysctl -ep /etc/sysctl.conf"
 	if system {
 		command = "sysctl --system"
 	}
-	output, err := exec.Command("/bin/sh", "-c", command).CombinedOutput()
-	if err != nil || !strings.Contains(string(output), "kernel.domainname = "+value) {
-		t.Fatalf("SETUP: idempotent sysctl control: %v: %s", err, output)
+	control := catalogueControl(t, command)
+	controlled, err := os.ReadFile("/proc/sys/kernel/domainname")
+	mutationSetup(t, err)
+	if strings.TrimSpace(string(controlled)) != value {
+		t.Fatal("SETUP: sysctl control did not change namespace-local domainname")
 	}
-	result := runP12(t, spec, command, nil)
-	coverRan(t, result)
+	mutationSetup(t, os.WriteFile("/proc/sys/kernel/domainname", original, 0644))
+	p.Control("effect", ControlResult{Valid: true, Detail: "unjailed sysctl changed namespace-local domainname; restored before attempt"})
+	result := catalogueRun(t, p, spec, command, control)
+	p.Jailed("command", result)
 	if result.exit == 0 {
 		unexpected(t, "catalogue sysctl write accepted: %+v", result)
 	}
@@ -352,6 +385,8 @@ func catalogueSysctl(t *testing.T, spec Spec, system bool) {
 	if !bytes.Equal(original, after) {
 		unexpected(t, "sysctl changed outside value")
 	}
+	p.Observed("effect", Observation{Valid: !t.Failed(), Sealed: result.validated, Conclusive: true, Detail: "domainname read after command completion"})
+	p.Finish()
 }
 
 func TestCatalogueFixtureControls(t *testing.T) {

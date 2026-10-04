@@ -20,6 +20,10 @@ func filterProbe(op string, args []string) bool {
 		return uintptr(n)
 	}
 	switch op {
+	case "x32-signal":
+		fmt.Println("x32-ready")
+		_, _, errno := unix.RawSyscall(0x40000000, 0, 0, 0)
+		report("x32-returned", errnoOrNil(errno))
 	case "keyring-add":
 		_, err := unix.AddKey("user", args[1], []byte("changed"), int(number(args[0])))
 		report("keyring", err)
@@ -30,8 +34,7 @@ func filterProbe(op string, args []string) bool {
 		_, err := unix.RequestKey("user", args[1], "", int(number(args[0])))
 		report("keyring", err)
 	case "uring":
-		uringProbe(args[0], int(number(args[1])))
-		fmt.Println("uring-complete=ok")
+		uringM1Probe(args[0], int(number(args[1])))
 	case "metadata-mount":
 		path := args[0]
 		fd, err := unix.Open(path, unix.O_RDONLY|unix.O_CLOEXEC, 0)
@@ -117,7 +120,11 @@ func filterProbe(op string, args []string) bool {
 			report("flock", unix.Flock(fd, unix.LOCK_EX|unix.LOCK_NB))
 			fmt.Println("READY")
 			var b [1]byte
-			_, _ = os.Stdin.Read(b[:])
+			n, err := os.Stdin.Read(b[:])
+			if err != nil || n != 1 || b[0] != 'g' {
+				panic("invalid flock release")
+			}
+			report("release", nil)
 		}
 	case "rlimit-lock":
 		var before unix.Rlimit

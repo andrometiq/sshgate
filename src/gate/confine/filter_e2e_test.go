@@ -3,11 +3,9 @@
 package confine
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"fmt"
-	"github.com/karthikeyan5/sshgate/src/gate/confine/jailmut/harness"
 	"golang.org/x/sys/unix"
 	"net"
 	"os"
@@ -45,6 +43,7 @@ func TestJailMatrixP15(t *testing.T) {
 			t.Run("L-SOCK-SWEEP-GRANT", func(t *testing.T) { legSocketSweep(t, spec, true) })
 			t.Run("L-SS-FALLBACK", func(t *testing.T) { legSSFallback(t, spec) })
 			t.Run("L-SOCKDIAG", func(t *testing.T) { legSockdiag(t, spec) })
+			t.Run("L-SOCKDIAG-AUTOLOAD", func(t *testing.T) { legSockdiagModule(t, spec) })
 			t.Run("L-SOCKPAIR-SWEEP", func(t *testing.T) { legSocketpair(t, spec) })
 			t.Run("L-NS-CREATE", func(t *testing.T) { legNamespaceCalls(t, spec) })
 			t.Run("L-KEYRING", func(t *testing.T) { legKeyring(t, spec) })
@@ -187,6 +186,9 @@ func TestProbeOutputContract(t *testing.T) {
 }
 
 func legPipeSize(t *testing.T, spec Spec) {
+	p := newProof(t, "L-FCNTL-PIPESZ")
+	var runs []JailedResult
+
 	probe := buildProbe(t)
 	r, w, err := os.Pipe()
 	mutationSetup(t, err)
@@ -201,7 +203,7 @@ func legPipeSize(t *testing.T, spec Spec) {
 	}
 	control := exec.Command(probe, "pipesz", strconv.Itoa(target))
 	control.Stdin = r
-	out, err := control.CombinedOutput()
+	out, err := m1ControlOutput(t, control)
 	mutationSetup(t, err)
 	changed, err := unix.FcntlInt(r.Fd(), unix.F_GETPIPE_SZ, 0)
 	mutationSetup(t, err)
@@ -217,12 +219,16 @@ func legPipeSize(t *testing.T, spec Spec) {
 	defer w.Close()
 	before, err = unix.FcntlInt(r.Fd(), unix.F_GETPIPE_SZ, 0)
 	mutationSetup(t, err)
-	result := runP12(t, spec, probe+" pipesz "+strconv.Itoa(target), func(j *Jailed) { j.Cmd.Stdin = r })
+	result := runM1Filter(t, p, &runs, spec, probe+" pipesz "+strconv.Itoa(target), func(j *Jailed) { j.Cmd.Stdin = r })
 	output := requireProbeOutput(t, result, "pipesz", "size")
 	after, err := unix.FcntlInt(r.Fd(), unix.F_GETPIPE_SZ, 0)
 	mutationSetup(t, err)
 	mutationEffect(t, "L-FCNTL-PIPESZ", "pipe-size", after != before)
 	mutationEffect(t, "L-FCNTL-PIPESZ", "errno", !strings.Contains(output, "pipesz=1\n"))
+	p.Jailed("probe", runs...)
+	p.Control("fixture", ControlResult{Valid: true})
+	p.Observed("effects", Observation{Valid: true, Sealed: true, Conclusive: true})
+	p.Finish()
 }
 
 func fileHint(t *testing.T, fd int, set bool, value uint64) uint64 {
@@ -238,6 +244,9 @@ func fileHint(t *testing.T, fd int, set bool, value uint64) uint64 {
 	return value
 }
 func legRWHint(t *testing.T, spec Spec) {
+	p := newProof(t, "L-FCNTL-RWHINT")
+	var runs []JailedResult
+
 	probe := buildProbe(t)
 	path := filepath.Join(filterFixture(t), "owned")
 	mutationSetup(t, os.WriteFile(path, []byte("canary"), 0600))
@@ -245,104 +254,77 @@ func legRWHint(t *testing.T, spec Spec) {
 	mutationSetup(t, err)
 	defer unix.Close(fd)
 	fileHint(t, fd, true, 0)
-	out, err := exec.Command(probe, "rwhint", path).CombinedOutput()
+	out, err := m1ControlOutput(t, exec.Command(probe, "rwhint", path))
 	mutationSetup(t, err)
 	if fileHint(t, fd, false, 0) != 4 {
 		t.Fatalf("SETUP: owned-file control did not persist hint: %s", out)
 	}
 	fileHint(t, fd, true, 0)
-	output := requireProbeOutput(t, runP12(t, spec, probe+" rwhint "+path, nil), "open", "rwhint")
+	output := requireProbeOutput(t, runM1Filter(t, p, &runs, spec, probe+" rwhint "+path, nil), "open", "rwhint")
 	mutationEffect(t, "L-FCNTL-RWHINT", "hint", fileHint(t, fd, false, 0) != 0)
 	mutationEffect(t, "L-FCNTL-RWHINT", "errno", !strings.Contains(output, "rwhint=1\n"))
+	p.Jailed("probe", runs...)
+	p.Control("fixture", ControlResult{Valid: true})
+	p.Observed("effects", Observation{Valid: true, Sealed: true, Conclusive: true})
+	p.Finish()
 }
 
 func legFlock(t *testing.T, spec Spec) {
+	p := newProof(t, "L-FLOCK-EX")
 	probe := buildProbe(t)
 	path := filepath.Join(filterFixture(t), "lock")
 	mutationSetup(t, os.WriteFile(path, nil, 0600))
 	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_CLOEXEC, 0)
 	mutationSetup(t, err)
 	defer unix.Close(fd)
-	run := func(jailed bool) (string, error) {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		command := exec.CommandContext(ctx, probe, "flock-hold", path)
-		var j *Jailed
-		if jailed {
-			j, err = spec.Command(ctx, probe+" flock-hold "+path)
-			mutationSetup(t, err)
-			defer j.Abort()
-			command = j.Cmd
-		}
-		input, err := command.StdinPipe()
-		mutationSetup(t, err)
-		output, err := command.StdoutPipe()
-		mutationSetup(t, err)
-		var diagnostic bytes.Buffer
-		command.Stderr = &diagnostic
-		mutationSetup(t, command.Start())
-		if j != nil {
-			_ = j.Started()
-		}
-		scanner := bufio.NewScanner(output)
-		var lines []string
-		ready := false
-		for scanner.Scan() {
-			lines = append(lines, scanner.Text())
-			if scanner.Text() == "READY" {
-				ready = true
-				break
-			}
-		}
-		if !ready {
-			t.Fatalf("SETUP: lock holder not ready: %s %s", strings.Join(lines, "\n"), diagnostic.String())
-		}
-		outside := unix.Flock(fd, unix.LOCK_EX|unix.LOCK_NB)
-		if outside == nil {
+	outside := func() error {
+		err := unix.Flock(fd, unix.LOCK_EX|unix.LOCK_NB)
+		if err == nil {
 			mutationSetup(t, unix.Flock(fd, unix.LOCK_UN))
 		}
-		input.Close()
-		waitErr := command.Wait()
-		if j != nil {
-			if _, err := j.Status(); err != nil {
-				t.Fatalf("SETUP: jail %v", err)
-			}
+		if err != nil && err != unix.EAGAIN {
+			t.Fatalf("SETUP: outside flock: %v", err)
 		}
-		if !jailed {
-			mutationSetup(t, waitErr)
-		}
-		return strings.Join(lines, "\n"), outside
+		return err
 	}
-	_, err = run(false)
-	if err != unix.EAGAIN {
-		t.Fatalf("SETUP: unjailed holder did not exclude outside locker: %v", err)
-	}
-	output, err := run(true)
-	mutationEffect(t, "L-FLOCK-EX", "exclusive-lock", err != nil)
-	mutationEffect(t, "L-FLOCK-EX", "errno", !strings.Contains(output, "flock=1\n"))
+	holder := startM1Holder(t, probe, "flock-hold", path)
+	excluded := outside() == unix.EAGAIN
+	control := holder.finish(t)
+	mutationSetup(t, validateM1Flock(control.stdout, control.stderr, control.exit))
+	p.Control("fixture", ControlResult{Valid: excluded && control.exit == 0, Detail: "unjailed holder must exclude outside lock and finish cleanly"})
+	var lockErr error
+	result := runJailed(t, p, spec, RunPlan{Mode: Interactive, ReadyPoint: "probe", AfterReady: func() { lockErr = outside() }, Ops: []ProofOp{{Name: "holder", Command: probe + " flock-hold " + path, Validate: validateM1Flock}}})
+	p.Jailed("probe", result)
+	mutationEffect(t, "L-FLOCK-EX", "exclusive-lock", lockErr != nil)
+	mutationEffect(t, "L-FLOCK-EX", "errno", !strings.Contains(result.stdout, "flock=1\n"))
+	p.Observed("effects", Observation{Valid: true, Sealed: true, Conclusive: true, Detail: "holder released and framed completion validated after outside lock attempt"})
+	p.Finish()
 }
 
 func legCoreLock(t *testing.T, spec Spec) {
+	p := newProof(t, "L-RLIMIT-CORE-LOCK")
+	var runs []JailedResult
+
 	probe := buildProbe(t)
 	var inherited unix.Rlimit
 	mutationSetup(t, unix.Getrlimit(unix.RLIMIT_CORE, &inherited))
 	want := min(uint64(1), inherited.Max)
-	control, err := exec.Command(probe, "rlimit-lock", "unused").CombinedOutput()
+	control, err := m1ControlOutput(t, exec.Command(probe, "rlimit-lock", "unused"))
 	mutationSetup(t, err)
 	if !strings.Contains(string(control), "setrlimit=ok") || !strings.Contains(string(control), "prlimit64=ok") {
 		t.Fatalf("SETUP: limit control: %s", control)
 	}
-	output := requireProbeOutput(t, runP12(t, spec, probe+" rlimit-lock unused", nil), "getrlimit", "before", "setrlimit", "prlimit64", "getrlimit-after", "after")
+	output := requireProbeOutput(t, runM1Filter(t, p, &runs, spec, probe+" rlimit-lock unused", nil), "getrlimit", "before", "setrlimit", "prlimit64", "getrlimit-after", "after")
 	mutationEffect(t, "L-RLIMIT-CORE-LOCK", "errno", !strings.Contains(output, "setrlimit=1\n") || !strings.Contains(output, "prlimit64=1\n"))
 	mutationEffect(t, "L-RLIMIT-CORE-LOCK", "limit", !strings.Contains(output, fmt.Sprintf("after=%d:%d\n", want, want)))
 	// Shell and util-linux exercise the real callers in addition to raw syscall probes.
 	for _, args := range [][]string{{"/bin/sh", "-c", "ulimit -Sc 0"}, {"prlimit", "--core=0:"}} {
-		control, err := exec.Command(args[0], args[1:]...).CombinedOutput()
+		control, err := m1ControlOutput(t, exec.Command(args[0], args[1:]...))
 		if err != nil {
 			t.Fatalf("SETUP: core caller control %v: %s", err, control)
 		}
 	}
-	shell := runP12(t, spec, "ulimit -Sc 0", nil)
+	shell := runM1Filter(t, p, &runs, spec, "ulimit -Sc 0", nil)
 	if shell.setupErr != nil {
 		t.Fatalf("SETUP: shell %v", shell.setupErr)
 	}
@@ -350,7 +332,7 @@ func legCoreLock(t *testing.T, spec Spec) {
 	if shell.exit != 0 && !strings.Contains(strings.ToLower(shell.stderr), "operation not permitted") {
 		unexpected(t, "shell core-limit errno: %+v", shell)
 	}
-	command := runP12(t, spec, "prlimit --core=0:", nil)
+	command := runM1Filter(t, p, &runs, spec, "prlimit --core=0:", nil)
 	if command.setupErr != nil {
 		t.Fatalf("SETUP: prlimit %v", command.setupErr)
 	}
@@ -358,6 +340,10 @@ func legCoreLock(t *testing.T, spec Spec) {
 	if command.exit != 0 && !strings.Contains(strings.ToLower(command.stderr), "operation not permitted") {
 		unexpected(t, "prlimit core-limit errno: %+v", command)
 	}
+	p.Jailed("probe", runs...)
+	p.Control("fixture", ControlResult{Valid: true})
+	p.Observed("effects", Observation{Valid: true, Sealed: true, Conclusive: true})
+	p.Finish()
 }
 
 func legSyncErrno(t *testing.T, spec Spec, syncfs bool) {
@@ -368,71 +354,87 @@ func legSyncErrno(t *testing.T, spec Spec, syncfs bool) {
 		args = []string{"syncfs", filterFixture(t)}
 		name, field = "L-SC-SYNCFS-ERRNO", "syncfs"
 	}
-	control, err := exec.Command(probe, args...).CombinedOutput()
+	p := newProof(t, name)
+	var runs []JailedResult
+
+	control, err := m1ControlOutput(t, exec.Command(probe, args...))
 	mutationSetup(t, err)
 	if !strings.Contains(string(control), field+"=ok\n") {
 		t.Fatalf("SETUP: sync control: %s", control)
 	}
-	output := requireProbeOutput(t, runP12(t, spec, probe+" "+strings.Join(args, " "), nil), field)
+	output := requireProbeOutput(t, runM1Filter(t, p, &runs, spec, probe+" "+strings.Join(args, " "), nil), field)
 	mutationEffect(t, name, "errno", !strings.Contains(output, field+"=1\n"))
+	p.Jailed("probe", runs...)
+	p.Control("fixture", ControlResult{Valid: true})
+	p.Finish()
 }
 func legListen(t *testing.T, spec Spec) {
+	p := newProof(t, "L-LISTEN")
+	var runs []JailedResult
+
 	probe := buildProbe(t)
-	control, err := exec.Command(probe, "listen", "unused").CombinedOutput()
+	control, err := m1ControlOutput(t, exec.Command(probe, "listen", "unused"))
 	mutationSetup(t, err)
 	if !strings.Contains(string(control), "listen=ok") {
 		t.Fatalf("SETUP: listen control %s", control)
 	}
-	output := requireProbeOutput(t, runP12(t, spec, probe+" listen unused", nil), "socket", "socket>listen")
+	output := requireProbeOutput(t, runM1Filter(t, p, &runs, spec, probe+" listen unused", nil), "socket", "socket>listen")
 	mutationEffect(t, "L-LISTEN", "errno", !strings.Contains(output, "listen=1\n"))
+	p.Jailed("probe", runs...)
+	p.Control("fixture", ControlResult{Valid: true})
+	p.Finish()
 }
 func legSockdiag(t *testing.T, spec Spec) {
+	p := newProof(t, "L-SOCKDIAG")
+	var runs []JailedResult
 	probe := buildProbe(t)
-	if os.Getenv("SSHGATE_JAIL_CI") == "1" {
-		output, err := exec.Command(probe, "sockdiag-request", "unused").CombinedOutput()
-		if err != nil || !strings.Contains(string(output), "sockdiag=ok") {
-			t.Fatalf("SETUP: sockdiag module control: %v %s", err, output)
-		}
-	} else {
-		t.Log("CONTROL-SKIPPED(ci-only): L-SOCKDIAG module control")
-	}
-	control, err := exec.Command(probe, "socket-tuple", "16", "3", "4").CombinedOutput()
+	control, err := m1ControlOutput(t, exec.Command(probe, "socket-tuple", "16", "3", "4"))
 	mutationSetup(t, err)
-	if !strings.Contains(string(control), "socket=ok") {
-		t.Fatalf("SETUP: sockdiag control %s", control)
-	}
-	output := requireProbeOutput(t, runP12(t, spec, probe+" socket-tuple 16 3 4", nil), "socket")
-	mutationEffect(t, "L-SOCKDIAG", "errno", !strings.Contains(output, "socket=1\n"))
+	p.Control("fixture", ControlResult{Valid: string(control) == "socket=ok\n", Detail: string(control)})
+	output := requireProbeOutput(t, runM1Filter(t, p, &runs, spec, probe+" socket-tuple 16 3 4", nil), "socket")
+	mutationEffect(t, "L-SOCKDIAG", "errno", output != "socket=1\n")
+	p.Jailed("probe", runs...)
+	p.Finish()
 }
+
 func legSocketpair(t *testing.T, spec Spec) {
+	p := newProof(t, "L-SOCKPAIR-SWEEP")
+	var runs []JailedResult
+
 	probe := buildProbe(t)
 	for _, kind := range []int{1, 2, 5} {
 		args := fmt.Sprintf(" socketpair-tuple 1 %d", kind)
-		control, err := exec.Command(probe, "socketpair-tuple", "1", strconv.Itoa(kind)).CombinedOutput()
+		control, err := m1ControlOutput(t, exec.Command(probe, "socketpair-tuple", "1", strconv.Itoa(kind)))
 		mutationSetup(t, err)
 		if !strings.Contains(string(control), "socketpair=ok") {
 			t.Fatal("SETUP: socketpair control")
 		}
-		output := requireProbeOutput(t, runP12(t, spec, probe+args, nil), "socketpair")
+		output := requireProbeOutput(t, runM1Filter(t, p, &runs, spec, probe+args, nil), "socketpair")
 		want := "socketpair=ok\n"
 		if kind == 2 {
 			want = "socketpair=1\n"
 		}
 		mutationEffect(t, "L-SOCKPAIR-SWEEP", "errno", !strings.Contains(output, want))
 	}
+	p.Jailed("probe", runs...)
+	p.Control("fixture", ControlResult{Valid: true})
+	p.Finish()
 }
 func legNamespaceCalls(t *testing.T, spec Spec) {
+	p := newProof(t, "L-NS-CREATE")
+	var runs []JailedResult
+
 	probe := buildProbe(t)
 	cloneAllowed, unshareAllowed := false, false
 	for _, item := range []struct {
 		flags  uint64
 		option string
 	}{{0x10000000, "-U"}, {0x20000, "-m"}, {0x40000000, "-n"}, {0x20000000, "-p"}, {0x8000000, "-i"}} {
-		control, err := exec.Command("unshare", "-Ur", "--", "unshare", item.option, "--", "/bin/true").CombinedOutput()
+		control, err := m1ControlOutput(t, exec.Command("unshare", "-Ur", "--", "unshare", item.option, "--", "/bin/true"))
 		if err != nil {
 			t.Fatalf("SETUP: unshare %s control: %v: %s", item.option, err, control)
 		}
-		result := runP12(t, spec, "unshare "+item.option+" -- /bin/true", nil)
+		result := runM1Filter(t, p, &runs, spec, "unshare "+item.option+" -- /bin/true", nil)
 		if result.setupErr != nil {
 			t.Fatalf("SETUP: unshare jail: %v", result.setupErr)
 		}
@@ -441,42 +443,52 @@ func legNamespaceCalls(t *testing.T, spec Spec) {
 		} else if !strings.Contains(result.stderr, "Operation not permitted") {
 			unexpected(t, "unshare %s not EPERM: %+v", item.option, result)
 		}
-		control, err = exec.Command("unshare", "-Ur", "--", probe, "clone-ns", fmt.Sprint(item.flags)).CombinedOutput()
+		control, err = m1ControlOutput(t, exec.Command("unshare", "-Ur", "--", probe, "clone-ns", fmt.Sprint(item.flags)))
 		if err != nil || !strings.Contains(string(control), "clone=ok\n") {
 			t.Fatalf("SETUP: clone %#x control: %v: %s", item.flags, err, control)
 		}
-		output := requireProbeOutput(t, runP12(t, spec, fmt.Sprintf("%s clone-ns %d", probe, item.flags), nil), "clone", "clone>wait")
+		output := requireProbeOutput(t, runM1Filter(t, p, &runs, spec, fmt.Sprintf("%s clone-ns %d", probe, item.flags), nil), "clone", "clone>wait")
 		if strings.Contains(output, "clone=ok\n") {
 			cloneAllowed = true
 		} else if !strings.Contains(output, "clone=1\n") {
 			unexpected(t, "clone %#x not EPERM: %s", item.flags, output)
 		}
 	}
-	control, err := exec.Command("unshare", "-Urn", "--", probe, "setns", "unused").CombinedOutput()
+	control, err := m1ControlOutput(t, exec.Command("unshare", "-Urn", "--", probe, "setns", "unused"))
 	if err != nil || !strings.Contains(string(control), "setns=ok\n") {
 		t.Fatalf("SETUP: setns control: %v: %s", err, control)
 	}
-	output := requireProbeOutput(t, runP12(t, spec, probe+" setns unused", nil), "open", "setns")
+	output := requireProbeOutput(t, runM1Filter(t, p, &runs, spec, probe+" setns unused", nil), "open", "setns")
 	if !strings.Contains(output, "setns=1\n") {
 		unexpected(t, "setns(0) not EPERM: %s", output)
 	}
 	mutationEffect(t, "L-NS-CREATE", "clone", cloneAllowed)
 	mutationEffect(t, "L-NS-CREATE", "unshare", unshareAllowed)
+	p.Jailed("probe", runs...)
+	p.Control("fixture", ControlResult{Valid: true})
+	p.Finish()
 }
 func legCeiling(t *testing.T, spec Spec) {
+	p := newProof(t, "L-SC-CEILING")
+	var runs []JailedResult
+
+	control := runJailed(t, p, spec, RunPlan{Mode: Execute, Ops: []ProofOp{{Name: "control", Command: "echo CONTROL_RAN", Outcomes: []OpOutcome{{Stdout: "CONTROL_RAN\n"}}}}})
+	runs = append(runs, control)
 	probe := buildProbe(t)
-	p12Control(t, spec)
-	output := requireProbeOutput(t, runP12(t, spec, probe+" raw 472", nil), "raw")
+	output := requireProbeOutput(t, runM1Filter(t, p, &runs, spec, probe+" raw 472", nil), "raw")
 	if !strings.Contains(output, "raw=38\n") {
 		unexpected(t, "unknown syscall not ENOSYS: %s", output)
 	}
-	result := runP12(t, spec, "exec "+probe+" raw 1073741824", nil)
-	if result.setupErr != nil {
-		t.Fatalf("SETUP: x32 %v", result.setupErr)
-	}
-	if !isSeccompKill(result.exit) {
-		unexpected(t, "x32 exit %d, expected SIGSYS: %+v", result.exit, result)
-	}
+	result := runJailed(t, p, spec, RunPlan{Mode: ExpectedSignal, Command: "exec " + probe + " x32-signal unused", Signal: syscall.SIGSYS, Validate: func(stdout, stderr string, exit int) error {
+		if stdout != "x32-ready\n" || stderr != "" || exit != 128+int(syscall.SIGSYS) {
+			return fmt.Errorf("x32 probe did not die cleanly of SIGSYS")
+		}
+		return nil
+	}})
+	runs = append(runs, result)
+
+	p.Jailed("probe", runs...)
+	p.Finish()
 }
 
 func legDatagram(t *testing.T, spec Spec, abstract bool) {
@@ -487,11 +499,14 @@ func legDatagram(t *testing.T, spec Spec, abstract bool) {
 		path = "@sshgate-" + strconv.Itoa(os.Getpid()) + "-" + strconv.FormatInt(time.Now().UnixNano(), 10)
 		name = "L-DGRAM-ABSTRACT"
 	}
+	p := newProof(t, name)
+	var runs []JailedResult
+
 	fd, err := unix.Socket(unix.AF_UNIX, unix.SOCK_DGRAM|unix.SOCK_NONBLOCK|unix.SOCK_CLOEXEC, 0)
 	mutationSetup(t, err)
 	defer unix.Close(fd)
 	mutationSetup(t, unix.Bind(fd, &unix.SockaddrUnix{Name: path}))
-	control, err := exec.Command(probe, "dgram-send", path).CombinedOutput()
+	control, err := m1ControlOutput(t, exec.Command(probe, "dgram-send", path))
 	mutationSetup(t, err)
 	var data [64]byte
 	n, _, err := unix.Recvfrom(fd, data[:], 0)
@@ -499,7 +514,7 @@ func legDatagram(t *testing.T, spec Spec, abstract bool) {
 	if string(data[:n]) != "canary" {
 		t.Fatalf("SETUP: no unjailed datagram: %s", control)
 	}
-	output := requireProbeOutput(t, runP12(t, spec, probe+" dgram-send "+path, nil), "socketpair", "socketpair>sendto")
+	output := requireProbeOutput(t, runM1Filter(t, p, &runs, spec, probe+" dgram-send "+path, nil), "socketpair", "socketpair>sendto")
 	n, _, err = unix.Recvfrom(fd, data[:], 0)
 	if err != nil && err != unix.EAGAIN {
 		t.Fatalf("SETUP: receiver %v", err)
@@ -508,55 +523,61 @@ func legDatagram(t *testing.T, spec Spec, abstract bool) {
 	if !strings.Contains(output, "socketpair=1\n") && !strings.Contains(output, "sendto=13\n") && !strings.Contains(output, "sendto=1\n") && !strings.Contains(output, "sendto=ok\n") {
 		unexpected(t, "unexpected datagram errno: %s", output)
 	}
+	p.Jailed("probe", runs...)
+	p.Control("fixture", ControlResult{Valid: true})
+	p.Observed("effects", Observation{Valid: true, Sealed: true, Conclusive: true})
+	p.Finish()
 }
 
 func legSignal(t *testing.T, spec Spec) {
+	p := newProof(t, "L-SIGNAL")
+	var runs []JailedResult
 	probe := buildProbe(t)
-	victim := func() (*exec.Cmd, chan error) {
-		cmd := exec.Command("sleep", "60")
-		mutationSetup(t, cmd.Start())
-		done := make(chan error, 1)
-		go func() { done <- cmd.Wait() }()
-		t.Cleanup(func() { cmd.Process.Kill() })
-		return cmd, done
-	}
-	control, done := victim()
-	out, err := exec.Command(probe, "signal", strconv.Itoa(control.Process.Pid)).CombinedOutput()
+	control := startM1SignalRecipient(t)
+	out, err := m1ControlOutput(t, exec.Command(probe, "signal", strconv.Itoa(control.command.Process.Pid)))
 	mutationSetup(t, err)
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatalf("SETUP: signal control did not terminate: %s", out)
-	}
-	target, done := victim()
-	output := requireProbeOutput(t, runP12(t, spec, probe+" signal "+strconv.Itoa(target.Process.Pid), nil), "kill")
-	delivered := false
-	select {
-	case <-done:
-		delivered = true
-	case <-time.After(100 * time.Millisecond):
-	}
-	mutationEffect(t, "L-SIGNAL", "signal", delivered)
-	if !strings.Contains(output, "kill=3\n") && !strings.Contains(output, "kill=1\n") && !strings.Contains(output, "kill=ok\n") {
+	controlResult := control.finish(t)
+	p.Control("fixture", ControlResult{Valid: string(out) == "kill=ok\n" && controlResult.exit == 0 && controlResult.stderr == "" && controlResult.stdout == "READY\nsignal=1\n", Detail: "recipient must acknowledge SIGUSR1 after producer completion"})
+	target := startM1SignalRecipient(t)
+	observer := &m1RecipientObserver{holder: target, t: t}
+	p.ObserveWith("recipient", observer)
+	mark := observer.Mark()
+	output := requireProbeOutput(t, runM1Filter(t, p, &runs, spec, probe+" signal "+strconv.Itoa(target.command.Process.Pid), nil), "kill")
+	mutationSetup(t, observer.Seal(ProducerSync{Complete: true, Kind: "framed-op-ended"}))
+	records := observer.Since(mark)
+	mutationEffect(t, "L-SIGNAL", "signal", records.Records[0] == "signal=1")
+	if output != "kill=3\n" && output != "kill=1\n" && output != "kill=ok\n" {
 		unexpected(t, "signal errno: %s", output)
 	}
+	p.Jailed("probe", runs...)
+	p.Observed("effects", Observation{Valid: records.Err == nil, Sealed: records.Sealed, Conclusive: records.Conclusive})
+	p.Finish()
 }
+
 func legSysV(t *testing.T, spec Spec) {
+	p := newProof(t, "L-IPC-SYSV")
+	var runs []JailedResult
+
 	probe := buildProbe(t)
-	control := shmCreate(t)
-	out, err := exec.Command(probe, "shm-rmid", strconv.Itoa(control)).CombinedOutput()
+	control := m1ShmCreate(t)
+	out, err := m1ControlOutput(t, exec.Command(probe, "shm-rmid", strconv.Itoa(control)))
 	mutationSetup(t, err)
-	if shmExists(control) {
-		shmRemove(control)
+	if m1ShmExists(t, control) {
+		m1ShmRemove(t, control)
 		t.Fatalf("SETUP: SysV control: %s", out)
 	}
-	id := shmCreate(t)
-	defer shmRemove(id)
-	output := requireProbeOutput(t, runP12(t, spec, probe+" shm-rmid "+strconv.Itoa(id), nil), "shmctl")
-	mutationEffect(t, "L-IPC-SYSV", "removed", !shmExists(id))
+	id := m1ShmCreate(t)
+	output := requireProbeOutput(t, runM1Filter(t, p, &runs, spec, probe+" shm-rmid "+strconv.Itoa(id), nil), "shmctl")
+	mutationEffect(t, "L-IPC-SYSV", "removed", !m1ShmExists(t, id))
 	if !strings.Contains(output, "shmctl=22\n") && !strings.Contains(output, "shmctl=ok\n") {
 		unexpected(t, "SysV errno: %s", output)
 	}
+	m1ShmRemove(t, id)
+	p.Jailed("probe", runs...)
+	p.Control("fixture", ControlResult{Valid: true})
+	p.Observed("effects", Observation{Valid: true, Sealed: true, Conclusive: true})
+	p.Finish()
+
 }
 
 type schedulerState struct {
@@ -586,6 +607,9 @@ func readScheduler(t *testing.T, pid int) schedulerState {
 	return result
 }
 func legScheduler(t *testing.T, spec Spec) {
+	p := newProof(t, "L-SCHED")
+	var runs []JailedResult
+
 	probe := buildProbe(t)
 	var affinity unix.CPUSet
 	mutationSetup(t, unix.SchedGetaffinity(0, &affinity))
@@ -596,26 +620,37 @@ func legScheduler(t *testing.T, spec Spec) {
 	callers := func(pid string) string {
 		return fmt.Sprintf("renice -n 19 -p %s && ionice -c3 -p %s && chrt -b -p 0 %s && taskset -pc %d %s && prlimit --nofile=7:7 --pid %s", pid, pid, pid, cpu, pid, pid)
 	}
-	self := runP12(t, spec, "nice -n 19 ionice -c3 chrt -b 0 taskset -c "+strconv.Itoa(cpu)+" prlimit --nofile=7:7 "+probe+" scheduler-state 0", nil)
+	self := runM1Filter(t, p, &runs, spec, "nice -n 19 ionice -c3 chrt -b 0 taskset -c "+strconv.Itoa(cpu)+" prlimit --nofile=7:7 "+probe+" scheduler-state 0", nil)
 	if self.setupErr != nil || self.exit != 0 || !strings.Contains(self.stdout, "state=19:24576:3:7:1\n") {
 		t.Fatalf("SETUP: self retune effect control: %+v", self)
 	}
-	victim := startSleeper(t)
-	pid := victim.Process.Pid
+	victim := startM1Holder(t, "/bin/sh", "-c", "printf 'READY\\n'; read release; printf 'DONE\\n'")
+	pid := victim.command.Process.Pid
 	before := readScheduler(t, pid)
-	output := requireProbeOutput(t, runP12(t, spec, probe+" scheduler "+strconv.Itoa(pid), nil), "prlimit", "nice", "ioprio", "policy", "affinity", "schedattr", "state")
+	output := requireProbeOutput(t, runM1Filter(t, p, &runs, spec, probe+" scheduler "+strconv.Itoa(pid), nil), "prlimit", "nice", "ioprio", "policy", "affinity", "schedattr", "state")
 	for _, caller := range strings.Split(callers(strconv.Itoa(pid)), " && ") {
-		result := runP12(t, spec, caller, nil)
+		result := runM1Filter(t, p, &runs, spec, caller, nil)
 		if result.setupErr != nil || result.exit != 0 && result.exit != 1 {
 			t.Fatalf("SETUP: scheduler caller: %+v", result)
 		}
 	}
 	mutationEffect(t, "L-SCHED", "retuned", before != readScheduler(t, pid))
+	victimResult := victim.finish(t)
+	if victimResult.exit != 0 || victimResult.stderr != "" || victimResult.stdout != "READY\nDONE\n" {
+		t.Fatalf("SETUP: scheduler victim completion: %+v", victimResult)
+	}
 	if !strings.Contains(output, "=1\n") && !strings.Contains(output, "=ok\n") {
 		unexpected(t, "scheduler errno: %s", output)
 	}
+	p.Jailed("probe", runs...)
+	p.Control("fixture", ControlResult{Valid: true})
+	p.Observed("effects", Observation{Valid: true, Sealed: true, Conclusive: true})
+	p.Finish()
 }
 func legIOUring(t *testing.T, spec Spec) {
+	p := newProof(t, "L-IOURING")
+	var runs []JailedResult
+
 	probe := buildProbe(t)
 	path := filepath.Join(filterFixture(t), "owned")
 	mutationSetup(t, os.WriteFile(path, []byte("canary"), 0600))
@@ -623,11 +658,12 @@ func legIOUring(t *testing.T, spec Spec) {
 	mutationSetup(t, err)
 	defer listener.Close()
 	port := strconv.Itoa(listener.Addr().(*net.TCPAddr).Port)
-	control, err := exec.Command(probe, "uring", path, port).CombinedOutput()
+	control, err := m1ControlOutput(t, exec.Command(probe, "uring", path, port))
+	mutationSetup(t, validateM1UringResult(jailResult{stdout: string(control), exit: proofExit(err)}, true))
 	if err != nil || !strings.Contains(string(control), "uring-setxattr=ok\n") {
 		t.Fatalf("SETUP: io_uring control (requires enabled io_uring): %v: %s", err, control)
 	}
-	listener.SetDeadline(time.Now().Add(time.Second))
+	mutationSetup(t, listener.SetDeadline(time.Now().Add(time.Second)))
 	connection, err := listener.Accept()
 	mutationSetup(t, err)
 	connection.Close()
@@ -639,9 +675,10 @@ func legIOUring(t *testing.T, spec Spec) {
 	}
 	mutationSetup(t, unix.Removexattr(path, "user.sshgate_uring"))
 	spec.Net = false
-	output := requireProbeOutput(t, runP12(t, spec, probe+" uring "+path+" "+port, nil), "uring-complete", "io_uring_setup", "io_uring_setup>eventfd", "eventfd>io_uring_register", "io_uring_register>sq-map", "sq-map>sqes-map")
-	listener.SetDeadline(time.Now().Add(100 * time.Millisecond))
+	output := runM1Filter(t, p, &runs, spec, probe+" uring "+path+" "+port, nil).stdout
+	mutationSetup(t, listener.SetDeadline(time.Now().Add(100*time.Millisecond)))
 	connection, err = listener.Accept()
+	mutationSetup(t, validateM1Accept(err, strings.Contains(output, "connect=ok\n")))
 	delivered := err == nil
 	if delivered {
 		connection.Close()
@@ -651,15 +688,22 @@ func legIOUring(t *testing.T, spec Spec) {
 	if err != unix.ENODATA {
 		unexpected(t, "uring altered host xattr: %v", err)
 	}
-	if !strings.Contains(output, "io_uring_setup=1\n") && !strings.Contains(output, "io_uring_register=1\n") && !strings.Contains(output, "io_uring_enter=1\n") && !strings.Contains(output, "uring-connect=ok\n") {
+	if !strings.Contains(output, "io_uring_setup=1\n") && !strings.Contains(output, "io_uring_register=1\n") && !strings.Contains(output, "uring-socket-enter=1\n") && !strings.Contains(output, "uring-connect=ok\n") {
 		unexpected(t, "unexpected uring errno: %s", output)
 	}
+	p.Jailed("probe", runs...)
+	p.Control("fixture", ControlResult{Valid: true})
+	p.Observed("effects", Observation{Valid: true, Sealed: true, Conclusive: true})
+	p.Finish()
 }
 
 func legKeyring(t *testing.T, spec Spec) {
 	if runFilterFixture(t, "SSHGATE_KEYRING_FIXTURE", nil, []string{"keyring", "errno"}) {
 		return
 	}
+	p := newProof(t, "L-KEYRING")
+	var runs []JailedResult
+
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 	session, err := unix.KeyctlJoinSessionKeyring(fmt.Sprintf("sshgate-session-%d-%d", os.Getpid(), time.Now().UnixNano()))
@@ -695,22 +739,34 @@ func legKeyring(t *testing.T, spec Spec) {
 		reset()
 		before := snapshot()
 		args := []string{op, strconv.Itoa(ring), description}
-		control, err := exec.Command(probe, args...).CombinedOutput()
+		control, err := m1ControlOutput(t, exec.Command(probe, args...))
 		mutationSetup(t, err)
 		if bytes.Equal(before, snapshot()) {
 			t.Fatalf("SETUP: keyring control did not change ring: %s", control)
 		}
 		reset()
 		before = snapshot()
-		output := requireProbeOutput(t, runP12(t, spec, probe+" "+strings.Join(args, " "), nil), "keyring")
+		output := requireProbeOutput(t, runM1Filter(t, p, &runs, spec, probe+" "+strings.Join(args, " "), nil), "keyring")
 		changed = changed || !bytes.Equal(before, snapshot())
 		badErrno = badErrno || !strings.Contains(output, "keyring=1\n")
 	}
 	mutationEffect(t, "L-KEYRING", "keyring", changed)
 	mutationEffect(t, "L-KEYRING", "errno", badErrno)
+	p.Jailed("probe", runs...)
+	p.Control("fixture", ControlResult{Valid: true})
+	p.Observed("effects", Observation{Valid: true, Sealed: true, Conclusive: true})
+	p.Finish()
 }
 
 func legInet(t *testing.T, spec Spec, grant bool) {
+	name := "L-INET-DENY"
+	if grant {
+		name = "L-INET-GRANT"
+	}
+
+	p := newProof(t, name)
+	var runs []JailedResult
+
 	probe := buildProbe(t)
 	badConnect, badErrno := false, false
 	for _, network := range []string{"tcp4", "tcp6"} {
@@ -724,9 +780,9 @@ func legInet(t *testing.T, spec Spec, grant bool) {
 		mutationSetup(t, err)
 		defer listener.Close()
 		port := strconv.Itoa(listener.Addr().(*net.TCPAddr).Port)
-		control, err := exec.Command(probe, operation, port).CombinedOutput()
+		control, err := m1ControlOutput(t, exec.Command(probe, operation, port))
 		mutationSetup(t, err)
-		listener.SetDeadline(time.Now().Add(time.Second))
+		mutationSetup(t, listener.SetDeadline(time.Now().Add(time.Second)))
 		conn, err := listener.Accept()
 		mutationSetup(t, err)
 		conn.Close()
@@ -734,9 +790,10 @@ func legInet(t *testing.T, spec Spec, grant bool) {
 			t.Fatal("SETUP: inet control")
 		}
 		spec.Net = grant
-		output := requireProbeOutput(t, runP12(t, spec, probe+" "+operation+" "+port, nil), "socket", "socket>connect")
-		listener.SetDeadline(time.Now().Add(100 * time.Millisecond))
+		output := requireProbeOutput(t, runM1Filter(t, p, &runs, spec, probe+" "+operation+" "+port, nil), "socket", "socket>connect")
+		mutationSetup(t, listener.SetDeadline(time.Now().Add(100*time.Millisecond)))
 		conn, err = listener.Accept()
+		mutationSetup(t, validateM1Accept(err, strings.Contains(output, "connect=ok\n")))
 		connected := err == nil
 		if connected {
 			conn.Close()
@@ -754,8 +811,24 @@ func legInet(t *testing.T, spec Spec, grant bool) {
 		mutationEffect(t, "L-INET-DENY", "connected", badConnect)
 		mutationEffect(t, "L-INET-DENY", "errno", badErrno)
 	}
+	p.Jailed("probe", runs...)
+	p.Control("fixture", ControlResult{Valid: true})
+	p.Observed("effects", Observation{Valid: true, Sealed: true, Conclusive: true})
+	p.Finish()
 }
 func legSocketSweep(t *testing.T, spec Spec, grant bool) {
+	name := "L-SOCK-SWEEP"
+	if grant {
+		name = "L-SOCK-SWEEP-GRANT"
+	}
+
+	p := newProof(t, name)
+	if os.Getenv("SSHGATE_JAIL_CI") != "1" {
+		p.Omit("ci-only")
+		return
+	}
+	var runs []JailedResult
+
 	probe := buildProbe(t)
 	spec.Net = grant
 	if os.Getenv("SSHGATE_JAIL_CI") == "1" {
@@ -763,7 +836,7 @@ func legSocketSweep(t *testing.T, spec Spec, grant bool) {
 		if grant {
 			args = []string{"socket-tuple", "2", "1", "132"}
 		}
-		output, err := exec.Command(probe, args...).CombinedOutput()
+		output, err := m1ControlOutput(t, exec.Command(probe, args...))
 		if err != nil || !strings.Contains(string(output), "socket=ok") {
 			t.Fatalf("SETUP: socket module control: %v %s", err, output)
 		}
@@ -771,7 +844,7 @@ func legSocketSweep(t *testing.T, spec Spec, grant bool) {
 	before, err := os.ReadFile("/proc/modules")
 	mutationSetup(t, err)
 	// A supported forbidden tuple proves the plain-jail family deny independently of module autoload.
-	control, err := exec.Command(probe, "socket-tuple", "1", "1", "0").CombinedOutput()
+	control, err := m1ControlOutput(t, exec.Command(probe, "socket-tuple", "1", "1", "0"))
 	mutationSetup(t, err)
 	if !strings.Contains(string(control), "socket=ok") {
 		t.Fatal("SETUP: socket control")
@@ -780,7 +853,7 @@ func legSocketSweep(t *testing.T, spec Spec, grant bool) {
 	if grant {
 		mode = "grant"
 	}
-	output := requireProbeOutput(t, runP12(t, spec, probe+" socket-sweep "+mode, nil), "attempts")
+	output := requireProbeOutput(t, runM1Filter(t, p, &runs, spec, probe+" socket-sweep "+mode, nil), "attempts")
 	var attempts, denied int
 	if _, err := fmt.Sscanf(strings.TrimSpace(output), "attempts=%d denied=%d", &attempts, &denied); err != nil || attempts < 20000 {
 		t.Fatalf("SETUP: incomplete socket sweep: %s", output)
@@ -788,27 +861,27 @@ func legSocketSweep(t *testing.T, spec Spec, grant bool) {
 	bad := attempts != denied
 	after, err := os.ReadFile("/proc/modules")
 	mutationSetup(t, err)
-	name := "L-SOCK-SWEEP"
-	if grant {
-		name = "L-SOCK-SWEEP-GRANT"
-	}
 	mutationEffect(t, name, "tuple", bad || moduleNames(before) != moduleNames(after))
-	if os.Getenv("SSHGATE_JAIL_CI") != "1" {
-		t.Log("CONTROL-SKIPPED(ci-only): socket module-autoload control")
-	}
+	p.Jailed("probe", runs...)
+	p.Control("fixture", ControlResult{Valid: true})
+	p.Observed("effects", Observation{Valid: true, Sealed: true, Conclusive: true})
+	p.Finish()
 }
 func legSSFallback(t *testing.T, spec Spec) {
+	p := newProof(t, "L-SS-FALLBACK")
+	var runs []JailedResult
+
 	listener, err := net.ListenTCP("tcp4", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	mutationSetup(t, err)
 	defer listener.Close()
 	port := listener.Addr().(*net.TCPAddr).Port
 	command := fmt.Sprintf("ss -H -ltn 'sport = :%d'", port)
-	control, err := exec.Command("/bin/sh", "-c", command).Output()
+	control, err := m1ControlOutput(t, exec.Command("/bin/sh", "-c", command))
 	mutationSetup(t, err)
 	if len(bytes.TrimSpace(control)) == 0 {
 		t.Fatal("SETUP: ss did not show control listener")
 	}
-	result := runP12(t, spec, command, nil)
+	result := runM1Filter(t, p, &runs, spec, command, nil)
 	if result.setupErr != nil || result.exit != 0 || result.stdout == "" {
 		t.Fatalf("SETUP: ss control: %+v", result)
 	}
@@ -816,6 +889,9 @@ func legSSFallback(t *testing.T, spec Spec) {
 	if result.exit != 0 || strings.Count(strings.TrimSpace(output), "\n") != bytes.Count(bytes.TrimSpace(control), []byte("\n")) {
 		unexpected(t, "ss procfs fallback lost listener: %+v", result)
 	}
+	p.Jailed("probe", runs...)
+	p.Control("fixture", ControlResult{Valid: true})
+	p.Finish()
 }
 
 func legUnixConnect(t *testing.T, spec Spec, abstract bool) {
@@ -826,21 +902,25 @@ func legUnixConnect(t *testing.T, spec Spec, abstract bool) {
 		path = "@sshgate-stream-" + strconv.Itoa(os.Getpid()) + "-" + strconv.FormatInt(time.Now().UnixNano(), 10)
 		name = "L-UNIX-ABSTRACT"
 	}
+	p := newProof(t, name)
+	var runs []JailedResult
+
 	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
 	mutationSetup(t, err)
 	defer listener.Close()
-	control, err := exec.Command(probe, "unix-connect", path).CombinedOutput()
+	control, err := m1ControlOutput(t, exec.Command(probe, "unix-connect", path))
 	mutationSetup(t, err)
-	listener.SetDeadline(time.Now().Add(time.Second))
+	mutationSetup(t, listener.SetDeadline(time.Now().Add(time.Second)))
 	conn, err := listener.Accept()
 	mutationSetup(t, err)
 	conn.Close()
 	if !strings.Contains(string(control), "connect=ok") {
 		t.Fatal("SETUP: unix control")
 	}
-	output := requireProbeOutput(t, runP12(t, spec, probe+" unix-connect "+path, nil), "socket", "socket>connect")
-	listener.SetDeadline(time.Now().Add(100 * time.Millisecond))
+	output := requireProbeOutput(t, runM1Filter(t, p, &runs, spec, probe+" unix-connect "+path, nil), "socket", "socket>connect")
+	mutationSetup(t, listener.SetDeadline(time.Now().Add(100*time.Millisecond)))
 	conn, err = listener.Accept()
+	mutationSetup(t, validateM1Accept(err, strings.Contains(output, "connect=ok\n")))
 	connected := err == nil
 	if connected {
 		conn.Close()
@@ -849,8 +929,15 @@ func legUnixConnect(t *testing.T, spec Spec, abstract bool) {
 	if !strings.Contains(output, "socket=1\n") && !strings.Contains(output, "connect=13\n") && !strings.Contains(output, "connect=1\n") && !strings.Contains(output, "connect=ok\n") {
 		unexpected(t, "unix connect errno: %s", output)
 	}
+	p.Jailed("probe", runs...)
+	p.Control("fixture", ControlResult{Valid: true})
+	p.Observed("effects", Observation{Valid: true, Sealed: true, Conclusive: true})
+	p.Finish()
 }
 func legIoctlFilter(t *testing.T, spec Spec) {
+	p := newProof(t, "L-IOCTL")
+	var runs []JailedResult
+
 	probe := buildProbe(t)
 	requests := []uint32{0x5412, 0x541c, 0xc0506617, 0xc0406618, 0xc0406619}
 	bad := false
@@ -864,7 +951,7 @@ func legIoctlFilter(t *testing.T, spec Spec) {
 		if !strings.Contains(string(output), "open=ok\n") || !strings.Contains(string(output), "ioctl=25\n") && !strings.Contains(string(output), "ioctl=95\n") {
 			t.Fatalf("SETUP: scratch ioctl control %#x: %s", request, output)
 		}
-		result := runP12(t, spec, fmt.Sprintf("%s ioctl-scratch %d", probe, request), nil)
+		result := runM1Filter(t, p, &runs, spec, fmt.Sprintf("%s ioctl-scratch %d", probe, request), nil)
 		text := requireProbeOutput(t, result, "open", "ioctl")
 		if !strings.Contains(text, "open=ok\n") {
 			t.Fatalf("SETUP: scratch ioctl target not opened: %s", text)
@@ -886,18 +973,24 @@ func legIoctlFilter(t *testing.T, spec Spec) {
 	if !strings.Contains(string(output), "tiocsti=ok\n") && !strings.Contains(string(output), "tiocsti=5\n") && !strings.Contains(string(output), "tiocsti=1\n") {
 		t.Fatalf("SETUP: isolated pty ioctl control: %s", output)
 	}
-	result := runP12(t, spec, probe+" tiocsti unused", func(j *Jailed) { j.Cmd.Stdin = tty })
+	result := runM1Filter(t, p, &runs, spec, probe+" tiocsti unused", func(j *Jailed) { j.Cmd.Stdin = tty })
 	text := requireProbeOutput(t, result, "tiocsti")
 	bad = bad || !strings.Contains(text, "tiocsti=1\n")
 	mutationEffect(t, "L-IOCTL", "errno", bad)
+	p.Jailed("probe", runs...)
+	p.Control("fixture", ControlResult{Valid: true})
+	p.Finish()
 }
 func legMetadataErrno(t *testing.T, spec Spec) {
+	p := newProof(t, "L-META-ERRNO")
+	var runs []JailedResult
+
 	probe := buildProbe(t)
 	badErrno := false
 	for _, submount := range []bool{false, true} {
 		path := filepath.Join(writeSweepFixture(t, submount), "owned")
 		mutationSetup(t, os.WriteFile(path, []byte("canary"), 0600))
-		control, err := exec.Command(probe, "metadata-errno", path).CombinedOutput()
+		control, err := m1ControlOutput(t, exec.Command(probe, "metadata-errno", path))
 		if err != nil {
 			t.Fatalf("SETUP: metadata control %s: %v: %s", path, err, control)
 		}
@@ -915,7 +1008,7 @@ func legMetadataErrno(t *testing.T, spec Spec) {
 		mutationSetup(t, os.WriteFile(path, []byte("canary"), 0600))
 		before, err := os.Stat(path)
 		mutationSetup(t, err)
-		output := requireProbeOutput(t, runP12(t, spec, probe+" metadata-errno "+path, nil), "open", "fchmod", "chmod", "chown", "setxattr", "utimensat")
+		output := requireProbeOutput(t, runM1Filter(t, p, &runs, spec, probe+" metadata-errno "+path, nil), "open", "fchmod", "chmod", "chown", "setxattr", "utimensat")
 		for _, op := range []string{"fchmod", "chmod", "chown", "setxattr", "utimensat"} {
 			badErrno = badErrno || !strings.Contains(output, op+"=1\n")
 		}
@@ -930,6 +1023,10 @@ func legMetadataErrno(t *testing.T, spec Spec) {
 		}
 	}
 	mutationEffect(t, "L-META-ERRNO", "errno", badErrno)
+	p.Jailed("probe", runs...)
+	p.Control("fixture", ControlResult{Valid: true})
+	p.Observed("effects", Observation{Valid: true, Sealed: true, Conclusive: true})
+	p.Finish()
 }
 
 func moduleNames(data []byte) string {
@@ -958,26 +1055,6 @@ func runFilterFixture(t *testing.T, environment string, attributes *syscall.SysP
 	command.Env = append(os.Environ(), environment+"=1")
 	command.SysProcAttr = attributes
 	output, err := command.CombinedOutput()
-	status := exitCodeOf(err)
-	convert := exec.Command("go", "tool", "test2json", "-p", "fixture")
-	convert.Stdin = bytes.NewReader(output)
-	stream, convertErr := convert.Output()
-	mutationSetup(t, convertErr)
-	parts := strings.Split(t.Name(), "/")
-	name := parts[len(parts)-1]
-	leg := harness.Leg{Name: name, Names: map[string]string{"native": t.Name(), "abi1": t.Name()}}
-	var observed []string
-	for _, assertion := range assertions {
-		if bytes.Contains(output, []byte("MUTATION-EFFECT "+name+" "+assertion)) {
-			observed = append(observed, assertion)
-			leg.Markers = append(leg.Markers, "MUTATION-EFFECT "+assertion)
-		}
-	}
-	if judgeErr := harness.Judge(bytes.NewReader(stream), "", status, []harness.Leg{leg}, "native"); judgeErr != nil {
-		t.Fatalf("SETUP: fixture subprocess: %v: %s", judgeErr, output)
-	}
-	for _, assertion := range observed {
-		mutationEffect(t, name, assertion, true)
-	}
+	forwardCoverProof(t, output, err)
 	return true
 }
