@@ -201,18 +201,32 @@ func reap(workerPID int, terminated <-chan os.Signal, report io.Writer) int {
 }
 
 func reapWithCleanup(workerPID int, terminated <-chan os.Signal, report io.Writer, cleanup func() error) int {
+	unavailable := ""
 	defer func() {
-		if err := cleanup(); err != nil {
-			reason := strings.Join(strings.Fields(err.Error()), " ")
-			fmt.Fprintln(os.Stderr, "gate-jail: cleanup:", reason)
-			if report != nil {
+		cleanupErr := cleanup()
+		canReport := true
+		if unavailable != "" && cleanupErr != nil {
+			// A worker still in setup owns fd 4 until it exits. Never interleave
+			// shim records with its I/X or failure report.
+			var status unix.WaitStatus
+			pid, err := unix.Wait4(workerPID, &status, unix.WNOHANG|unix.WALL, nil)
+			canReport = pid == workerPID || err == unix.ECHILD
+		}
+		if report != nil && canReport && unavailable != "" {
+			fmt.Fprintf(report, "\nW{\"unavailable\":%q}\n", unavailable)
+		}
+		if cleanupErr != nil {
+			reason := strings.Join(strings.Fields(cleanupErr.Error()), " ")
+			if report != nil && canReport {
 				fmt.Fprintf(report, "\nC%s\n", reason)
 			}
+			fmt.Fprintln(os.Stderr, "gate-jail: cleanup:", reason)
 		}
 	}()
 	for {
 		select {
 		case <-terminated:
+			unavailable = "cancelled before worker reap"
 			return 128 + int(unix.SIGTERM)
 		default:
 		}
@@ -222,11 +236,18 @@ func reapWithCleanup(workerPID int, terminated <-chan os.Signal, report io.Write
 			continue
 		}
 		if err != nil {
+			unavailable = "wait: " + err.Error()
 			return ExitSetupFailed
 		}
 		if pid == workerPID {
 			if status.Signaled() {
+				if report != nil {
+					fmt.Fprintf(report, "\nW{\"signal\":%d,\"core\":%t}\n", status.Signal(), status.CoreDump())
+				}
 				return 128 + int(status.Signal())
+			}
+			if report != nil {
+				fmt.Fprintf(report, "\nW{\"exit\":%d}\n", status.ExitStatus())
 			}
 			return status.ExitStatus()
 		}

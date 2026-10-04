@@ -143,6 +143,7 @@ type Jailed struct {
 	statusR      *os.File
 	statusDone   chan struct{}
 	statusReport workerReport
+	workerStatus WorkerStatus
 	// childEnds are the pipe ends handed to the child via ExtraFiles; the
 	// parent closes its copies in Started (after a successful Start) or Abort
 	// (after a failed Start).
@@ -200,7 +201,7 @@ func (j *Jailed) Abort() {
 }
 
 // Status validates the worker's I/X report after Cmd.Wait and descendant cleanup. Facts are published
-// only on success; the shim may append one cleanup diagnostic after execution.
+// only on success; the shim appends worker status and an optional cleanup diagnostic.
 func (j *Jailed) Status() (Facts, error) {
 	defer func() {
 		if j.statusR != nil {
@@ -235,7 +236,12 @@ func (j *Jailed) Status() (Facts, error) {
 		return failure("unknown")
 	}
 	if buf[0] == 'F' {
-		return Facts{}, statusFromReport(buf)
+		head, worker, cleanup, err := splitStatusRecords(string(buf))
+		if err != nil {
+			return failure("report")
+		}
+		j.workerStatus, j.CleanupError = worker, cleanup
+		return Facts{}, statusFromReport([]byte(head))
 	}
 	line, tail, ok := strings.Cut(string(buf), "\n")
 	if !ok || len(line) < 2 || line[0] != 'I' {
@@ -282,16 +288,13 @@ func (j *Jailed) Status() (Facts, error) {
 	if facts.Profile != j.spec.Profile || facts.Net != j.spec.Net || facts.Lane2 || facts.ABI < 1 || j.spec.ForceABI > 0 && facts.ABI > j.spec.ForceABI || j.strict && len(facts.Unmet) > 0 {
 		return failure("report")
 	}
-	cleanup := ""
-	if head, reason, ok := strings.Cut(tail, "\nC"); ok {
-		reason = strings.TrimSuffix(reason, "\n")
-		if reason == "" || strings.ContainsAny(reason, "\r\n") {
-			return failure("report")
-		}
-		cleanup, tail = reason, head
+	tail, worker, cleanup, recordErr := splitStatusRecords(tail)
+	if recordErr != nil {
+		return failure("report")
 	}
 	if tail != "X" {
 		if strings.HasPrefix(tail, "XFexec:") {
+			j.workerStatus, j.CleanupError = worker, cleanup
 			return Facts{}, statusFromReport([]byte(tail))
 		}
 		if strings.HasPrefix(tail, "X") {
@@ -305,7 +308,7 @@ func (j *Jailed) Status() (Facts, error) {
 		}
 		cleanup += "status pipe remained open after cleanup"
 	}
-	j.Facts, j.CleanupError = facts, cleanup
+	j.Facts, j.CleanupError, j.workerStatus = facts, cleanup, worker
 	return facts, nil
 }
 

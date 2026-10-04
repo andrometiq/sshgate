@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -301,5 +302,52 @@ func TestAuditCleanupErrorKeepsExitStatus(t *testing.T) {
 	records := readRecords(t, path)
 	if len(records) != 1 || records[0]["exit_code"] != float64(23) || records[0]["cleanup_error"] != "descendant cleanup exceeded deadline" {
 		t.Fatalf("cleanup audit: %#v", records)
+	}
+}
+
+func TestAuditRefusesNonRegularDestinations(t *testing.T) {
+	for _, kind := range []string{"fifo-no-reader", "fifo-reader", "symlink", "device"} {
+		t.Run(kind, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "audit")
+			switch kind {
+			case "fifo-no-reader", "fifo-reader":
+				if err := syscall.Mkfifo(path, 0600); err != nil {
+					t.Fatal(err)
+				}
+				if kind == "fifo-reader" {
+					fd, err := syscall.Open(path, syscall.O_RDONLY|syscall.O_NONBLOCK, 0)
+					if err != nil {
+						t.Fatal(err)
+					}
+					defer syscall.Close(fd)
+				}
+			case "symlink":
+				target := filepath.Join(dir, "target")
+				if err := os.WriteFile(target, []byte("untouched"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(target, path); err != nil {
+					t.Fatal(err)
+				}
+				defer func() {
+					if got := mustReadFile(t, target); got != "untouched" {
+						t.Fatalf("symlink target changed: %q", got)
+					}
+				}()
+			case "device":
+				path = "/dev/null"
+			}
+			done := make(chan struct{})
+			go func() {
+				gate.NewAuditLogger(gate.AuditAllMeta, path).Record(makeRecord("true", "read", "unsigned", 0, nil))
+				close(done)
+			}()
+			select {
+			case <-done:
+			case <-time.After(time.Second):
+				t.Fatal("audit destination blocked")
+			}
+		})
 	}
 }
