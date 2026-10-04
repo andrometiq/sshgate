@@ -3,6 +3,7 @@ package confine
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/karthikeyan5/sshgate/src/gate/confine/jailmut"
 )
@@ -73,6 +75,9 @@ type Spec struct {
 }
 
 const ForceNoLandlock = -1
+
+// Status is collected after the five-second descendant cleanup has ended.
+const statusWait = 500 * time.Millisecond
 
 const maxStatusBytes = 1 << 20
 
@@ -159,6 +164,15 @@ func (j *Jailed) Started() error {
 	}
 	j.childEnds = nil
 	// Drain before releasing the worker: Facts may exceed the pipe capacity.
+	j.startStatusReader()
+	go func() {
+		_, _ = io.WriteString(j.cmdW, j.cmd)
+		_ = j.cmdW.Close()
+	}()
+	return nil
+}
+
+func (j *Jailed) startStatusReader() {
 	reader := j.statusR
 	j.statusDone = make(chan struct{})
 	go func() {
@@ -166,11 +180,6 @@ func (j *Jailed) Started() error {
 		defer reader.Close()
 		j.statusReport.data, j.statusReport.err = io.ReadAll(io.LimitReader(reader, maxStatusBytes))
 	}()
-	go func() {
-		_, _ = io.WriteString(j.cmdW, j.cmd)
-		_ = j.cmdW.Close()
-	}()
-	return nil
 }
 
 // Abort releases every pipe end when Cmd.Start fails.
@@ -190,7 +199,7 @@ func (j *Jailed) Abort() {
 	}
 }
 
-// Status validates the worker's I/X report after Cmd.Wait. Facts are published
+// Status validates the worker's I/X report after Cmd.Wait and descendant cleanup. Facts are published
 // only on success; the shim may append one cleanup diagnostic after execution.
 func (j *Jailed) Status() (Facts, error) {
 	defer func() {
@@ -202,18 +211,24 @@ func (j *Jailed) Status() (Facts, error) {
 	if j.statusR == nil {
 		return failure("unknown")
 	}
-	var buf []byte
-	var err error
-	if j.statusDone != nil {
-		<-j.statusDone
-		buf, err = j.statusReport.data, j.statusReport.err
-	} else {
-		buf, err = io.ReadAll(io.LimitReader(j.statusR, maxStatusBytes))
+	if j.statusDone == nil {
+		j.startStatusReader()
 	}
+	timer := time.NewTimer(statusWait)
+	defer timer.Stop()
+	timedOut := false
+	select {
+	case <-j.statusDone:
+	case <-timer.C:
+		timedOut = true
+		_ = j.statusR.Close()
+		<-j.statusDone
+	}
+	buf, err := j.statusReport.data, j.statusReport.err
 	if jailmut.On("P-STATUS") {
 		return Facts{Profile: j.spec.Profile, ABI: 1, Net: j.spec.Net}, nil
 	}
-	if err != nil || len(buf) == maxStatusBytes {
+	if err != nil && !(timedOut && errors.Is(err, os.ErrClosed)) || len(buf) == maxStatusBytes {
 		return failure("report")
 	}
 	if len(buf) == 0 {
@@ -283,6 +298,12 @@ func (j *Jailed) Status() (Facts, error) {
 			return failure("exec")
 		}
 		return failure("report")
+	}
+	if timedOut {
+		if cleanup != "" {
+			cleanup += "; "
+		}
+		cleanup += "status pipe remained open after cleanup"
 	}
 	j.Facts, j.CleanupError = facts, cleanup
 	return facts, nil

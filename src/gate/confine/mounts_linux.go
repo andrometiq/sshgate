@@ -38,7 +38,7 @@ func parseMountInfo(r io.Reader) ([]mountEntry, error) {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 64<<10), 1<<20)
 	for scanner.Scan() {
-		fields := strings.Fields(scanner.Text())
+		fields := strings.Split(scanner.Text(), " ")
 		separator := -1
 		for i, field := range fields {
 			if field == "-" {
@@ -66,27 +66,31 @@ func parseMountInfo(r io.Reader) ([]mountEntry, error) {
 				return nil, err
 			}
 		}
-		root, err := unescapeMountField(fields[3])
+		root, err := unescapeMountField(fields[3], false)
 		if err != nil {
 			return nil, err
 		}
-		point, err := unescapeMountField(fields[4])
+		point, err := unescapeMountField(fields[4], false)
 		if err != nil {
 			return nil, err
 		}
-		source, err := unescapeMountField(fields[separator+2])
+		source, err := unescapeMountField(fields[separator+2], true)
+		if err != nil {
+			return nil, err
+		}
+		fstype, err := unescapeMountField(fields[separator+1], true)
 		if err != nil {
 			return nil, err
 		}
 		if !filepath.IsAbs(point) {
 			return nil, fmt.Errorf("nonabsolute mount path")
 		}
-		result = append(result, mountEntry{id: id, parent: parent, dev: fields[2], root: root, point: point, opts: strings.Split(fields[5], ","), optional: fields[6:separator], fstype: fields[separator+1], source: source, superOpts: strings.Split(fields[separator+3], ",")})
+		result = append(result, mountEntry{id: id, parent: parent, dev: fields[2], root: root, point: point, opts: strings.Split(fields[5], ","), optional: fields[6:separator], fstype: fstype, source: source, superOpts: strings.Split(fields[separator+3], ",")})
 	}
 	return result, scanner.Err()
 }
 
-func unescapeMountField(value string) (string, error) {
+func unescapeMountField(value string, hashEscape bool) (string, error) {
 	var out strings.Builder
 	for i := 0; i < len(value); i++ {
 		if value[i] != '\\' {
@@ -99,6 +103,10 @@ func unescapeMountField(value string) (string, error) {
 		octal := value[i+1 : i+4]
 		switch octal {
 		case "040", "011", "012", "134":
+		case "043":
+			if !hashEscape {
+				return "", fmt.Errorf("invalid mount escape %q", octal)
+			}
 		default:
 			return "", fmt.Errorf("invalid mount escape %q", octal)
 		}

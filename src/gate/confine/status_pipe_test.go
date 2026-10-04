@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"os"
+	"os/exec"
 	"strings"
 	"syscall"
 	"testing"
@@ -87,5 +88,60 @@ func TestStatusPipeAbort(t *testing.T) {
 	case <-jailed.statusDone:
 	default:
 		t.Fatal("status reader survived Abort")
+	}
+}
+
+func TestStatusPipeSurvivingDescendant(t *testing.T) {
+	const info = `I{"profile":"ro-v1","abi":1,"net":false,"lane2":false}` + "\n"
+	for _, test := range []struct {
+		name, report string
+		valid        bool
+	}{
+		{"empty", "", false},
+		{"incomplete", info, false},
+		{"executed", info + "X", true},
+		{"cleanup", info + "X\nCdeadline exceeded\n", true},
+		{"invalid", strings.Replace(info, "ro-v1", "wrong", 1) + "X", false},
+		{"exec-failed", info + "XFexec:2\n", false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			jailed, writer := startStatusFixture(t)
+			// Stand in for a descendant surviving the cleanup deadline with fd 4 open.
+			descendant := exec.Command("sleep", "30")
+			descendant.ExtraFiles = []*os.File{writer, writer}
+			if err := descendant.Start(); err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = descendant.Process.Kill(); _ = descendant.Wait() }()
+			if _, err := writer.WriteString(test.report); err != nil {
+				t.Fatal(err)
+			}
+			writer.Close()
+			start := time.Now()
+			finished := make(chan error, 1)
+			go func() { _, err := jailed.Status(); finished <- err }()
+			select {
+			case err := <-finished:
+				if (err == nil) != test.valid {
+					t.Fatalf("status: %v", err)
+				}
+				if test.valid && (jailed.Facts.Profile != ProfileROv1 || !strings.Contains(jailed.CleanupError, "status pipe")) {
+					t.Fatalf("lost execution or cleanup evidence: %+v", jailed)
+				}
+				if test.name == "cleanup" && !strings.Contains(jailed.CleanupError, "deadline exceeded") {
+					t.Fatal("lost shim cleanup diagnostic")
+				}
+			case <-time.After(statusWait + 2*time.Second):
+				t.Fatal("status collection exceeded bound")
+			}
+			if time.Since(start) < statusWait {
+				t.Fatal("descendant did not retain status writer")
+			}
+			select {
+			case <-jailed.statusDone:
+			default:
+				t.Fatal("status reader was not joined")
+			}
+		})
 	}
 }

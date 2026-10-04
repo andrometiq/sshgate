@@ -206,13 +206,6 @@ func link(t *testing.T, target, path string) {
 func TestBackingChains(t *testing.T) {
 	sys := t.TempDir()
 	inspector := backingInspector{sys: sys}
-	inspector.auxiliaryDevice = func(path string) (string, error) {
-		dev := inspector.read(filepath.Join(sys, "class/block", strings.TrimPrefix(path, "/dev/"), "dev"))
-		if dev == "" {
-			return "", os.ErrNotExist
-		}
-		return dev, nil
-	}
 	disk := func(name, dev, driver string) string {
 		path := filepath.Join(sys, "devices", name)
 		mkdir(t, path)
@@ -262,8 +255,13 @@ func TestBackingChains(t *testing.T) {
 	for _, test := range []struct {
 		options []string
 		want    backingClass
-	}{{[]string{"logdev=/dev/nvme0n1", "rtdev=/dev/nvme0n1"}, backingDirect}, {[]string{"logdev=/dev/loop0"}, backingCovered}, {[]string{"logdev=/dev/nvme1n1"}, backingNetwork}, {[]string{"rtdev=/dev/missing"}, backingCovered}, {[]string{"logdev=/dev/nvme1n1", "rtdev=/dev/loop0"}, backingCovered}} {
+	}{{nil, backingDirect}, {[]string{"logdev=/dev/nvme0n1"}, backingCovered}, {[]string{"rtdev=/dev/nvme0n1"}, backingCovered}, {[]string{"logdev=/dev/nvme0n1", "rtdev=/dev/nvme0n1"}, backingCovered}, {[]string{"logdev=/dev/loop0"}, backingCovered}, {[]string{"logdev=/dev/nvme1n1"}, backingCovered}, {[]string{"rtdev=/dev/missing"}, backingCovered}, {[]string{"logdev=/dev/nvme1n1", "rtdev=/dev/loop0"}, backingCovered}} {
 		entry := mountEntry{fstype: "xfs", dev: "259:0", superOpts: test.options}
+		for _, accept := range [][]string{nil, {"network", "autofs"}} {
+			if got := mountAccepted(entry, accept, inspector); got != (test.want == backingDirect) {
+				t.Errorf("xfs %v accept %v: admitted=%v", test.options, accept, got)
+			}
+		}
 		if got := inspector.mount(entry); got != test.want {
 			t.Errorf("xfs %v=%v want %v", test.options, got, test.want)
 		}
@@ -370,19 +368,6 @@ func TestWalkToCheckedComponents(t *testing.T) {
 		}
 	}
 }
-func TestAuxiliaryDeviceRefusesSymlinkAndNonDevice(t *testing.T) {
-	inspector := backingInspector{sys: "/sys"}
-	path := filepath.Join(t.TempDir(), "node")
-	write(t, path, "not a device")
-	if _, err := inspector.resolveAuxiliaryDevice(path); err == nil {
-		t.Fatal("accepted regular file")
-	}
-	link(t, "/dev/null", path+"-link")
-	if _, err := inspector.resolveAuxiliaryDevice(path + "-link"); err == nil {
-		t.Fatal("accepted symlink")
-	}
-}
-
 func TestDevNodesLiteral(t *testing.T) {
 	if strings.Join(devNodes, " ") != "null zero full random urandom tty" {
 		t.Fatal(devNodes)
@@ -429,5 +414,22 @@ func TestBackingOptionalMetadataErrors(t *testing.T) {
 	sys := t.TempDir()
 	if (backingInspector{sys: sys}).chain(filepath.Join(sys, "devices/ram0"), 0, map[string]bool{}) != backingCovered {
 		t.Fatal("missing RAM disk accepted")
+	}
+}
+
+func TestParseMountInfoLiteralWhitespace(t *testing.T) {
+	for _, point := range []string{"/a\u2000b", "/a\rb", "/a\vb", "/a\fb"} {
+		entries, err := parseMountInfo(strings.NewReader("1 0 0:1 / " + point + " rw - tmpfs tag\\043name rw\n"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(entries) != 1 || entries[0].point != point || entries[0].source != "tag#name" {
+			t.Fatalf("U-ParseMountInfo: %+v", entries)
+		}
+	}
+	for _, field := range []string{`/a\043b`, `/a\015b`, `/a\013b`, `/a\014b`} {
+		if _, err := parseMountInfo(strings.NewReader("1 0 0:1 / " + field + " rw - tmpfs x rw\n")); err == nil {
+			t.Fatalf("accepted non-kernel path escape %q", field)
+		}
 	}
 }
