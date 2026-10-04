@@ -258,7 +258,6 @@ func legPhase1FD(t *testing.T, spec Spec) {
 	_, err = file.Seek(0, 0)
 	mutationSetup(t, err)
 	result := runP12(t, spec, probe+" phase1-fd 7", func(j *Jailed) {
-		j.Cmd.Args[1] = SentinelWorker
 		j.Cmd.ExtraFiles = append(j.Cmd.ExtraFiles, nil, nil, file)
 	})
 	if result.setupErr != nil || result.stderr != "" {
@@ -293,7 +292,32 @@ func legPhase1Clone(t *testing.T, spec Spec, namespace string) {
 	var stdout, stderr bytes.Buffer
 	jailed.Cmd.Stdout = &stdout
 	jailed.Cmd.Stderr = &stderr
-	err = jailed.Cmd.Start()
+	started := make(chan error, 1)
+	go func() { started <- jailed.Cmd.Start() }()
+	select {
+	case err = <-started:
+	case <-time.After(5 * time.Second):
+		// Without CLONE_NEWUSER, Go launches with vfork yet still makes the child wait
+		// for the parent's uid_map write, so a root launcher deadlocks in clone
+		// (syscall/exec_linux.go). Non-root never gets here: clone(CLONE_NEWNS) is EPERM.
+		if namespace != "USER" || os.Geteuid() != 0 {
+			t.Fatal("SETUP: clone start hung")
+		}
+		killMappingWaiters(t)
+		select {
+		case err = <-started:
+		case <-time.After(5 * time.Second):
+			t.Fatal("SETUP: hung clone was not released")
+		}
+		if err == nil {
+			_ = jailed.Cmd.Wait()
+		}
+		if stdout.Len() != 0 {
+			t.Fatalf("SETUP: hung clone ran the command: %s", stdout.String())
+		}
+		mutationAbort(t, "L-CLONE-USER", "clone", true)
+		return
+	}
 	if err != nil {
 		if namespace != "USER" || !errors.Is(err, syscall.EPERM) {
 			t.Fatalf("SETUP: clone start %v", err)
@@ -349,7 +373,9 @@ func legPhase1TTY(t *testing.T, spec Spec) {
 		if result.exit != 1 {
 			t.Fatalf("SETUP: %+v", result)
 		}
-	case "open=ok\nexclusive=13\nget-termios=ok\ntermios=13\nget-winsize=ok\nwinsize=13\n":
+	// Landlock IOCTL_DEV (ABI >= 5) denies every device ioctl, TCGETS included.
+	case "open=ok\nexclusive=13\nget-termios=13\n",
+		"open=ok\nexclusive=13\nget-termios=ok\ntermios=13\nget-winsize=ok\nwinsize=13\n":
 		if result.exit != 3 {
 			t.Fatalf("SETUP: %+v", result)
 		}
@@ -368,4 +394,32 @@ func legPhase1TTY(t *testing.T, spec Spec) {
 		t.Fatal("SETUP: incomplete tty effect")
 	}
 	mutationEffect(t, "L-TTY-STATE", "tty-exclusive", changed)
+}
+
+// killMappingWaiters kills this process's not-yet-execed children blocked on the
+// uid_map synchronisation pipe, which releases a parent stuck in vfork.
+func killMappingWaiters(t *testing.T) {
+	t.Helper()
+	entries, err := os.ReadDir("/proc")
+	mutationSetup(t, err)
+	killed := 0
+	for _, entry := range entries {
+		pid, err := strconv.Atoi(entry.Name())
+		if err != nil {
+			continue
+		}
+		stat, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+		if err != nil {
+			continue
+		}
+		fields := strings.Fields(string(stat[bytes.LastIndexByte(stat, ')')+1:]))
+		wchan, _ := os.ReadFile(fmt.Sprintf("/proc/%d/wchan", pid))
+		if len(fields) > 1 && fields[1] == strconv.Itoa(os.Getpid()) && string(wchan) == "pipe_read" {
+			mutationSetup(t, unix.Kill(pid, unix.SIGKILL))
+			killed++
+		}
+	}
+	if killed != 1 {
+		t.Fatalf("SETUP: expected one mapping waiter, killed %d", killed)
+	}
 }

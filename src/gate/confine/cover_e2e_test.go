@@ -251,6 +251,14 @@ func legCoverOverlay(t *testing.T, spec Spec) {
 	if err != nil || !strings.Contains(fixture.since(t, mark), "READ") {
 		t.Fatalf("SETUP: delegated read control: %v %s", err, out)
 	}
+	// FUSE sends RELEASE asynchronously; wait so it is not charged to the jailed read.
+	deadline := time.Now().Add(3 * time.Second)
+	for !strings.Contains(fixture.since(t, mark), "RELEASE") {
+		if time.Now().After(deadline) {
+			t.Fatal("SETUP: delegated read control release not observed")
+		}
+		time.Sleep(time.Millisecond)
+	}
 	mark = fixture.mark(t)
 	result, _ := coverResult(t, spec, coverCommand("read", merged+"/f"), nil)
 	coverRan(t, result)

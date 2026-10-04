@@ -312,7 +312,9 @@ func filterProbe(op string, args []string) bool {
 	case "prio-user":
 		report("prio-user", unix.Setpriority(unix.PRIO_USER, 0, 19))
 	case "ioprio-user":
-		_, _, e := unix.Syscall(unix.SYS_IOPRIO_SET, 3, 0, 3<<13)
+		// who=0 is not "current user" for IOPRIO_WHO_USER: the kernel resolves the
+		// user from the caller but then matches tasks against kuid 0 (block/ioprio.c).
+		_, _, e := unix.Syscall(unix.SYS_IOPRIO_SET, 3, uintptr(unix.Getuid()), 3<<13)
 		report("ioprio-user", errnoOrNil(e))
 	case "crash":
 		if args[0] == "lower" {
