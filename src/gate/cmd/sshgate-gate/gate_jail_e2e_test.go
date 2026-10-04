@@ -25,11 +25,12 @@ import (
 // on a Tier-1 install (no gate.pub). The other read-path tests call run() inside
 // the test binary, whose TestMain stands in for main()'s sentinel dispatch; this
 // one proves the shipped binary's own re-exec path puts the read in the jail.
-// In ONE invocation, a classifier-approved read that writes (`sed --i`) must
+// In ONE invocation, a classifier-approved read that writes (readNamedWriter) must
 // leave the file unchanged, the read of that file must arrive redacted, and the
 // command's processes must carry the worker's NNP + seccomp (and, on rung 1, run
 // under the binary's own pid-1 shim).
 func TestGateBinaryJailedRead(t *testing.T) {
+	readNamedWriter(t)
 	rung := liveRung(t)
 
 	dir := t.TempDir() // under the jail-visible TMPDIR set by TestMain
@@ -47,7 +48,7 @@ func TestGateBinaryJailedRead(t *testing.T) {
 		t.FailNow()
 	}
 
-	cmd := "sed --i 's/orig/pwned/' " + target + " ; cat " + target +
+	cmd := "stat " + target + " pwned" + " ; cat " + target +
 		" ; grep -E '^(NoNewPrivs|Seccomp):' /proc/self/status ; awk 'FNR == 1 { n++ } n <= 2 && $1 == \"PPid:\" { ARGV[ARGC++] = \"/proc/\" $2 \"/status\"; if (n == 2) ARGV[ARGC++] = \"/proc/\" $2 \"/cmdline\" } n == 2 && $1 == \"NSpid:\" { print \"worker\", $0 } n == 3 && $1 == \"NSpid:\" { print \"shim\", $0 } n == 4 { print }' /proc/self/status ; echo done"
 	if k := classify.Classify(cmd); k != classify.KindRead {
 		unexpected(t, "precondition: the command must classify as a read, got %v", k)

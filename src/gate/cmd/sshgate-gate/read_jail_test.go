@@ -102,6 +102,7 @@ func TestConfineSpecFor(t *testing.T) {
 // a live rung below the pinned floor, or a damaged floor makes the read NOT run
 // at all (not jailed, not unconfined), audited as a denied read.
 func TestRunReadFailsClosed(t *testing.T) {
+	readNamedWriter(t)
 	for _, tc := range []struct {
 		name  string
 		rep   confine.Report
@@ -127,7 +128,7 @@ func TestRunReadFailsClosed(t *testing.T) {
 				t.Fatal(err)
 			}
 			// A read the classifier accepts that leaves a trace if it executes.
-			code, out, stderr := runWith(t, "sed --i 's/orig/ran/' "+target)
+			code, out, stderr := runWith(t, "stat "+target+" ran")
 			if code != exitNoPermVal {
 				t.Errorf("exit = %d, want %d (deny)", code, exitNoPermVal)
 			}
@@ -151,6 +152,7 @@ func TestRunReadFailsClosed(t *testing.T) {
 // TestRunReadRung3Unconfined: rung 3 with no floor is today's unconfined /bin/sh
 // path, labelled unconfined in the audit.
 func TestRunReadRung3Unconfined(t *testing.T) {
+	readNamedWriter(t)
 	dir := t.TempDir()
 	withGateDir(t, dir)
 	withDetect(t, confine.Report{Rung: confine.Rung3Unconfined})
@@ -158,8 +160,8 @@ func TestRunReadRung3Unconfined(t *testing.T) {
 	if err := os.WriteFile(target, []byte("orig\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	// The classifier calls `sed --i` a read; unconfined, it really edits.
-	code, _, stderr := runWith(t, "sed --i 's/orig/edited/' "+target)
+	// The test-owned `stat` is a classifier read that edits; unconfined, it really edits.
+	code, _, stderr := runWith(t, "stat "+target+" edited")
 	if code != exitOK {
 		t.Fatalf("exit = %d, stderr = %q", code, stderr)
 	}
@@ -188,10 +190,11 @@ func liveRung(t *testing.T) confine.Rung {
 
 // TestRunReadJailedRealEffect is the real-effect proof on the live host (rung 1
 // here): an unsigned Tier-1 read runs inside the jail — a normal read still
-// works, and a classifier-approved read that writes (`sed --i`, a known
-// classifier bypass) cannot change the file. A signed read and a signed REVEAL
+// works, and a classifier-approved read that writes (the test-owned `stat`, see
+// readNamedWriter) cannot change the file. A signed read and a signed REVEAL
 // read are jailed the same way, while a signed WRITE stays unconfined and lands.
 func TestRunReadJailedRealEffect(t *testing.T) {
+	readNamedWriter(t)
 	rung := liveRung(t)
 	seed := func(t *testing.T, dir string) string {
 		p := filepath.Join(dir, "target")
@@ -235,7 +238,7 @@ func TestRunReadJailedRealEffect(t *testing.T) {
 		dir := t.TempDir()
 		withGateDir(t, dir)
 		target := seed(t, dir)
-		code, _, _ := runWith(t, "sed --i 's/orig/pwned/' "+target)
+		code, _, _ := runWith(t, "stat "+target+" pwned")
 		if code == exitOK {
 			t.Errorf("a jailed in-place edit exited 0")
 		}
@@ -249,7 +252,7 @@ func TestRunReadJailedRealEffect(t *testing.T) {
 		seedPub(t, dir, pub, 0o644)
 		withGateDir(t, dir)
 		target := seed(t, dir)
-		code, _, _ := runWith(t, signedLine(t, priv, freshPayload("sed --i 's/orig/pwned/' "+target)))
+		code, _, _ := runWith(t, signedLine(t, priv, freshPayload("stat "+target+" pwned")))
 		if code == exitOK {
 			t.Errorf("a jailed signed-read in-place edit exited 0")
 		}
@@ -263,7 +266,7 @@ func TestRunReadJailedRealEffect(t *testing.T) {
 		seedPub(t, dir, pub, 0o644)
 		withGateDir(t, dir)
 		target := seed(t, dir)
-		p := freshPayload("cat " + target + " && sed --i 's/orig/pwned/' " + target)
+		p := freshPayload("cat " + target + " && stat " + target + " pwned")
 		p.Reveal = true
 		code, out, _ := runWith(t, signedLine(t, priv, p))
 		if !strings.Contains(out, "AKIA1234567890ABCDEF") {
@@ -281,7 +284,7 @@ func TestRunReadJailedRealEffect(t *testing.T) {
 		withGateDir(t, dir)
 		withDetect(t, confine.Report{Rung: confine.Rung1Full})
 		target := seed(t, dir)
-		code, out, stderr := runWith(t, "cat "+target+" && sed --i 's/orig/pwned/' "+target)
+		code, out, stderr := runWith(t, "cat "+target+" && stat "+target+" pwned")
 		if !strings.HasPrefix(out, "orig ") || code == exitOK {
 			t.Errorf("exit = %d, stdout = %q, stderr = %q; want the read to work and the edit to fail", code, out, stderr)
 		}
@@ -330,6 +333,7 @@ func TestRunReadJailedRealEffect(t *testing.T) {
 // nothing ran, so the gate exits 77 and audits a denial with no rung. It must
 // never look like a command that ran and exited 1 (grep with no match).
 func TestRunReadJailSetupFailureDenies(t *testing.T) {
+	readNamedWriter(t)
 	check := func(t *testing.T, dir, target string, code int, out, stderr string) {
 		t.Helper()
 		// The MCP tells this 77 from a missing signature by this exact line.
@@ -369,7 +373,7 @@ func TestRunReadJailSetupFailureDenies(t *testing.T) {
 		var out string
 		stderr := captureStderr(t, func() {
 			out = captureStdout(t, func() {
-				code = execAndAudit(newAuditLogger(), "sed --i 's/orig/ran/' "+target, "read", "unsigned", false, plan)
+				code = execAndAudit(newAuditLogger(), "stat "+target+" ran", "read", "unsigned", false, plan)
 			})
 		})
 		check(t, dir, target, code, out, stderr)
@@ -381,7 +385,21 @@ func TestRunReadJailSetupFailureDenies(t *testing.T) {
 		withDetect(t, confine.Report{Rung: confine.Rung3Unconfined})
 		target := seed(t, dir)
 		writeFloor(t, dir, "landlock\n", 0o644)
-		code, out, stderr := runWith(t, "sed --i 's/orig/ran/' "+target)
+		code, out, stderr := runWith(t, "stat "+target+" ran")
 		check(t, dir, target, code, out, stderr)
 	})
+}
+
+// readNamedWriter puts a test-owned `stat` first on PATH that rewrites "orig"
+// in its first argument to its second, via sed -i. The classifier calls it a
+// read, so it stands in for any read that writes without depending on a real
+// classifier bypass staying open.
+func readNamedWriter(t *testing.T) {
+	t.Helper()
+	dir := t.TempDir()
+	script := "#!/bin/sh\nexec sed -i \"s/orig/$2/\" \"$1\"\n"
+	if err := os.WriteFile(filepath.Join(dir, "stat"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	withEnv(t, "PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
