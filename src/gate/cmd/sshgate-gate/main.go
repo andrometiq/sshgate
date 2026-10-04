@@ -37,6 +37,7 @@ import (
 	"context"
 	"crypto/rand"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -113,6 +114,25 @@ func main() {
 
 // run is the testable entry point; main exits on its return value.
 func run() int {
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer stop()
+	stopPipe := gate.CatchSIGPIPE()
+	defer stopPipe()
+	sessionContext = ctx
+	sessionDestination, sessionDeliveryError = "", ""
+	var destinationErr error
+	sessionDestination, destinationErr = gate.ClientOutputDestination(os.Stdout, os.Stderr)
+	if destinationErr != nil {
+		sessionDeliveryError = destinationErr.Error()
+	}
+	defer func() {
+		if sessionSink != nil {
+			sessionSink.Finish()
+			_ = sessionSink.Close()
+		}
+		sessionSink, sessionContext, sessionDestination, sessionDeliveryError = nil, nil, "", ""
+	}()
+
 	// Per-process redactor state: fresh 32-byte salt + compiled-in
 	// ruleset. Failures here are fatal — we cannot serve traffic
 	// without a fresh salt for HMAC marker keys.
@@ -306,8 +326,17 @@ var executeCommand = gate.ExecWithRedaction
 // or setup failure): that is a deny, jailDenied is true and the code is 77, so
 // it can never pass for a command that ran and exited 1.
 func execChild(cmd string, reveal bool, captureLimit int, plan execPlan) (rc int, res gate.ExecResult, jailDenied bool) {
-	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
-	defer cancel()
+	ctx := sessionContext
+	if ctx == nil {
+		var cancel context.CancelFunc
+		ctx, cancel = signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+		defer cancel()
+	}
+	if plan.confine != nil && sessionContext != nil {
+		if err := ensureClientSink(); err != nil {
+			return exitNoPermVal, gate.ExecResult{ExitCode: -1, Transport: gate.TransportMetadata{DeliveryError: err.Error(), OutputDestination: sessionDestination}}, true
+		}
+	}
 	// Resolve the redaction ruleset lazily via auditRules() — only this
 	// execute path (and the command-string audit redaction) needs it; a
 	// deny/verify-fail/probe path that never reaches here pays nothing.
@@ -317,6 +346,7 @@ func execChild(cmd string, reveal bool, captureLimit int, plan execPlan) (rc int
 		Rules:        rules,
 		Reveal:       reveal,
 		CaptureLimit: captureLimit,
+		ClientSink:   sessionSink,
 	}
 	var err error
 	switch {
@@ -431,10 +461,10 @@ func execAndAudit(audit *gate.AuditLogger, cmd, classification, approval string,
 	rc, res, jailDenied := execChild(cmd, reveal, captureLimit, plan)
 	if jailDenied {
 		// Nothing ran: record a denial with no output metadata and no rung.
-		auditNoExec(audit, cmd, classification, "denied", rc)
+		auditNoExec(audit, cmd, classification, "denied", rc, res.Transport)
 		return rc
 	}
-	audit.Record(gate.AuditRecord{
+	record := gate.AuditRecord{
 		TS: time.Now().UTC().Unix(),
 		// Redact a secret embedded in the command STRING before persisting it
 		// to the system-of-record. The redactor already scrubs output; the
@@ -461,7 +491,15 @@ func execAndAudit(audit *gate.AuditLogger, cmd, classification, approval string,
 		Stdout: res.Stdout,
 		Stderr: res.Stderr,
 		Rung:   plan.rung,
-	})
+	}
+	if res.Transport.CleanupError == "" {
+		res.Transport.CleanupError = res.CleanupError
+	}
+	if plan.confine == nil && !res.Transport.WorkerStatus.Known && res.Transport.WorkerStatus.Unavailable == "" {
+		res.Transport.WorkerStatus.Unavailable = "not confined"
+	}
+	record.SetTransport(finishTransport(res.Transport))
+	audit.Record(record)
 	return rc
 }
 
@@ -497,8 +535,8 @@ func execRead(audit *gate.AuditLogger, cmd, approval string, reveal bool) int {
 // child: a rejection (approval="denied", exit is the deny code) or a
 // signed admin verb handled internally (approval="signed"). Meta is nil
 // because there is no output metadata. The write is fail-open.
-func auditNoExec(audit *gate.AuditLogger, cmd, classification, approval string, exit int) {
-	audit.Record(gate.AuditRecord{
+func auditNoExec(audit *gate.AuditLogger, cmd, classification, approval string, exit int, outcome ...gate.TransportMetadata) {
+	record := gate.AuditRecord{
 		TS: time.Now().UTC().Unix(),
 		// Redact a secret embedded in the command string even on the no-exec
 		// (denial / admin-verb) path — a denied command can still carry a
@@ -508,7 +546,16 @@ func auditNoExec(audit *gate.AuditLogger, cmd, classification, approval string, 
 		ApprovalStatus: approval,
 		ExitCode:       exit,
 		Meta:           nil,
-	})
+	}
+	transport := gate.TransportMetadata{WorkerStatus: confine.WorkerStatus{Unavailable: "not executed"}}
+	if len(outcome) != 0 {
+		transport = outcome[0]
+	}
+	if !transport.WorkerStatus.Known && transport.WorkerStatus.Unavailable == "" {
+		transport.WorkerStatus.Unavailable = "not executed"
+	}
+	record.SetTransport(finishTransport(transport))
+	audit.Record(record)
 }
 
 // gateDirFn resolves the gate install directory and the absolute path
@@ -597,5 +644,54 @@ func logf(format string, args ...any) {
 	// Unwrap-friendly sentinels render through %v as expected. Keep
 	// only one final newline.
 	msg = strings.TrimRight(msg, "\n")
-	fmt.Fprintf(os.Stderr, "gate: %s\n", msg)
+	var destination io.Writer = os.Stderr
+	if sessionContext != nil {
+		if err := ensureClientSink(); err != nil {
+			return
+		}
+		destination = sessionSink.Stderr()
+	}
+	fmt.Fprintf(destination, "gate: %s\n", msg)
+}
+
+// These are invocation-scoped, like sessionSalt; run is not called concurrently.
+var sessionContext context.Context
+var sessionSink *gate.ClientSink
+var sessionDestination string
+var sessionDeliveryError string
+
+func ensureClientSink() error {
+	if sessionSink != nil {
+		return nil
+	}
+	sink, err := gate.NewClientSink(sessionContext, os.Stdout, os.Stderr)
+	if err != nil {
+		sessionDeliveryError = err.Error()
+		return err
+	}
+	sessionSink = sink
+	return nil
+}
+
+func finishTransport(process gate.TransportMetadata) gate.TransportMetadata {
+	if sessionSink != nil {
+		delivery := sessionSink.Finish()
+		process.Abandoned, process.DroppedBytes = delivery.Abandoned, delivery.DroppedBytes
+		if delivery.DeliveryError != "" && process.DeliveryError != delivery.DeliveryError {
+			if process.DeliveryError != "" {
+				process.DeliveryError += ";"
+			}
+			process.DeliveryError += delivery.DeliveryError
+		}
+		process.OutputDestination = delivery.OutputDestination
+	} else if process.OutputDestination == "" {
+		process.OutputDestination = sessionDestination
+	}
+	if sessionDeliveryError != "" && process.DeliveryError != sessionDeliveryError {
+		if process.DeliveryError != "" {
+			process.DeliveryError += ";"
+		}
+		process.DeliveryError += sessionDeliveryError
+	}
+	return process
 }

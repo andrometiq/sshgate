@@ -107,7 +107,7 @@ func TestExecutorOutputDelivery(t *testing.T) {
 			cancel()
 			select {
 			case got := <-done:
-				if got.err != nil || got.result.ExitCode != 128+int(syscall.SIGTERM) || !strings.Contains(got.result.CleanupError, "output delivery abandoned") || got.result.Stdout != "" || got.result.Stderr != "" {
+				if got.err != nil || got.result.ExitCode != 128+int(syscall.SIGTERM) || (!got.result.Transport.Abandoned || got.result.Transport.DroppedBytes != int64(4+len("gate-jail: cleanup: shim ended before worker status was published\n")) || got.result.CleanupError != "shim ended before worker status was published" || !got.result.Cancelled) || got.result.Stdout != "" || got.result.Stderr != "" {
 					t.Fatalf("abandonment: %+v %v", got.result, got.err)
 				}
 				if elapsed := time.Since(started); elapsed < 450*time.Millisecond || elapsed > 2*time.Second {

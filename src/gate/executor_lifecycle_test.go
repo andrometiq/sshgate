@@ -110,13 +110,16 @@ func TestExecWithRedactionConfineLifecycle(t *testing.T) {
 				if outcome.err != nil || outcome.result.ExitCode <= 0 {
 					t.Errorf("execution evidence lost: %+v %v", outcome.result, outcome.err)
 				}
-				if mode != "cancel" && mode != "blocked-output" && outcome.result.ExitCode != 128+int(syscall.SIGKILL) {
+				if mode == "dead-shim" && outcome.result.ExitCode != 128+int(syscall.SIGKILL) {
 					t.Errorf("SIGKILL status lost: %+v", outcome.result)
+				}
+				if mode == "stopped-shim" && (outcome.result.ExitCode != 143 || !outcome.result.Cancelled) {
+					t.Errorf("cancellation precedence lost: %+v", outcome.result)
 				}
 				if mode == "stopped-shim" && time.Since(started) < 450*time.Millisecond {
 					t.Error("stopped shim bypassed the cancellation grace period")
 				}
-				if mode == "blocked-output" && (!strings.Contains(outcome.result.CleanupError, "output delivery abandoned") || outcome.result.Stdout != "") {
+				if mode == "blocked-output" && (!outcome.result.Transport.Abandoned || outcome.result.Transport.DroppedBytes == 0 || !outcome.result.Cancelled) {
 					t.Errorf("blocked output was not abandoned safely: %+v", outcome.result)
 				}
 				if time.Since(started) > 3*time.Second {

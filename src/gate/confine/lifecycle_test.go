@@ -84,7 +84,10 @@ func TestSubreaperDetachedCleanup(t *testing.T) {
 				}
 			}
 			code := reapWithCleanup(command.Process.Pid, stopped, &report, cleanup)
-			if mode == "cleanup-error" && report.String() != "\nCinjected cleanup error\n" {
+			if mode == "cancel" && report.String() != "\nW{\"unavailable\":\"cancelled before worker reap\"}\n" {
+				t.Fatalf("cancellation report %q", report.String())
+			}
+			if mode == "cleanup-error" && report.String() != "\nW{\"exit\":23}\n\nCinjected cleanup error\n" {
 				t.Fatalf("cleanup report %q", report.String())
 			}
 			command.Process.Release()
@@ -191,5 +194,81 @@ func TestCleanupEnumerationErrorDeadline(t *testing.T) {
 	err := cleanupDescendants(func() (map[int]bool, error) { calls++; return nil, unix.EACCES }, 20*time.Millisecond)
 	if !errors.Is(err, unix.EACCES) || calls < 2 || time.Since(started) < 20*time.Millisecond || !strings.Contains(err.Error(), "enumerate descendants") {
 		t.Fatalf("enumeration failure: calls=%d error=%v", calls, err)
+	}
+}
+
+func TestWorkerStatusPublishedBeforeCleanup(t *testing.T) {
+	if os.Getenv("SSHGATE_TEST_WORKER_STATUS") != "1" {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		command := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestWorkerStatusPublishedBeforeCleanup$")
+		command.Env = append(os.Environ(), "SSHGATE_TEST_WORKER_STATUS=1")
+		if output, err := command.CombinedOutput(); err != nil {
+			t.Fatalf("worker status fixture: %v\n%s", err, output)
+		}
+		return
+	}
+	for _, script := range []string{"exit 139", "ulimit -c 0; kill -SEGV $$", "exit 23"} {
+		command := exec.Command("/bin/sh", "-c", script)
+		if err := command.Start(); err != nil {
+			t.Fatal(err)
+		}
+		var report bytes.Buffer
+		code := reapWithCleanup(command.Process.Pid, make(chan os.Signal), &report, func() error {
+			_, status, _, err := splitStatusRecords("X" + report.String())
+			if err != nil || !status.Known {
+				t.Fatalf("worker status not available before cleanup: %q %v", report.String(), err)
+			}
+			if script == "ulimit -c 0; kill -SEGV $$" {
+				if status.Exited || status.Signal != unix.SIGSEGV {
+					t.Fatalf("lost signal: %+v", status)
+				}
+			} else if !status.Exited {
+				t.Fatalf("exit reported as signal: %+v", status)
+			}
+			time.Sleep(20 * time.Millisecond)
+			return nil
+		})
+		command.Process.Release()
+		want := 139
+		if script == "exit 23" {
+			want = 23
+		}
+		if code != want {
+			t.Fatalf("code %d want %d", code, want)
+		}
+	}
+}
+
+func TestWorkerStatusCancellationWaitsForReportOwner(t *testing.T) {
+	var report bytes.Buffer
+	terminated := make(chan os.Signal, 1)
+	terminated <- unix.SIGTERM
+	code := reapWithCleanup(0, terminated, &report, func() error {
+		if report.Len() != 0 {
+			t.Fatalf("shim wrote while worker owns status: %q", report.String())
+		}
+		// Model a worker finishing setup after cancellation but before cleanup stops it.
+		return writeExecReport(&report, Facts{Profile: ProfileROv1, ABI: 1})
+	})
+	_, tail, _ := strings.Cut(report.String(), "\n")
+	head, status, _, err := splitStatusRecords(tail)
+	if code != 143 || err != nil || head != "X" || status.Unavailable != "cancelled before worker reap" {
+		t.Fatalf("cancelled report=%q status=%+v code=%d err=%v", report.String(), status, code, err)
+	}
+}
+
+func TestWorkerStatusCancellationFailedCleanupKeepsWorkerPipe(t *testing.T) {
+	command := exec.Command("sleep", "30")
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { command.Process.Kill(); command.Wait() }()
+	terminated := make(chan os.Signal, 1)
+	terminated <- unix.SIGTERM
+	var report bytes.Buffer
+	code := reapWithCleanup(command.Process.Pid, terminated, &report, func() error { return errors.New("worker still alive") })
+	if code != 143 || report.Len() != 0 {
+		t.Fatalf("concurrent shim record: code=%d report=%q", code, report.String())
 	}
 }

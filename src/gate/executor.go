@@ -54,6 +54,8 @@ type ExecOpts struct {
 	// The jail only ADDS restrictions; stdout/stderr/stdin/redaction wiring below
 	// is identical either way.
 	Confine *confine.Spec
+	// ClientSink is shared with the entrypoint for diagnostics after execution.
+	ClientSink *ClientSink
 }
 
 // ExecResult is the widened return of ExecWithRedaction. It carries the
@@ -75,8 +77,10 @@ type ExecOpts struct {
 // child's 0..255 code, 128+signum when signalled, or -1 if the process
 // never started.
 type ExecResult struct {
-	Jail     *confine.Facts
-	ExitCode int
+	Transport TransportMetadata
+	Cancelled bool
+	Jail      *confine.Facts
+	ExitCode  int
 	// CleanupError reports post-execution cleanup failure without changing ExitCode.
 	CleanupError string
 	StdoutBytes  int64
@@ -108,7 +112,13 @@ type countingWriter struct {
 }
 
 func (c *countingWriter) Write(p []byte) (int, error) {
-	n, err := c.dst.Write(p)
+	n, err := 0, error(nil)
+	delivery, tracked := c.dst.(interface{ WriteDelivered([]byte) (int, error) })
+	if tracked {
+		n, err = delivery.WriteDelivered(p)
+	} else {
+		n, err = c.dst.Write(p)
+	}
 	if n > 0 {
 		c.bytes.Add(int64(n))
 		var nl int64
@@ -125,6 +135,9 @@ func (c *countingWriter) Write(p []byte) (int, error) {
 			}
 			c.cap = append(c.cap, p[:room]...)
 		}
+	}
+	if tracked && err == nil {
+		return len(p), nil
 	}
 	return n, err
 }
@@ -181,6 +194,29 @@ var confinedCommand = func(spec *confine.Spec, ctx context.Context, command stri
 // spawn subprocesses (e.g. pipelines) that would otherwise be reparented to
 // PID 1 and outlive cancellation.
 func ExecWithRedaction(ctx context.Context, cmd string, opts ExecOpts) (res ExecResult, err error) {
+	if opts.Confine != nil {
+		owned := opts.ClientSink == nil
+		if owned {
+			opts.ClientSink, err = NewClientSink(ctx, os.Stdout, os.Stderr)
+			if err != nil {
+				return ExecResult{ExitCode: -1}, fmt.Errorf("exec: client sink: %w", err)
+			}
+		}
+		defer func() {
+			var delivery TransportMetadata
+			if owned {
+				delivery = opts.ClientSink.Finish()
+				_ = opts.ClientSink.Close()
+			} else {
+				delivery = opts.ClientSink.Snapshot()
+			}
+			if res.Transport.WorkerStatus.Unavailable == "" && !res.Transport.WorkerStatus.Known {
+				res.Transport.WorkerStatus.Unavailable = "not executed"
+			}
+			res.Transport = withDelivery(res.Transport, delivery)
+		}()
+	}
+
 	if strings.TrimSpace(cmd) == "" {
 		return ExecResult{ExitCode: -1}, errors.New("exec: empty command")
 	}
@@ -231,6 +267,11 @@ func ExecArgvWithRedaction(ctx context.Context, argv, env []string, opts ExecOpt
 // outcome to an ExecResult. jailed is non-nil only for a confined command; what
 // names the program in a start-failure error.
 func runRedacted(ctx context.Context, c *exec.Cmd, jailed *confine.Jailed, what string, opts ExecOpts) (res ExecResult, err error) {
+	if jailed != nil {
+		return runConfined(ctx, c, jailed, opts)
+	}
+	stopSIGPIPE := CatchSIGPIPE()
+	defer stopSIGPIPE()
 	// Counting writers sit BELOW any redactor so the tally is the
 	// post-redaction byte/line count that actually reaches the SSH
 	// stream (see ExecResult). One per stream, never shared. CaptureLimit
@@ -276,89 +317,19 @@ func runRedacted(ctx context.Context, c *exec.Cmd, jailed *confine.Jailed, what 
 	// structurally — independent of whether the classifier happens to flag a
 	// given program-from-stdin form.
 	c.Stdin = nil
-	if jailed != nil {
-		if err := confine.EnableSubreaper(); err != nil {
-			jailed.Abort()
-			return ExecResult{ExitCode: -1}, fmt.Errorf("exec: gate subreaper: %w", err)
+	c.Cancel = func() error {
+		if c.Process == nil {
+			return os.ErrProcessDone
 		}
-		// WaitDelay escalates SIGTERM to SIGKILL independently of output delivery.
-		c.WaitDelay = 500 * time.Millisecond
-		c.Cancel = func() error { return c.Process.Signal(syscall.SIGTERM) }
-	} else {
-		c.Cancel = func() error {
-			if c.Process == nil {
-				return os.ErrProcessDone
-			}
-			return syscall.Kill(-c.Process.Pid, syscall.SIGKILL)
-		}
-	}
-
-	var outputReaders, outputWriters []*os.File
-	destinations := []io.Writer{c.Stdout, c.Stderr}
-	closers := []io.Closer{stdoutCloser, stderrCloser}
-	if jailed != nil {
-		defer func() {
-			for _, f := range outputReaders {
-				_ = f.Close()
-			}
-			for _, f := range outputWriters {
-				_ = f.Close()
-			}
-		}()
-		for range 2 {
-			reader, writer, pipeErr := os.Pipe()
-			if pipeErr != nil {
-				jailed.Abort()
-				return ExecResult{ExitCode: -1}, fmt.Errorf("exec: output pipe: %w", pipeErr)
-			}
-			outputReaders = append(outputReaders, reader)
-			outputWriters = append(outputWriters, writer)
-		}
-		c.Stdout, c.Stderr = outputWriters[0], outputWriters[1]
+		return syscall.Kill(-c.Process.Pid, syscall.SIGKILL)
 	}
 
 	start := time.Now()
 	if err := c.Start(); err != nil {
-		if jailed != nil {
-			jailed.Abort()
-			return ExecResult{ExitCode: -1, Duration: time.Since(start)}, fmt.Errorf("exec: start jail: %w", err)
-		}
 		// Nil-Confine path stays byte-identical to the pre-jail executor.
 		return ExecResult{ExitCode: -1, Duration: time.Since(start)}, fmt.Errorf("exec: start %s: %w", what, err)
 	}
-	outputDone := make(chan error, 2)
-	if jailed != nil {
-		for i, reader := range outputReaders {
-			_ = outputWriters[i].Close()
-			go func(i int, reader *os.File) {
-				defer reader.Close()
-				_, copyErr := io.Copy(destinations[i], reader)
-				if closers[i] != nil {
-					copyErr = errors.Join(copyErr, closers[i].Close())
-				}
-				outputDone <- copyErr
-			}(i, reader)
-		}
-		stdoutCloser, stderrCloser = nil, nil
-	}
-	if jailed != nil {
-		// Close the parent's child-side pipe ends and stream the command to the
-		// worker on fd 3 (from a goroutine, so a large command cannot deadlock).
-		_ = jailed.Started()
-	}
 	waitErr := c.Wait()
-	var cleanupErr error
-	outputJoined := true
-	if jailed != nil {
-		cleanupErr = confine.CleanupDescendants()
-		var outputErr error
-		outputJoined, outputErr = joinOutput(ctx, outputDone, c.WaitDelay)
-		if !outputJoined {
-			cleanupErr = errors.Join(cleanupErr, errors.New("output delivery abandoned after cancellation"))
-		} else if waitErr == nil {
-			waitErr = outputErr
-		}
-	}
 
 	// Flush the redact.Writer instances after the child exits so any
 	// bytes still held inside the safe-prefix tail (or inside a
@@ -386,46 +357,8 @@ func runRedacted(ctx context.Context, c *exec.Cmd, jailed *confine.Jailed, what 
 		Duration:    dur,
 	}
 
-	if outputJoined {
-		res.Stdout, res.Stderr = outCount.captured(), errCount.captured()
-	}
+	res.Stdout, res.Stderr = outCount.captured(), errCount.captured()
 
-	// Fail closed on a jail setup failure: if the worker aborted before execve
-	// (fd-4 status is not "reached exec"), NOTHING ran. The child's exit code
-	// here is the setup-failure sentinel, not a command result, so we return -1
-	// and the SetupError — never a success and never the sh exit code — so the
-	// gate maps it to a deny rather than silently treating a half-built jail as a
-	// completed command.
-	if jailed != nil {
-		facts, setupErr := jailed.Status()
-		if setupErr != nil {
-			res.ExitCode = -1
-			return res, fmt.Errorf("exec: %w", setupErr)
-		}
-		res.Jail = &facts
-	}
-
-	if jailed != nil {
-		res.CleanupError = jailed.CleanupError
-		if cleanupErr != nil {
-			reason := strings.Join(strings.Fields(cleanupErr.Error()), " ")
-			// After an abandoned join stderr may itself be blocked: audit metadata only.
-			if res.CleanupError == "" && outputJoined {
-				fmt.Fprintln(errCount, "gate-jail: cleanup:", reason)
-			}
-			if res.CleanupError != "" {
-				res.CleanupError += "; "
-			}
-			res.CleanupError += reason
-		}
-		res.StderrBytes = errCount.bytes.Load()
-		if outputJoined {
-			res.Stderr = errCount.captured()
-		}
-		if errors.Is(waitErr, exec.ErrWaitDelay) {
-			waitErr = nil
-		}
-	}
 	if waitErr == nil {
 		res.ExitCode = 0
 		return res, nil
@@ -446,39 +379,8 @@ func runRedacted(ctx context.Context, c *exec.Cmd, jailed *confine.Jailed, what 
 		res.ExitCode = exitErr.ExitCode()
 		return res, nil
 	}
-	if jailed != nil {
-		res.ExitCode = 1
-		return res, fmt.Errorf("exec: confined wait after execution: %w", waitErr)
-	}
 	// Non-ExitError wait failure (e.g. waitpid syscall error). Treat as
 	// a start/run failure so the caller can distinguish it.
 	res.ExitCode = -1
 	return res, fmt.Errorf("exec: wait: %w", waitErr)
-}
-
-// Output keeps normal backpressure until cancellation, including redactor flushes.
-func joinOutput(ctx context.Context, done <-chan error, grace time.Duration) (bool, error) {
-	var result error
-	cancelled := ctx.Done()
-	var deadline <-chan time.Time
-	var timer *time.Timer
-	defer func() {
-		if timer != nil {
-			timer.Stop()
-		}
-	}()
-	for remaining := 2; remaining > 0; {
-		select {
-		case err := <-done:
-			result = errors.Join(result, err)
-			remaining--
-		case <-cancelled:
-			timer = time.NewTimer(grace)
-			deadline = timer.C
-			cancelled = nil
-		case <-deadline:
-			return false, result
-		}
-	}
-	return true, result
 }
