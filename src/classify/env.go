@@ -65,12 +65,12 @@ var dangerousEnvVars = map[string]bool{
 }
 
 // isDangerousEnvVar reports whether a leading KEY=VAL assignment makes the
-// command a write. Every GIT_CONFIG* key is included: GIT_CONFIG_PARAMETERS
-// and GIT_CONFIG_COUNT/KEY_n/VALUE_n inject arbitrary config (core.fsmonitor,
-// diff.external, core.pager run commands), and GIT_CONFIG/_GLOBAL/_SYSTEM
-// point git at another config file.
+// command a write. Every GIT_* key is included: git reads dozens of them, and
+// GIT_CONFIG_PARAMETERS / GIT_CONFIG_COUNT inject config that runs commands
+// (core.fsmonitor, diff.external), while GIT_TRACE* write to any file. Every
+// LD_* key steers the dynamic loader.
 func isDangerousEnvVar(key string) bool {
-	return dangerousEnvVars[key] || strings.HasPrefix(key, "GIT_CONFIG")
+	return dangerousEnvVars[key] || strings.HasPrefix(key, "GIT_") || strings.HasPrefix(key, "LD_")
 }
 
 // envRule classifies `env` invocations. `env` is READ iff it is invoked

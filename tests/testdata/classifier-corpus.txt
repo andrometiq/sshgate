@@ -308,5 +308,8 @@ WRITE	GIT_CONFIG_GLOBAL=/tmp/x git log
 WRITE	env GIT_CONFIG_PARAMETERS="'core.pager=id'" git log
 WRITE	EDITOR=id git log
 WRITE	SYSTEMD_PAGER=id systemctl status nginx
+WRITE	GIT_TRACE=/etc/x git status
+WRITE	GIT_SEQUENCE_EDITOR=id git log
+WRITE	LD_DEBUG_OUTPUT=/etc/x ls
 READ	sed -n '1,5p' /etc/hosts
 READ	git status

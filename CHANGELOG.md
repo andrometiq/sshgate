@@ -114,6 +114,14 @@ only when its release gates pass (see `docs/ROADMAP.md`).
 
 ### Security
 
+- **Two classifier bypasses closed** — `sed --i` (GNU sed reads any prefix of
+  `--in-place`) and git configuration passed through the environment
+  (`GIT_CONFIG_PARAMETERS` or `GIT_CONFIG_COUNT`/`KEY_n`/`VALUE_n`, which can
+  make `git status` or `git diff` run a command) were classified as reads. Both
+  are now writes. A leading assignment of any `GIT_*` or `LD_*` variable, or of
+  `SSH_ASKPASS`, `EDITOR`, `VISUAL`, `SYSTEMD_PAGER` or `SYSTEMD_EDITOR`, now
+  makes the command a write.
+
 - **`restrict` forced-command hardening** — the OpenSSH forced-command option
   template now leads with `restrict` (OpenSSH ≥ 7.2), in addition to the explicit
   `no-pty,no-port-forwarding,no-X11-forwarding,no-agent-forwarding` list.
