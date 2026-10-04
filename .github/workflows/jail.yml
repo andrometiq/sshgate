@@ -23,6 +23,8 @@ permissions:
 jobs:
   jail:
     runs-on: ubuntu-latest
+    env:
+      SSHGATE_JAIL_CI: "1"
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
@@ -41,7 +43,10 @@ jobs:
           make selftest-testjail SHELL=/bin/bash
 
       - name: Install jail-test tooling (chattr/lsattr, setfattr/getfattr)
-        run: sudo apt-get update && sudo apt-get install -y e2fsprogs attr
+        run: |
+          sudo apt-get update && sudo apt-get install -y e2fsprogs attr fuse3 libfuse3-dev
+          sudo modprobe fuse
+          test -c /dev/fuse
 
       - name: Allow unprivileged user namespaces on the runner
         run: |

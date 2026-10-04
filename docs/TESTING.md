@@ -690,3 +690,29 @@ The rule of thumb: a green `make preflight` is the bar to push; a green
    tests, real loopback sshd
 10. Running & CI conventions
 11. The integration / e2e boundary
+
+Jail proof cases declare their completion mode and required control, jailed-run and
+observation evidence. A finalized case emits exactly one `PROOF-COMPLETE` record;
+mutation builds still pass the test and place the exact detected markers in that
+record. The mutation judge requires the leg and package to pass and `go test` to
+exit zero. A marker cannot excuse another failure or an unfinished proof.
+
+`test-jail` and `test-jail-root` validate their combined logs against the case
+manifest. `PROOF-OMITTED` requires a declared reason; CI permits only lane marks.
+`PROOF-RESIDUAL` requires a case's explicit accepted residual. Free-text omission
+messages supply no coverage. The mutation union additionally requires a completed
+proof (or accepted residual) for every manifest case and a registered expectation
+or characterisation for every possible marker. CI sets `SSHGATE_JAIL_CI=1` and
+installs FUSE so missing observer prerequisites fail rather than silently omit.
+
+Export each lane's baseline with `make test-jail JAIL_BASELINE=/path/to/jail.json`
+(or `test-jail-root`). The target captures authoritative `go test -json` events and a `.status` companion
+only after all invocations, logging, and proof checks pass. Supply
+`JAIL_PROOF_LOG=/path/to/jail.json` when producing `MUTATION_REPORT=/path/to/report.json`.
+The importer requires the companion status to be zero, every package and test to
+have a PASS terminal, and every proof to belong to its passing test. Plain verbose
+logs are rejected. This carries cases with no mutation set into the union; omitting
+that evidence makes union validation fail.
+
+Human logs render JSON Output fields without interpreting nested child test frames.
+The original JSON events remain the authority for terminal outcomes.

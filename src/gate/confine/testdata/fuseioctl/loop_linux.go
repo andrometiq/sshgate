@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -12,7 +13,7 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-func loopFixture(point string) error {
+func loopFixture(point string) (result error) {
 	backing := point + "-backing"
 	if strings.ContainsAny(point, "\n\x00") {
 		return fmt.Errorf("invalid loop path")
@@ -25,7 +26,7 @@ func loopFixture(point string) error {
 	if err := unix.Mount("tmpfs", backing, "tmpfs", unix.MS_NOSUID|unix.MS_NODEV, "size=96m,mode=0755"); err != nil {
 		return err
 	}
-	defer unix.Unmount(backing, unix.MNT_DETACH)
+	defer func() { result = errors.Join(result, unix.Unmount(backing, unix.MNT_DETACH)) }()
 	image := filepath.Join(backing, "ext4.img")
 	file, err := os.Create(image)
 	if err != nil {
@@ -58,11 +59,16 @@ func loopFixture(point string) error {
 		return fmt.Errorf("losetup: %w: %s", err, output)
 	}
 	device := strings.TrimSpace(string(output))
-	defer exec.Command("losetup", "--detach", device).Run()
+	defer func() {
+		output, err := exec.Command("losetup", "--detach", device).CombinedOutput()
+		if err != nil {
+			result = errors.Join(result, fmt.Errorf("loop detach: %w: %s", err, output))
+		}
+	}()
 	if err = unix.Mount(device, point, "ext4", unix.MS_NOSUID|unix.MS_NODEV, ""); err != nil {
 		return err
 	}
-	defer unix.Unmount(point, unix.MNT_DETACH)
+	defer func() { result = errors.Join(result, unix.Unmount(point, unix.MNT_DETACH)) }()
 	if err = os.WriteFile(filepath.Join(point, "f"), []byte("loop-canary\n"), 0644); err != nil {
 		return err
 	}

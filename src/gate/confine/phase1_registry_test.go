@@ -10,7 +10,7 @@ func phase1Leg(name string, markers ...string) harness.Leg {
 	return harness.Leg{Name: name, Package: "./src/gate/confine", Names: map[string]string{"native": "TestJailMatrixPhase1/native/" + name, "abi1": "TestJailMatrixPhase1/abi1/" + name}, Markers: markers}
 }
 func phase1Unit(name string) harness.Leg {
-	return harness.Leg{Name: name, Package: "./src/gate/confine", Names: map[string]string{"native": "TestPhase1Tables/" + name, "abi1": "TestPhase1Tables/" + name}, Markers: []string{"MUTATION-EFFECT decision"}}
+	return harness.Leg{Name: name, Package: "./src/gate/confine", Names: map[string]string{"native": "TestPhase1Tables/native/" + name, "abi1": "TestPhase1Tables/abi1/" + name}, Markers: []string{"MUTATION-EFFECT decision"}}
 }
 func phase1Registry() []prot {
 	var result []prot

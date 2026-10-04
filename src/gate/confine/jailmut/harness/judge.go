@@ -5,7 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"sort"
+	"os"
+	"slices"
 	"strings"
 )
 
@@ -13,7 +14,7 @@ type Event struct{ Action, Package, Test, Output string }
 
 type testResult struct {
 	terminal string
-	markers  []string
+	proofs   []ProofRecord
 }
 
 func markerLine(line string) string {
@@ -27,7 +28,7 @@ func markerLine(line string) string {
 
 // Judge checks a single package invocation, using full test names throughout.
 func Judge(stream io.Reader, stderr string, status int, legs []Leg, abi string) error {
-	if status != 0 && status != 1 {
+	if status != 0 {
 		return fmt.Errorf("infrastructure: go test exit %d", status)
 	}
 	if suspicious(stderr) {
@@ -71,8 +72,12 @@ func Judge(stream io.Reader, stderr string, status int, legs []Leg, abi string) 
 		case "output":
 			for _, line := range strings.Split(event.Output, "\n") {
 				line = markerLine(line)
-				if strings.HasPrefix(line, "MUTATION-EFFECT ") || strings.HasPrefix(line, "MUTATION-ABORT ") {
-					result.markers = append(result.markers, line)
+				if strings.HasPrefix(line, "PROOF-") {
+					proof, err := ParseProof(line)
+					if err != nil {
+						return fmt.Errorf("infrastructure: %w", err)
+					}
+					result.proofs = append(result.proofs, proof)
 				}
 			}
 		}
@@ -80,80 +85,43 @@ func Judge(stream io.Reader, stderr string, status int, legs []Leg, abi string) 
 	if err := scanner.Err(); err != nil {
 		return fmt.Errorf("infrastructure: JSON read: %w", err)
 	}
-	accepted := map[string]bool{}
-	expectedRed := 0
+	if packageTerminal != "pass" {
+		return fmt.Errorf("infrastructure: package did not pass")
+	}
+	for name, result := range results {
+		if result.terminal == "fail" || result.terminal == "skip" {
+			return fmt.Errorf("infrastructure: failed or skipped test %s", name)
+		}
+	}
 	for _, leg := range legs {
 		name := leg.Names[abi]
 		result := results[name]
-		if result == nil || result.terminal == "" || result.terminal == "skip" {
-			return fmt.Errorf("infrastructure: %s missing terminal or skipped", name)
+		if result == nil || result.terminal != "pass" {
+			return fmt.Errorf("infrastructure: %s missing PASS", name)
+		}
+		if len(result.proofs) != 1 {
+			return fmt.Errorf("infrastructure: %s requires exactly one finalized proof", name)
+		}
+		proof := result.proofs[0]
+		if proof.Leg != leg.Name || proof.ABI != abi {
+			return fmt.Errorf("infrastructure: mismatched proof %s", name)
+		}
+		if proof.Outcome != "COMPLETE" {
+			c := Case{Name: leg.Name, ABIs: []string{abi}, Root: leg.Root, CIOnly: leg.CIOnly, Omissions: leg.Omissions, Residuals: leg.Residuals}
+			if err := CheckProof(c, proof, os.Geteuid() == 0, os.Getenv("SSHGATE_JAIL_CI") == "1"); err != nil {
+				return fmt.Errorf("infrastructure: %w", err)
+			}
+			continue
 		}
 		var want []string
 		for _, marker := range leg.ExpectedMarkers(abi) {
-			parts := strings.SplitN(marker, " ", 2)
-			want = append(want, parts[0]+" "+leg.Name+" "+parts[1])
+			parts := strings.Fields(marker)
+			want = append(want, strings.TrimPrefix(parts[0], "MUTATION-")+":"+parts[1])
 		}
-		if len(want) > 0 && result.terminal == "pass" {
-			return fmt.Errorf("mutation not detected: %s", name)
+		slices.Sort(want)
+		if !slices.Equal(proof.Markers, want) {
+			return fmt.Errorf("mutation not detected or wrong marker set: %s got %q want %q", name, proof.Markers, want)
 		}
-		sort.Strings(want)
-		sort.Strings(result.markers)
-		if strings.Join(want, "\n") != strings.Join(result.markers, "\n") {
-			return fmt.Errorf("wrong marker set: %s got %q want %q", name, result.markers, want)
-		}
-		if len(want) == 0 {
-			if result.terminal != "pass" {
-				return fmt.Errorf("infrastructure: green leg %s failed", name)
-			}
-			continue
-		}
-		expectedRed++
-		if result.terminal == "pass" {
-			return fmt.Errorf("mutation not detected: %s", name)
-		}
-		accepted[name] = true
-	}
-	for name, result := range results {
-		if result.terminal == "skip" {
-			return fmt.Errorf("infrastructure: unexpected skip %s", name)
-		}
-		if result.terminal != "fail" {
-			continue
-		}
-		if accepted[name] {
-			continue
-		}
-		hasRed := false
-		for red := range accepted {
-			if strings.HasPrefix(red, name+"/") {
-				hasRed = true
-			}
-		}
-		if !hasRed || len(result.markers) > 0 {
-			return fmt.Errorf("infrastructure: unlisted failure %s", name)
-		}
-		for child, descendant := range results {
-			if strings.HasPrefix(child, name+"/") && descendant.terminal == "fail" && !accepted[child] {
-				hasAcceptedChild := false
-				for red := range accepted {
-					if strings.HasPrefix(red, child+"/") {
-						hasAcceptedChild = true
-					}
-				}
-				if !hasAcceptedChild {
-					return fmt.Errorf("infrastructure: non-red failing descendant %s", child)
-				}
-			}
-		}
-	}
-	expectedStatus := 0
-	expectedPackage := "pass"
-	if expectedRed > 0 {
-		expectedStatus = 1
-		expectedPackage = "fail"
-	}
-	if status != expectedStatus || packageTerminal != expectedPackage {
-		return fmt.Errorf("infrastructure: exit/package mismatch: %d/%s want %d/%s", status, packageTerminal, expectedStatus, expectedPackage)
 	}
 	return nil
 }

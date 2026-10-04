@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/karthikeyan5/sshgate/src/gate/confine/jailmut"
 	"github.com/karthikeyan5/sshgate/src/gate/confine/jailmut/harness"
 	"os"
 	"os/exec"
@@ -164,8 +165,28 @@ func runDisposableIdentity(t *testing.T, legName string, markerCandidates []stri
 				leg.Markers = append(leg.Markers, "MUTATION-EFFECT "+marker)
 			}
 		}
-		if err := harness.Judge(bytes.NewReader(stream), "", exitCodeOf(err), []harness.Leg{leg}, "native"); err != nil {
+		if legName == "L-RL-NPROC" {
+			leg.Markers = nil
+			if jailmut.On("P-RL-NPROC") {
+				leg.Markers = []string{"MUTATION-EFFECT limit"}
+			}
+		}
+		abi := "native"
+		if strings.Contains(t.Name(), "/abi1/") {
+			abi = "abi1"
+		}
+		if err := harness.Judge(bytes.NewReader(stream), "", exitCodeOf(err), []harness.Leg{leg}, abi); err != nil {
 			t.Fatalf("SETUP: disposable USER fixture: %v: %s", err, output)
+		}
+		if legName == "L-RL-NPROC" {
+			// The child owns the complete proof under the disposable identity. The
+			// parent's own PASS remains conditional on fixture teardown succeeding.
+			for _, line := range strings.Split(string(output), "\n") {
+				if index := strings.Index(line, "PROOF-COMPLETE "+legName+" "); index >= 0 {
+					t.Log(line[index:])
+				}
+			}
+			continue
 		}
 		for _, marker := range leg.Markers {
 			mutationEffect(t, legName, strings.TrimPrefix(marker, "MUTATION-EFFECT "), true)

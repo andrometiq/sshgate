@@ -3,16 +3,26 @@ package confine
 import "github.com/karthikeyan5/sshgate/src/gate/confine/jailmut/harness"
 
 func coverLeg(name string, markers ...string) harness.Leg {
-	return harness.Leg{Name: name, Package: "./src/gate/confine", Names: map[string]string{"native": "TestJailMatrixCovers/native/" + name, "abi1": "TestJailMatrixCovers/abi1/" + name}, Markers: markers}
+	leg := harness.Leg{Name: name, Package: "./src/gate/confine", Names: map[string]string{"native": "TestJailMatrixCovers/native/" + name, "abi1": "TestJailMatrixCovers/abi1/" + name}, Markers: markers}
+	for _, c := range legCases {
+		if c.Name == name {
+			leg.Omissions = append([]string(nil), c.Omissions...)
+			leg.Residuals = append([]string(nil), c.Residuals...)
+			break
+		}
+	}
+	return leg
 }
 func coverRegistry() []prot {
 	abort := func(name string) harness.Leg { return coverLeg(name, "MUTATION-ABORT selfcheck") }
 	effect := func(name, marker string) harness.Leg { return coverLeg(name, "MUTATION-EFFECT "+marker) }
-	coverEffect := harness.MutationSet{IDs: []string{"P-COVERS", "P-SELFCHECK-MOUNTS"}, Legs: []harness.Leg{effect("L-FUSE-IOCTL", "fuse-ioctl"), coverLeg("L-COVER-WALKDENIED", "MUTATION-EFFECT fuse-ioctl-absolute", "MUTATION-EFFECT fuse-ioctl-cwd")}}
+	coverEffect := harness.MutationSet{IDs: []string{"P-COVERS", "P-SELFCHECK-MOUNTS"}, Legs: []harness.Leg{effect("L-FUSE-IOCTL", "fuse-ioctl"), coverLeg("L-COVER-WALKDENIED/absolute", "MUTATION-EFFECT fuse-ioctl-absolute"), coverLeg("L-COVER-WALKDENIED/cwd", "MUTATION-EFFECT fuse-ioctl-cwd")}}
 	trace := effect("L-TRACEFS", "trace-consumed")
 	trace.Root = true
 	trace.CIOnly = true
-	coverEffect.Legs = append(coverEffect.Legs, trace)
+	autofs := effect("L-AUTOFS", "triggered")
+	autofs.Root, autofs.CIOnly = true, true
+	coverEffect.Legs = append(coverEffect.Legs, trace, autofs)
 	cwdEffect := harness.MutationSet{IDs: []string{"P-CWD", "P-SELFCHECK-MOUNTS"}, Legs: []harness.Leg{effect("L-COVER-CWD", "fuse-ioctl")}}
 	reachEffect := harness.MutationSet{IDs: []string{"REACH-R3", "P-SELFCHECK-REACH"}, Legs: []harness.Leg{effect("L-COVER-STACKED", "fuse-ioctl")}}
 	shimLandlock := harness.MutationSet{IDs: []string{"P-SHIM-SEAL", "SHIM-NOCAPS"}, Legs: []harness.Leg{coverLeg("L-SHIM-PROC")}}

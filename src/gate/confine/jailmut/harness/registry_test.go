@@ -86,3 +86,25 @@ func TestRegistryValidationRedundantGreenSets(t *testing.T) {
 		t.Fatal("accepted protection with green proofs only")
 	}
 }
+
+func TestRegistryValidationNestedLegName(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		valid bool
+	}{
+		{"TestJail/native/L-COVER-WALKDENIED/absolute", true},
+		{"TestJail/native/L-COVER-WALKDENIED/relative", false},
+		{"TestJail/native/other/L-COVER-WALKDENIED/absolute", false},
+		{"TestJail/abi1/L-COVER-WALKDENIED/absolute", false},
+		{"TestJail/native/not-L-COVER-WALKDENIED/absolute", false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			leg := Leg{Name: "L-COVER-WALKDENIED/absolute", Package: "./fixture", Names: map[string]string{"native": test.name, "abi1": "TestJail/abi1/L-COVER-WALKDENIED/absolute"}, Markers: []string{"MUTATION-EFFECT ioctl"}}
+			registry := []Protection{{ID: "P-COVER", Site: "fixture", Class: "single", MutationSets: []MutationSet{{IDs: []string{"P-COVER"}, Legs: []Leg{leg}}}}}
+			err := Validate(registry)
+			if (err == nil) != test.valid {
+				t.Fatalf("valid=%t want %t: %v", err == nil, test.valid, err)
+			}
+		})
+	}
+}

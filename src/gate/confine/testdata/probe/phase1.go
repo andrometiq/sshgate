@@ -13,6 +13,8 @@ import (
 
 func phase1Probe(op string, args []string) bool {
 	switch op {
+	case "phase1-exec":
+		report("exec", unix.Exec(args[0], []string{args[0]}, os.Environ()))
 	case "phase1-fd":
 		fd, err := strconv.Atoi(args[0])
 		if err != nil {

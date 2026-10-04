@@ -26,13 +26,14 @@ type MutationSet struct {
 // Names are complete go test names, indexed by native and abi1.
 // Markers omit the leg field: for example "MUTATION-EFFECT write".
 type Leg struct {
-	Name       string
-	Package    string
-	Names      map[string]string
-	Root       bool
-	CIOnly     bool
-	Markers    []string
-	ABIMarkers map[string][]string
+	Name                 string
+	Package              string
+	Names                map[string]string
+	Root                 bool
+	CIOnly               bool
+	Markers              []string
+	ABIMarkers           map[string][]string
+	Omissions, Residuals []string
 }
 
 func (l Leg) ExpectedMarkers(abi string) []string {
@@ -96,11 +97,11 @@ func Validate(registry []Protection) error {
 					if leg.Names[abi] == "" {
 						return fmt.Errorf("%s: %s missing %s full name", s.Name(), leg.Name, abi)
 					}
-					parts := strings.Split(leg.Names[abi], "/")
-					if len(parts) < 2 || parts[len(parts)-1] != leg.Name {
+					prefix, matched := strings.CutSuffix(leg.Names[abi], "/"+leg.Name)
+					if !matched || prefix == "" {
 						return fmt.Errorf("%s: %s full name does not identify its leg", leg.Name, abi)
 					}
-					if strings.HasPrefix(leg.Name, "L-") && (len(parts) < 3 || parts[len(parts)-2] != abi) {
+					if strings.HasPrefix(leg.Name, "L-") && !strings.HasSuffix(prefix, "/"+abi) {
 						return fmt.Errorf("%s: %s full name does not identify its ABI", leg.Name, abi)
 					}
 					markers := map[string]bool{}

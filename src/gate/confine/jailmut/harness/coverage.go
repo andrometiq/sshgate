@@ -1,6 +1,9 @@
 package harness
 
-import "fmt"
+import (
+	"fmt"
+	"slices"
+)
 
 // Report is a lane's completed, checked outcomes. A report is written only after
 // every invocation in that lane has passed Judge.
@@ -8,6 +11,7 @@ type Report struct {
 	Root     bool
 	CI       bool
 	Outcomes []Outcome
+	Proofs   []ProofRecord
 }
 type Outcome struct {
 	Set, ABI, Leg string
@@ -44,6 +48,12 @@ func CheckUnion(registry []Protection, reports []Report) error {
 								matched = true
 								covered = true
 								hasRed = hasRed || outcome.Red
+							}
+						}
+						for _, proof := range report.Proofs {
+							if proof.Leg == leg.Name && proof.ABI == abi && proof.Outcome == "RESIDUAL" && slices.Contains(leg.Residuals, proof.Code) {
+								matched = true
+								covered = true
 							}
 						}
 						if eligible && !matched {

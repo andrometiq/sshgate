@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"strings"
@@ -15,7 +17,7 @@ func fixtureLeg() harness.Leg {
 }
 
 func TestHarnessFixtures(t *testing.T) {
-	for _, mode := range []string{"red", "marker-setup", "marker-unexpected", "panic", "timeout", "setup", "pass", "missing", "extra", "sibling", "ancestor", "skip", "build"} {
+	for _, mode := range []string{"red", "marker-plain-failure", "marker-unfinalized", "wrong-markers", "marker-setup", "marker-unexpected", "panic", "timeout", "setup", "pass", "missing", "extra", "sibling", "ancestor", "skip", "build"} {
 		t.Run(mode, func(t *testing.T) {
 			path := "./testdata/fixture"
 			if mode == "build" {
@@ -150,3 +152,53 @@ func TestHarnessMutationSelection(t *testing.T) {
 		t.Fatal("accepted unknown MUTATE ID")
 	}
 }
+
+func TestBaselineRequiresCapturedStatus(t *testing.T) {
+	path := t.TempDir() + "/baseline.json"
+	if _, err := baselineStatus(path); err == nil {
+		t.Fatal("accepted absent producer status")
+	}
+	for _, value := range []string{"", "pass", "0 1"} {
+		if err := os.WriteFile(path+".status", []byte(value), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := baselineStatus(path); err == nil {
+			t.Fatalf("accepted malformed status %q", value)
+		}
+	}
+	if err := os.WriteFile(path+".status", []byte("0\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if status, err := baselineStatus(path); err != nil || status != 0 {
+		t.Fatalf("captured zero status: %d %v", status, err)
+	}
+}
+
+func TestRenderJSONPreservesChildFramesAsOutput(t *testing.T) {
+	var stream bytes.Buffer
+	encoder := json.NewEncoder(&stream)
+	output := "=== RUN   TestNested\n--- PASS: TestNested (0.00s)\nPASS\n"
+	if err := encoder.Encode(harness.Event{Action: "output", Package: "parent", Test: "TestParent", Output: output}); err != nil {
+		t.Fatal(err)
+	}
+	if err := encoder.Encode(harness.Event{Action: "pass", Package: "parent", Test: "TestParent"}); err != nil {
+		t.Fatal(err)
+	}
+	var rendered bytes.Buffer
+	if err := renderJSON(&stream, &rendered); err != nil {
+		t.Fatal(err)
+	}
+	if rendered.String() != output {
+		t.Fatalf("render altered nested frames: %q", rendered.String())
+	}
+	if err := renderJSON(strings.NewReader("not json\n"), &rendered); err == nil {
+		t.Fatal("accepted corrupt producer stream")
+	}
+	if err := renderJSON(strings.NewReader(`{"Action":"output","Output":"text"}`), rejectOutput{}); err == nil {
+		t.Fatal("ignored renderer write failure")
+	}
+}
+
+type rejectOutput struct{}
+
+func (rejectOutput) Write([]byte) (int, error) { return 0, fmt.Errorf("fixture writer closed") }

@@ -225,6 +225,32 @@ func TestRegistryLegsExist(t *testing.T) {
 					if err != nil {
 						t.Fatal(err)
 					}
+
+					if family, variant, nested := strings.Cut(leg.Name, "/"); nested {
+						for _, decl := range tree.Decls {
+							function, ok := decl.(*ast.FuncDecl)
+							if !ok || function.Body == nil {
+								continue
+							}
+							hasFamily, hasVariant, hasRun := false, false, false
+							ast.Inspect(function.Body, func(node ast.Node) bool {
+								if literal, ok := node.(*ast.BasicLit); ok && literal.Kind == token.STRING {
+									value, _ := strconv.Unquote(literal.Value)
+									hasFamily = hasFamily || value == family+"/"
+									hasVariant = hasVariant || value == variant
+								}
+								if call, ok := node.(*ast.CallExpr); ok {
+									if selector, ok := call.Fun.(*ast.SelectorExpr); ok && selector.Sel.Name == "Run" {
+										hasRun = true
+									}
+								}
+								return true
+							})
+							if hasFamily && hasVariant && hasRun {
+								found = true
+							}
+						}
+					}
 					ast.Inspect(tree, func(node ast.Node) bool {
 						call, ok := node.(*ast.CallExpr)
 						if !ok || len(call.Args) == 0 {

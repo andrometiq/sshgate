@@ -183,21 +183,29 @@ define jail-runner
 	tmp=$$(mktemp -d) || { echo "test-jail: mktemp failed" >&2; exit 1; }; \
 	[ -n "$$tmp" ] && [ -d "$$tmp" ] || { echo "test-jail: invalid mktemp directory" >&2; exit 1; }; \
 	trap 'rm -rf "$$tmp"' 0; \
-	log="$$tmp/log"; fail=0; invocation=0; \
+	log="$$tmp/log"; json="$$tmp/baseline.json"; : > "$$json"; fail=0; invocation=0; \
 	run_jail() { \
-		invocation=$$((invocation + 1)); st="$$tmp/status-$$invocation"; \
-		{ "$$@"; echo $$? > "$$st"; } 2>&1 | tee -a "$$log"; tee_st=$$?; \
+		invocation=$$((invocation + 1)); st="$$tmp/status-$$invocation"; invlog="$$tmp/log-$$invocation"; invjson="$$tmp/json-$$invocation"; inverr="$$tmp/stderr-$$invocation"; \
+		{ "$$@"; echo $$? > "$$st"; } 2>"$$inverr" | tee "$$invjson" >/dev/null; tee_st=$$?; \
 		[ -f "$$st" ] && [ "$$(cat "$$st")" = 0 ] && [ "$$tee_st" = 0 ] || fail=1; \
+		go run ./scripts/jailmut -render-json "$$invjson" > "$$invlog" || fail=1; \
+		cat "$$inverr" >> "$$invlog" || fail=1; \
+		[ ! -s "$$inverr" ] || fail=1; \
+		tee -a "$$log" < "$$invlog" || fail=1; \
+		cat "$$invjson" >> "$$json" || fail=1; \
 	}; \
-	run_jail go test -race -count=1 -tags=jail_e2e ./src/gate/confine/ -v -run 'TestJailMatrix|TestDetectUsernsCountUsedUpDenies'; \
-	run_jail go test -race -count=1 -v -run 'TestExecWithRedactionConfine' ./src/gate/; \
-	run_jail go test -race -count=1 -tags=jail_e2e -v -run 'TestRunReadJailedRealEffect|TestGateBinaryJailedRead|TestRunReadJailSetupFailureDenies' ./src/gate/cmd/sshgate-gate/; \
+	run_jail go test -json -race -count=1 -tags=jail_e2e ./src/gate/confine/ -v -run 'TestJailMatrix|TestPhase1Tables|TestDetectUsernsCountUsedUpDenies'; \
+	run_jail go test -json -race -count=1 -v -run 'TestExecWithRedactionConfine' ./src/gate/; \
+	run_jail go test -json -race -count=1 -tags=jail_e2e -v -run 'TestRunReadJailedRealEffect|TestGateBinaryJailedRead|TestRunReadJailSetupFailureDenies' ./src/gate/cmd/sshgate-gate/; \
 	grep -qE '^FAIL' "$$log" && fail=1; \
 	grep -qE -- '--- SKIP|SKIP rung|no tests to run' "$$log" && fail=1; \
 	if [ "$${SSHGATE_JAIL_CI:-}" = 1 ]; then grep -q 'CONTROL-SKIPPED' "$$log" && fail=1; fi; \
-	for t in TestJailMatrix TestJailMatrixP12 TestJailMatrixPhase1 TestJailMatrixP14 TestJailMatrixP15 TestJailMatrixP15c TestJailMatrixCovers TestJailMatrixCredentials TestJailMatrixCatalogue TestJailMatrixWrite TestJailMatrixSyscallSweep TestDetectUsernsCountUsedUpDenies TestExecWithRedactionConfinedNamespace TestExecWithRedactionConfineLifecycle TestExecWithRedactionConfinedEROFS TestExecWithRedactionConfineFailClosed TestExecWithRedactionConfineClosesInheritedFDs TestRunReadJailedRealEffect TestGateBinaryJailedRead TestRunReadJailSetupFailureDenies; do \
+	for t in TestPhase1Tables TestJailMatrix TestJailMatrixP12 TestJailMatrixPhase1 TestJailMatrixP14 TestJailMatrixP15 TestJailMatrixP15c TestJailMatrixCovers TestJailMatrixCredentials TestJailMatrixCatalogue TestJailMatrixWrite TestJailMatrixSyscallSweep TestDetectUsernsCountUsedUpDenies TestExecWithRedactionConfinedNamespace TestExecWithRedactionConfineLifecycle TestExecWithRedactionConfinedEROFS TestExecWithRedactionConfineFailClosed TestExecWithRedactionConfineClosesInheritedFDs TestRunReadJailedRealEffect TestGateBinaryJailedRead TestRunReadJailSetupFailureDenies; do \
 		grep -qE -- "^--- PASS: $$t( |$$)" "$$log" || { echo "test-jail: no PASS line for $$t"; fail=1; }; \
 	done; \
+	printf '%s\n' "$$fail" > "$$json.status"; \
+	go run ./scripts/jailmut -check-manifest "$$json" || fail=1; \
+	if [ $$fail = 0 ] && [ -n "$(JAIL_BASELINE)" ]; then cp "$$json" "$(JAIL_BASELINE)" && cp "$$json.status" "$(JAIL_BASELINE).status" || fail=1; fi; \
 	[ $$fail = 0 ] || { echo "test-jail: FAILED"; exit 1; }; \
 	echo "test-jail: OK (every invocation, logger and expected test passed)"
 endef
@@ -214,14 +222,14 @@ test-jail-mutate:
 	@tmp=$$(mktemp -d) || { echo "test-jail-mutate: mktemp failed" >&2; exit 1; }; \
 	[ -n "$$tmp" ] && [ -d "$$tmp" ] || exit 1; \
 	trap 'rm -rf "$$tmp"' 0; st="$$tmp/status"; \
-	{ go run ./scripts/jailmut -mutate "$(MUTATE)" -report "$(MUTATION_REPORT)" -union "$(MUTATION_UNION)"; echo $$? > "$$st"; } 2>&1 | tee "$$tmp/log"; tee_st=$$?; \
+	{ go run ./scripts/jailmut -mutate "$(MUTATE)" -report "$(MUTATION_REPORT)" -union "$(MUTATION_UNION)" -proof-log "$(JAIL_PROOF_LOG)"; echo $$? > "$$st"; } 2>&1 | tee "$$tmp/log"; tee_st=$$?; \
 	[ -f "$$st" ] && [ "$$(cat "$$st")" = 0 ] && [ "$$tee_st" = 0 ]
 
 selftest-testjail:
 	TESTJAIL_SHELL='$(SHELL)' go test -count=1 ./scripts/jailmut -run '^TestTestJailStatusCapture$$' -v
 
 selftest-jailmut:
-	go test -count=1 ./scripts/jailmut ./src/gate/confine/jailmut/... -run '^TestHarness|^TestRegistryValidation' -v
+	go test -count=1 ./scripts/jailmut ./src/gate/confine/jailmut/... -run '^TestHarness|^TestRegistryValidation|^TestCase|^TestManifest|^TestBaseline|^TestRender' -v
 	go test -count=1 -tags=jail_mutation ./src/gate/confine/jailmut -run '^TestHarnessHooksOn$$' -v
 
 test-refapp-js:

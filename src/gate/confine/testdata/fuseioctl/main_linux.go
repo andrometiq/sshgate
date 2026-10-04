@@ -18,7 +18,7 @@ import (
 )
 
 type fixture struct {
-	mounts    []string
+	mountIDs  []uint64
 	devices   []*os.File
 	log       *os.File
 	data      []byte
@@ -26,6 +26,9 @@ type fixture struct {
 	writeback bool
 	failures  chan error
 	workers   sync.WaitGroup
+	mu        sync.Mutex
+	failure   error
+	stopping  bool
 }
 
 func mountDevice(point string, subtype bool) (*os.File, error) {
@@ -111,7 +114,6 @@ func (f *fixture) fuse(point string) error {
 	if err != nil {
 		return err
 	}
-	f.mounts = append(f.mounts, point)
 	f.devices = append(f.devices, device)
 	ready := make(chan struct{})
 	f.workers.Add(1)
@@ -123,21 +125,27 @@ func (f *fixture) fuse(point string) error {
 		for {
 			n, err := device.Read(buffer)
 			if errors.Is(err, unix.ENODEV) || errors.Is(err, os.ErrClosed) {
+				f.mu.Lock()
+				stopping := f.stopping
+				f.mu.Unlock()
+				if !stopping {
+					f.fail(err)
+				}
 				return
 			}
 			if err != nil {
-				f.failures <- err
+				f.fail(err)
 				return
 			}
 			request := buffer[:n]
 			response, err := s.dispatch(request)
 			if err != nil {
-				f.failures <- err
+				f.fail(err)
 				return
 			}
 			if response != nil {
 				if _, err = device.Write(response); err != nil {
-					f.failures <- err
+					f.fail(err)
 					return
 				}
 			}
@@ -149,7 +157,7 @@ func (f *fixture) fuse(point string) error {
 	}()
 	select {
 	case <-ready:
-		return nil
+		return f.rememberMount(point)
 	case err := <-f.failures:
 		return err
 	case <-time.After(10 * time.Second):
@@ -161,22 +169,96 @@ func (f *fixture) tmpfs(point string) error {
 	if err := unix.Mount("tmpfs", point, "tmpfs", unix.MS_NOSUID|unix.MS_NODEV, "mode=0755"); err != nil {
 		return err
 	}
-	f.mounts = append(f.mounts, point)
+	if err := f.rememberMount(point); err != nil {
+		return err
+	}
 	return nil
 }
-func (f *fixture) close() {
-	for i := len(f.mounts) - 1; i >= 0; i-- {
-		if err := unix.Unmount(f.mounts[i], unix.MNT_DETACH); err != nil && os.Geteuid() != 0 {
-			exec.Command("fusermount3", "-uz", "--", f.mounts[i]).Run()
+func (f *fixture) rememberMount(point string) error {
+	var state unix.Statx_t
+	if err := unix.Statx(unix.AT_FDCWD, point, unix.AT_STATX_DONT_SYNC, unix.STATX_MNT_ID, &state); err != nil {
+		return err
+	}
+	if state.Mask&unix.STATX_MNT_ID == 0 {
+		return fmt.Errorf("mount identity unavailable for %s", point)
+	}
+	f.mountIDs = append(f.mountIDs, state.Mnt_id)
+	return nil
+}
+
+func mountPointForID(id uint64) (string, error) {
+	data, err := os.ReadFile("/proc/self/mountinfo")
+	if err != nil {
+		return "", err
+	}
+	return mountPointFromInfo(string(data), id)
+}
+func mountPointFromInfo(info string, id uint64) (string, error) {
+	for _, line := range strings.Split(info, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 6 {
+			continue
+		}
+		number, err := strconv.ParseUint(fields[0], 10, 64)
+		if err != nil {
+			return "", err
+		}
+		if number == id {
+			return strings.NewReplacer("\\040", " ", "\\011", "\t", "\\012", "\n", "\\134", "\\").Replace(fields[4]), nil
+		}
+	}
+	return "", fmt.Errorf("owned mount %d disappeared", id)
+}
+
+func (f *fixture) fail(err error) {
+	f.mu.Lock()
+	f.failure = errors.Join(f.failure, err)
+	f.mu.Unlock()
+	select {
+	case f.failures <- err:
+	default:
+	}
+}
+
+func (f *fixture) close() error {
+	f.mu.Lock()
+	f.stopping = true
+	f.mu.Unlock()
+	for i := len(f.mountIDs) - 1; i >= 0; i-- {
+		point, err := mountPointForID(f.mountIDs[i])
+		if err != nil {
+			f.fail(err)
+			continue
+		}
+		if err = unix.Unmount(point, unix.MNT_DETACH); err != nil {
+			if os.Geteuid() != 0 {
+				output, fallbackErr := exec.Command("fusermount3", "-uz", "--", point).CombinedOutput()
+				if fallbackErr != nil {
+					f.fail(fmt.Errorf("unmount %s: %w; fusermount: %v: %s", point, err, fallbackErr, output))
+				}
+			} else {
+				f.fail(fmt.Errorf("unmount %s: %w", point, err))
+			}
 		}
 	}
 	for _, device := range f.devices {
-		device.Close()
+		if err := device.Close(); err != nil {
+			f.fail(fmt.Errorf("close FUSE device: %w", err))
+		}
 	}
+
 	f.workers.Wait()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	verdict := "VERDICT ok\n"
+	if f.failure != nil {
+		verdict = "VERDICT fail " + strings.ReplaceAll(f.failure.Error(), "\n", "; ") + "\n"
+	}
+	_, err := f.log.WriteString(verdict)
+	return errors.Join(f.failure, err, f.log.Sync())
 }
 
-func run() error {
+func run() (result error) {
 	point := flag.String("mount", "", "FUSE mount point")
 	logPath := flag.String("log", "", "outside request log")
 	writeback := flag.Bool("writeback", false, "buffer writes in the kernel page cache")
@@ -237,7 +319,7 @@ func run() error {
 		}
 	}
 	f := &fixture{writeback: *writeback, log: log, data: data, subtype: *subtype, failures: make(chan error, 8)}
-	defer f.close()
+	defer func() { result = errors.Join(result, f.close()) }()
 	if *over != "" || *stack != "" {
 		if err = f.tmpfs(*point); err != nil {
 			return err
@@ -281,17 +363,33 @@ func run() error {
 		if err = unix.Mount("overlay", *overlay, "overlay", unix.MS_RDONLY, "lowerdir="+*point+":"+second); err != nil {
 			return err
 		}
-		f.mounts = append(f.mounts, *overlay)
+		if err = f.rememberMount(*overlay); err != nil {
+			return err
+		}
 	}
 	fmt.Println("READY pid=" + strconv.Itoa(os.Getpid()))
 	signals := make(chan os.Signal, 1)
-	signal.Notify(signals, syscall.SIGTERM, syscall.SIGINT)
+	signal.Notify(signals, syscall.SIGTERM, syscall.SIGINT, syscall.SIGUSR1)
 	defer signal.Stop(signals)
-	select {
-	case <-signals:
-		return nil
-	case err := <-f.failures:
-		return err
+	for {
+		select {
+		case sig := <-signals:
+			if sig != syscall.SIGUSR1 {
+				return nil
+			}
+			// Requests record their effects before replying. The caller sends this only
+			// after its synchronous operation completed; Sync is the record barrier.
+			if _, err := f.log.WriteString("BARRIER\n"); err != nil {
+				f.fail(err)
+				return err
+			}
+			if err := f.log.Sync(); err != nil {
+				f.fail(err)
+				return err
+			}
+		case err := <-f.failures:
+			return err
+		}
 	}
 }
 func main() {

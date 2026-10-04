@@ -68,7 +68,7 @@ func TestJailMatrix(t *testing.T) {
 	{
 		t.Run("no_landlock_fails_closed", func(t *testing.T) {
 			spec := Spec{Profile: ProfileROv1, Net: true, ForceABI: ForceNoLandlock}
-			r := runJailed(t, spec, "echo SHOULD_NOT_RUN")
+			r := runLegacyJailed(t, spec, "echo SHOULD_NOT_RUN")
 			var se *SetupError
 			if !errors.As(r.setupErr, &se) {
 				unexpected(t, "expected *SetupError, got %v", r.setupErr)
@@ -115,7 +115,7 @@ func runLegs(t *testing.T, cfg jailCfg, probe string) {
 
 func legReadsWork(t *testing.T, spec Spec) {
 	for _, cmd := range []string{"cat /etc/hostname", "id", "ls /", "echo RAN"} {
-		r := runJailed(t, spec, cmd)
+		r := runLegacyJailed(t, spec, cmd)
 		if r.setupErr != nil {
 			unexpected(t, "%q: unexpected setup failure: %v (stderr=%q)", cmd, r.setupErr, r.stderr)
 			t.FailNow()
@@ -124,7 +124,7 @@ func legReadsWork(t *testing.T, spec Spec) {
 			unexpected(t, "%q: exit=%d want 0 (stderr=%q)", cmd, r.exit, r.stderr)
 		}
 	}
-	if r := runJailed(t, spec, "echo RAN"); !strings.Contains(r.stdout, "RAN") {
+	if r := runLegacyJailed(t, spec, "echo RAN"); !strings.Contains(r.stdout, "RAN") {
 		unexpected(t, "echo RAN produced no stdout (%q)", r.stdout)
 	}
 }
@@ -497,7 +497,7 @@ func legChattr(t *testing.T, spec Spec, probe string) {
 		t.Skipf("control `probe setflags` did not succeed on this fs: %s", out)
 	}
 	pbefore := lsattr(t, target)
-	r := runJailed(t, spec, probe+" setflags "+target+" ; echo "+ranCanary)
+	r := runLegacyJailed(t, spec, probe+" setflags "+target+" ; echo "+ranCanary)
 	if r.setupErr != nil {
 		unexpected(t, "probe setflags: jail setup failed: %v", r.setupErr)
 		t.FailNow()
@@ -587,7 +587,7 @@ func legXattr(t *testing.T, spec Spec, probe string) {
 		{"xattr-rm", probe + " xattr-rm " + target + " user.seed",
 			[]string{"removexattr=ok", "lremovexattr=ok", "fremovexattr=ok"}},
 	} {
-		r := runJailed(t, spec, op.cmd+" ; echo "+ranCanary)
+		r := runLegacyJailed(t, spec, op.cmd+" ; echo "+ranCanary)
 		if r.setupErr != nil {
 			unexpected(t, "probe %s: jail setup failed: %v", op.name, r.setupErr)
 			t.FailNow()
@@ -646,7 +646,7 @@ func legAFUnix(t *testing.T, spec Spec, probe string) {
 	}
 
 	// Jailed: socket(AF_UNIX) is denied at creation (EPERM==1), before any connect.
-	r := runJailed(t, spec, probe+" dial-unix "+sock)
+	r := runLegacyJailed(t, spec, probe+" dial-unix "+sock)
 	if r.exit == 0 {
 		unexpected(t, "jailed AF_UNIX dial succeeded; expected EPERM")
 		t.FailNow()
@@ -842,7 +842,7 @@ func legFailClosed(t *testing.T, spec Spec) {
 
 		s := spec
 		s.InjectFailAt = stage
-		r := runJailed(t, s, "echo pwned >> "+target+" ; echo m > "+marker+" ; echo SHOULD_NOT_RUN")
+		r := runLegacyJailed(t, s, "echo pwned >> "+target+" ; echo m > "+marker+" ; echo SHOULD_NOT_RUN")
 
 		var se *SetupError
 		if !errors.As(r.setupErr, &se) {
@@ -994,7 +994,7 @@ func legProcState(t *testing.T, spec Spec, probe string) {
 	nofileBefore := readNofile(t, vpid)
 	affBefore := readAffinity(t, vpid)
 
-	r := runJailed(t, spec, probe+" proc-state "+strconv.Itoa(vpid)+" ; echo "+ranCanary)
+	r := runLegacyJailed(t, spec, probe+" proc-state "+strconv.Itoa(vpid)+" ; echo "+ranCanary)
 	if r.setupErr != nil {
 		unexpected(t, "proc-state leg: jail setup failed (nothing ran): %v", r.setupErr)
 		t.FailNow()
@@ -1160,14 +1160,7 @@ func legReadCorpus(t *testing.T, spec Spec) {
 
 // --- helpers ------------------------------------------------------------------
 
-type jailResult struct {
-	exit     int
-	stdout   string
-	stderr   string
-	setupErr error
-}
-
-func runJailed(t *testing.T, spec Spec, cmd string) jailResult {
+func runLegacyJailed(t *testing.T, spec Spec, cmd string) jailResult {
 	return runJailedTimeout(t, spec, cmd, 30*time.Second)
 }
 
@@ -1183,7 +1176,7 @@ const ranCanary = "JAILRAN"
 // (an appended canary would mask it with echo's 0).
 func runJailedRan(t *testing.T, spec Spec, cmd string) jailResult {
 	t.Helper()
-	r := runJailed(t, spec, "echo "+ranCanary+" ; "+cmd)
+	r := runLegacyJailed(t, spec, "echo "+ranCanary+" ; "+cmd)
 	if r.setupErr != nil {
 		unexpected(t, "jail setup failed (nothing ran) for %q: %v (stderr=%q)", cmd, r.setupErr, r.stderr)
 		t.FailNow()
