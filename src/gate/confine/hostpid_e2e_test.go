@@ -383,13 +383,19 @@ func hostLifecycle(t *testing.T, abi int) {
 			mark := observer.Mark()
 			start := time.Now()
 			var result JailedResult
-			if mode == "cancel" {
+			report := func(stdout, _ string, _ int) error { return validateM2LifecycleReport(stdout, mode) }
+			// Surviving descendants hold the output pipe; bound the join past their 8s sleep.
+			holdOutput := func(j *Jailed) { j.Cmd.WaitDelay = 9 * time.Second }
+			switch mode {
+			case "cancel":
 				var jailed *Jailed
 				result = runJailed(t, p, spec, RunPlan{Mode: Cancelled, Command: command, ReadyPoint: "probe", CancelAfterReady: true, ExpectExit: 143, Timeout: 10 * time.Second,
 					Configure: func(j *Jailed) { jailed = j }, AfterReady: func() { observer.capture(t, jailed.Cmd.Process.Pid) }, CleanupEvidence: func() error { return observer.inspect() },
 				})
-			} else {
-				result = runM2Lifecycle(t, p, spec, command, mode)
+			case "term":
+				result = runJailed(t, p, spec, RunPlan{Mode: ShimSignal, Command: command, ReadyPoint: "probe", Timeout: 12 * time.Second, Configure: holdOutput, Validate: report})
+			default:
+				result = runJailed(t, p, spec, RunPlan{Mode: Unframed, Command: command, Timeout: 12 * time.Second, Configure: holdOutput, Validate: report})
 			}
 			results = append(results, result)
 			if err := validateM2LifecycleReport(result.stdout, mode); err != nil {

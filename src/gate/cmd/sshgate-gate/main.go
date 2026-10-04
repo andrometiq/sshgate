@@ -78,9 +78,10 @@ var redactRules []redact.Rule
 const (
 	exitOK        = 0
 	exitGeneric   = 1
-	exitDataErr   = 65 // EX_DATAERR
-	exitSoftware  = 70 // EX_SOFTWARE
-	exitNoPermVal = 77 // EX_NOPERM
+	exitDataErr   = 65  // EX_DATAERR
+	exitSoftware  = 70  // EX_SOFTWARE
+	exitNoPermVal = 77  // EX_NOPERM
+	exitCancelled = 143 // 128+SIGTERM: cancelled before an admin verb ran
 )
 
 func main() {
@@ -251,6 +252,9 @@ func run() int {
 	// Administrative commands. Only valid when signed.
 	if signed {
 		if innerCmd == "SSHGATE_REVOKE" {
+			if restoreDefaultTermination(ctx) {
+				return exitCancelled
+			}
 			// A verified admin verb runs no /bin/sh child, so there is no
 			// output metadata — record it as a signed write with the actual
 			// exit code. doRevoke owns the teardown + its own exit code.
@@ -264,12 +268,18 @@ func run() int {
 			// from the gate's OWN stdin, refuses on any hash mismatch, and
 			// atomically replaces this binary. It ALWAYS returns — never falls
 			// through to classify/exec.
+			if restoreDefaultTermination(ctx) {
+				return exitCancelled
+			}
 			return handleUpdate(audit, innerCmd)
 		}
 		if strings.HasPrefix(innerCmd, xferwire.VerbPrefix) {
 			// Signed box→box transfer leg. Dispatched here, BEFORE classify/exec,
 			// so a SSHGATE_XFER_* line is NEVER handed to /bin/sh. handleXfer
 			// ALWAYS returns — like handleUpdate it never falls through.
+			if restoreDefaultTermination(ctx) {
+				return exitCancelled
+			}
 			return handleXfer(audit, innerCmd)
 		}
 	}
@@ -301,6 +311,21 @@ func run() int {
 		auditNoExec(audit, innerCmd, "write", "denied", exitGeneric)
 		return exitGeneric
 	}
+}
+
+// restoreDefaultTermination gives the signed admin verbs back the default
+// SIGTERM/SIGINT disposition: they block on the client's stdin or a source file
+// and never consume the session context, so a caught signal would not end them.
+// Reset, unlike stop, leaves the context live for the client sink and logf. A
+// signal that arrived before the reset has already cancelled the context; it
+// is re-raised as SIGTERM and true is returned so the verb does not run.
+func restoreDefaultTermination(ctx context.Context) bool {
+	signal.Reset(syscall.SIGTERM, syscall.SIGINT)
+	if ctx.Err() == nil {
+		return false
+	}
+	_ = syscall.Kill(os.Getpid(), syscall.SIGTERM)
+	return true
 }
 
 var executeCommand = gate.ExecWithRedaction

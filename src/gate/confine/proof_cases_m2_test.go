@@ -23,7 +23,7 @@ func proofCasesM2() []harness.Case {
 		add(item.name, "Effect", Execute, []string{"control:facility", "jailed:probe", "observe:effects"}, item.markers...)
 		c := &cases[len(cases)-1]
 		if item.name == "L-LIFECYCLE" {
-			c.Modes = []string{Cancelled, "ShimSignal"}
+			c.Mode, c.Modes = Unframed, []string{Cancelled, ShimSignal}
 		}
 		if item.name == "L-RETUNE-SETPARAM" {
 			c.Root, c.CIOnly = true, true

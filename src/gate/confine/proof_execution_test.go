@@ -27,6 +27,13 @@ const (
 	ExpectedSignal = "ExpectedSignal"
 	Interactive    = "Interactive"
 	Cancelled      = "Cancelled"
+	// Unframed runs the command as written, for output that descendants write
+	// after the shell's own (no op framing can hold it); Validate judges all of
+	// stdout and shim and worker must both exit ExpectExit.
+	Unframed = "Unframed"
+	// ShimSignal sends SIGTERM straight to the shim after READY, with no context
+	// cancellation; the shim must die of it and the worker be killed or unreaped.
+	ShimSignal = "ShimSignal"
 
 	// SilentExecFailure (mutation-only): the worker sent its success report, its
 	// execve then failed and it exited ExitSetupFailed without the F record.
@@ -202,7 +209,7 @@ func runJailed(t *testing.T, p *proof, spec Spec, plan RunPlan) JailedResult {
 			t.Fatalf("SETUP: %v", err)
 		}
 	}
-	handshake := plan.Mode == Interactive || plan.Mode == Cancelled
+	handshake := plan.Mode == Interactive || plan.Mode == Cancelled || plan.Mode == ShimSignal
 	if plan.Mode == Interactive && plan.ReadyPoint != "post-exec" && plan.ReadyPoint != "probe" {
 		t.Fatal("SETUP: declare interactive READY point")
 	}
@@ -318,12 +325,17 @@ func runJailed(t *testing.T, p *proof, spec Spec, plan RunPlan) JailedResult {
 			if plan.AfterReady != nil {
 				plan.AfterReady()
 			}
-			if plan.Mode == Cancelled {
+			switch plan.Mode {
+			case Cancelled:
 				if !plan.CancelAfterReady {
 					t.Fatal("SETUP: cancellation not requested")
 				}
 				cancel()
-			} else {
+			case ShimSignal:
+				if err := j.Cmd.Process.Signal(syscall.SIGTERM); err != nil {
+					t.Fatalf("SETUP: signal shim: %v", err)
+				}
+			default:
 				if _, err := release.WriteString("go\n"); err != nil {
 					t.Fatalf("SETUP: release interactive probe: %v", err)
 				}
@@ -340,6 +352,9 @@ func runJailed(t *testing.T, p *proof, spec Spec, plan RunPlan) JailedResult {
 		}
 	}
 	err = <-done
+	if (plan.Mode == Unframed || plan.Mode == ShimSignal) && ctx.Err() != nil {
+		t.Fatal("SETUP: execution timed out")
+	}
 	facts, statusErr := j.Status()
 	if plan.AcceptFactsABI0 && statusErr != nil {
 		facts, statusErr = proofFactsABI0(j, spec)
@@ -381,6 +396,14 @@ func runJailed(t *testing.T, p *proof, spec Spec, plan RunPlan) JailedResult {
 		}
 	case Cancelled:
 		if err := validateCancellation(&result, plan); err != nil {
+			t.Fatalf("SETUP: %v", err)
+		}
+	case Unframed:
+		if err := validateUnframed(result, plan); err != nil {
+			t.Fatalf("SETUP: %v", err)
+		}
+	case ShimSignal:
+		if err := validateShimSignal(&result, plan); err != nil {
 			t.Fatalf("SETUP: %v", err)
 		}
 	default:
@@ -468,5 +491,35 @@ func validateCancellation(result *JailedResult, plan RunPlan) error {
 		return fmt.Errorf("cancellation descendants: %w", err)
 	}
 	result.exit = code
+	return nil
+}
+
+func validateUnframed(result JailedResult, plan RunPlan) error {
+	worker := result.Worker
+	if result.setupErr != nil || result.ShimExit != plan.ExpectExit || !worker.Known || !worker.Exited || worker.Code != plan.ExpectExit || result.stderr != "" || plan.Validate == nil {
+		return fmt.Errorf("unframed completion mismatch: %+v", result)
+	}
+	if err := plan.Validate(result.stdout, result.stderr, worker.Code); err != nil {
+		return fmt.Errorf("unframed report: %w", err)
+	}
+	return nil
+}
+
+// validateShimSignal requires the shim's SIGTERM status and a worker that was
+// either killed by the shim or never reaped; exit follows worker precedence.
+func validateShimSignal(result *JailedResult, plan RunPlan) error {
+	worker := result.Worker
+	killed := worker.Known && !worker.Exited && worker.Signal == syscall.SIGKILL
+	unreaped := !worker.Known && worker.Unavailable == "cancelled before worker reap"
+	if result.setupErr != nil || result.ShimExit != 128+int(syscall.SIGTERM) || !killed && !unreaped || result.stderr != "" || plan.Validate == nil {
+		return fmt.Errorf("shim signal evidence mismatch: %+v", result)
+	}
+	result.exit = result.ShimExit
+	if killed {
+		result.exit = 128 + int(worker.Signal)
+	}
+	if err := plan.Validate(result.stdout, result.stderr, result.exit); err != nil {
+		return fmt.Errorf("shim signal report: %w", err)
+	}
 	return nil
 }
