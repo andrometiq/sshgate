@@ -3,9 +3,6 @@
 package confine
 
 import (
-	"bufio"
-	"bytes"
-	"context"
 	"fmt"
 	"golang.org/x/sys/unix"
 	"os"
@@ -41,19 +38,24 @@ func TestJailMatrixP15c(t *testing.T) {
 				hostSignalEffect(t, []Spec{{Profile: ProfileROv1, Net: true, ForceABI: cfg.abi}}, "L-SIGNAL-SCOPE")
 			})
 			t.Run("L-SIGNAL-OWN-GROUP", func(t *testing.T) {
+				p := newProof(t, "L-SIGNAL-OWN-GROUP")
+				var results []JailedResult
 				for _, spec := range hostPIDSpecs(cfg.abi) {
-					for _, command := range []string{"trap '' USR1 && kill -USR1 0", "kill -0 $$", "timeout 1 sleep 5"} {
+					for _, command := range []string{"setsid sh -c \"trap '' USR1 && kill -USR1 0\"", "kill -0 $$", "timeout 1 sleep 5"} {
 						start := time.Now()
-						result := runJailedTimeout(t, spec, command, 4*time.Second)
 						wantExit := 0
 						if command == "timeout 1 sleep 5" {
 							wantExit = 124
 						}
+						result := runJailed(t, p, spec, RunPlan{Mode: Execute, Timeout: 4 * time.Second, Ops: []ProofOp{{Name: "control", Command: command, Outcomes: []OpOutcome{{Exit: wantExit}}}}})
+						results = append(results, result)
 						if result.setupErr != nil || result.exit != wantExit || result.stderr != "" || time.Since(start) > 4*time.Second {
 							t.Fatalf("SETUP: own-group control %q: %+v elapsed=%s", command, result, time.Since(start))
 						}
 					}
 				}
+				p.Jailed("probe", results...)
+				p.Finish()
 			})
 			t.Run("L-ASYNC-OWNER", func(t *testing.T) { hostAsyncEffect(t, hostPIDSpecs(cfg.abi), "L-ASYNC-OWNER") })
 			t.Run("L-ASYNC-SCOPE", func(t *testing.T) {
@@ -61,228 +63,133 @@ func TestJailMatrixP15c(t *testing.T) {
 			})
 			if os.Getenv("SSHGATE_TEST_USER_RETUNE_PHASE") != "" || os.Geteuid() == 0 && os.Getenv("SSHGATE_JAIL_CI") == "1" {
 				t.Run("L-SCHED-USER", func(t *testing.T) { legUserScheduler(t, cfg.abi) })
-			} else if os.Geteuid() != 0 {
-				t.Log("MUTATE-OMITTED(root): L-SCHED-USER")
 			} else {
-				t.Log("MUTATE-OMITTED(ci-only): L-SCHED-USER")
+				t.Run("L-SCHED-USER", func(t *testing.T) {
+					p := newProof(t, "L-SCHED-USER")
+					if os.Geteuid() != 0 {
+						p.Omit("root-only")
+					} else {
+						p.Omit("ci-only")
+					}
+				})
 			}
 			t.Run("L-RETUNE", func(t *testing.T) { hostRetuneEffect(t, cfg.abi) })
 			if os.Geteuid() == 0 && os.Getenv("SSHGATE_JAIL_CI") == "1" {
 				t.Run("L-RETUNE-SETPARAM", func(t *testing.T) { hostRetuneSetparam(t, cfg.abi) })
-			} else if os.Geteuid() != 0 {
-				t.Log("MUTATE-OMITTED(root): L-RETUNE-SETPARAM")
 			} else {
-				t.Log("MUTATE-OMITTED(ci-only): L-RETUNE-SETPARAM")
+				t.Run("L-RETUNE-SETPARAM", func(t *testing.T) {
+					p := newProof(t, "L-RETUNE-SETPARAM")
+					if os.Geteuid() != 0 {
+						p.Omit("root-only")
+					} else {
+						p.Omit("ci-only")
+					}
+				})
 			}
 
 			t.Run("L-SESSION", func(t *testing.T) {
+				p := newProof(t, "L-SESSION")
+				var results []JailedResult
 				changed := false
 				for _, spec := range hostPIDSpecs(cfg.abi) {
-					out := requireProbeOutput(t, runP12(t, spec, "exec "+buildProbe(t)+" session 0", nil), "session")
+					result := runM2Probe(t, p, spec, buildProbe(t)+" session $$", "session")
+					results = append(results, result)
+					out := result.stdout
 					var pid, sid, group int
-					if _, err := fmt.Sscanf(out, "session=%d:%d:%d", &pid, &sid, &group); err != nil {
+					if _, err := fmt.Sscanf(out, "session=%d:%d:%d", &pid, &sid, &group); err != nil || pid <= 0 || sid <= 0 || group <= 0 || out != fmt.Sprintf("session=%d:%d:%d\n", pid, sid, group) {
 						t.Fatal("SETUP:", out)
 					}
 					parentSID, err := unix.Getsid(0)
 					mutationSetup(t, err)
 					changed = changed || pid != sid || pid != group || sid == parentSID || group == unix.Getpgrp()
 				}
+				p.Jailed("probe", results...)
 				mutationEffect(t, "L-SESSION", "session", changed)
+				p.Finish()
 			})
 			t.Run("L-LIFECYCLE", func(t *testing.T) { hostLifecycle(t, cfg.abi) })
+			t.Run("L-NUMA-MIGRATE-PAGES", func(t *testing.T) { p := newProof(t, "L-NUMA-MIGRATE-PAGES"); p.Residual("R-NUMA-EFFECT") })
+			t.Run("L-NUMA-MOVE-PAGES", func(t *testing.T) { p := newProof(t, "L-NUMA-MOVE-PAGES"); p.Residual("R-NUMA-EFFECT") })
 		})
 	}
 }
 
 func hostSignalEffect(t *testing.T, specs []Spec, leg string) {
-	probe := buildProbe(t)
+	p := newProof(t, leg)
+	probe, binary := buildProbe(t), buildM2Recipient(t)
 	delivered := false
-	for _, spec := range specs {
+	var results []JailedResult
+	for index, spec := range specs {
 		for _, nr := range []int{62, 200, 234, 129, 297, 424} {
-			control := exec.Command("sleep", "30")
-			mutationSetup(t, control.Start())
-			output, err := exec.Command(probe, "signal-one", strconv.Itoa(nr), strconv.Itoa(control.Process.Pid)).CombinedOutput()
-			if err != nil || !strings.Contains(string(output), "signal=ok\n") {
-				control.Process.Kill()
-				control.Wait()
-				t.Fatalf("SETUP: signal %d: %v %s", nr, err, output)
+			control := newM2Recipient(t, binary, syscall.SIGUSR1)
+			mark := control.Mark()
+			output, err := exec.Command(probe, "signal-one", strconv.Itoa(nr), strconv.Itoa(control.command.Process.Pid)).CombinedOutput()
+			if err != nil || string(output) != "signal=ok\n" {
+				t.Fatalf("SETUP: signal control %d: %v %s", nr, err, output)
 			}
-			mutationSetup(t, waitSignalVictim(control))
-			victim := exec.Command("sleep", "30")
-			mutationSetup(t, victim.Start())
-			result := runP12(t, spec, fmt.Sprintf("%s signal-one %d %d", probe, nr, victim.Process.Pid), nil)
-			out := requireProbeOutput(t, result, "signal")
-			done := make(chan error, 1)
-			go func() { done <- victim.Wait() }()
-			select {
-			case <-done:
-				delivered = true
-			case <-time.After(30 * time.Millisecond):
-				victim.Process.Kill()
-				<-done
+			if records := m2Seal(t, control, mark); records[0] != "signal=pending" {
+				t.Fatal("SETUP: signal control did not arrive")
 			}
-			if !strings.Contains(out, "signal=1\n") && !strings.Contains(out, "signal=ok\n") {
-				unexpected(t, "unexpected signal %d errno: %s", nr, out)
-				t.FailNow()
+			mutationSetup(t, control.Stop())
+			victim := newM2Recipient(t, binary, syscall.SIGUSR1)
+			p.ObserveWith(fmt.Sprintf("recipient-%d-%d", index, nr), victim)
+			mark = victim.Mark()
+			result := runM2Probe(t, p, spec, fmt.Sprintf("%s signal-one %d %d", probe, nr, victim.command.Process.Pid), "signal")
+			results = append(results, result)
+			if result.stdout != "signal=1\n" && result.stdout != "signal=ok\n" {
+				t.Fatalf("UNEXPECTED: signal %d: %s", nr, result.stdout)
 			}
+			records := m2Seal(t, victim, mark)
+			delivered = delivered || records[0] == "signal=pending"
 		}
 	}
+	p.Control("facility", ControlResult{Valid: true})
+	p.Jailed("probe", results...)
+	sealM2Processes(t, p)
+	p.Observed("effects", Observation{Conclusive: true, Sealed: true, Valid: true})
 	mutationEffect(t, leg, "signal", delivered)
-}
-func waitSignalVictim(command *exec.Cmd) error {
-	done := make(chan error, 1)
-	go func() { done <- command.Wait() }()
-	select {
-	case err := <-done:
-		if exitCodeOf(err) != 128+int(unix.SIGUSR1) {
-			return fmt.Errorf("signal victim status: %v", err)
-		}
-		return nil
-	case <-time.After(time.Second):
-		command.Process.Kill()
-		<-done
-		return fmt.Errorf("signal victim survived control")
-	}
+	p.Finish()
 }
 func hostAsyncEffect(t *testing.T, specs []Spec, leg string) {
-	probe := buildProbe(t)
+	p := newProof(t, leg)
+	probe, binary := buildProbe(t), buildM2Recipient(t)
 	delivered, badErrno := false, false
-	for _, spec := range specs {
-		for _, confined := range []bool{false, true} {
-			victim := exec.Command(probe, "async-victim", "0")
-			reader, err := victim.StdoutPipe()
-			mutationSetup(t, err)
-			mutationSetup(t, victim.Start())
-			scan := bufio.NewScanner(reader)
-			if !scan.Scan() || scan.Text() != "READY" {
-				victim.Process.Kill()
-				victim.Wait()
-				t.Fatal("SETUP: SIGIO victim readiness")
-			}
-			command := probe + " async-owner " + strconv.Itoa(victim.Process.Pid)
-			var out string
-			if confined {
-				out = requireProbeOutput(t, runP12(t, spec, command, nil), "owner")
-				badErrno = badErrno || !strings.Contains(out, "owner=1\n")
-			} else {
-				data, err := exec.Command("/bin/sh", "-c", command).CombinedOutput()
-				mutationSetup(t, err)
-				out = string(data)
-			}
-			received := make(chan bool, 1)
-			go func() { received <- scan.Scan() && scan.Text() == "SIGIO" }()
-			var got bool
-			select {
-			case got = <-received:
-			case <-time.After(100 * time.Millisecond):
-				victim.Process.Kill()
-				got = <-received
-			}
-			victim.Process.Kill()
-			victim.Wait()
-			if !confined && !got {
-				t.Fatalf("SETUP: async SIGIO control: %s", out)
-			}
-			if confined {
-				delivered = delivered || got
-			}
+	var results []JailedResult
+	for index, spec := range specs {
+		control := newM2Recipient(t, binary, syscall.SIGIO)
+		mark := control.Mark()
+		output, err := exec.Command(probe, "async-owner", strconv.Itoa(control.command.Process.Pid)).CombinedOutput()
+		if err != nil || string(output) != "owner=ok\n" {
+			t.Fatalf("SETUP: async control: %v %s", err, output)
 		}
-		out := requireProbeOutput(t, runP12(t, spec, probe+" async-errno "+strconv.Itoa(os.Getpid()), nil), append(strings.Fields(strings.Repeat("setown ", 5)+strings.Repeat("ioctl ", 3)), "setown_ex", "clear", "setsig")...)
+		if records := m2Seal(t, control, mark); records[0] != "sigio=pending" {
+			t.Fatal("SETUP: SIGIO control did not arrive")
+		}
+		mutationSetup(t, control.Stop())
+		victim := newM2Recipient(t, binary, syscall.SIGIO)
+		p.ObserveWith(fmt.Sprintf("sigio-%d", index), victim)
+		mark = victim.Mark()
+		result := runM2Probe(t, p, spec, probe+" async-owner "+strconv.Itoa(victim.command.Process.Pid), "owner")
+		results = append(results, result)
+		badErrno = badErrno || result.stdout != "owner=1\n"
+		records := m2Seal(t, victim, mark)
+		delivered = delivered || records[0] == "sigio=pending"
+		result = runM2Probe(t, p, spec, probe+" async-errno "+strconv.Itoa(os.Getpid()), append(strings.Fields(strings.Repeat("setown ", 5)+strings.Repeat("ioctl ", 3)), "setown_ex", "clear", "setsig")...)
+		results = append(results, result)
+		out := result.stdout
 		badErrno = badErrno || strings.Count(out, "setown=1\n") != 5 || !strings.Contains(out, "setown_ex=1\n") || strings.Count(out, "ioctl=1\n") != 3
 		if !strings.Contains(out, "clear=ok\n") || !strings.Contains(out, "setsig=ok\n") {
-			unexpected(t, "async zero-owner/setsig controls: %s", out)
-			t.FailNow()
+			t.Fatalf("UNEXPECTED: async clear/setsig controls: %s", out)
 		}
 	}
+	p.Control("facility", ControlResult{Valid: true})
+	p.Jailed("probe", results...)
+	sealM2Processes(t, p)
+	p.Observed("effects", Observation{Conclusive: true, Sealed: true, Valid: true})
 	mutationEffect(t, leg, "errno", badErrno)
 	mutationEffect(t, leg, "signal", delivered)
+	p.Finish()
 }
-func startRetuneVictim(t *testing.T) *exec.Cmd {
-	t.Helper()
-	if os.Geteuid() != 0 {
-		return startSleeper(t)
-	}
-	victim := exec.Command(buildProbe(t), "retune-victim", "drop")
-	var diagnostic bytes.Buffer
-	victim.Stderr = &diagnostic
-	reader, err := victim.StdoutPipe()
-	mutationSetup(t, err)
-	mutationSetup(t, victim.Start())
-	t.Cleanup(func() {
-		_ = victim.Process.Kill()
-		_ = victim.Wait()
-	})
-	scan := bufio.NewScanner(reader)
-	if !scan.Scan() || scan.Text() != "READY" {
-		_ = victim.Process.Kill()
-		_ = victim.Wait()
-		t.Fatalf("SETUP: retune victim readiness: %v %s", scan.Err(), diagnostic.String())
-	}
-	status, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", victim.Process.Pid))
-	mutationSetup(t, err)
-	for _, field := range []string{"Uid", "CapPrm", "CapEff", "CapInh", "CapBnd", "CapAmb"} {
-		found := false
-		for _, line := range strings.Split(string(status), "\n") {
-			values := strings.Fields(line)
-			if len(values) == 0 || values[0] != field+":" {
-				continue
-			}
-			expected := 2
-			if field == "Uid" {
-				expected = 5
-			}
-			if len(values) != expected {
-				t.Fatalf("SETUP: retune victim malformed %s", line)
-			}
-			for _, value := range values[1:] {
-				n, err := strconv.ParseUint(value, 16, 64)
-				if err != nil || n != 0 {
-					t.Fatalf("SETUP: retune victim nonzero %s", line)
-				}
-			}
-			found = true
-		}
-		if !found {
-			t.Fatalf("SETUP: retune victim missing %s", field)
-		}
-	}
-	return victim
-}
-
-func initializeRetuneVictim(t *testing.T, victim *exec.Cmd, targetCPU int) schedulerState {
-	t.Helper()
-	pid := victim.Process.Pid
-	mutationSetup(t, unix.Setpriority(unix.PRIO_PROCESS, pid, 18))
-	_, _, errno := unix.Syscall(unix.SYS_IOPRIO_SET, 1, uintptr(pid), 2<<13|4)
-	if errno != 0 {
-		t.Fatalf("SETUP: initial ioprio: %v", errno)
-	}
-	var available, pinned unix.CPUSet
-	mutationSetup(t, unix.SchedGetaffinity(0, &available))
-	for cpu := 0; cpu < 1024; cpu++ {
-		if cpu != targetCPU && available.IsSet(cpu) {
-			pinned.Set(cpu)
-			break
-		}
-	}
-	if pinned.Count() != 1 {
-		t.Fatal("SETUP: retune affinity requires at least two available CPUs")
-	}
-	mutationSetup(t, unix.SchedSetaffinity(pid, &pinned))
-	limit := unix.Rlimit{Cur: 64, Max: 64}
-	mutationSetup(t, unix.Prlimit(pid, unix.RLIMIT_NOFILE, &limit, nil))
-	var priority int32
-	_, _, errno = unix.Syscall(unix.SYS_SCHED_SETSCHEDULER, uintptr(pid), 0, uintptr(unsafe.Pointer(&priority)))
-	if errno != 0 {
-		t.Fatalf("SETUP: initial scheduler policy: %v", errno)
-	}
-	initial := readScheduler(t, pid)
-	if initial.nice != 2 || initial.io != 2<<13|4 || initial.policy != 0 || initial.nofile != 64 || initial.affinity != pinned {
-		t.Fatalf("SETUP: retune victim initial state: %+v", initial)
-	}
-	return initial
-}
-
 func retuneFieldChanged(handler string, before, after schedulerState) bool {
 	switch handler {
 	case "nice":
@@ -301,6 +208,8 @@ func retuneFieldChanged(handler string, before, after schedulerState) bool {
 }
 
 func hostRetuneEffect(t *testing.T, abi int) {
+	p := newProof(t, "L-RETUNE")
+	var results []JailedResult
 	probe := buildProbe(t)
 	changed, badErrno := false, false
 	var available unix.CPUSet
@@ -314,24 +223,32 @@ func hostRetuneEffect(t *testing.T, abi int) {
 	}
 	for _, handler := range []string{"nice", "ioprio", "policy", "schedattr", "affinity", "prlimit"} {
 		command := func(pid int) string { return fmt.Sprintf("%s retune-one %s %d %d", probe, handler, pid, targetCPU) }
-		control := startRetuneVictim(t)
+		control := startRetuneVictim(t, p)
 		initial := initializeRetuneVictim(t, control, targetCPU)
 		output, err := exec.Command("/bin/sh", "-c", command(control.Process.Pid)).CombinedOutput()
 		if err != nil || string(output) != "retune=ok\n" || !retuneFieldChanged(handler, initial, readScheduler(t, control.Process.Pid)) {
 			t.Fatalf("SETUP: %s control did not change its field: %v %s", handler, err, output)
 		}
-		for _, spec := range hostPIDSpecs(abi) {
-			victim := startRetuneVictim(t)
-			before := initializeRetuneVictim(t, victim, targetCPU)
-			out := requireProbeOutput(t, runP12(t, spec, command(victim.Process.Pid), nil), "retune")
+		for index, spec := range hostPIDSpecs(abi) {
+			victim := startRetuneVictim(t, p)
+			initializeRetuneVictim(t, victim, targetCPU)
+			observer := &m2StateObserver{sample: func() string { return fmt.Sprint(readScheduler(t, victim.Process.Pid)) }}
+			p.ObserveWith(fmt.Sprintf("retune-%s-%d", handler, index), observer)
+			mark := observer.Mark()
+			result := runM2Probe(t, p, spec, command(victim.Process.Pid), "retune")
+			results = append(results, result)
+			out := result.stdout
+			records := m2Seal(t, observer, mark)
 			badErrno = badErrno || out != "retune=1\n"
-			changed = before != readScheduler(t, victim.Process.Pid) || changed
+			changed = records[0] != records[1] || changed
 		}
 	}
 	for _, spec := range hostPIDSpecs(abi) {
-		victim := startRetuneVictim(t)
+		victim := startRetuneVictim(t, p)
 		expected := append([]string{"query"}, strings.Fields(strings.Repeat("retune ", 54))...)
-		out := requireProbeOutput(t, runP12(t, spec, probe+" retune-errno "+strconv.Itoa(victim.Process.Pid), nil), expected...)
+		result := runM2Probe(t, p, spec, probe+" retune-errno "+strconv.Itoa(victim.Process.Pid), expected...)
+		results = append(results, result)
+		out := result.stdout
 		badErrno = badErrno || strings.Count(out, "retune=1\n") != 54
 		if !strings.Contains(out, "query=ok\n") {
 			t.Fatalf("SETUP: prlimit query control: %s", out)
@@ -344,33 +261,32 @@ func hostRetuneEffect(t *testing.T, abi int) {
 			{probe + " raw 141 1 0 19", []string{"raw"}},
 			{probe + " raw 251 2 0 24576", []string{"raw"}},
 		} {
-			out := requireProbeOutput(t, runP12(t, spec, item.command, nil), item.fields...)
+			result := runM2Probe(t, p, spec, item.command, item.fields...)
+			results = append(results, result)
+			out := result.stdout
 			if strings.Contains(out, "=1\n") {
 				t.Fatalf("SETUP: self/group retune control: %s", out)
 			}
 		}
 	}
+	p.Control("facility", ControlResult{Valid: true})
+	p.Jailed("probe", results...)
+	sealM2Processes(t, p)
+	p.Observed("effects", Observation{Conclusive: true, Sealed: true, Valid: true})
 	mutationEffect(t, "L-RETUNE", "errno", badErrno)
 	mutationEffect(t, "L-RETUNE", "retuned", changed)
-}
-
-func readRealtimePriority(t *testing.T, pid int) int32 {
-	t.Helper()
-	var priority int32
-	_, _, errno := unix.Syscall(unix.SYS_SCHED_GETPARAM, uintptr(pid), uintptr(unsafe.Pointer(&priority)), 0)
-	if errno != 0 {
-		t.Fatalf("SETUP: observe realtime priority: %v", errno)
-	}
-	return priority
+	p.Finish()
 }
 
 func hostRetuneSetparam(t *testing.T, abi int) {
+	p := newProof(t, "L-RETUNE-SETPARAM")
+	var results []JailedResult
 	if os.Geteuid() != 0 || os.Getenv("SSHGATE_JAIL_CI") != "1" {
 		t.Fatal("SETUP: realtime retune requires root disposable CI")
 	}
 	probe := buildProbe(t)
 	victim := func() *exec.Cmd {
-		command := startRetuneVictim(t)
+		command := startRetuneVictim(t, p)
 		priority := int32(2)
 		_, _, errno := unix.Syscall(unix.SYS_SCHED_SETSCHEDULER, uintptr(command.Process.Pid), 2, uintptr(unsafe.Pointer(&priority)))
 		if errno != 0 {
@@ -387,10 +303,18 @@ func hostRetuneSetparam(t *testing.T, abi int) {
 		t.Fatalf("SETUP: sched_setparam control did not lower priority 2 to 1: %v %s", err, output)
 	}
 	changed, badErrno := false, false
-	for _, spec := range hostPIDSpecs(abi) {
+	for index, spec := range hostPIDSpecs(abi) {
 		target := victim()
-		out := requireProbeOutput(t, runP12(t, spec, fmt.Sprintf("%s retune-one param %d", probe, target.Process.Pid), nil), "retune")
-		priority := readRealtimePriority(t, target.Process.Pid)
+		observer := &m2StateObserver{sample: func() string { return fmt.Sprint(readRealtimePriority(t, target.Process.Pid)) }}
+		p.ObserveWith(fmt.Sprintf("param-%d", index), observer)
+		mark := observer.Mark()
+		result := runM2Probe(t, p, spec, fmt.Sprintf("%s retune-one param %d", probe, target.Process.Pid), "retune")
+		results = append(results, result)
+		out := result.stdout
+		records := m2Seal(t, observer, mark)
+		priority64, err := strconv.ParseInt(records[1], 10, 32)
+		mutationSetup(t, err)
+		priority := int32(priority64)
 		if priority != 1 && priority != 2 {
 			t.Fatalf("SETUP: unexpected realtime priority %d", priority)
 		}
@@ -400,8 +324,13 @@ func hostRetuneSetparam(t *testing.T, abi int) {
 		changed = priority == 1 || changed
 		badErrno = out != "retune=1\n" || badErrno
 	}
+	p.Control("facility", ControlResult{Valid: true})
+	p.Jailed("probe", results...)
+	sealM2Processes(t, p)
+	p.Observed("effects", Observation{Conclusive: true, Sealed: true, Valid: true})
 	mutationEffect(t, "L-RETUNE-SETPARAM", "errno", badErrno)
 	mutationEffect(t, "L-RETUNE-SETPARAM", "retuned", changed)
+	p.Finish()
 }
 
 func TestRetuneFieldIsolation(t *testing.T) {
@@ -430,149 +359,70 @@ func TestRetuneFieldIsolation(t *testing.T) {
 }
 
 func hostLifecycle(t *testing.T, abi int) {
+	p := newProof(t, "L-LIFECYCLE")
+	m2LifecycleControl(t)
 	alive := false
-	for _, spec := range hostPIDSpecs(abi) {
+	var results []JailedResult
+	for index, spec := range hostPIDSpecs(abi) {
 		for _, mode := range []string{"normal", "cancel", "term", "nested", "forking"} {
-			ctx, cancel := context.WithCancel(context.Background())
-			// Two distinct detached generations retain stdout after their shell exits.
 			command := "p=/dev/shm/lifecycle-$$; mkfifo $p; exec 3<>$p; rm $p; setsid sh -c 'echo CHILD=$$; echo ready >&3; sleep 8' & sh -c \"setsid sh -c 'echo CHILD=\\$\\$; echo ready >&3; sleep 8' &\"; read ready <&3; read ready <&3; "
 			if mode == "nested" || mode == "forking" {
 				command = "p=/dev/shm/lifecycle-$$; mkfifo $p; exec 3<>$p; rm $p; " + buildProbe(t) + " lifecycle-" + mode + " 0 & read ready <&3; read ready <&3; "
 			}
-			if mode == "normal" || mode == "nested" || mode == "forking" {
+			cancelling := mode == "cancel" || mode == "term"
+			if cancelling {
+				command += "echo READY; sleep 8"
+			} else {
 				command += "sleep .2"
 				if mode == "forking" {
 					command += "; echo TEARDOWN"
 				}
-			} else {
-				command += "sleep 8"
 			}
-			jailed, err := spec.Command(ctx, command)
-			mutationSetup(t, err)
-			out := &lifecycleOutput{ready: make(chan struct{}, 1)}
-			var diagnostic bytes.Buffer
-			jailed.Cmd.Stdout = out
-			jailed.Cmd.Stderr = &diagnostic
-			jailed.Cmd.Cancel = func() error { return jailed.Cmd.Process.Signal(syscall.SIGTERM) }
-			jailed.Cmd.WaitDelay = 500 * time.Millisecond
+			observer := &m2LifecycleObserver{}
+			p.ObserveWith(fmt.Sprintf("descendants-%d-%s", index, mode), observer)
+			mark := observer.Mark()
 			start := time.Now()
-			mutationSetup(t, jailed.Cmd.Start())
-			_ = jailed.Started()
-			if mode == "cancel" || mode == "term" {
-				select {
-				case <-out.ready:
-				case <-time.After(5 * time.Second):
-					jailed.Cmd.Process.Kill()
-					jailed.Cmd.Wait()
-					t.Fatal("SETUP: lifecycle readiness")
-				}
-				if mode == "cancel" {
-					cancel()
-				} else {
-					mutationSetup(t, jailed.Cmd.Process.Signal(syscall.SIGTERM))
-				}
+			var result JailedResult
+			if mode == "cancel" {
+				var jailed *Jailed
+				result = runJailed(t, p, spec, RunPlan{Mode: Cancelled, Command: command, ReadyPoint: "probe", CancelAfterReady: true, ExpectExit: 143, Timeout: 10 * time.Second,
+					Configure: func(j *Jailed) { jailed = j }, AfterReady: func() { observer.capture(t, jailed.Cmd.Process.Pid) }, CleanupEvidence: func() error { return observer.inspect() },
+				})
+			} else {
+				result = runM2Lifecycle(t, p, spec, command, mode)
 			}
-			_ = jailed.Cmd.Wait()
-			cancel()
-			if _, err := jailed.Status(); err != nil {
-				t.Fatalf("SETUP: lifecycle jail: %v %s", err, diagnostic.String())
+			results = append(results, result)
+			if err := validateM2LifecycleReport(result.stdout, mode); err != nil {
+				t.Fatal("SETUP:", err)
 			}
-			if strings.Count(out.String(), "CHILD=") != 2 {
-				t.Fatalf("SETUP: lifecycle children: %q %s", out.String(), diagnostic.String())
-			}
-			remained := false
-			for _, line := range strings.Fields(out.String()) {
-				if !strings.HasPrefix(line, "CHILD=") && !strings.HasPrefix(line, "SPAWN=") {
-					continue
-				}
-				pid, err := strconv.Atoi(strings.SplitN(line, "=", 2)[1])
-				mutationSetup(t, err)
-				if unix.Kill(pid, 0) == nil {
-					remained = true
-					_ = unix.Kill(pid, unix.SIGKILL)
-				}
-			}
+			observer.addReport(t, result.stdout)
+			m2Seal(t, observer, mark)
 			if mode == "forking" {
-				beforeTeardown, _, hasTeardown := strings.Cut(out.String(), "TEARDOWN\n")
-				if spawned := strings.Count(beforeTeardown, "SPAWN="); !hasTeardown || spawned < 3 || spawned >= 32 {
-					t.Fatalf("SETUP: repeated creation missing: %q", out.String())
-				}
-				// r11 bounds cleanup, not success against continued creation.
 				alive = alive || time.Since(start) > 6*time.Second
 			} else {
-				alive = alive || remained || time.Since(start) > 2*time.Second
+				alive = alive || observer.remained || time.Since(start) > 2*time.Second
 			}
 		}
 	}
+	p.Control("facility", ControlResult{Valid: true, Detail: "unjailed descendants survive their exited parent"})
+	p.Jailed("probe", results...)
+	sealM2Processes(t, p)
+	p.Observed("effects", Observation{Conclusive: true, Sealed: true, Valid: true})
 	mutationEffect(t, "L-LIFECYCLE", "alive", alive)
+	p.Finish()
 }
 
-type lifecycleOutput struct {
-	buffer bytes.Buffer
-	ready  chan struct{}
-}
-
-func (out *lifecycleOutput) String() string { return out.buffer.String() }
-
-func (out *lifecycleOutput) Write(p []byte) (int, error) {
-	n, err := out.buffer.Write(p)
-	if strings.Count(out.String(), "CHILD=") >= 2 {
-		select {
-		case out.ready <- struct{}{}:
-		default:
-		}
-	}
-	return n, err
-}
-
-func exitStopVictim(t *testing.T) int {
-	t.Helper()
-	command := exec.Command("/bin/sh", "-c", "exit 0")
-	command.SysProcAttr = &syscall.SysProcAttr{Ptrace: true}
-	mutationSetup(t, command.Start())
-	pid := command.Process.Pid
-	t.Cleanup(func() {
-		_ = unix.PtraceCont(pid, 0)
-		var status unix.WaitStatus
-		_, _ = unix.Wait4(pid, &status, 0, nil)
-		command.Process.Release()
-	})
-	var status unix.WaitStatus
-	_, err := unix.Wait4(pid, &status, 0, nil)
-	mutationSetup(t, err)
-	if !status.Stopped() {
-		t.Fatal("SETUP: missing initial ptrace stop")
-	}
-	mutationSetup(t, unix.PtraceSetOptions(pid, unix.PTRACE_O_TRACEEXIT))
-	mutationSetup(t, unix.PtraceCont(pid, 0))
-	_, err = unix.Wait4(pid, &status, 0, nil)
-	mutationSetup(t, err)
-	if !status.Stopped() || status.TrapCause() != unix.PTRACE_EVENT_EXIT {
-		t.Fatalf("SETUP: missing exit stop: %v", status)
-	}
-	return pid
-}
-func residentPages(t *testing.T, pid int) uint64 {
-	t.Helper()
-	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/statm", pid))
-	mutationSetup(t, err)
-	fields := strings.Fields(string(data))
-	if len(fields) < 2 {
-		t.Fatal("SETUP: statm", string(data))
-	}
-	pages, err := strconv.ParseUint(fields[1], 10, 64)
-	mutationSetup(t, err)
-	return pages
-}
 func hostMrelease(t *testing.T, abi int) {
+	p := newProof(t, "L-PROCESS-MRELEASE")
+	var results []JailedResult
 	runtime.LockOSThread()
 	t.Cleanup(runtime.UnlockOSThread)
 	probe := buildProbe(t)
 	changed, badErrno := false, false
 	// An exit ptrace stop occurs before exit_mm. SIGNAL_GROUP_EXIT makes that
 	// private mm releasable while the tracer holds the process at the exit stop.
-	for _, spec := range hostPIDSpecs(abi) {
-		control := exitStopVictim(t)
+	for index, spec := range hostPIDSpecs(abi) {
+		control := exitStopVictim(t, p)
 		before := residentPages(t, control)
 		if before == 0 {
 			t.Fatal("SETUP: exit-stop victim has no resident pages")
@@ -581,15 +431,28 @@ func hostMrelease(t *testing.T, abi int) {
 		if err != nil || !strings.Contains(string(data), "mrelease=ok\n") || residentPages(t, control) >= before {
 			t.Fatalf("SETUP: memory-release control: %v %s", err, data)
 		}
-		target := exitStopVictim(t)
+		target := exitStopVictim(t, p)
 		before = residentPages(t, target)
 		if before == 0 {
 			t.Fatal("SETUP: target has no resident pages")
 		}
-		output := requireProbeOutput(t, runP12(t, spec, probe+" mrelease "+strconv.Itoa(target), nil), "mrelease")
+		observer := &m2StateObserver{sample: func() string { return strconv.FormatUint(residentPages(t, target), 10) }}
+		p.ObserveWith(fmt.Sprintf("memory-%d", index), observer)
+		mark := observer.Mark()
+		result := runM2Probe(t, p, spec, probe+" mrelease "+strconv.Itoa(target), "mrelease")
+		results = append(results, result)
+		output := result.stdout
+		records := m2Seal(t, observer, mark)
+		after, err := strconv.ParseUint(records[1], 10, 64)
+		mutationSetup(t, err)
 		badErrno = badErrno || !strings.Contains(output, "mrelease=1\n")
-		changed = changed || residentPages(t, target) < before
+		changed = changed || after < before
 	}
+	p.Control("facility", ControlResult{Valid: true})
+	p.Jailed("probe", results...)
+	sealM2Processes(t, p)
+	p.Observed("effects", Observation{Conclusive: true, Sealed: true, Valid: true})
 	mutationEffect(t, "L-PROCESS-MRELEASE", "errno", badErrno)
 	mutationEffect(t, "L-PROCESS-MRELEASE", "memory", changed)
+	p.Finish()
 }
