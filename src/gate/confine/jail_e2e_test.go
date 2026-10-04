@@ -95,7 +95,6 @@ func runLegs(t *testing.T, cfg jailCfg, probe string) {
 	t.Run("af_unix_denied", func(t *testing.T) { legAFUnix(t, spec, probe) })
 	t.Run("proc_mem_unreadable", func(t *testing.T) { legProcMem(t, spec, probe) })
 	t.Run("rlimits_applied", func(t *testing.T) { legRlimits(t, spec) })
-	t.Run("fifo", func(t *testing.T) { legFifo(t, spec) })
 	t.Run("ipc", func(t *testing.T) { legIPC(t, spec, probe) })
 	t.Run("posix_mqueue_isolated", func(t *testing.T) { legMQueue(t, spec, probe) })
 	t.Run("fail_closed_before_execve", func(t *testing.T) { legFailClosed(t, spec) })
@@ -706,32 +705,37 @@ func legRlimits(t *testing.T, spec Spec) {
 
 // legFifo proves mandatory Landlock blocks writes to existing host FIFOs.
 func legFifo(t *testing.T, spec Spec) {
+	p := newProof(t, "L-FIFO-WRITE")
 	probe := buildProbe(t)
 	dir, err := os.MkdirTemp(homeDir(t), ".sshgate-jailfifo-")
 	mutationSetup(t, err)
 	t.Cleanup(func() { os.RemoveAll(dir) })
-
-	if got := fifoRoundTrip(t, dir, "ctl", func(fifo string) {
-		out, err := exec.Command(probe, "device-write", fifo).CombinedOutput()
-		if err != nil || string(out) != "open=ok\nwrite=ok\n" {
-			t.Fatalf("SETUP: FIFO control: %v %s", err, out)
-		}
-	}); got != "x" {
-		t.Fatalf("SETUP: FIFO control delivery: got %q", got)
+	path := filepath.Join(dir, "probe.fifo")
+	mutationSetup(t, unix.Mkfifo(path, 0600))
+	reader, err := unix.Open(path, unix.O_RDONLY|unix.O_NONBLOCK|unix.O_CLOEXEC, 0)
+	mutationSetup(t, err)
+	observer := &mountFIFOObserver{fd: reader}
+	p.ObserveWith("fifo", observer)
+	control := mountControl(t, exec.Command(probe, "device-write", path), 0)
+	if string(control) != "open=ok\nwrite=ok\n" {
+		t.Fatalf("SETUP: FIFO control: %s", control)
 	}
-
-	var output string
-	got := fifoRoundTrip(t, dir, "jail", func(fifo string) {
-		output = requireProbeOutput(t, runP12(t, spec, probe+" device-write "+fifo, nil), "open", "open>write")
-	})
+	mark := observer.Mark()
+	mutationSetup(t, observer.Seal(ProducerSync{Complete: true, Kind: "process-exited"}))
+	if got := observer.Since(mark); !got.Conclusive || len(got.Records) != 1 || got.Records[0] != "x" {
+		t.Fatalf("SETUP: FIFO control delivery: %+v", got)
+	}
+	p.Control("fifo", ControlResult{Valid: true})
+	mark = observer.Mark()
+	result := runJailed(t, p, spec, RunPlan{Mode: Execute, Ops: []ProofOp{{Name: "fifo", Command: probe + " device-write " + path, Outcomes: []OpOutcome{{Stdout: "open=13\n", Exit: 1}, {Stdout: "open=ok\nwrite=ok\n"}}}}})
+	p.Jailed("fifo", result)
+	mutationSetup(t, observer.Seal(ProducerSync{Complete: true, Kind: "framed-op-ended"}))
+	records := observer.Since(mark)
+	got := strings.Join(records.Records, "")
+	valid := (got == "" && result.stdout == "open=13\n") || (got == "x" && result.stdout == "open=ok\nwrite=ok\n")
+	p.Observed("fifo", Observation{Conclusive: records.Conclusive, Sealed: records.Sealed, Valid: valid, Detail: fmt.Sprintf("bytes=%q report=%q", got, result.stdout)})
 	mutationEffect(t, "L-FIFO-WRITE", "delivered", len(got) != 0)
-	if got == "" {
-		if output != "open=13\n" {
-			unexpected(t, "FIFO denial: want EACCES, got %q", output)
-		}
-	} else if got != "x" || output != "open=ok\nwrite=ok\n" {
-		unexpected(t, "FIFO delivery/report mismatch: bytes=%q report=%q", got, output)
-	}
+	p.Finish()
 }
 
 // legIPC proves the IPC namespace protects host SysV segments.

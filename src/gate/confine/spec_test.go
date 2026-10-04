@@ -107,14 +107,11 @@ func TestCommandEmptyProfileRefused(t *testing.T) {
 }
 
 func TestStrictSpecDecode(t *testing.T) {
-	t.Run("U-SpecRejectsUnknownProfile", func(t *testing.T) {
-		for _, raw := range []string{`{"Profile":"unknown"}`, `{"Rung":-1}`, `{"Rung":0}`, `{"Profile":"ro-v1","ParentNS":{"User":1,"Mnt":2,"Pid":3,"IPC":4},"Unexpected":true}`, `{"Profile":"ro-v1","ParentNS":{"User":1,"Mnt":2,"Pid":3,"IPC":4}} {}`, `{"Profile":"ro-v1","ParentNS":{"User":1,"Mnt":2,"Pid":3,"IPC":4}} garbage`, `null`, `{"Profile":"ro-v1","ParentNS":{"User":1,"Mnt":2,"Pid":3,"IPC":4},"ForceABI":-2}`, `{"Profile":"ro-v1","ParentNS":{"User":1,"Mnt":2,"Pid":3,"IPC":4},"InjectFailAt":"rbind"}`, `{"Profile":"ro-v1","ParentNS":{"User":1,"Mnt":2,"Pid":3,"IPC":4},"InjectFailAt":"nnp:UNKNOWN"}`, `{"Rung":2}`} {
-			var spec Spec
-			if err := decodeSpec(raw, &spec); err != syscall.EINVAL {
-				t.Errorf("decode %s: got %v want EINVAL", raw, err)
-			}
-		}
-	})
+	for _, abi := range []string{"native", "abi1"} {
+		t.Run(abi, func(t *testing.T) {
+			t.Run("U-SpecRejectsUnknownProfile", proofSpecRejectsUnknownProfile)
+		})
+	}
 	for _, profile := range []string{"", "landlock", "ro-v2"} {
 		jailed, err := (Spec{Profile: profile}).Command(context.Background(), "true")
 		if jailed != nil {
@@ -236,4 +233,16 @@ func TestCleanupStatusReport(t *testing.T) {
 			t.Fatal(jailed.CleanupError)
 		}
 	}
+}
+
+func proofSpecRejectsUnknownProfile(t *testing.T) {
+	p := newProof(t, "U-SpecRejectsUnknownProfile")
+	for _, raw := range []string{`{"Profile":"unknown"}`, `{"Rung":-1}`, `{"Rung":0}`, `{"Profile":"ro-v1","ParentNS":{"User":1,"Mnt":2,"Pid":3,"IPC":4},"Unexpected":true}`, `{"Profile":"ro-v1","ParentNS":{"User":1,"Mnt":2,"Pid":3,"IPC":4}} {}`, `{"Profile":"ro-v1","ParentNS":{"User":1,"Mnt":2,"Pid":3,"IPC":4}} garbage`, `null`, `{"Profile":"ro-v1","ParentNS":{"User":1,"Mnt":2,"Pid":3,"IPC":4},"ForceABI":-2}`, `{"Profile":"ro-v1","ParentNS":{"User":1,"Mnt":2,"Pid":3,"IPC":4},"InjectFailAt":"rbind"}`, `{"Profile":"ro-v1","ParentNS":{"User":1,"Mnt":2,"Pid":3,"IPC":4},"InjectFailAt":"nnp:UNKNOWN"}`, `{"Rung":2}`} {
+		var spec Spec
+		if err := decodeSpec(raw, &spec); err != syscall.EINVAL {
+			t.Errorf("decode %s: got %v want EINVAL", raw, err)
+		}
+	}
+	p.Control("decision", ControlResult{Valid: !t.Failed(), Detail: "strict decoder rejects each malformed or unknown spec"})
+	p.Finish()
 }

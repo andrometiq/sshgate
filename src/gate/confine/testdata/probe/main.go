@@ -153,6 +153,11 @@ func main() {
 			report("mq_timedreceive", errnoOrNil(e))
 			unix.Close(fd)
 		}
+	case "metadata-snapshot":
+		if err := metadataSnapshot(args[0], args[1], os.Stdout); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(2)
+		}
 	case "metadata":
 		p := args[0]
 		report("chmod", unix.Chmod(p, 0644))

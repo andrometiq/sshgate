@@ -5,6 +5,7 @@ package confine
 import (
 	"bytes"
 	"encoding/binary"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -24,12 +25,16 @@ func TestJailMatrixWrite(t *testing.T) {
 			spec := Spec{Profile: ProfileROv1, ForceABI: cfg.abi, Net: true}
 			t.Run("L-FIFO-WRITE", func(t *testing.T) { legFifo(t, spec) })
 			t.Run("L-WRITE-ERRNO", func(t *testing.T) {
+				p := newProof(t, "L-WRITE-ERRNO")
+				var results []JailedResult
 				probe := buildProbe(t)
 				bad := false
 				for _, submount := range []bool{false, true} {
 					directory := writeSweepFixture(t, submount)
 					seedWriteSweep(t, directory)
-					output := requireProbeOutput(t, runP12(t, spec, probe+" write-sweep "+directory, nil), writeSweepOperations...)
+					result := runJailed(t, p, spec, mountProbePlan(probe+" write-sweep "+directory, mountWriteOutcomes(), writeSweepOperations...))
+					results = append(results, result)
+					output := result.stdout
 					if jailmut.On("P-RO") && !jailmut.On("P-LL-FS") {
 						for _, op := range []string{"write", "append", "open-trunc"} {
 							if !strings.Contains(output, op+"=13\n") {
@@ -41,23 +46,35 @@ func TestJailMatrixWrite(t *testing.T) {
 						bad = bad || !strings.Contains(output, op+"=30\n")
 					}
 				}
+				p.Jailed("errno", results...)
 				mutationEffect(t, "L-WRITE-ERRNO", "errno", bad)
+				p.Finish()
 			})
 			metadata := func(t *testing.T, leg string, mounts ...bool) {
+				p := newProof(t, leg)
+				var results []JailedResult
 				var effects map[string]bool
 				for _, submount := range mounts {
-					observed := legMetadataMount(t, spec, submount)
+					observed, result := legMetadataMount(t, p, spec, submount)
+					results = append(results, result)
 					if effects == nil {
 						effects = observed
 					} else {
 						for key := range effects {
+							if effects[key] != observed[key] {
+								t.Fatalf("SETUP: metadata %s effect differs across mounts", key)
+							}
 							effects[key] = effects[key] && observed[key]
 						}
 					}
 				}
+				p.Control("metadata", ControlResult{Valid: true})
+				p.Jailed("metadata", results...)
+				p.Observed("metadata", Observation{Conclusive: true, Sealed: true, Valid: true, Detail: "metadata sampled after each framed sweep; all controls changed each field"})
 				for effect, changed := range effects {
 					mutationEffect(t, leg, "metadata-"+effect, changed)
 				}
+				p.Finish()
 			}
 			t.Run("L-META-EROFS", func(t *testing.T) { metadata(t, "L-META-EROFS", false, true) })
 			t.Run("L-META-ROOT", func(t *testing.T) { metadata(t, "L-META-ROOT", false) })
@@ -99,7 +116,7 @@ func metadataChanges(before, after metadataSnapshot) map[string]bool {
 	return map[string]bool{"mode": before.mode != after.mode, "mtime": before.mtime != after.mtime, "flags": before.flags != after.flags, "xattr-set": !bytes.Equal(before.acl, after.acl), "xattr-remove": !bytes.Equal(before.removeACL, after.removeACL)}
 }
 
-func legMetadataMount(t *testing.T, spec Spec, submount bool) map[string]bool {
+func legMetadataMount(t *testing.T, p *proof, spec Spec, submount bool) (map[string]bool, JailedResult) {
 	probe := buildProbe(t)
 	directory := writeSweepFixture(t, submount)
 	path := filepath.Join(directory, "owned")
@@ -121,9 +138,15 @@ func legMetadataMount(t *testing.T, spec Spec, submount bool) map[string]bool {
 	}
 	seed()
 	before := readMetadata(t, path)
-	control, err := exec.Command(probe, "metadata-mount", path).CombinedOutput()
-	mutationSetup(t, err)
+	control := mountControl(t, exec.Command(probe, "metadata-mount", path), 0)
 	operations := []string{"chmod", "chown", "setxattr", "removexattr", "utimensat", "setflags"}
+	var controlWant strings.Builder
+	for _, name := range operations {
+		fmt.Fprintf(&controlWant, "%s=ok\n", name)
+	}
+	if string(control) != controlWant.String() {
+		t.Fatalf("SETUP: incomplete metadata control: %q", control)
+	}
 	for _, op := range operations {
 		if !strings.Contains(string(control), op+"=ok\n") {
 			t.Fatalf("SETUP: %s control: %s", op, control)
@@ -136,7 +159,19 @@ func legMetadataMount(t *testing.T, spec Spec, submount bool) map[string]bool {
 	}
 	seed()
 	before = readMetadata(t, path)
-	output := requireProbeOutput(t, runP12(t, spec, probe+" metadata-mount "+path, nil), operations...)
+	var after metadataSnapshot
+	observer := &mountStateObserver{sample: func() []string { after = readMetadata(t, path); return []string{fmt.Sprintf("%+v", after)} }}
+	p.ObserveWith(fmt.Sprintf("metadata-%t", submount), observer)
+	mark := observer.Mark()
+	values := []string{"1"}
+	if jailmut.On("P-SC-META") {
+		values = []string{"30"}
+		if jailmut.On("P-RO") && jailmut.On("P-SELFCHECK-MOUNTS") {
+			values = []string{"ok"}
+		}
+	}
+	result := runJailed(t, p, spec, mountProbePlan(probe+" metadata-mount "+path, values, operations...))
+	output := result.stdout
 	want := "1"
 	fullEffect := jailmut.On("P-SC-META") && jailmut.On("P-RO") && jailmut.On("P-SELFCHECK-MOUNTS")
 	if jailmut.On("P-SC-META") {
@@ -153,5 +188,6 @@ func legMetadataMount(t *testing.T, spec Spec, submount bool) map[string]bool {
 			unexpected(t, "%s expected errno %s: %s", op, want, output)
 		}
 	}
-	return metadataChanges(before, readMetadata(t, path))
+	sealMountState(t, observer, mark)
+	return metadataChanges(before, after), result
 }

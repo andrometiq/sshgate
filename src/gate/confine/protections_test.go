@@ -21,7 +21,7 @@ import (
 
 type prot = harness.Protection
 
-var registry = append(completeRegistry(), statusRegistry()...)
+var registry = completeRegistry()
 
 func p12Leg(name, marker string) harness.Leg {
 	leg := harness.Leg{Name: name, Package: "./src/gate/confine", Names: map[string]string{"native": "TestJailMatrixP12/native/" + name, "abi1": "TestJailMatrixP12/abi1/" + name}}
@@ -47,6 +47,16 @@ func p12Registry() []prot {
 	add("P-NSVERIFY", "RunWorker before setupMounts", nsLegs...)
 	for _, stage := range []string{"spec", "cmdread", "mounts", "nnp", "caps", "rlimits", "landlock", "seccomp", "fds", "cwd", "session", "selfcheck", "exec"} {
 		legs := []harness.Leg{p12Leg("L-FAULT-"+stage, "MUTATION-EFFECT reached-exec")}
+		if stage == "cmdread" {
+			legs = append(legs, p12Leg("L-INJECT-ERRNO", "MUTATION-EFFECT reached-exec"))
+		}
+		if stage == "fds" {
+			leg := p12Leg("L-FAULT-fds-ENOSYS", "MUTATION-EFFECT reached-exec")
+			for abi := range leg.Names {
+				leg.Names[abi] = "TestJailMatrixP14/" + abi + "/" + leg.Name
+			}
+			legs = append(legs, leg)
+		}
 		if stage == "caps" {
 			root := p12Leg("L-ROOT-STATE", "")
 			root.Root = true
@@ -78,7 +88,7 @@ func p12Registry() []prot {
 	add("P-MQ", "POSIX mqueue syscall denies", mqErrno, mqCover)
 	protections[len(protections)-1].Class = "multi"
 	add("P-LL-REQUIRED", "applyLandlock ABI floor", p12Leg("L-LL-REQUIRED", "MUTATION-ABORT selfcheck"))
-	return protections
+	return append(protections, statusRegistry()...)
 }
 
 // Filled alongside the literal non-allow seccomp lists when those rows are hooked.
@@ -218,7 +228,9 @@ func TestRegistryLegsExist(t *testing.T) {
 					if err != nil {
 						t.Fatal(err)
 					}
-					if !strings.HasPrefix(leg.Name, "U-") && !isJailE2E(data) {
+					// The executor baseline runs without jail_e2e; its namespace proof is shared with mutation runs.
+					executorProof := leg.Package == "./src/gate" && leg.Name == "L-NSVERIFY" && filepath.Base(path) == "executor_confine_test.go"
+					if !strings.HasPrefix(leg.Name, "U-") && !isJailE2E(data) && !executorProof {
 						continue
 					}
 					tree, err := parser.ParseFile(token.NewFileSet(), path, data, 0)
