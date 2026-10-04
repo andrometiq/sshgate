@@ -3,9 +3,7 @@
 package confine
 
 import (
-	"fmt"
 	"github.com/karthikeyan5/sshgate/src/gate/confine/jailmut"
-	"golang.org/x/sys/unix"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -44,8 +42,7 @@ func combineBacking(a, b backingClass) backingClass {
 }
 
 type backingInspector struct {
-	sys             string
-	auxiliaryDevice func(string) (string, error)
+	sys string
 }
 
 // sysfsPresent distinguishes absent optional metadata from broken links and
@@ -243,31 +240,17 @@ func (inspector backingInspector) mount(entry mountEntry) backingClass {
 
 		return class
 	}
-	class := inspector.device(entry.dev)
 	if entry.fstype == "xfs" {
 		for _, option := range entry.superOpts {
-			name, value, ok := strings.Cut(option, "=")
-			if !ok || (name != "logdev" && name != "rtdev") {
-				continue
-			}
-			value, err := unescapeMountField(value)
-			if err != nil {
+			// These paths do not identify the devices retained at mount time.
+			if strings.HasPrefix(option, "logdev=") || strings.HasPrefix(option, "rtdev=") {
 				return backingCovered
 			}
-			resolve := inspector.auxiliaryDevice
-			if resolve == nil {
-				resolve = inspector.resolveAuxiliaryDevice
-			}
-			dev, err := resolve(value)
-			if err != nil {
-				return backingCovered
-			}
-
-			class = combineBacking(class, inspector.device(dev))
 		}
 	}
-	return class
+	return inspector.device(entry.dev)
 }
+
 func mountAccepted(entry mountEntry, accept []string, inspector backingInspector) bool {
 	if entry.fstype == "ramfs" && jailmut.On("SAFE-DROP=ramfs") {
 		return false
@@ -292,60 +275,4 @@ func mountAccepted(entry mountEntry, accept []string, inspector backingInspector
 		return class == backingDirect || class == backingNetwork && slices.Contains(accept, "network")
 	}
 	return true
-}
-
-// resolveAuxiliaryDevice never resolves through an unconfirmed mount. In
-// particular, root XFS with auxiliary devices is circular and remains unmet.
-func (inspector backingInspector) resolveAuxiliaryDevice(path string) (string, error) {
-	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
-		return "", unix.EINVAL
-	}
-	entries, err := readMountInfo()
-	if err != nil {
-		return "", err
-	}
-	root, err := unix.Open("/", unix.O_PATH|unix.O_CLOEXEC, 0)
-	if err != nil {
-		return "", err
-	}
-	rootID, err := mountID(root)
-	unix.Close(root)
-	if err != nil {
-		return "", err
-	}
-	view := reachableMounts(entries, rootID)
-	if len(view.unmet) > 0 {
-		return "", unix.ESTALE
-	}
-	accepted := map[int]bool{}
-	for _, entry := range view.entries {
-		hasAuxiliary := false
-		if entry.fstype == "xfs" {
-			for _, option := range entry.superOpts {
-				if strings.HasPrefix(option, "logdev=") || strings.HasPrefix(option, "rtdev=") {
-					hasAuxiliary = true
-				}
-			}
-		}
-		if !hasAuxiliary {
-			accepted[entry.id] = mountAccepted(entry, nil, inspector)
-		}
-	}
-	result := walkTo(path, view, accepted, nil)
-	defer result.close()
-	if result.err != nil {
-		return "", result.err
-	}
-	id, err := mountID(result.fd)
-	if err != nil || !accepted[id] {
-		return "", unix.ESTALE
-	}
-	var stat unix.Stat_t
-	if err := unix.Fstat(result.fd, &stat); err != nil {
-		return "", err
-	}
-	if stat.Mode&unix.S_IFMT != unix.S_IFBLK {
-		return "", unix.ENOTBLK
-	}
-	return fmt.Sprintf("%d:%d", unix.Major(stat.Rdev), unix.Minor(stat.Rdev)), nil
 }
