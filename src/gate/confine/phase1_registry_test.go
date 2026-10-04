@@ -2,7 +2,6 @@ package confine
 
 import (
 	"github.com/karthikeyan5/sshgate/src/gate/confine/jailmut/harness"
-	"os"
 )
 
 func phase1Leg(name string, markers ...string) harness.Leg {
@@ -54,13 +53,12 @@ func phase1Registry() []prot {
 	add("P-NODEV", "remountRootReadOnly NODEV", one("P-NODEV", phase1Leg("L-DEV-OPEN", "MUTATION-ABORT selfcheck")), harness.MutationSet{IDs: []string{"P-NODEV", "P-SELFCHECK-MOUNTS"}, Legs: []harness.Leg{opened, partial}}, harness.MutationSet{IDs: []string{"P-NODEV", "P-SELFCHECK-MOUNTS", "P-LL-IOCTL-DEV"}, Legs: []harness.Leg{opened, tty}})
 	for i := range result {
 		if result[i].ID == "P-RL-CORE" {
-			// Root CI installs the owned pipe collector over any host pattern, which
-			// records the crash; non-root CI runs the provisioned file pattern, where
-			// the read-only jail alone still stops the core file.
-			normal := crashLeg("L-CRASH-NO-HELPER")
-			if os.Geteuid() == 0 {
-				normal.Markers = []string{"MUTATION-EFFECT helper-record"}
-			}
+			// Only root CI shows this effect: it installs the owned pipe collector,
+			// which records the crash. Under non-root CI's file pattern the read-only
+			// jail alone still stops the core file. The registry must not depend on
+			// who builds it (the union check rebuilds it), so the leg is root-only.
+			normal := crashLeg("L-CRASH-NO-HELPER", "MUTATION-EFFECT helper-record")
+			normal.Root = true
 			result[i].MutationSets[0].Legs = append(result[i].MutationSets[0].Legs, normal)
 			result[i].MutationSets = append(result[i].MutationSets, harness.MutationSet{IDs: []string{"P-RL-CORE", "P-RO", "P-SELFCHECK-MOUNTS", "P-LL-FS"}, Legs: []harness.Leg{crashLeg("L-CRASH-NO-HELPER", "MUTATION-EFFECT helper-record")}})
 		}
