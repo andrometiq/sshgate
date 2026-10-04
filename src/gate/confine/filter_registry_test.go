@@ -86,12 +86,12 @@ func p15Registry() []prot {
 			p.Partners = []string{"P-LL-RESOLVE-UNIX", "P-LL-SCOPE-ABSTRACT"}
 			path := p15Leg("L-UNIX-CONNECT")
 			path.ABIMarkers = map[string][]string{"abi1": {"MUTATION-EFFECT connected"}}
-			if probeLandlockABI() < 9 {
+			if abi, _ := probeLandlockABI(); abi < 9 {
 				path.Markers = []string{"MUTATION-EFFECT connected"}
 			}
 			abstract := p15Leg("L-UNIX-ABSTRACT")
 			abstract.ABIMarkers = map[string][]string{"abi1": {"MUTATION-EFFECT connected"}}
-			if probeLandlockABI() < 6 {
+			if abi, _ := probeLandlockABI(); abi < 6 {
 				abstract.Markers = []string{"MUTATION-EFFECT connected"}
 			}
 			p.MutationSets[0].Legs = append(p.MutationSets[0].Legs, path, abstract)
@@ -145,12 +145,12 @@ func p15Registry() []prot {
 			p.Partners = []string{"P-LL-RESOLVE-UNIX", "P-LL-SCOPE-ABSTRACT"}
 			path := p15Leg("L-DGRAM-SEND")
 			path.ABIMarkers = map[string][]string{"abi1": {"MUTATION-EFFECT delivered"}}
-			if probeLandlockABI() < 9 {
+			if abi, _ := probeLandlockABI(); abi < 9 {
 				path.Markers = []string{"MUTATION-EFFECT delivered"}
 			}
 			abstract := p15Leg("L-DGRAM-ABSTRACT")
 			abstract.ABIMarkers = map[string][]string{"abi1": {"MUTATION-EFFECT delivered"}}
-			if probeLandlockABI() < 6 {
+			if abi, _ := probeLandlockABI(); abi < 6 {
 				abstract.Markers = []string{"MUTATION-EFFECT delivered"}
 			}
 			p.MutationSets[0].Legs = append(p.MutationSets[0].Legs, p15Leg("L-SOCKPAIR-SWEEP", "MUTATION-EFFECT errno"), path, abstract)
@@ -160,7 +160,7 @@ func p15Registry() []prot {
 			p.MutationSets[0].Legs = append(p.MutationSets[0].Legs, hostPIDLeg("L-ASYNC-SCOPE"))
 			p.MutationSets = append(p.MutationSets, asyncScopeMutationSet())
 			effect := hostPIDLeg("L-SIGNAL-SCOPE")
-			if probeLandlockABI() >= 6 {
+			if abi, _ := probeLandlockABI(); abi >= 6 {
 				effect.Markers = []string{"MUTATION-EFFECT signal"}
 			}
 			effect.ABIMarkers = map[string][]string{"abi1": {}}

@@ -409,7 +409,10 @@ func runRedacted(ctx context.Context, c *exec.Cmd, jailed *confine.Jailed, what 
 		res.CleanupError = jailed.CleanupError
 		if cleanupErr != nil {
 			reason := strings.Join(strings.Fields(cleanupErr.Error()), " ")
-			// Report through audit metadata: stderr may itself be blocked.
+			// After an abandoned join stderr may itself be blocked: audit metadata only.
+			if res.CleanupError == "" && outputJoined {
+				fmt.Fprintln(errCount, "gate-jail: cleanup:", reason)
+			}
 			if res.CleanupError != "" {
 				res.CleanupError += "; "
 			}

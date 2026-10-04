@@ -49,7 +49,7 @@ func phase1Registry() []prot {
 	tty := phase1Leg("L-TTY-STATE", "MUTATION-EFFECT tty-exclusive")
 	partial := phase1Leg("L-TTY-STATE")
 	partial.ABIMarkers = map[string][]string{"abi1": {"MUTATION-EFFECT tty-exclusive"}}
-	if probeLandlockABI() < 5 {
+	if abi, _ := probeLandlockABI(); abi < 5 {
 		partial.Markers = []string{"MUTATION-EFFECT tty-exclusive"}
 	}
 	add("P-NODEV", "remountRootReadOnly NODEV", one("P-NODEV", phase1Leg("L-DEV-OPEN", "MUTATION-ABORT selfcheck")), harness.MutationSet{IDs: []string{"P-NODEV", "P-SELFCHECK-MOUNTS"}, Legs: []harness.Leg{opened, partial}}, harness.MutationSet{IDs: []string{"P-NODEV", "P-SELFCHECK-MOUNTS", "P-LL-IOCTL-DEV"}, Legs: []harness.Leg{opened, tty}})

@@ -21,7 +21,7 @@ func writeRegistry() []prot {
 	}
 	partial := writeLegs(false)
 	// Native ABIs below 3 have the same truncate gap as forced ABI 1.
-	if probeLandlockABI() < 3 {
+	if abi, _ := probeLandlockABI(); abi < 3 {
 		for i := range partial {
 			partial[i].Markers = []string{"MUTATION-EFFECT truncate"}
 		}
