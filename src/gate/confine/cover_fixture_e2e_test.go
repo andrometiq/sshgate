@@ -261,6 +261,18 @@ func coverResult(t *testing.T, spec Spec, command string, afterX func()) (result
 		if result.setupErr != nil || (strings.Contains(command, coverQuote(coverProbe())+" jail-proc") && !strings.Contains(command, "COVER-BEGIN ")) {
 			return
 		}
+		// A reset cwd legitimately adds the worker's one fixed note.
+		const cwdNote = "gate: note: the working directory is not visible in the read view; the read ran from /\n"
+		if facts.CwdReset {
+			validated := result
+			validated.stderr = strings.Replace(result.stderr, cwdNote, "", 1)
+			output, err := validateCoverReports(validated, strings.Count(command, "COVER-BEGIN "))
+			if err != nil {
+				t.Fatalf("SETUP: cover probe: %v: %+v", err, result)
+			}
+			result.stdout = output
+			return
+		}
 		output, err := validateCoverReports(result, strings.Count(command, "COVER-BEGIN "))
 		if err != nil {
 			t.Fatalf("SETUP: cover probe: %v: %+v", err, result)
