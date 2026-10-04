@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/karthikeyan5/sshgate/src/gate/confine/jailmut"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -29,34 +30,30 @@ func TestJailMatrixP12(t *testing.T) {
 			t.Run("L-SCRATCH-META", func(t *testing.T) { legScratchMetadata(t, spec) })
 			t.Run("L-FILEATTR-ERRNO", func(t *testing.T) { legFileattrErrno(t, spec) })
 			t.Run("L-LL-REQUIRED", func(t *testing.T) {
-				p12Control(t, spec)
+				p := newProof(t, "L-LL-REQUIRED")
+				hardeningControl(t, p, spec)
 				withoutLandlock := spec
 				withoutLandlock.ForceABI = ForceNoLandlock
-				result := runP12(t, withoutLandlock, "echo COMMAND_RAN", nil)
-				var setup *SetupError
-				if errors.As(result.setupErr, &setup) && setup.Stage == "selfcheck" && result.stdout == "" {
-					mutationAbort(t, "L-LL-REQUIRED", "selfcheck", true)
-					return
+				stage, errno := "landlock", syscall.ENOSYS
+				if jailmut.On("P-LL-REQUIRED") {
+					stage, errno = "selfcheck", 0
 				}
-				expectP12Abort(t, "L-LL-REQUIRED", "landlock", syscall.ENOSYS, result)
+				p.Jailed("attempt", runJailed(t, p, withoutLandlock, RunPlan{Mode: SetupAbort, Stage: stage, Errno: errno, Command: "echo COMMAND_RAN"}))
+				mutationAbort(t, "L-LL-REQUIRED", "selfcheck", stage == "selfcheck")
+				p.Finish()
 			})
-			if os.Geteuid() == 0 {
-				t.Run("L-ROOT-STATE", func(t *testing.T) { legRootState(t, spec) })
-				t.Run("L-ROOT-NPROC", func(t *testing.T) { legRootNproc(t, spec) })
-				if os.Getenv("SSHGATE_JAIL_CI") == "1" {
-					t.Run("L-ROOT-PROC", func(t *testing.T) { legRootProc(t, spec) })
-				} else {
-					t.Log("MUTATE-OMITTED(ci-only): L-ROOT-PROC")
-				}
-			} else {
-				t.Log("MUTATE-OMITTED(root): L-ROOT-STATE L-ROOT-NPROC L-ROOT-PROC")
-			}
+			t.Run("L-ROOT-STATE", func(t *testing.T) { legRootState(t, spec) })
+			t.Run("L-ROOT-NPROC", func(t *testing.T) { legRootNproc(t, spec) })
+			t.Run("L-ROOT-PROC", func(t *testing.T) { legRootProc(t, spec) })
 			t.Run("L-INJECT-ERRNO", func(t *testing.T) {
-				p12Control(t, spec)
+				p := newProof(t, "L-INJECT-ERRNO")
+				hardeningControl(t, p, spec)
 				injected := spec
 				injected.InjectFailAt = "cmdread:EACCES"
-				result := runP12(t, injected, "echo COMMAND_RAN", nil)
-				expectP12Abort(t, "L-INJECT-ERRNO", "cmdread", syscall.EACCES, result)
+				plan := hardeningAbortPlan("cmdread", syscall.EACCES, jailmut.On("P-FAULT-cmdread"))
+				p.Jailed("attempt", runJailed(t, p, injected, plan))
+				mutationEffect(t, "L-INJECT-ERRNO", "reached-exec", plan.Mode == Execute)
+				p.Finish()
 			})
 			t.Run("L-SPEC-REJECT", func(t *testing.T) { legSpecReject(t, cfg.abi) })
 			t.Run("L-NSVERIFY-user", func(t *testing.T) { legNamespace(t, spec, "user") })
@@ -64,24 +61,19 @@ func TestJailMatrixP12(t *testing.T) {
 			t.Run("L-NSVERIFY-pid", func(t *testing.T) { legNamespace(t, spec, "pid") })
 			t.Run("L-NSVERIFY-ipc", func(t *testing.T) { legNamespace(t, spec, "ipc") })
 			t.Run("L-HOSTMOUNTS-UNCHANGED", func(t *testing.T) {
+				p := newProof(t, "L-HOSTMOUNTS-UNCHANGED")
 				before, err := os.ReadFile("/proc/self/mountinfo")
 				mutationSetup(t, err)
-				result := runP12(t, spec, "echo COMMAND_RAN", func(j *Jailed) { j.Cmd.SysProcAttr.Cloneflags = syscall.CLONE_NEWUSER })
-				var setup *SetupError
-				if !errors.As(result.setupErr, &setup) || setup.Errno != syscall.EPERM || (setup.Stage != "nsverify" && setup.Stage != "private") {
-					t.Fatalf("SETUP: clobber did not abort: %+v", result)
+				stage := "nsverify"
+				if jailmut.On("P-NSVERIFY") {
+					stage = "private"
 				}
-				mutationAbort(t, "L-HOSTMOUNTS-UNCHANGED", "private", setup.Stage == "private")
-				if result.stdout != "" {
-					unexpected(t, "command ran after namespace clobber")
-					t.FailNow()
-				}
+				result := runJailed(t, p, spec, RunPlan{Mode: SetupAbort, Stage: stage, Errno: syscall.EPERM, Command: "echo COMMAND_RAN", Configure: func(j *Jailed) { j.Cmd.SysProcAttr.Cloneflags = syscall.CLONE_NEWUSER }})
+				p.Jailed("attempt", result)
 				after, err := os.ReadFile("/proc/self/mountinfo")
-				mutationSetup(t, err)
-				if !bytes.Equal(before, after) {
-					unexpected(t, "host mountinfo changed")
-					t.FailNow()
-				}
+				p.Observed("mounts", Observation{Conclusive: err == nil, Sealed: true, Valid: bytes.Equal(before, after), Detail: "host mountinfo after completed setup abort"})
+				mutationAbort(t, "L-HOSTMOUNTS-UNCHANGED", "private", stage == "private")
+				p.Finish()
 			})
 			t.Run("L-FAULT-nsverify", func(t *testing.T) { legFault(t, spec, "nsverify") })
 			t.Run("L-FAULT-spec", func(t *testing.T) { legFault(t, spec, "spec") })
@@ -147,41 +139,60 @@ func expectP12Abort(t *testing.T, leg, stage string, errno syscall.Errno, result
 	}
 }
 
+func hardeningControl(t *testing.T, p *proof, spec Spec) {
+	result := runJailed(t, p, spec, RunPlan{Mode: Execute, Ops: []ProofOp{{Name: "control", Command: "printf CONTROL_RAN", Outcomes: []OpOutcome{{Stdout: "CONTROL_RAN"}}}}})
+	p.Control("intact", ControlResult{Valid: true, Jailed: &result})
+}
+func hardeningAbortPlan(stage string, errno syscall.Errno, removed bool) RunPlan {
+	if removed {
+		return RunPlan{Mode: Execute, Ops: []ProofOp{{Name: "attempt", Command: "printf COMMAND_RAN", Outcomes: []OpOutcome{{Stdout: "COMMAND_RAN"}}}}}
+	}
+	return RunPlan{Mode: SetupAbort, Stage: stage, Errno: errno, Command: "printf COMMAND_RAN"}
+}
 func legFault(t *testing.T, spec Spec, stage string) {
-	p12Control(t, spec)
+	p := newProof(t, "L-FAULT-"+stage)
+	hardeningControl(t, p, spec)
 	spec.InjectFailAt = stage
-	result := runP12(t, spec, "echo COMMAND_RAN", nil)
 	errno := syscall.EIO
 	if stage == "exec" {
 		errno = syscall.ENOENT
 	}
-	expectP12Abort(t, "L-FAULT-"+stage, stage, errno, result)
+	id := "P-FAULT-" + stage
+	if stage == "nsverify" {
+		id = "P-NSVERIFY"
+	}
+	if stage == "tsync" {
+		id = "P-SC-TSYNC"
+	}
+	plan := hardeningAbortPlan(stage, errno, jailmut.On(id))
+	p.Jailed("attempt", runJailed(t, p, spec, plan))
+	mutationEffect(t, "L-FAULT-"+stage, "reached-exec", plan.Mode == Execute)
+	p.Finish()
 }
-
 func legNamespace(t *testing.T, spec Spec, namespace string) {
-	p12Control(t, spec)
+	p := newProof(t, "L-NSVERIFY-"+namespace)
+	hardeningControl(t, p, spec)
+	var results []JailedResult
 	if namespace == "pid" {
 		expected, err := os.Readlink("/proc/self/ns/pid")
 		mutationSetup(t, err)
-		result := runP12(t, spec, "readlink /proc/self/ns/pid", nil)
-		if result.setupErr != nil || result.exit != 0 || strings.TrimSpace(result.stdout) != expected {
-			unexpected(t, "pid namespace is not the host's: %+v", result)
-			t.FailNow()
-		}
+		results = append(results, runJailed(t, p, spec, RunPlan{Mode: Execute, Ops: []ProofOp{{Name: "pid", Command: "readlink /proc/self/ns/pid", Outcomes: []OpOutcome{{Stdout: expected + "\n"}}}}}))
 	}
 	before, err := os.ReadFile("/proc/self/mountinfo")
 	mutationSetup(t, err)
-	result := runP12(t, spec, "echo COMMAND_RAN", func(j *Jailed) { j.Cmd.Args = append(j.Cmd.Args, "same-"+namespace) })
-	expectP12Abort(t, "L-NSVERIFY-"+namespace, "nsverify", syscall.EPERM, result)
+	plan := hardeningAbortPlan("nsverify", syscall.EPERM, jailmut.On("P-NSVERIFY"))
+	plan.Configure = func(j *Jailed) { j.Cmd.Args = append(j.Cmd.Args, "same-"+namespace) }
+	results = append(results, runJailed(t, p, spec, plan))
+	p.Jailed("attempt", results...)
 	after, err := os.ReadFile("/proc/self/mountinfo")
-	mutationSetup(t, err)
-	if !bytes.Equal(before, after) {
-		unexpected(t, "host mountinfo changed")
-		t.FailNow()
-	}
+	p.Observed("mounts", Observation{Conclusive: err == nil, Sealed: true, Valid: bytes.Equal(before, after), Detail: "host mountinfo after completed namespace attempt"})
+	mutationEffect(t, "L-NSVERIFY-"+namespace, "reached-exec", plan.Mode == Execute)
+	p.Finish()
 }
 
 func legSpecReject(t *testing.T, abi int) {
+	p := newProof(t, "L-SPEC-REJECT")
+	defer p.Finish()
 	home, err := os.UserHomeDir()
 	mutationSetup(t, err)
 	directory, err := os.MkdirTemp(home, ".sshgate-jailtest-")
@@ -199,8 +210,13 @@ func legSpecReject(t *testing.T, abi int) {
 	}
 	mutationSetup(t, os.Chmod(target, 0600))
 	spec := Spec{Profile: ProfileROv1, ForceABI: abi, Net: true}
-	p12Control(t, spec)
-	result := runP12(t, spec, command+"; echo COMMAND_RAN", func(j *Jailed) {
+	hardeningControl(t, p, spec)
+	plan := hardeningAbortPlan("spec", syscall.EINVAL, jailmut.On("P-SPEC"))
+	if plan.Mode == Execute {
+		plan.Ops[0].Command = "LC_ALL=C " + command + "; printf COMMAND_RAN"
+		plan.Ops[0].Outcomes = []OpOutcome{{Stdout: "COMMAND_RAN", Stderr: "chmod: changing permissions of '" + target + "': Operation not permitted\n"}, {Stdout: "COMMAND_RAN", Stderr: "chmod: changing permissions of '" + target + "': Read-only file system\n"}}
+	}
+	plan.Configure = func(j *Jailed) {
 		if err := json.Unmarshal([]byte(j.Cmd.Args[2]), &spec); err != nil {
 			unexpected(t, "%v", err)
 			t.FailNow()
@@ -209,17 +225,22 @@ func legSpecReject(t *testing.T, abi int) {
 		raw, err := json.Marshal(spec)
 		mutationSetup(t, err)
 		j.Cmd.Args[2] = string(raw)
-	})
+		if jailmut.On("P-SPEC") {
+			j.spec.Profile = spec.Profile
+		}
+	}
+	result := runJailed(t, p, spec, plan)
+	p.Jailed("attempt", result)
 	info, err = os.Stat(target)
 	mutationSetup(t, err)
 	if info.Mode().Perm() != 0600 {
 		unexpected(t, "invalid spec changed target mode")
 		t.FailNow()
 	}
-	// The gate's Facts check may still reject the report after the command ran;
-	// reaching exec is the effect either way.
-	if result.setupErr == nil || strings.Contains(result.stdout, "COMMAND_RAN\n") {
-		if result.exit != 0 || !strings.Contains(result.stdout, "COMMAND_RAN\n") {
+	p.Observed("target", Observation{Conclusive: true, Sealed: true, Valid: info.Mode().Perm() == 0600, Detail: "target mode after completed invalid-spec attempt"})
+	// The complete frame proves reaching exec even for the injected profile.
+	if result.setupErr == nil || strings.Contains(result.stdout, "COMMAND_RAN") {
+		if result.exit != 0 || !strings.Contains(result.stdout, "COMMAND_RAN") {
 			t.Fatalf("SETUP: invalid spec did not finish command: %+v", result)
 		}
 		mutationEffect(t, "L-SPEC-REJECT", "reached-exec", true)
@@ -232,9 +253,22 @@ func legSpecReject(t *testing.T, abi int) {
 }
 
 func legRootState(t *testing.T, spec Spec) {
+	p := newProof(t, "L-ROOT-STATE")
+	if os.Geteuid() != 0 {
+		p.Omit("root-only")
+		return
+	}
+	defer p.Finish()
 	probe := buildProbe(t)
-	control, err := exec.Command(probe, "root-state", "unused").CombinedOutput()
+	controlCommand := exec.Command(probe, "root-state", "unused")
+	var controlStderr bytes.Buffer
+	controlCommand.Stderr = &controlStderr
+	control, err := controlCommand.Output()
 	mutationSetup(t, err)
+	if controlStderr.Len() != 0 {
+		t.Fatalf("SETUP: control stderr %q", controlStderr.String())
+	}
+	mutationSetup(t, validateHardeningControl("root-state", string(control)))
 	if strings.Contains(string(control), "CapEff:\t0000000000000004\n") {
 		t.Fatal("SETUP: root capability control already at jail floor")
 	}
@@ -242,7 +276,8 @@ func legRootState(t *testing.T, spec Spec) {
 		t.Fatal("SETUP: missing root capability control")
 	}
 
-	result := runP12(t, spec, probe+" root-state unused", nil)
+	p.Control("probe", ControlResult{Valid: true, Detail: "unjailed capability floor differs"})
+	result := hardeningProbe(t, p, spec, probe+" root-state unused", 0)
 	if result.setupErr != nil || result.exit != 0 {
 		t.Fatalf("SETUP: root state: %+v", result)
 	}
@@ -283,28 +318,55 @@ func legRootState(t *testing.T, spec Spec) {
 	if evalFilter(t, buildFilter(filterParams{}), dataFor(unix.SYS_OPEN_BY_HANDLE_AT, x8664)) != actDeny {
 		unexpected(t, "root filter permits open_by_handle_at")
 	}
+	p.Observed("probe", Observation{Conclusive: true, Sealed: true, Valid: !t.Failed(), Detail: "complete framed operation and all post-operation assertions checked"})
 }
 
 func legRootNproc(t *testing.T, spec Spec) {
+	p := newProof(t, "L-ROOT-NPROC")
+	if os.Geteuid() != 0 {
+		p.Omit("root-only")
+		return
+	}
+	defer p.Finish()
 	probe := buildProbe(t)
-	control, err := exec.Command(probe, "root-nproc", "unused").CombinedOutput()
+	controlCommand := exec.Command(probe, "root-nproc", "unused")
+	var controlStderr bytes.Buffer
+	controlCommand.Stderr = &controlStderr
+	control, err := controlCommand.Output()
 	mutationSetup(t, err)
+	if controlStderr.Len() != 0 {
+		t.Fatalf("SETUP: control stderr %q", controlStderr.String())
+	}
+	mutationSetup(t, validateHardeningControl("root-nproc", string(control)))
 	if !strings.Contains(string(control), "fork-root=ok") {
 		t.Fatalf("SETUP: root control %s", control)
 	}
-	result := runP12(t, spec, probe+" root-nproc unused", nil)
+	p.Control("probe", ControlResult{Valid: true, Detail: "unjailed root fork completed"})
+	result := hardeningProbe(t, p, spec, probe+" root-nproc unused", 0)
 	if result.setupErr != nil || result.exit != 0 || (!strings.Contains(result.stdout, "fork-root=ok") || !strings.Contains(result.stdout, "nproc=256:256")) {
 		unexpected(t, "root NPROC exemption: %+v", result)
 		t.FailNow()
 	}
+	p.Observed("probe", Observation{Conclusive: true, Sealed: true, Valid: !t.Failed(), Detail: "complete framed operation and all post-operation assertions checked"})
 }
 
 func legRootProc(t *testing.T, spec Spec) {
+	p := newProof(t, "L-ROOT-PROC")
+	if os.Geteuid() != 0 {
+		p.Omit("root-only")
+		return
+	}
+	if os.Getenv("SSHGATE_JAIL_CI") != "1" {
+		p.Omit("ci-only")
+		return
+	}
+	defer p.Finish()
 	const path = "/proc/sys/kernel/printk"
 	before, err := os.ReadFile(path)
 	mutationSetup(t, err)
 	mutationSetup(t, os.WriteFile(path, before, 0600))
-	result := runP12(t, spec, "printf '%s' '"+strings.TrimSpace(string(before))+"' > "+path, nil)
+	p.Control("probe", ControlResult{Valid: true, Detail: "unjailed printk write completed"})
+	result := hardeningProbe(t, p, spec, "LC_ALL=C /bin/sh -c "+proofShellQuote("printf '%s' '"+strings.TrimSpace(string(before))+"' > "+path), -1)
 	if result.setupErr != nil {
 		t.Fatalf("SETUP: %+v", result)
 	}
@@ -318,20 +380,31 @@ func legRootProc(t *testing.T, spec Spec) {
 		unexpected(t, "printk changed")
 		t.FailNow()
 	}
+	p.Observed("probe", Observation{Conclusive: true, Sealed: true, Valid: !t.Failed(), Detail: "complete framed operation and all post-operation assertions checked"})
 }
 
 func legScratchMetadata(t *testing.T, spec Spec) {
+	p := newProof(t, "L-SCRATCH-META")
+	defer p.Finish()
 	probe := buildProbe(t)
 	target := filepath.Join(t.TempDir(), "metadata")
 	mutationSetup(t, os.WriteFile(target, []byte("canary"), 0600))
-	control, err := exec.Command(probe, "metadata", target).CombinedOutput()
+	controlCommand := exec.Command(probe, "metadata", target)
+	var controlStderr bytes.Buffer
+	controlCommand.Stderr = &controlStderr
+	control, err := controlCommand.Output()
 	mutationSetup(t, err)
+	mutationSetup(t, validateHardeningEffectControl("metadata", string(control), controlStderr.String(), 0))
 	for _, op := range []string{"chmod", "chown", "setxattr", "utimensat"} {
 		if !strings.Contains(string(control), op+"=ok\n") {
 			t.Fatalf("SETUP: control %s", control)
 		}
 	}
-	result := runP12(t, spec, "umask 077; printf canary > /dev/shm/metadata; "+probe+" metadata /dev/shm/metadata", nil)
+	p.Control("probe", ControlResult{Valid: true, Detail: "all unjailed metadata operations succeeded"})
+	command := "umask 077; test ! -e /dev/shm/metadata && printf canary > /dev/shm/metadata && " + probe + " metadata-snapshot /dev/shm/metadata before && { " + probe + " metadata /dev/shm/metadata; metadata_status=$?; " + probe + " metadata-snapshot /dev/shm/metadata after || exit $?; exit $metadata_status; }"
+	result := hardeningProbe(t, p, spec, command, -1)
+	before, after, _, err := parseHardeningMetadata(result.stdout)
+	mutationSetup(t, err)
 	if result.setupErr != nil {
 		t.Fatalf("SETUP: metadata: %+v", result)
 	}
@@ -350,10 +423,20 @@ func legScratchMetadata(t *testing.T, spec Spec) {
 	}
 	switch success {
 	case 0:
+		if before != after {
+			t.Fatalf("SETUP: denied metadata changed state: before=%+v after=%+v", before, after)
+		}
 		if result.exit != 1 {
 			t.Fatalf("SETUP: denied metadata exit: %+v", result)
 		}
 	case 4:
+		wantXattr := "test"
+		if xattrUnsupported {
+			wantXattr = "unsupported"
+		}
+		if after.mode != "644" || after.seconds != "1000" || after.nanoseconds != "0" || after.xattr != wantXattr {
+			t.Fatalf("SETUP: metadata effect snapshot incomplete: %+v", after)
+		}
 		if result.exit == 0 == xattrUnsupported || !strings.Contains(result.stdout, "mode=644\n") || !strings.Contains(result.stdout, "mtime=1000\n") || !xattrUnsupported && !strings.Contains(result.stdout, "xattr=test\n") {
 			t.Fatalf("SETUP: metadata effect incomplete: %+v", result)
 		}
@@ -361,20 +444,27 @@ func legScratchMetadata(t *testing.T, spec Spec) {
 	default:
 		t.Fatalf("SETUP: partial metadata mutation: %+v", result)
 	}
+	p.Observed("probe", Observation{Conclusive: true, Sealed: true, Valid: !t.Failed(), Detail: "complete framed operation and all post-operation assertions checked"})
 }
 
 func legFileattrErrno(t *testing.T, spec Spec) {
+	p := newProof(t, "L-FILEATTR-ERRNO")
+	defer p.Finish()
 	probe := buildProbe(t)
 	file, err := os.CreateTemp("/dev/shm", "sshgate-fileattr-")
 	mutationSetup(t, err)
 	target := file.Name()
 	mutationSetup(t, file.Close())
 	t.Cleanup(func() { _ = os.Remove(target) })
-	control, err := exec.Command(probe, "fileattr", target).CombinedOutput()
+	controlCommand := exec.Command(probe, "fileattr", target)
+	var controlStderr bytes.Buffer
+	controlCommand.Stderr = &controlStderr
+	control, err := controlCommand.Output()
 	var exit *exec.ExitError
 	if err != nil && !errors.As(err, &exit) {
 		mutationSetup(t, err)
 	}
+	mutationSetup(t, validateHardeningEffectControl("fileattr", string(control), controlStderr.String(), proofExit(err)))
 	expected := map[string]string{}
 	for _, op := range []string{"setflags", "setflags32", "fssetxattr"} {
 		for _, line := range strings.Split(string(control), "\n") {
@@ -386,7 +476,8 @@ func legFileattrErrno(t *testing.T, spec Spec) {
 			t.Fatalf("SETUP: fileattr control unavailable: %s", control)
 		}
 	}
-	result := runP12(t, spec, "printf canary > /dev/shm/fileattr; "+probe+" fileattr /dev/shm/fileattr", nil)
+	p.Control("probe", ControlResult{Valid: true, Detail: "all unjailed fileattr responses established"})
+	result := hardeningProbe(t, p, spec, "printf canary > /dev/shm/fileattr; "+probe+" fileattr /dev/shm/fileattr", -1)
 	if result.setupErr != nil || !strings.Contains(result.stdout, "open=ok\n") {
 		t.Fatalf("SETUP: fileattr: %+v", result)
 	}
@@ -414,4 +505,13 @@ func legFileattrErrno(t *testing.T, spec Spec) {
 		t.Fatalf("SETUP: denied fileattr exit: %+v", result)
 	}
 	mutationEffect(t, "L-FILEATTR-ERRNO", "fileattr-errno", unfiltered == 3)
+	p.Observed("probe", Observation{Conclusive: true, Sealed: true, Valid: !t.Failed(), Detail: "complete framed operation and all post-operation assertions checked"})
+}
+
+func hardeningProbe(t *testing.T, p *proof, spec Spec, command string, wantExit int) JailedResult {
+	result := runJailed(t, p, spec, RunPlan{Mode: Execute, Ops: []ProofOp{{Name: "probe", Command: command, Validate: func(stdout, stderr string, exit int) error {
+		return validateHardeningReport(p.caseDef.Name, stdout, stderr, exit, wantExit)
+	}}}})
+	p.Jailed("probe", result)
+	return result
 }

@@ -194,9 +194,19 @@ func TestExecWithRedactionConfineClosesInheritedFDs(t *testing.T) {
 	}
 }
 
-func TestExecWithRedactionConfineNamespaceClobber(t *testing.T) { testExecutorNamespaceClobber(t) }
+func TestExecWithRedactionConfineNSVerify(t *testing.T) {
+	t.Run("native", func(t *testing.T) { t.Run("L-NSVERIFY", testExecutorNamespaceClobber) })
+	t.Run("abi1", func(t *testing.T) { t.Run("L-NSVERIFY", testExecutorNamespaceClobber) })
+}
 
 func testExecutorNamespaceClobber(t *testing.T) {
+	p := newProof(t, "L-NSVERIFY")
+	spec := confine.Spec{Profile: confine.ProfileROv1}
+	if p.abi == "abi1" {
+		spec.ForceABI = 1
+	}
+	control := runJailed(t, p, spec, executorRunPlan{mode: "Execute"})
+	p.Control("intact", control)
 	before, err := os.ReadFile("/proc/self/mountinfo")
 	if err != nil {
 		t.Fatal(err)
@@ -210,22 +220,12 @@ func testExecutorNamespaceClobber(t *testing.T) {
 		return jailed, err
 	}
 	defer func() { confinedCommand = original }()
-	result, err := ExecWithRedaction(context.Background(), "echo EXECUTOR_CANARY", ExecOpts{Confine: &confine.Spec{Profile: confine.ProfileROv1}, CaptureLimit: 4096})
-	var setup *confine.SetupError
-	if !errors.As(err, &setup) || (setup.Stage != "nsverify" && setup.Stage != "private") || setup.Errno != syscall.EPERM {
-		t.Fatalf("expected nsverify EPERM; result=%+v error=%v", result, err)
-	}
-	if setup.Stage == "private" {
-		t.Errorf("MUTATION-ABORT L-NSVERIFY private")
-	}
-	if strings.Contains(result.Stdout, "EXECUTOR_CANARY") {
-		t.Fatal("command executed after clobber")
-	}
+	result := runJailed(t, p, spec, executorRunPlan{mode: "SetupAbort"})
+	p.Jailed("attempt", result)
 	after, err := os.ReadFile("/proc/self/mountinfo")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(before) != string(after) {
-		t.Fatal("host mountinfo changed")
-	}
+	p.Observed("mounts", executorObservation{sealed: result.validated, conclusive: true, valid: string(before) == string(after)})
+	p.Finish()
 }

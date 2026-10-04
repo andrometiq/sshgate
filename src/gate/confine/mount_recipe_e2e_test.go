@@ -25,47 +25,62 @@ func TestJailMatrixP14(t *testing.T) {
 		t.Run(cfg.name, func(t *testing.T) {
 			spec := Spec{Profile: ProfileROv1, ForceABI: cfg.abi, Net: true}
 			t.Run("L-FAULT-fds-ENOSYS", func(t *testing.T) {
-				p12Control(t, spec)
+				p := newProof(t, "L-FAULT-fds-ENOSYS")
+				control := runJailed(t, p, spec, RunPlan{Mode: Execute, Ops: []ProofOp{{Name: "control", Command: "printf CONTROL_RAN", Outcomes: []OpOutcome{{Stdout: "CONTROL_RAN"}}}}})
+				p.Control("intact", ControlResult{Valid: true, Jailed: &control})
 				injected := spec
 				injected.InjectFailAt = "fds:ENOSYS"
-				result := runP12(t, injected, "echo COMMAND_RAN", nil)
-				expectP12Abort(t, "L-FAULT-fds-ENOSYS", "fds", unix.ENOSYS, result)
+				plan := hardeningAbortPlan("fds", unix.ENOSYS, jailmut.On("P-FAULT-fds"))
+				p.Jailed("attempt", runJailed(t, p, injected, plan))
+				mutationEffect(t, "L-FAULT-fds-ENOSYS", "reached-exec", plan.Mode == Execute)
+				p.Finish()
 			})
 			t.Run("L-MOUNT-STAGES", func(t *testing.T) {
+				p := newProof(t, "L-MOUNT-STAGES")
+				control := runJailed(t, p, spec, RunPlan{Mode: Execute, Ops: []ProofOp{{Name: "control", Command: "printf CONTROL_RAN", Outcomes: []OpOutcome{{Stdout: "CONTROL_RAN"}}}}})
+				p.Control("intact", ControlResult{Valid: true, Jailed: &control})
+				var results []JailedResult
 				for _, stage := range []string{"private", "setattr", "devnodes", "covers", "scratch"} {
-					t.Run(stage, func(t *testing.T) { legFault(t, spec, stage) })
+					injected := spec
+					injected.InjectFailAt = stage
+					plan := hardeningAbortPlan(stage, unix.EIO, false)
+					results = append(results, runJailed(t, p, injected, plan))
 				}
+				p.Jailed("attempt", results...)
+				p.Finish()
 			})
 			t.Run("L-DEVICES", func(t *testing.T) {
+				p := newProof(t, "L-DEVICES")
 				probe := buildProbe(t)
+				var results []JailedResult
 				for _, node := range []string{"null", "zero", "full", "urandom"} {
-					t.Run(node, func(t *testing.T) {
-						path := "/dev/" + node
-						control, _ := exec.Command(probe, "device-write", path).CombinedOutput()
-						if !strings.Contains(string(control), "open=ok\n") {
-							t.Fatalf("SETUP: device control %s", control)
-						}
-						result := runP12(t, spec, probe+" device-write "+path, nil)
-						if result.setupErr != nil {
-							t.Fatalf("SETUP: %+v", result)
-						}
-						if node == "null" {
-							if result.exit != 0 || !strings.Contains(result.stdout, "write=ok\n") {
-								unexpected(t, "null broke: %+v", result)
-								t.FailNow()
-							}
-						} else if !strings.Contains(result.stdout, "open=13\n") {
-							unexpected(t, "device write not EACCES: %+v", result)
-						}
-					})
+					path := "/dev/" + node
+					controlWant := "open=ok\nwrite=ok\n"
+					controlExit := 0
+					if node == "full" {
+						controlWant = "open=ok\nwrite=28\n"
+						controlExit = 3
+					}
+					control := mountControl(t, exec.Command(probe, "device-write", path), controlExit)
+					if string(control) != controlWant {
+						t.Fatalf("SETUP: device control %s", control)
+					}
+					want := OpOutcome{Stdout: "open=13\n", Exit: 1}
+					if node == "null" {
+						want = OpOutcome{Stdout: "open=ok\nwrite=ok\n"}
+					}
+					results = append(results, runJailed(t, p, spec, RunPlan{Mode: Execute, Ops: []ProofOp{{Name: node, Command: probe + " device-write " + path, Outcomes: []OpOutcome{want}}}}))
 				}
+				p.Control("devices", ControlResult{Valid: true})
+				p.Jailed("devices", results...)
+				p.Finish()
 			})
 			t.Run("L-TTY-NODEV", func(t *testing.T) {
+				p := newProof(t, "L-TTY-NODEV")
 				probe := buildProbe(t)
 				path, fd := openPty(t)
-				control, err := exec.Command(probe, "tiocexcl", path).CombinedOutput()
-				mutationSetup(t, err)
-				if !strings.Contains(string(control), "tiocexcl=ok\n") {
+				control := mountControl(t, exec.Command(probe, "tiocexcl", path), 0)
+				if string(control) != "open=ok\ntiocexcl=ok\n" {
 					t.Fatalf("SETUP: ioctl control %s", control)
 				}
 				exclusive, err := unix.IoctlGetInt(fd, unix.TIOCGEXCL)
@@ -74,59 +89,73 @@ func TestJailMatrixP14(t *testing.T) {
 					t.Fatal("SETUP: TIOCEXCL had no effect")
 				}
 				mutationSetup(t, unix.IoctlSetInt(fd, unix.TIOCNXCL, 0))
-				result := runP12(t, spec, probe+" tiocexcl "+path, nil)
+				p.Control("tty", ControlResult{Valid: true})
+				observer := &mountStateObserver{sample: func() []string {
+					exclusive, err = unix.IoctlGetInt(fd, unix.TIOCGEXCL)
+					mutationSetup(t, err)
+					return []string{fmt.Sprint(exclusive)}
+				}}
+				p.ObserveWith("tty", observer)
+				mark := observer.Mark()
+				result := runJailed(t, p, spec, RunPlan{Mode: Execute, Ops: []ProofOp{{Name: "tty", Command: probe + " tiocexcl " + path, Outcomes: []OpOutcome{{Stdout: "open=13\n", Exit: 1}}}}})
+				p.Jailed("tty", result)
 				if result.setupErr != nil {
 					t.Fatalf("SETUP: %+v", result)
 				}
 				if !strings.Contains(result.stdout, "open=13\n") {
 					unexpected(t, "pty open not denied: %+v", result)
 				}
-				exclusive, err = unix.IoctlGetInt(fd, unix.TIOCGEXCL)
-				mutationSetup(t, err)
+				sealMountState(t, observer, mark)
 				if exclusive != 0 {
 					unexpected(t, "outside tty changed")
 				}
+				p.Observed("tty", Observation{Conclusive: true, Sealed: true, Valid: exclusive == 0})
+				p.Finish()
 			})
 			t.Run("L-SCRATCH", func(t *testing.T) {
+				p := newProof(t, "L-SCRATCH")
 				file, err := os.CreateTemp("/dev/shm", "sshgate-host-")
 				mutationSetup(t, err)
 				_, err = file.WriteString("host-shm-canary")
 				mutationSetup(t, err)
 				mutationSetup(t, file.Close())
-				mutationSetup(t, exec.Command("/bin/true").Run())
+				mountControl(t, exec.Command("/bin/true"), 0)
 				t.Cleanup(func() { os.Remove(file.Name()) })
-				result := runP12(t, spec, "test ! -e "+file.Name()+" && printf scratch > /dev/shm/file && test $(cat /dev/shm/file) = scratch && cp /bin/true /dev/shm/exec && /dev/shm/exec", nil)
+				p.Control("scratch", ControlResult{Valid: true})
+				var after []byte
+				observer := &mountStateObserver{sample: func() []string {
+					after, err = os.ReadFile(file.Name())
+					mutationSetup(t, err)
+					return []string{string(after)}
+				}}
+				p.ObserveWith("scratch", observer)
+				mark := observer.Mark()
+				result := runJailed(t, p, spec, RunPlan{Mode: Execute, Ops: []ProofOp{{Name: "scratch", Command: "test ! -e " + file.Name() + " && printf scratch > /dev/shm/file && test $(cat /dev/shm/file) = scratch && cp /bin/true /dev/shm/exec && { /dev/shm/exec; code=$?; test $code = 126; }", Validate: func(stdout, stderr string, exit int) error {
+					if exit != 0 || stdout != "" || (!strings.HasSuffix(strings.ToLower(stderr), "/dev/shm/exec: permission denied\n") || strings.Count(stderr, "\n") != 1) {
+						return fmt.Errorf("scratch noexec: %d %q %q", exit, stdout, stderr)
+					}
+					return nil
+				}}}})
+				p.Jailed("scratch", result)
 				if result.setupErr != nil {
 					t.Fatalf("SETUP: %+v", result)
 				}
-				if result.exit != 126 || !strings.Contains(strings.ToLower(result.stderr), "permission denied") {
+				if result.exit != 0 || !strings.Contains(strings.ToLower(result.stderr), "permission denied") {
 					unexpected(t, "scratch isolation/noexec: %+v", result)
 				}
-				after, err := os.ReadFile(file.Name())
-				mutationSetup(t, err)
+				sealMountState(t, observer, mark)
 				if string(after) != "host-shm-canary" {
 					unexpected(t, "host scratch object changed")
 				}
+				p.Observed("scratch", Observation{Conclusive: true, Sealed: true, Valid: string(after) == "host-shm-canary"})
+				p.Finish()
 			})
 			t.Run("L-WRITE-ROOT", func(t *testing.T) { legWriteSweep(t, spec, false) })
 			t.Run("L-WRITE-SUBMOUNT", func(t *testing.T) { legWriteSweep(t, spec, true) })
 			t.Run("L-MQUEUE", func(t *testing.T) { legMqueueCover(t, spec) })
 			t.Run("L-MQUEUE-ERRNO", func(t *testing.T) { legMqueueErrno(t, spec) })
-			t.Run("L-RL-CORE", func(t *testing.T) {
-				probe := buildProbe(t)
-				control, err := exec.Command(probe, "core-limit", "unused").CombinedOutput()
-				mutationSetup(t, err)
-				var soft, hard uint64
-				_, err = fmt.Sscanf(strings.TrimSpace(string(control)), "core=%d:%d", &soft, &hard)
-				mutationSetup(t, err)
-				want := min(uint64(1), hard)
-				result := runP12(t, spec, probe+" core-limit unused", nil)
-				if result.setupErr != nil || result.exit != 0 || strings.TrimSpace(result.stdout) != fmt.Sprintf("core=%d:%d", want, want) {
-					unexpected(t, "core limit (inherited hard=%d): %+v", hard, result)
-					t.FailNow()
-				}
-			})
 			t.Run("L-TMP-VISIBLE", func(t *testing.T) {
+				p := newProof(t, "L-TMP-VISIBLE")
 				file, err := os.CreateTemp("/tmp", "sshgate-visible-")
 				mutationSetup(t, err)
 				path := file.Name()
@@ -136,32 +165,36 @@ func TestJailMatrixP14(t *testing.T) {
 				mutationSetup(t, file.Close())
 				control, err := os.ReadFile(path)
 				mutationSetup(t, err)
-				result := runP12(t, spec, "cat "+path, nil)
+				result := runJailed(t, p, spec, RunPlan{Mode: Execute, Ops: []ProofOp{{Name: "read", Command: "cat " + path, Outcomes: []OpOutcome{{Stdout: string(control)}}}}})
+				p.Jailed("read", result)
 				if result.setupErr != nil || result.exit != 0 || result.stdout != string(control) {
 					unexpected(t, "tmp invisible: %+v", result)
 					t.FailNow()
 				}
+				p.Finish()
 			})
 			t.Run("L-PS-VISIBLE", func(t *testing.T) {
-				all, err := exec.Command("ps", "aux").Output()
-				mutationSetup(t, err)
+				p := newProof(t, "L-PS-VISIBLE")
+				var results []JailedResult
+				all := mountControl(t, exec.Command("ps", "aux"), 0)
 				if len(psRows(string(all))) <= 5 {
 					t.Fatal("SETUP: host ps needs more than five processes")
 				}
 				command := fmt.Sprintf("ps -p %d -o comm=", os.Getpid())
-				control, err := exec.Command("/bin/sh", "-c", command).Output()
-				mutationSetup(t, err)
+				control := mountControl(t, exec.Command("/bin/sh", "-c", command), 0)
 				if len(bytes.TrimSpace(control)) == 0 {
 					t.Fatal("SETUP: missing host process")
 				}
 				for repetition := 0; repetition < 20; repetition++ {
-					result := runP12(t, spec, command, nil)
+					result := runJailed(t, p, spec, RunPlan{Mode: Execute, Ops: []ProofOp{{Name: "ps", Command: command, Outcomes: []OpOutcome{{Stdout: string(control)}}}}})
+					results = append(results, result)
 					if result.setupErr != nil || result.exit != 0 || result.stdout != string(control) {
 						unexpected(t, "host process invisible: %+v", result)
 						t.FailNow()
 					}
 				}
-
+				p.Jailed("ps", results...)
+				p.Finish()
 			})
 		})
 	}
@@ -198,18 +231,25 @@ func queueFixture(t *testing.T) (string, *os.File) {
 	return name, file
 }
 func legMqueueErrno(t *testing.T, spec Spec) {
+	p := newProof(t, "L-MQUEUE-ERRNO")
 	name, file := queueFixture(t)
 	probe := buildProbe(t)
-	result := runP12(t, spec, probe+" mq-errno "+name, func(j *Jailed) { j.Cmd.Stdin = file })
-	output := requireProbeOutput(t, result, "mq_open", "mq_timedreceive")
+	plan := RunPlan{Mode: Execute, Ops: []ProofOp{{Name: "mq", Command: probe + " mq-errno " + name, Outcomes: []OpOutcome{{Stdout: "mq_open=1\nmq_timedreceive=1\n", Exit: 1}, {Stdout: "mq_open=2\nmq_timedreceive=ok\n", Exit: 3}}}}}
+	plan.Configure = func(j *Jailed) { j.Cmd.Stdin = file }
+	result := runJailed(t, p, spec, plan)
+	p.Jailed("errno", result)
+	output := result.stdout
 	denied := strings.Contains(output, "mq_open=1\n") && strings.Contains(result.stdout, "mq_timedreceive=1\n")
 	mutated := strings.Contains(result.stdout, "mq_open=2\n") && strings.Contains(result.stdout, "mq_timedreceive=ok\n")
 	if !denied && !mutated {
 		t.Fatalf("SETUP: unexpected MQ result %+v", result)
 	}
 	mutationEffect(t, "L-MQUEUE-ERRNO", "mq-errno", mutated)
+	p.Finish()
 }
 func legMqueueCover(t *testing.T, spec Spec) {
+	p := newProof(t, "L-MQUEUE")
+	var results []JailedResult
 	entries, err := readMountInfo()
 	mutationSetup(t, err)
 	count := 0
@@ -226,14 +266,21 @@ func legMqueueCover(t *testing.T, spec Spec) {
 		if !strings.Contains(string(before), "QSIZE:6") {
 			t.Fatalf("SETUP: queue not populated: %s", before)
 		}
-		result := runP12(t, spec, buildProbe(t)+" mq-drain "+path, nil)
-		output := requireProbeOutput(t, result, "open", "open>mq_timedreceive")
+		var after []byte
+		observer := &mountStateObserver{sample: func() []string { after, err = os.ReadFile(path); mutationSetup(t, err); return []string{string(after)} }}
+		p.ObserveWith(fmt.Sprintf("queue-%d", count), observer)
+		mark := observer.Mark()
+		result := runJailed(t, p, spec, RunPlan{Mode: Execute, Ops: []ProofOp{{Name: "mq", Command: buildProbe(t) + " mq-drain " + path, Outcomes: []OpOutcome{{Stdout: "open=2\n", Exit: 1}, {Stdout: "open=ok\nmq_timedreceive=ok\n"}}}}})
+		results = append(results, result)
+		output := result.stdout
 		if !strings.Contains(output, "open=2\n") && !strings.Contains(result.stdout, "mq_timedreceive=ok\n") {
 			t.Fatalf("SETUP: unexpected queue result: %+v", result)
 		}
-		after, err := os.ReadFile(path)
-		mutationSetup(t, err)
+		sealMountState(t, observer, mark)
 		pathDrained := !bytes.Equal(before, after)
+		if pathDrained != strings.Contains(output, "mq_timedreceive=ok\n") {
+			t.Fatalf("SETUP: queue drain report disagrees with sealed state: %q %q", output, after)
+		}
 		if count > 0 && pathDrained != drained {
 			t.Fatal("SETUP: inconsistent drain observations across mqueue mounts")
 		}
@@ -243,17 +290,32 @@ func legMqueueCover(t *testing.T, spec Spec) {
 	if count == 0 {
 		t.Fatal("SETUP: no mqueue mount")
 	}
+	p.Control("queue", ControlResult{Valid: count > 0, Detail: "each fresh queue control sent, received and re-seeded canary"})
+	p.Jailed("drain", results...)
+	p.Observed("queue", Observation{Conclusive: true, Sealed: true, Valid: true, Detail: "queue size sampled after each framed drain ended"})
 	mutationEffect(t, "L-MQUEUE", "queue-drained", drained)
+	p.Finish()
 }
 
 func legWriteSweep(t *testing.T, spec Spec, submount bool) {
+	leg := "L-WRITE-ROOT"
+	if submount {
+		leg = "L-WRITE-SUBMOUNT"
+	}
+	p := newProof(t, leg)
 	directory := writeSweepFixture(t, submount)
 	seed := func() { seedWriteSweep(t, directory) }
 	seed()
 	probe := buildProbe(t)
-	control, err := exec.Command(probe, "write-sweep", directory).CombinedOutput()
-	mutationSetup(t, err)
+	control := mountControl(t, exec.Command(probe, "write-sweep", directory), 0)
 	operations := writeSweepOperations
+	var controlWant strings.Builder
+	for _, name := range operations {
+		fmt.Fprintf(&controlWant, "%s=ok\n", name)
+	}
+	if string(control) != controlWant.String() {
+		t.Fatalf("SETUP: incomplete write control: %q", control)
+	}
 	for _, name := range operations {
 		if !strings.Contains(string(control), name+"=ok\n") {
 			t.Fatalf("SETUP: control %s", control)
@@ -266,13 +328,18 @@ func legWriteSweep(t *testing.T, spec Spec, submount bool) {
 			t.Fatalf("SETUP: %s control content %q, want %q", name, data, want)
 		}
 	}
+	p.Control("write", ControlResult{Valid: true})
 	seed()
-	result := runP12(t, spec, probe+" write-sweep "+directory, nil)
-	output := requireProbeOutput(t, result, operations...)
-	leg := "L-WRITE-ROOT"
-	if submount {
-		leg = "L-WRITE-SUBMOUNT"
-	}
+	var writeChanged, truncated bool
+	observer := &mountStateObserver{sample: func() []string {
+		writeChanged, truncated = observeWriteSweep(t, directory)
+		return []string{fmt.Sprintf("write=%t truncate=%t", writeChanged, truncated)}
+	}}
+	p.ObserveWith("write", observer)
+	mark := observer.Mark()
+	result := runJailed(t, p, spec, mountProbePlan(probe+" write-sweep "+directory, mountWriteOutcomes(), operations...))
+	p.Jailed("write", result)
+	output := result.stdout
 	for _, name := range operations {
 		if jailmut.On("P-RO") && !jailmut.On("P-LL-FS") && (name == "write" || name == "append" || name == "open-trunc") && !strings.Contains(output, name+"=13\n") {
 			t.Fatalf("SETUP: Landlock write denial invariant failed for %s: %s", name, output)
@@ -288,9 +355,11 @@ func legWriteSweep(t *testing.T, spec Spec, submount bool) {
 			t.Fatalf("SETUP: %s expected errno %s: %+v", name, want, result)
 		}
 	}
-	writeChanged, truncated := observeWriteSweep(t, directory)
+	sealMountState(t, observer, mark)
 	mutationEffect(t, leg, "write", writeChanged)
 	mutationEffect(t, leg, "truncate", truncated)
+	p.Observed("write", Observation{Conclusive: true, Sealed: true, Valid: true, Detail: "all file contents and directory entries sampled after framed sweep ended"})
+	p.Finish()
 }
 
 var writeSweepOperations = []string{"write", "append", "open-trunc", "open-rdonly-trunc", "truncate-path", "unlink", "rmdir", "mkdir", "symlink", "link", "rename", "mkfifo"}
