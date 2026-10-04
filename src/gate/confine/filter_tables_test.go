@@ -15,9 +15,6 @@ func filterTableCheck(t *testing.T, leg string, checks func(func(bool))) {
 }
 
 func TestFilterTables(t *testing.T) {
-	t.Run("U-ClonePID", func(t *testing.T) {
-		mutationEffect(t, "U-ClonePID", "decision", cloneSysProcAttr().Cloneflags&unix.CLONE_NEWPID == 0)
-	})
 	t.Run("U-CloneIPC", func(t *testing.T) {
 		mutationEffect(t, "U-CloneIPC", "decision", cloneSysProcAttr().Cloneflags&unix.CLONE_NEWIPC == 0)
 	})
@@ -25,7 +22,7 @@ func TestFilterTables(t *testing.T) {
 	t.Run("U-FcntlCommandTable", func(t *testing.T) {
 		filterTableCheck(t, "U-FcntlCommandTable", func(check func(bool)) {
 			allowed := map[int]bool{}
-			for _, n := range []int{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 15, 16, 36, 37, 38, 1027, 1028, 1030, 1032, 1033, 1034, 1035, 1037} {
+			for _, n := range []int{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 16, 36, 37, 38, 1027, 1028, 1030, 1032, 1033, 1034, 1035, 1037} {
 				allowed[n] = true
 			}
 			f := buildFilter(filterParams{})

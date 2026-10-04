@@ -37,10 +37,11 @@ const (
 )
 
 // filterParams are the only inputs that shape the filter. Kept as explicit
-// booleans (not a Spec) so buildFilter is purely mechanical and a unit test can
+// values (not a Spec) so buildFilter is purely mechanical and a unit test can
 // assemble and evaluate every combination.
 type filterParams struct {
 	allowInet bool
+	abi       int
 }
 
 // retErrno builds a SECCOMP_RET_ERRNO action carrying errno in the low 16 bits.
@@ -156,6 +157,9 @@ func buildFilter(p filterParams) []unix.SockFilter {
 	actions := make([]string, len(syscallTable))
 	for i, row := range syscallTable {
 		action := row.action
+		if row.name == "PROCESS_MRELEASE" && jailmut.On("P-SC-PROCESS-MRELEASE") {
+			action = "allow"
+		}
 		if action != "allow" && jailmut.On("P-SC-"+row.name) {
 			action = "allow"
 		}

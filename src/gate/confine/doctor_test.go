@@ -92,8 +92,7 @@ func TestDecideInjected(t *testing.T) {
 	}
 }
 
-// TestRunProbeRefusesOutsideClone: called directly (not pid 1 of a fresh pid
-// namespace) the probe must refuse before any mount, so it can never change the
+// TestRunProbeRefusesOutsideClone: called directly (without a parent namespace contract) the probe must refuse before any mount, so it can never change the
 // caller's mount propagation.
 func TestRunProbeRefusesOutsideClone(t *testing.T) {
 	if got := RunProbe(nil); got != probeExitNotInClone {

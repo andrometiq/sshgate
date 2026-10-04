@@ -293,3 +293,13 @@ func TestAuditRungOmitEmpty(t *testing.T) {
 		t.Errorf("rung = %v, want full", recs[1]["rung"])
 	}
 }
+
+func TestAuditCleanupErrorKeepsExitStatus(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "audit.log")
+	logger := gate.NewAuditLogger(gate.AuditAllMeta, path)
+	logger.Record(gate.AuditRecord{Classification: "read", ApprovalStatus: "unsigned", ExitCode: 23, CleanupError: "descendant cleanup exceeded deadline"})
+	records := readRecords(t, path)
+	if len(records) != 1 || records[0]["exit_code"] != float64(23) || records[0]["cleanup_error"] != "descendant cleanup exceeded deadline" {
+		t.Fatalf("cleanup audit: %#v", records)
+	}
+}

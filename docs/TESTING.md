@@ -23,6 +23,49 @@ go test -count=1 ./...   # same, but defeat the build/test cache when verifying
 go test -race ./...      # run this before merge (needs CGO; see §10)
 ```
 
+The tagged jail mutation suite (`make test-jail-mutate`) omits CI-only controls
+outside `SSHGATE_JAIL_CI=1`. These include `L-SOCKDIAG`, both socket sweeps and
+`L-CRASH-NO-HELPER`. An omitted effect leg does not prevent a set's table leg
+from proving the mutation; a set with no remaining red leg is `NOT-RUN`.
+Phase-end acceptance requires both CI lane reports and no omission in their union.
+The io_uring probe waits for a published completion before checking the outside
+TCP/xattr effects. Its deterministic completion tests live under `testdata`, so
+run them explicitly; `go test ./...` does not discover them. Repeat the live leg
+on a jail-capable host with:
+
+```sh
+go test -race ./src/gate/confine/testdata/probe
+go test -tags=jail_e2e ./src/gate/confine -run '^TestJailMatrixP15/(native|abi1)/L-IOURING$' -count=20
+```
+
+Host-PID lifecycle cleanup is best effort, independent of confinement. The shim
+and gate have one reaping owner each, use pidfds to kill children, and retry
+failed enumeration for up to five seconds. Hosts without procfs `children`
+files use parent PIDs from `/proc/*/stat`. Cleanup failures preserve the executed
+command's status, emit one `gate-jail: cleanup: <reason>` stderr line, and populate
+the audit's `cleanup_error` field. Fatal gate signals, sustained forking and
+deadline expiry can leave confined descendants alive; there is no execution
+deadline for a read.
+
+`L-LIFECYCLE` and `TestExecWithRedactionConfineLifecycle` cover detached children,
+nested subreapers, bounded repeated forking during teardown, shim SIGTERM and
+SIGKILL, cancellation escalation, and inherited output pipes. Enumeration
+fallback and failure retries have unit seams. Run these with `make test-jail`
+and mutation-check `P-SUBREAPER,P-SESSION` with `make test-jail-mutate`.
+
+`make test-fidelity-smoke` repeats each jailed `ps aux`, `top -bn1` and `pgrep`
+observer 20 times per ABI. Its owned, uniquely named process makes `pidof` and
+`pgrep` controls independent of other host processes. `PIDOF-EXE-DENIED` applies
+only to executable-path matching with overridden argv[0]: the user namespace
+denies `/proc/<pid>/exe` readlink. That row requires exit 1 and empty output,
+plus the readlink permission error; ordinary argv-name matching and `pgrep -x`
+must still return exactly the owned PID. The `ss` projection accepts headers
+with or without a trailing `Process` label. After procfs normalization, listening
+and bound sockets must match the bracketing controls, allowing bracket churn.
+Connection-state rows may appear or disappear between samples, but every socket
+present in both controls must appear in the jail. Owned listeners and a held TCP
+connection keep these checks non-vacuous.
+
 What is **not** in the unit gate:
 
 - The Docker integration suites (`internal/redteam` and `tests/integration`,

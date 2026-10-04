@@ -34,7 +34,7 @@ func main() {
 		}
 	}
 	group("deny", "mount", "mount umount2 pivot_root open_tree move_mount fsopen fsmount fspick mount_setattr fsconfig open_tree_attr")
-	group("deny", "process-reach", "ptrace process_vm_readv process_vm_writev pidfd_getfd")
+	group("deny", "process-reach", "ptrace process_vm_readv process_vm_writev pidfd_getfd process_mrelease")
 	group("deny", "kernel-surface", "bpf perf_event_open userfaultfd keyctl add_key request_key io_uring_setup io_uring_enter io_uring_register kexec_load kexec_file_load init_module finit_module delete_module reboot swapon swapoff settimeofday clock_settime clock_adjtime adjtimex")
 	group("deny", "personality", "personality")
 	group("deny", "handles", "open_by_handle_at")
@@ -45,12 +45,12 @@ func main() {
 	group("deny", "filesystem-sync", "sync syncfs")
 	group("enosys", "unimplemented", "uselib _sysctl create_module get_kernel_syms query_module nfsservctl getpmsg putpmsg afs_syscall tuxcall security lookup_dcookie epoll_ctl_old epoll_wait_old vserver")
 	group("enosys", "legacy-clone-fallback", "clone3")
-	for _, n := range strings.Fields("clone unshare socket socketpair ioctl fcntl flock setrlimit prlimit64") {
+	for _, n := range strings.Fields("clone unshare socket socketpair ioctl fcntl flock setrlimit prlimit64 kill tkill tgkill rt_sigqueueinfo rt_tgsigqueueinfo pidfd_send_signal setpriority ioprio_set sched_setparam sched_setscheduler sched_setaffinity sched_setattr migrate_pages move_pages") {
 		group("filter:"+n, "arguments", n)
 	}
 	group("allow", "fs-read", "read open close stat fstat lstat poll lseek pread64 readv access pipe select getdents getcwd readlink statfs fstatfs readahead getxattr lgetxattr fgetxattr listxattr llistxattr flistxattr getdents64 openat newfstatat readlinkat faccessat pselect6 ppoll dup dup2 dup3 pipe2 preadv preadv2 openat2 faccessat2 close_range name_to_handle_at statx statmount listmount file_getattr getxattrat listxattrat fsync fdatasync")
 	group("allow", "fs-mutate", "write pwrite64 writev truncate ftruncate rename mkdir rmdir creat link unlink symlink mknod mkdirat mknodat unlinkat renameat linkat symlinkat splice tee vmsplice fallocate pwritev pwritev2 renameat2 copy_file_range sendfile sync_file_range")
-	group("allow", "proc-other", "kill tkill tgkill rt_sigqueueinfo rt_tgsigqueueinfo pidfd_open pidfd_send_signal setpriority ioprio_set sched_setparam sched_setscheduler sched_setaffinity sched_setattr migrate_pages move_pages process_madvise process_mrelease kcmp")
+	group("allow", "proc-other", "pidfd_open process_madvise kcmp")
 	group("allow", "ipc", "shmget shmat shmctl shmdt semget semop semctl semtimedop msgget msgsnd msgrcv msgctl")
 	group("allow", "net-io", "connect accept accept4 bind sendto sendmsg sendmmsg recvfrom recvmsg recvmmsg shutdown getsockopt setsockopt getsockname getpeername")
 	group("allow", "cred", "setuid setgid setreuid setregid setresuid setresgid setfsuid setfsgid setgroups capset")
@@ -76,7 +76,7 @@ func main() {
 			panic("not in amd64 syscall table: " + n)
 		}
 	}
-	if counts["allow"] != 291 || counts["deny"] != 69 || counts["enosys"] != 16 || counts["filter"] != 9 {
+	if counts["allow"] != 276 || counts["deny"] != 70 || counts["enosys"] != 16 || counts["filter"] != 23 {
 		panic(fmt.Sprint(counts))
 	}
 	out.WriteString("}\n")

@@ -36,18 +36,6 @@ func p15Registry() []prot {
 	result[len(result)-1].Partners = []string{"P-SC-TOTAL"}
 	result[len(result)-1].MutationSets[0].IDs = []string{"P-SC-CEILING", "P-SC-TOTAL"}
 
-	add("P-CLONE-PID", p15Unit("TestFilterTables", "U-ClonePID"))
-	pid := &result[len(result)-1]
-	pid.Class = "multi"
-	pid.Partners = []string{"P-NSVERIFY", "P-SHIM-PID1", "P-LL-SCOPE-SIGNAL"}
-	user := p15Leg("L-SCHED-USER", "MUTATION-EFFECT retuned")
-	user.CIOnly = true
-	signal := p15Leg("L-SIGNAL")
-	signal.ABIMarkers = map[string][]string{"abi1": {"MUTATION-EFFECT signal"}}
-	if probeLandlockABI() < 6 {
-		signal.Markers = []string{"MUTATION-EFFECT signal"}
-	}
-	pid.MutationSets = append(pid.MutationSets, harness.MutationSet{IDs: []string{"P-CLONE-PID", "P-NSVERIFY", "P-SHIM-PID1"}, Legs: []harness.Leg{p15Leg("L-SCHED", "MUTATION-EFFECT retuned"), user, signal}})
 	add("P-CLONE-IPC", p15Unit("TestFilterTables", "U-CloneIPC"))
 	ipc := &result[len(result)-1]
 	ipc.Class = "multi"
@@ -59,7 +47,19 @@ func p15Registry() []prot {
 	}
 	for i := range result {
 		p := &result[i]
+		if p.ID == "P-SC-SETPRIORITY" || p.ID == "P-SC-IOPRIO_SET" {
+			p.MutationSets[0].Legs = append(p.MutationSets[0].Legs, userRetuneLeg())
+		}
 		switch p.ID {
+		case "P-SC-PROCESS_MRELEASE":
+			p.MutationSets[0].Legs = append(p.MutationSets[0].Legs, hostPIDLeg("L-PROCESS-MRELEASE", "MUTATION-EFFECT errno", "MUTATION-EFFECT memory"))
+		case "P-SC-KILL", "P-SC-TKILL", "P-SC-TGKILL", "P-SC-RT_SIGQUEUEINFO", "P-SC-RT_TGSIGQUEUEINFO", "P-SC-PIDFD_SEND_SIGNAL":
+			p.MutationSets[0].Legs = append(p.MutationSets[0].Legs, hostPIDLeg("L-SIGNAL-HOST", "MUTATION-EFFECT signal"))
+		case "P-SC-SETPRIORITY", "P-SC-IOPRIO_SET", "P-SC-SCHED_SETATTR", "P-SC-SCHED_SETSCHEDULER", "P-SC-SCHED_SETAFFINITY", "P-SC-PRLIMIT64":
+			p.MutationSets[0].Legs = append(p.MutationSets[0].Legs, hostPIDLeg("L-RETUNE", "MUTATION-EFFECT errno", "MUTATION-EFFECT retuned"))
+		case "P-SC-SCHED_SETPARAM", "P-SC-MIGRATE_PAGES", "P-SC-MOVE_PAGES":
+			p.MutationSets[0].Legs = append(p.MutationSets[0].Legs, hostPIDLeg("L-RETUNE", "MUTATION-EFFECT errno"))
+
 		case "P-SC-CLONE", "P-SC-CLONE-MASK":
 			p.MutationSets[0].Legs = append(p.MutationSets[0].Legs, p15Leg("L-NS-CREATE", "MUTATION-EFFECT clone"))
 		case "P-SC-UNSHARE", "P-SC-UNSHARE-MASK":
@@ -92,6 +92,8 @@ func p15Registry() []prot {
 			p.MutationSets[0].Legs = append(p.MutationSets[0].Legs, path, abstract)
 		case "P-SC-IOCTL-TIOCSTI", "P-SC-IOCTL-TIOCLINUX", "P-SC-IOCTL-FSCRYPT-ADD", "P-SC-IOCTL-FSCRYPT-REMOVE", "P-SC-IOCTL-FSCRYPT-REMOVE-ALL":
 			p.MutationSets[0].Legs = append(p.MutationSets[0].Legs, p15Leg("L-IOCTL", "MUTATION-EFFECT errno"))
+		case "P-SC-IOCTL":
+			p.MutationSets[0].Legs = append(p.MutationSets[0].Legs, hostPIDLeg("L-ASYNC-OWNER", "MUTATION-EFFECT errno"))
 		case "P-SC-KEYCTL", "P-SC-ADD_KEY", "P-SC-REQUEST_KEY":
 			p.Class = "single"
 			p.MutationSets[0].Legs = append(p.MutationSets[0].Legs, p15Leg("L-KEYRING", "MUTATION-EFFECT keyring", "MUTATION-EFFECT errno"))
@@ -101,6 +103,7 @@ func p15Registry() []prot {
 			p.MutationSets[0].Legs = append(p.MutationSets[0].Legs, p15Leg("L-IOURING"))
 			p.MutationSets = append(p.MutationSets, harness.MutationSet{IDs: []string{"P-SC-IO_URING_SETUP", "P-SC-IO_URING_ENTER", "P-SC-IO_URING_REGISTER"}, Legs: []harness.Leg{p15Leg("L-IOURING", "MUTATION-EFFECT connected")}})
 		case "P-SC-FCNTL":
+			p.MutationSets[0].Legs = append(p.MutationSets[0].Legs, hostPIDLeg("L-ASYNC-OWNER", "MUTATION-EFFECT errno", "MUTATION-EFFECT signal"))
 			p.Class = "single"
 			p.MutationSets[0].Legs = append(p.MutationSets[0].Legs, p15Unit("TestFilterTables", "U-FcntlCommandTable"), p15Leg("L-FCNTL-PIPESZ", "MUTATION-EFFECT pipe-size", "MUTATION-EFFECT errno"), p15Leg("L-FCNTL-RWHINT", "MUTATION-EFFECT hint", "MUTATION-EFFECT errno"))
 		case "P-SC-FLOCK":
@@ -141,9 +144,17 @@ func p15Registry() []prot {
 			p.MutationSets[0].Legs = append(p.MutationSets[0].Legs, p15Leg("L-SOCKPAIR-SWEEP", "MUTATION-EFFECT errno"), path, abstract)
 		case "P-LL-SCOPE-SIGNAL":
 			p.Class = "multi"
-			p.Partners = []string{"P-CLONE-PID", "P-NSVERIFY", "P-SHIM-PID1"}
-			p.MutationSets[0].Legs = append(p.MutationSets[0].Legs, p15Leg("L-SIGNAL"))
-			p.MutationSets = append(p.MutationSets, harness.MutationSet{IDs: []string{"P-LL-SCOPE-SIGNAL", "P-CLONE-PID", "P-NSVERIFY", "P-SHIM-PID1"}, Legs: []harness.Leg{p15Leg("L-SIGNAL", "MUTATION-EFFECT signal")}})
+			p.Partners = []string{"P-SC-SIGNAL", "P-SC-ASYNC-OWNER"}
+			p.MutationSets[0].Legs = append(p.MutationSets[0].Legs, hostPIDLeg("L-ASYNC-SCOPE"))
+			p.MutationSets = append(p.MutationSets, asyncScopeMutationSet())
+			effect := hostPIDLeg("L-SIGNAL-SCOPE")
+			if probeLandlockABI() >= 6 {
+				effect.Markers = []string{"MUTATION-EFFECT signal"}
+			}
+			effect.ABIMarkers = map[string][]string{"abi1": {}}
+			p.MutationSets[0].Legs = append(p.MutationSets[0].Legs, effect)
+			combined := hostPIDLeg("L-SIGNAL-SCOPE", "MUTATION-EFFECT signal")
+			p.MutationSets = append(p.MutationSets, harness.MutationSet{IDs: []string{"P-LL-SCOPE-SIGNAL", "P-SC-SIGNAL"}, Legs: []harness.Leg{combined}})
 		case "P-LL-RESOLVE-UNIX":
 			p.Class = "multi"
 			p.Partners = []string{"P-SC-SOCKPAIR"}
@@ -167,6 +178,7 @@ func TestRegistryCIOnlyControls(t *testing.T) {
 		"L-SOCK-SWEEP":       false,
 		"L-SOCK-SWEEP-GRANT": false,
 		"L-CRASH-NO-HELPER":  false,
+		"L-SCHED-USER":       false,
 	}
 	for _, protection := range p15Registry() {
 		for _, set := range protection.MutationSets {

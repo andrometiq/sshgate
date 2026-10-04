@@ -30,7 +30,7 @@ case "$1" in
 run) echo 'test-jail-mutate: fixture harness'; [ "$FIXTURE_MODE" != go-failure ]; exit $?;;
 esac
 if [ "$FIXTURE_MODE" = truncated ]; then echo '=== RUN   TestJailMatrix'; exit 0; fi
-for name in TestJailMatrix TestJailMatrixP12 TestJailMatrixP14 TestJailMatrixP15 TestROFallbackParent TestDetectUsernsCountUsedUpDenies TestExecWithRedactionConfinedNamespace TestExecWithRedactionConfinedEROFS TestExecWithRedactionConfineFailClosed TestExecWithRedactionConfineClosesInheritedFDs TestRunReadJailedRealEffect TestGateBinaryJailedRead TestRunReadJailSetupFailureDenies; do
+for name in TestJailMatrix TestJailMatrixP12 TestJailMatrixP14 TestJailMatrixP15 TestJailMatrixP15c TestROFallbackParent TestDetectUsernsCountUsedUpDenies TestExecWithRedactionConfinedNamespace TestExecWithRedactionConfineLifecycle TestExecWithRedactionConfinedEROFS TestExecWithRedactionConfineFailClosed TestExecWithRedactionConfineClosesInheritedFDs TestRunReadJailedRealEffect TestGateBinaryJailedRead TestRunReadJailSetupFailureDenies; do
  echo "--- PASS: $name (0.00s)"
 done
 if [ "$FIXTURE_MODE" = ci-control ]; then echo 'CONTROL-SKIPPED(ci-only): fixture'; fi

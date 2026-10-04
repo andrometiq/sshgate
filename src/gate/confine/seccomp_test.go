@@ -273,23 +273,10 @@ func TestBuildFilterMetadataIoctls(t *testing.T) {
 
 func TestBuildFilterTtyUsesDeviceWall(t *testing.T) {
 	f := buildFilter(filterParams{})
-	for _, req := range []uint64{unix.TCSETS, unix.TCSETSW, unix.TCSETSF, unix.TCSETA, unix.TCSETAW, unix.TCSETAF, unix.TCSETS2, unix.TCSETSW2, unix.TCSETSF2, unix.TIOCSWINSZ, unix.TCFLSH, unix.TCXONC, unix.TIOCSETD, unix.TIOCSPGRP, unix.TCGETS, unix.TIOCGWINSZ, unix.TIOCGPGRP, unix.TIOCINQ} {
+	for _, req := range []uint64{unix.TCSETS, unix.TCSETSW, unix.TCSETSF, unix.TCSETA, unix.TCSETAW, unix.TCSETAF, unix.TCSETS2, unix.TCSETSW2, unix.TCSETSF2, unix.TIOCSWINSZ, unix.TCFLSH, unix.TCXONC, unix.TIOCSETD, unix.TCGETS, unix.TIOCGWINSZ, unix.TIOCGPGRP, unix.TIOCINQ} {
 		for _, hi := range []uint64{0, 0xffffffff00000000} {
 			if got := evalFilter(t, f, dataFor(unix.SYS_IOCTL, x8664, 3, req|hi)); got != actAllow {
 				t.Errorf("tty %#x: %#x", req, got)
-			}
-		}
-	}
-}
-
-func TestBuildFilterProcStateUsesPIDNamespace(t *testing.T) {
-	f := buildFilter(filterParams{})
-	for _, nr := range []uint32{unix.SYS_PRLIMIT64, unix.SYS_SCHED_SETAFFINITY, unix.SYS_SCHED_SETSCHEDULER, unix.SYS_SCHED_SETPARAM, unix.SYS_SCHED_SETATTR, unix.SYS_SETPRIORITY, unix.SYS_IOPRIO_SET} {
-		for _, which := range []uint64{0, 1, 2, 1234} {
-			for _, who := range []uint64{0, 1234} {
-				if got := evalFilter(t, f, dataFor(nr, x8664, which, who)); got != actAllow {
-					t.Errorf("process syscall %d: %#x", nr, got)
-				}
 			}
 		}
 	}

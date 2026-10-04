@@ -283,6 +283,8 @@ func run() int {
 	}
 }
 
+var executeCommand = gate.ExecWithRedaction
+
 // execChild runs cmd under a signal-aware context. SIGTERM/SIGINT
 // received by gate are propagated to the child process group via
 // the context cancellation wired through Exec. The child's
@@ -322,7 +324,7 @@ func execChild(cmd string, reveal bool, captureLimit int, plan execPlan) (rc int
 		res, err = gate.ExecArgvWithRedaction(ctx, plan.argv, lane2Env, opts)
 	default:
 		opts.Confine = plan.confine
-		res, err = gate.ExecWithRedaction(ctx, cmd, opts)
+		res, err = executeCommand(ctx, cmd, opts)
 	}
 	if err != nil {
 		logf("%v", err)
@@ -441,6 +443,7 @@ func execAndAudit(audit *gate.AuditLogger, cmd, classification, approval string,
 		Classification: classification,
 		ApprovalStatus: approval,
 		ExitCode:       rc,
+		CleanupError:   res.CleanupError,
 		Meta: &gate.AuditMeta{
 			StdoutBytes: res.StdoutBytes,
 			StderrBytes: res.StderrBytes,

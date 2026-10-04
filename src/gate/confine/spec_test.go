@@ -214,3 +214,28 @@ func TestMountFactsStatus(t *testing.T) {
 		}
 	}
 }
+
+func TestCleanupStatusReport(t *testing.T) {
+	for _, test := range []struct {
+		raw    string
+		denied bool
+	}{{"X\nCdeadline exceeded\n", false}, {"XFexec:2\n\nCdeadline exceeded\n", true}, {"\nCdeadline exceeded\n", true}} {
+		reader, writer, err := os.Pipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = writer.WriteString(test.raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		writer.Close()
+		jailed := Jailed{statusR: reader}
+		err = jailed.Status()
+		if (err != nil) != test.denied {
+			t.Fatalf("%q: %v", test.raw, err)
+		}
+		if !test.denied && jailed.CleanupError != "deadline exceeded" {
+			t.Fatal(jailed.CleanupError)
+		}
+	}
+}

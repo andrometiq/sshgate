@@ -58,18 +58,17 @@ func TestJailMatrixP12(t *testing.T) {
 			t.Run("L-NSVERIFY-mnt", func(t *testing.T) { legNamespace(t, spec, "mnt") })
 			t.Run("L-NSVERIFY-pid", func(t *testing.T) { legNamespace(t, spec, "pid") })
 			t.Run("L-NSVERIFY-ipc", func(t *testing.T) { legNamespace(t, spec, "ipc") })
-			t.Run("L-NSVERIFY-parent", func(t *testing.T) {
-				p12Control(t, spec)
-				result := runP12(t, spec, "echo COMMAND_RAN", func(j *Jailed) { j.Cmd.Args[1] = SentinelWorker })
-				expectP12Abort(t, "L-NSVERIFY-parent", "nsverify", syscall.EPERM, result)
-			})
 			t.Run("L-HOSTMOUNTS-UNCHANGED", func(t *testing.T) {
 				before, err := os.ReadFile("/proc/self/mountinfo")
 				mutationSetup(t, err)
-				result := runP12(t, spec, "echo COMMAND_RAN", func(j *Jailed) { j.Cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true} })
+				result := runP12(t, spec, "echo COMMAND_RAN", func(j *Jailed) { j.Cmd.SysProcAttr.Cloneflags = syscall.CLONE_NEWUSER })
 				var setup *SetupError
-				if !errors.As(result.setupErr, &setup) || setup.Stage != "nsverify" {
+				if !errors.As(result.setupErr, &setup) || setup.Errno != syscall.EPERM || (setup.Stage != "nsverify" && setup.Stage != "private") {
 					t.Fatalf("SETUP: clobber did not abort: %+v", result)
+				}
+				mutationAbort(t, "L-HOSTMOUNTS-UNCHANGED", "private", setup.Stage == "private")
+				if result.stdout != "" {
+					t.Fatal("command ran after namespace clobber")
 				}
 				after, err := os.ReadFile("/proc/self/mountinfo")
 				mutationSetup(t, err)
@@ -78,7 +77,6 @@ func TestJailMatrixP12(t *testing.T) {
 				}
 			})
 			t.Run("L-FAULT-nsverify", func(t *testing.T) { legFault(t, spec, "nsverify") })
-			t.Run("L-SHIM-PID1", func(t *testing.T) { legShimPID1(t, spec) })
 			t.Run("L-FAULT-spec", func(t *testing.T) { legFault(t, spec, "spec") })
 			t.Run("L-FAULT-cmdread", func(t *testing.T) { legFault(t, spec, "cmdread") })
 			t.Run("L-FAULT-mounts", func(t *testing.T) { legFault(t, spec, "mounts") })
@@ -90,6 +88,7 @@ func TestJailMatrixP12(t *testing.T) {
 			t.Run("L-FAULT-tsync", func(t *testing.T) { legFault(t, spec, "tsync") })
 			t.Run("L-FAULT-fds", func(t *testing.T) { legFault(t, spec, "fds") })
 			t.Run("L-FAULT-cwd", func(t *testing.T) { legFault(t, spec, "cwd") })
+			t.Run("L-FAULT-session", func(t *testing.T) { legFault(t, spec, "session") })
 			t.Run("L-FAULT-exec", func(t *testing.T) { legFault(t, spec, "exec") })
 		})
 	}
@@ -152,6 +151,14 @@ func legFault(t *testing.T, spec Spec, stage string) {
 
 func legNamespace(t *testing.T, spec Spec, namespace string) {
 	p12Control(t, spec)
+	if namespace == "pid" {
+		expected, err := os.Readlink("/proc/self/ns/pid")
+		mutationSetup(t, err)
+		result := runP12(t, spec, "readlink /proc/self/ns/pid", nil)
+		if result.setupErr != nil || result.exit != 0 || strings.TrimSpace(result.stdout) != expected {
+			t.Fatalf("pid namespace is not the host's: %+v", result)
+		}
+	}
 	before, err := os.ReadFile("/proc/self/mountinfo")
 	mutationSetup(t, err)
 	result := runP12(t, spec, "echo COMMAND_RAN", func(j *Jailed) { j.Cmd.Args = append(j.Cmd.Args, "same-"+namespace) })
@@ -161,20 +168,6 @@ func legNamespace(t *testing.T, spec Spec, namespace string) {
 	if !bytes.Equal(before, after) {
 		t.Fatal("host mountinfo changed")
 	}
-}
-
-func legShimPID1(t *testing.T, spec Spec) {
-	p12Control(t, spec)
-	result := runP12(t, spec, "echo COMMAND_RAN", func(j *Jailed) {
-		j.Cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-		j.Cmd.Args[2] = "{}"
-	})
-	var setup *SetupError
-	if errors.As(result.setupErr, &setup) && setup.Stage == "spec" {
-		mutationAbort(t, "L-SHIM-PID1", "spec", true)
-		return
-	}
-	expectP12Abort(t, "L-SHIM-PID1", "nsverify", syscall.EPERM, result)
 }
 
 func legSpecReject(t *testing.T, abi int) {

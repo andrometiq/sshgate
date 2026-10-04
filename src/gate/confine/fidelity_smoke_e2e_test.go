@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestFidelitySmoke(t *testing.T) {
@@ -30,7 +31,7 @@ func TestFidelitySmoke(t *testing.T) {
 		}
 		expected[name] = category
 	}
-	for _, tool := range []string{"ps", "ss", "ip", "df", "ls", "cat", "git", "sqlite3", "journalctl", "getent", "id"} {
+	for _, tool := range []string{"ps", "top", "pgrep", "pidof", "ss", "ip", "df", "ls", "cat", "git", "sqlite3", "journalctl", "getent", "id", "readlink"} {
 		if _, err := exec.LookPath(tool); err != nil {
 			t.Fatalf("SETUP: required smoke tool %s: %v", tool, err)
 		}
@@ -43,19 +44,31 @@ func TestFidelitySmoke(t *testing.T) {
 	mutationSetup(t, control.Run())
 	control = exec.Command("sqlite3", filepath.Join(directory, "db"), "create table smoke (id integer);")
 	mutationSetup(t, control.Run())
-	home := homeDir(t)
-	homeFile, err := os.CreateTemp(home, ".sshgate-smoke-")
+	sleepPath, err := exec.LookPath("sleep")
 	mutationSetup(t, err)
-	_, err = homeFile.WriteString("home-canary\n")
+	sleepBinary, err := os.ReadFile(sleepPath)
 	mutationSetup(t, err)
-	mutationSetup(t, homeFile.Close())
-	t.Cleanup(func() { os.Remove(homeFile.Name()) })
+	victim, err := os.CreateTemp(directory, "sg")
+	mutationSetup(t, err)
+	mutationSetup(t, victim.Close())
+	mutationSetup(t, os.WriteFile(victim.Name(), sleepBinary, 0755))
+	mutationSetup(t, os.Chmod(victim.Name(), 0755))
+	victimName := filepath.Base(victim.Name()) // Short enough for Linux comm (15 bytes).
+	sleeper := exec.Command(victim.Name(), "600")
+	// Exercise pidof's exe fallback, independently of its argv[0] matching.
+	sleeper.Args[0] = victimName + "-argv"
+	mutationSetup(t, sleeper.Start())
+	defer func() { sleeper.Process.Kill(); sleeper.Wait() }()
 	rows := []struct{ name, command, cwd string }{
 		{"ps aux", "ps aux", "/"},
+		{"top -bn1", fmt.Sprintf("top -bn1 -p %d", os.Getpid()), "/"},
+		{"pgrep", "pgrep -x " + victimName, "/"},
+		{"pidof executable", "pidof " + victim.Name(), "/"},
+		{"pidof", "pidof " + sleeper.Args[0], "/"},
 		{"ss -tuna", "ss -tuna", "/"}, {"ip a", "ip a", "/"}, {"df -h", "df -h", "/"}, {"ls -l /", "ls -l /", "/"},
 		{"cat /tmp/<f>", "cat " + directory + "/visible", "/"}, {"git in /tmp", "git status --porcelain", directory},
 		{"sqlite3 <db> .tables", "sqlite3 " + directory + "/db .tables", "/"}, {"journalctl -n 20", "journalctl -n 20 --no-pager -o cat", "/"},
-		{"getent passwd", "getent passwd", "/"}, {"id", "id", "/"}, {"relative home read", "cat " + filepath.Base(homeFile.Name()), home},
+		{"getent passwd", "getent passwd", "/"}, {"id", "id", "/"}, {"relative home read", "", ""},
 	}
 	for _, cfg := range []struct {
 		name string
@@ -64,89 +77,164 @@ func TestFidelitySmoke(t *testing.T) {
 		t.Run(cfg.name, func(t *testing.T) {
 			for _, row := range rows {
 				t.Run(row.name, func(t *testing.T) {
-					var socketAnchors []string
-					if row.name == "ss -tuna" {
-						for _, address := range []struct{ network, local, peer string }{
-							{"tcp4", "127.0.0.1:0", "0.0.0.0:*"},
-							{"tcp6", "[::]:0", "[::]:*"},
-						} {
-							listener, err := net.Listen(address.network, address.local)
-							mutationSetup(t, err)
-							defer listener.Close()
-							socketAnchors = append(socketAnchors, "tcp LISTEN "+listener.Addr().String()+" "+address.peer)
-						}
-						if expected[row.name] != "SS-PROCFS-V6ONLY" {
-							t.Fatal("missing SS-PROCFS-V6ONLY category")
-						}
+					if row.name == "relative home read" {
+						home := homeDir(t)
+						homeFile, err := os.CreateTemp(home, ".sshgate-smoke-")
+						mutationSetup(t, err)
+						_, err = homeFile.WriteString("home-canary\n")
+						mutationSetup(t, err)
+						mutationSetup(t, homeFile.Close())
+						t.Cleanup(func() { os.Remove(homeFile.Name()) })
+						row.command = "cat " + filepath.Base(homeFile.Name())
+						row.cwd = home
 					}
-					command := exec.Command("/bin/sh", "-c", row.command)
-					command.Dir = row.cwd
-					baseline, controlErr := command.CombinedOutput()
-					if controlErr != nil {
-						t.Fatalf("SETUP: smoke control: %v: %s", controlErr, baseline)
+					repetitions := 1
+					if row.name == "ps aux" || row.name == "top -bn1" || row.name == "pgrep" {
+						repetitions = 20
 					}
-					result := runP12(t, Spec{Profile: ProfileROv1, Net: false, ForceABI: cfg.abi, Cwd: row.cwd}, row.command, nil)
-					if result.setupErr != nil {
-						t.Fatalf("SETUP: smoke jail: %+v", result)
-					}
-					if result.exit != 0 {
-						t.Fatalf("smoke command failed: %+v", result)
-					}
-					if row.name == "ss -tuna" {
-						command = exec.Command("/bin/sh", "-c", row.command)
-						command.Dir = row.cwd
-						final, err := command.CombinedOutput()
-						if err != nil {
-							t.Fatalf("SETUP: final ss control: %v: %s", err, final)
-						}
-						for _, output := range []string{string(baseline), string(final)} {
-							sockets, err := smokeSocketRows(output, false)
-							if err != nil {
-								t.Fatalf("SETUP: ss control: %v", err)
-							}
-							for _, anchor := range socketAnchors {
-								if !sockets[anchor] {
-									t.Fatalf("SETUP: ss control missing held listener %s: %s", anchor, output)
+					for repetition := 0; repetition < repetitions; repetition++ {
+						var socketAnchors []string
+						if row.name == "ss -tuna" {
+							for _, address := range []struct{ network, local, peer string }{
+								{"tcp4", "127.0.0.1:0", "0.0.0.0:*"},
+								{"tcp6", "[::]:0", "[::]:*"},
+							} {
+								listener, err := net.Listen(address.network, address.local)
+								mutationSetup(t, err)
+								defer listener.Close()
+								socketAnchors = append(socketAnchors, "tcp LISTEN "+listener.Addr().String()+" "+address.peer)
+								if address.network == "tcp4" {
+									connection, err := net.DialTimeout("tcp4", listener.Addr().String(), 5*time.Second)
+									mutationSetup(t, err)
+									defer connection.Close()
+									mutationSetup(t, listener.(*net.TCPListener).SetDeadline(time.Now().Add(5*time.Second)))
+									peer, err := listener.Accept()
+									mutationSetup(t, err)
+									defer peer.Close()
+									socketAnchors = append(socketAnchors,
+										"tcp ESTAB "+connection.LocalAddr().String()+" "+connection.RemoteAddr().String(),
+										"tcp ESTAB "+peer.LocalAddr().String()+" "+peer.RemoteAddr().String())
 								}
 							}
-						}
-						if err := compareSmokeSockets(string(baseline), result.stdout, string(final), result.stderr); err != nil {
-							t.Errorf("unlisted fidelity difference: %v", err)
-						}
-						t.Log("FIDELITY ss -tuna → SS-PROCFS-V6ONLY")
-						return
-					}
-					before, after := projectIdentity(t, row.name, string(baseline)), result.stdout+result.stderr
-					if row.name == "ps aux" {
-						if result.stderr != "" {
-							t.Errorf("unlisted fidelity difference: ps stderr: %s", result.stderr)
-						}
-						// PID 1 and this test process live throughout both samples.
-						// Other rows and accounting columns may change between runs.
-						stable := map[string]string{}
-						initial := psRows(before)
-						for _, pid := range []string{"1", strconv.Itoa(os.Getpid())} {
-							if initial[pid] == "" {
-								t.Fatalf("SETUP: host ps missing PID %s", pid)
+							if expected[row.name] != "SS-PROCFS-V6ONLY" {
+								t.Fatal("missing SS-PROCFS-V6ONLY category")
 							}
-							stable[pid] = initial[pid]
 						}
-						if !strings.HasPrefix(strings.TrimSpace(after), "USER") || !strings.Contains(strings.SplitN(after, "\n", 2)[0], "PID") {
-							t.Errorf("unlisted fidelity difference: ps header missing: %q", after)
+						command := exec.Command("/bin/sh", "-c", row.command)
+						command.Dir = row.cwd
+						baseline, controlErr := command.CombinedOutput()
+						if controlErr != nil {
+							t.Fatalf("SETUP: smoke control: %v: %s", controlErr, baseline)
 						}
-						before = stablePS(before, stable)
-						after = stablePS(after, stable)
+						result := runP12(t, Spec{Profile: ProfileROv1, Net: false, ForceABI: cfg.abi, Cwd: row.cwd}, row.command, nil)
+						if result.setupErr != nil {
+							t.Fatalf("SETUP: smoke jail: %+v", result)
+						}
+						if row.name == "pidof executable" {
+							if expected[row.name] != "PIDOF-EXE-DENIED" || string(baseline) != strconv.Itoa(sleeper.Process.Pid)+"\n" {
+								t.Fatalf("pidof control/category: %q / %q", baseline, expected[row.name])
+							}
+							if result.exit != 1 || result.stdout != "" || result.stderr != "" {
+								t.Fatalf("unlisted pidof difference: %+v", result)
+							}
+							link := fmt.Sprintf("/proc/%d/exe", sleeper.Process.Pid)
+							resolved, err := os.Readlink(link)
+							mutationSetup(t, err)
+							if resolved != victim.Name() {
+								t.Fatalf("victim executable: %q", resolved)
+							}
+							denied := runP12(t, Spec{Profile: ProfileROv1, Net: false, ForceABI: cfg.abi, Cwd: "/"}, "LC_ALL=C readlink -v "+link, nil)
+							wantError := "readlink: " + link + ": Permission denied\n"
+							if denied.setupErr != nil || denied.exit != 1 || denied.stdout != "" || denied.stderr != wantError {
+								t.Fatalf("pidof exe denial not established: %+v", denied)
+							}
+							t.Log("FIDELITY pidof executable → PIDOF-EXE-DENIED; pgrep -x checks the same victim")
+							continue
+						}
+						if result.exit != 0 {
+							t.Fatalf("smoke command failed: %+v", result)
+						}
+						if row.name == "ss -tuna" {
+							command = exec.Command("/bin/sh", "-c", row.command)
+							command.Dir = row.cwd
+							final, err := command.CombinedOutput()
+							if err != nil {
+								t.Fatalf("SETUP: final ss control: %v: %s", err, final)
+							}
+							for _, output := range []string{string(baseline), string(final)} {
+								sockets, err := smokeSocketRows(output, false)
+								if err != nil {
+									t.Fatalf("SETUP: ss control: %v", err)
+								}
+								for _, anchor := range socketAnchors {
+									if !sockets[anchor] {
+										t.Fatalf("SETUP: ss control missing held socket %s: %s", anchor, output)
+									}
+								}
+							}
+							if err := compareSmokeSockets(string(baseline), result.stdout, string(final), result.stderr); err != nil {
+								t.Errorf("unlisted fidelity difference: %v", err)
+							}
+							t.Log("FIDELITY ss -tuna → SS-PROCFS-V6ONLY")
+							return
+						}
+						if row.name == "top -bn1" || row.name == "pgrep" || row.name == "pidof" {
+							pid := strconv.Itoa(sleeper.Process.Pid)
+							if row.name == "top -bn1" {
+								pid = strconv.Itoa(os.Getpid())
+							}
+							for _, output := range []string{string(baseline), result.stdout} {
+								found := false
+								for _, field := range strings.Fields(output) {
+									found = found || field == pid
+								}
+								if !found {
+									t.Fatalf("process observer %s lost PID %s: %s", row.name, pid, output)
+								}
+							}
+							if result.stderr != "" {
+								t.Fatalf("observer stderr: %s", result.stderr)
+							}
+							if (row.name == "pgrep" || row.name == "pidof") && (string(baseline) != pid+"\n" || result.stdout != pid+"\n") {
+								t.Fatalf("%s returned unexpected PIDs: control %q, jail %q", row.name, baseline, result.stdout)
+							}
+							continue
+						}
+						before, after := projectIdentity(t, row.name, string(baseline)), result.stdout+result.stderr
+						if row.name == "ps aux" {
+							if result.stderr != "" {
+								t.Errorf("unlisted fidelity difference: ps stderr: %s", result.stderr)
+							}
+							// PID 1 and this test process live throughout both samples.
+							// Other rows and accounting columns may change between runs.
+							stable := map[string]string{}
+							initial := psRows(before)
+							for _, pid := range []string{"1", strconv.Itoa(os.Getpid())} {
+								if initial[pid] == "" {
+									t.Fatalf("SETUP: host ps missing PID %s", pid)
+								}
+								stable[pid] = initial[pid]
+							}
+							if !strings.HasPrefix(strings.TrimSpace(after), "USER") || !strings.Contains(strings.SplitN(after, "\n", 2)[0], "PID") {
+								t.Errorf("unlisted fidelity difference: ps header missing: %q", after)
+							}
+							before = stablePS(before, stable)
+							after = stablePS(after, stable)
+						}
+						changed := result.exit != 0 || normalizeSmoke(row.name, before) != normalizeSmoke(row.name, after)
+						category := expected[row.name]
+						if changed && category == "" {
+							t.Errorf("unlisted fidelity difference\ncontrol: %s\njail: %+v", baseline, result)
+						}
+						if !changed && category != "" {
+							t.Errorf("listed difference %s disappeared", category)
+						}
+						if category != "" {
+							t.Logf("FIDELITY %s → %s", row.name, category)
+						}
 					}
-					changed := result.exit != 0 || normalizeSmoke(row.name, before) != normalizeSmoke(row.name, after)
-					category := expected[row.name]
-					if changed && category == "" {
-						t.Errorf("unlisted fidelity difference\ncontrol: %s\njail: %+v", baseline, result)
-					}
-					if !changed && category != "" {
-						t.Errorf("listed difference %s disappeared", category)
-					}
-					if category != "" {
-						t.Logf("FIDELITY %s → %s", row.name, category)
+					if repetitions > 1 {
+						t.Logf("%s: %d jailed repetitions passed", row.name, repetitions)
 					}
 				})
 			}
@@ -318,7 +406,8 @@ func TestSmokeProcessProjection(t *testing.T) {
 
 func smokeSocketRows(output string, projectProcfs bool) (map[string]bool, error) {
 	lines := strings.Split(strings.TrimSpace(output), "\n")
-	if strings.Join(strings.Fields(lines[0]), " ") != "Netid State Recv-Q Send-Q Local Address:Port Peer Address:Port" {
+	header := strings.Join(strings.Fields(lines[0]), " ")
+	if header != "Netid State Recv-Q Send-Q Local Address:Port Peer Address:Port" && header != "Netid State Recv-Q Send-Q Local Address:Port Peer Address:Port Process" {
 		return nil, fmt.Errorf("ss header: %q", lines[0])
 	}
 	rows := map[string]bool{}
@@ -351,7 +440,7 @@ func compareSmokeSockets(before, jailed, after, stderr string) error {
 		}
 	}
 	// Procfs lacks v6only; ss prints unspecified IPv6 endpoints as "*".
-	// Project controls only: the jailed rows must retain every socket identity.
+	// Project controls only: the jailed rows must retain every stable socket identity.
 	initial, err := smokeSocketRows(before, true)
 	if err != nil {
 		return err
@@ -377,6 +466,11 @@ func compareSmokeSockets(before, jailed, after, stderr string) error {
 		return fmt.Errorf("ss controls contain no stable sockets")
 	}
 	for row := range confined {
+		// Connection states can exist only between the bracketing controls.
+		switch strings.Fields(row)[1] {
+		case "ESTAB", "TIME-WAIT", "SYN-SENT", "SYN-RECV", "FIN-WAIT-1", "FIN-WAIT-2", "CLOSE-WAIT", "LAST-ACK", "CLOSING":
+			continue
+		}
 		if !initial[row] && !final[row] {
 			return fmt.Errorf("ss unexpected socket: %s", row)
 		}
@@ -400,7 +494,11 @@ func TestSmokeSocketProjection(t *testing.T) {
 	if err := compareSmokeSockets(strings.ReplaceAll(before, "[::]:", "[::]%eth0:"), jailed, strings.ReplaceAll(after, "[::]:", "[::]%eth0:"), ""); err != nil {
 		t.Fatal(err)
 	}
-	for _, changed := range []string{header + scoped, strings.Replace(jailed, "1234", "9999", 1), strings.Replace(jailed, "LISTEN", "CLOSE", 1), strings.Replace(jailed, "Netid", "Other", 1), jailed + "unexpected\n",
+	withProcess := strings.TrimSuffix(header, "\n") + " Process\n"
+	if err := compareSmokeSockets(strings.Replace(before, header, withProcess, 1), strings.Replace(jailed, header, withProcess, 1), after, ""); err != nil {
+		t.Fatal(err)
+	}
+	for _, changed := range []string{header + scoped, strings.Replace(jailed, "1234", "9999", 1), strings.Replace(jailed, "LISTEN", "CLOSE", 1), strings.Replace(jailed, "Netid", "Other", 1), jailed + "unexpected\n", jailed + "tcp LISTEN 0 0 *:99 *:* process-detail\n", strings.Replace(jailed, header, strings.TrimSuffix(header, "\n")+" Unknown\n", 1),
 		strings.Replace(jailed, "*:3306", "*:3307", 1),
 		strings.Replace(jailed, "[fd7a:115c:a1e0::c]", "[fd7a:115c:a1e0::d]", 1),
 		strings.Replace(jailed, "*:3306", "[::]:3306", 1),
@@ -408,6 +506,30 @@ func TestSmokeSocketProjection(t *testing.T) {
 		jailed + "udp UNCONN 0 0 [::1]:9999 *:*\n"} {
 		if compareSmokeSockets(before, changed, after, "") == nil {
 			t.Fatalf("unlisted change accepted: %q", changed)
+		}
+	}
+	for _, state := range []string{"ESTAB", "TIME-WAIT", "SYN-SENT", "SYN-RECV", "FIN-WAIT-1", "FIN-WAIT-2", "CLOSE-WAIT", "LAST-ACK", "CLOSING"} {
+		t.Run(state, func(t *testing.T) {
+			connection := strings.Replace(transient, "ESTAB", state, 1)
+			controls := header + stable
+			for _, samples := range [][3]string{
+				{controls, controls + connection, controls},
+				{controls + connection, controls, controls},
+				{controls, controls, controls + connection},
+				{controls + connection, controls + connection, controls + connection},
+			} {
+				if err := compareSmokeSockets(samples[0], samples[1], samples[2], ""); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if compareSmokeSockets(controls+connection, controls, controls+connection, "") == nil {
+				t.Fatal("stable connection loss accepted")
+			}
+		})
+	}
+	for _, socket := range []string{stable, scoped} {
+		if compareSmokeSockets(header+transient, header+transient+socket, header+transient, "") == nil {
+			t.Fatal("unexpected listening/bound socket accepted")
 		}
 	}
 	if compareSmokeSockets(before, jailed, after, "unexpected") == nil {

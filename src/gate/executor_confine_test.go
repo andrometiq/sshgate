@@ -29,9 +29,9 @@ func TestConfineCommandSetsCloneFlags(t *testing.T) {
 	if sa == nil {
 		t.Fatal("confined Cmd has nil SysProcAttr")
 	}
-	const want = syscall.CLONE_NEWUSER | syscall.CLONE_NEWNS | syscall.CLONE_NEWPID | syscall.CLONE_NEWIPC
-	if sa.Cloneflags&want != want {
-		t.Errorf("Cloneflags=%#x; missing one of NEWUSER|NEWNS|NEWPID|NEWIPC (%#x)", sa.Cloneflags, want)
+	const want = syscall.CLONE_NEWUSER | syscall.CLONE_NEWNS | syscall.CLONE_NEWIPC
+	if sa.Cloneflags != want {
+		t.Errorf("Cloneflags=%#x; missing one of NEWUSER|NEWNS|NEWIPC (%#x)", sa.Cloneflags, want)
 	}
 	if !sa.Setpgid {
 		t.Error("confined Cmd must still set Setpgid for the cancel semantics")
@@ -41,7 +41,7 @@ func TestConfineCommandSetsCloneFlags(t *testing.T) {
 	}
 }
 
-// Every accepted profile uses the shim and all four namespaces.
+// Every accepted profile uses the shim and fresh user, mount and IPC namespaces.
 func TestConfineProfileAlwaysClones(t *testing.T) {
 	for _, abi := range []int{0, 1} {
 		jailed, err := (confine.Spec{Profile: confine.ProfileROv1, ForceABI: abi}).Command(context.Background(), "true")
@@ -49,7 +49,7 @@ func TestConfineProfileAlwaysClones(t *testing.T) {
 			t.Fatal(err)
 		}
 		jailed.Abort()
-		if jailed.Cmd.Args[1] != confine.SentinelShim || jailed.Cmd.SysProcAttr.Cloneflags != syscall.CLONE_NEWUSER|syscall.CLONE_NEWNS|syscall.CLONE_NEWPID|syscall.CLONE_NEWIPC || !jailed.Cmd.SysProcAttr.Setpgid {
+		if jailed.Cmd.Args[1] != confine.SentinelShim || jailed.Cmd.SysProcAttr.Cloneflags != syscall.CLONE_NEWUSER|syscall.CLONE_NEWNS|syscall.CLONE_NEWIPC || !jailed.Cmd.SysProcAttr.Setpgid {
 			t.Fatalf("invalid command: %+v", jailed.Cmd)
 		}
 	}
@@ -205,15 +205,18 @@ func testExecutorNamespaceClobber(t *testing.T) {
 	confinedCommand = func(spec *confine.Spec, ctx context.Context, command string) (*confine.Jailed, error) {
 		jailed, err := original(spec, ctx, command)
 		if err == nil {
-			jailed.Cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+			jailed.Cmd.SysProcAttr.Cloneflags = syscall.CLONE_NEWUSER
 		}
 		return jailed, err
 	}
 	defer func() { confinedCommand = original }()
 	result, err := ExecWithRedaction(context.Background(), "echo EXECUTOR_CANARY", ExecOpts{Confine: &confine.Spec{Profile: confine.ProfileROv1}, CaptureLimit: 4096})
 	var setup *confine.SetupError
-	if !errors.As(err, &setup) || setup.Stage != "nsverify" || setup.Errno != syscall.EPERM {
+	if !errors.As(err, &setup) || (setup.Stage != "nsverify" && setup.Stage != "private") || setup.Errno != syscall.EPERM {
 		t.Fatalf("expected nsverify EPERM; result=%+v error=%v", result, err)
+	}
+	if setup.Stage == "private" {
+		t.Errorf("MUTATION-ABORT L-NSVERIFY private")
 	}
 	if strings.Contains(result.Stdout, "EXECUTOR_CANARY") {
 		t.Fatal("command executed after clobber")

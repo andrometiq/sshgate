@@ -48,7 +48,7 @@ func (s Spec) validate(worker bool) error {
 	if s.InjectFailAt != "" {
 		stage, errno := s.inject()
 		switch stage {
-		case "spec", "cmdread", "nsverify", "mounts", "private", "setattr", "devnodes", "covers", "scratch", "fds", "cwd", "nnp", "caps", "rlimits", "landlock", "seccomp", "tsync", "exec":
+		case "spec", "cmdread", "nsverify", "mounts", "private", "setattr", "devnodes", "covers", "scratch", "fds", "cwd", "nnp", "caps", "rlimits", "landlock", "seccomp", "tsync", "session", "exec":
 		default:
 			return unix.EINVAL
 		}
@@ -112,7 +112,7 @@ func verifyNamespaces(parent NSIDs) error {
 	if err != nil {
 		return err
 	}
-	if unix.Getppid() != 1 || parent.User == 0 || parent.Mnt == 0 || parent.Pid == 0 || parent.IPC == 0 || current.User == parent.User || current.Mnt == parent.Mnt || current.Pid == parent.Pid || current.IPC == parent.IPC {
+	if parent.User == 0 || parent.Mnt == 0 || parent.Pid == 0 || parent.IPC == 0 || current.User == parent.User || current.Mnt == parent.Mnt || current.Pid != parent.Pid || current.IPC == parent.IPC {
 		return unix.EPERM
 	}
 	return nil

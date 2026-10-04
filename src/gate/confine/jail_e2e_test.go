@@ -936,11 +936,11 @@ func legReaper(t *testing.T, spec Spec) {
 		t.Errorf("reaper leg: no BG output (%q); the command did not run", r.stdout)
 	}
 	if elapsed > 20*time.Second {
-		t.Errorf("reaper leg: returned in %v; the backgrounded sleep held the gate (pid-ns teardown should free it immediately)", elapsed)
+		t.Errorf("reaper leg: returned in %v; the backgrounded sleep held the gate (subreaper cleanup should free it immediately)", elapsed)
 	}
 }
 
-// legProcState proves outside process state is isolated by the PID namespace.
+// legProcState proves outside process state is protected by the retune argument filters.
 func legProcState(t *testing.T, spec Spec, probe string) {
 	// Control target: prove prlimit/setpriority/setaffinity WORK unjailed.
 	ctl := startSleeper(t)
@@ -1056,6 +1056,14 @@ func ttyState(t *testing.T, fd int) (unix.Termios, unix.Winsize) {
 // syscall wall and would hang or need connectivity.
 func legReadCorpus(t *testing.T, spec Spec) {
 	rows := readCorpusRows(t)
+	for _, row := range rows {
+		if row == "ps aux" {
+			for i := 1; i < 20; i++ {
+				rows = append(rows, row)
+			}
+			break
+		}
+	}
 	if len(rows) == 0 {
 		t.Fatal("no READ rows parsed from the classifier corpus")
 	}

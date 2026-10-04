@@ -3,3 +3,7 @@ df -h → DEV-SHM
 # NETLINK_SOCK_DIAG denial uses procfs; interface suffixes and diagnostic detail are absent.
 # Procfs also lacks v6only: [::] endpoints become *, but IPv6 socket rows remain.
 ss -tuna → SS-PROCFS-V6ONLY
+# With argv[0] overridden, pidof <absolute-exe-path>'s fallback cannot read an outside /proc/<pid>/exe across
+# the user namespace (ptrace access check). argv[0] matching is separate; pgrep -x
+# still resolves the same unique comm. Only exit 1 with empty output is accepted.
+pidof executable → PIDOF-EXE-DENIED

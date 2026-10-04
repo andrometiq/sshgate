@@ -3,6 +3,7 @@
 package confine
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -20,7 +21,7 @@ const SentinelProbe = "__jailprobe"
 // Probe child exit codes.
 const (
 	probeExitOK          = 0
-	probeExitNotInClone  = 2 // not pid 1 of a fresh pid namespace: refused, nothing done
+	probeExitNotInClone  = 2 // not in the requested fresh namespaces: refused, nothing done
 	probeExitMountDenied = 3 // the jail's first mount step was refused (EPERM/EACCES)
 	probeExitMountError  = 4 // any other mount failure
 )
@@ -29,10 +30,10 @@ const (
 // / private — the jail's first mount step — so the probe proves the mount phase
 // works, not just that the namespaces can be created (Ubuntu's AppArmor userns
 // clamp lets the clone succeed but denies the mount). It refuses to mount unless
-// it is pid 1 of a fresh pid namespace, so a direct caller can never change the
-// host's mount propagation.
-func RunProbe([]string) int {
-	if os.Getpid() != 1 {
+// its namespaces match the parent-provided namespace contract.
+func RunProbe(args []string) int {
+	var parent NSIDs
+	if len(args) != 1 || json.Unmarshal([]byte(args[0]), &parent) != nil || verifyNamespaces(parent) != nil {
 		return probeExitNotInClone
 	}
 	err := unix.Mount("", "/", "", unix.MS_REC|unix.MS_PRIVATE, "")
@@ -116,12 +117,20 @@ func decide(fx probeFacts) Report {
 
 // runUsernsProbe re-execs the probe with the real rung-1 clone policy.
 func runUsernsProbe() (cloneErr error, exit int) {
-	c := exec.Command("/proc/self/exe", SentinelProbe)
+	parent, err := namespaceIDs()
+	if err != nil {
+		return err, -1
+	}
+	raw, err := json.Marshal(parent)
+	if err != nil {
+		return err, -1
+	}
+	c := exec.Command("/proc/self/exe", SentinelProbe, string(raw))
 	c.SysProcAttr = cloneSysProcAttr()
 	if err := c.Start(); err != nil {
 		return err, -1
 	}
-	err := c.Wait()
+	err = c.Wait()
 	if err == nil {
 		return nil, probeExitOK
 	}

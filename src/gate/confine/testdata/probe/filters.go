@@ -256,6 +256,7 @@ func filterProbe(op string, args []string) bool {
 				}
 			}
 			report("affinity", unix.SchedSetaffinity(pid, &one))
+			report("schedattr", unix.SchedSetAttr(pid, &unix.SchedAttr{Policy: 3, Nice: 19}, 0))
 		}
 		nice, err := unix.Getpriority(unix.PRIO_PROCESS, pid)
 		if err != nil {
@@ -312,7 +313,11 @@ func filterProbe(op string, args []string) bool {
 		if e != 0 {
 			panic(e)
 		}
-		unix.RawSyscall(unix.SYS_TGKILL, uintptr(os.Getpid()), uintptr(unix.Gettid()), uintptr(unix.SIGSEGV))
+		page, err := unix.Mmap(-1, 0, os.Getpagesize(), unix.PROT_NONE, unix.MAP_PRIVATE|unix.MAP_ANONYMOUS)
+		if err != nil {
+			panic(err)
+		}
+		page[0] = 1
 		panic("crash returned")
 	default:
 		return false

@@ -71,14 +71,14 @@ func TestGateBinaryJailedRead(t *testing.T) {
 	// Host /proc reports host PIDs; walk from awk to its shell to the shim.
 	if rung == confine.Rung1Full {
 		for _, role := range []string{"worker", "shim"} {
-			match := regexp.MustCompile(`(?m)^` + role + ` NSpid:\s+(\d+)\s+(\d+)$`).FindStringSubmatch(out)
-			if len(match) != 3 || match[1] == match[2] || (role == "shim" && match[2] != "1") {
+			match := regexp.MustCompile(`(?m)^` + role + ` NSpid:\s+(\d+)$`).FindStringSubmatch(out)
+			if len(match) != 2 {
 				t.Errorf("invalid %s PID namespace identity: %q", role, out)
 			}
 		}
 	}
 	if rung == confine.Rung1Full && !strings.Contains(out, "/proc/self/exe\x00"+confine.SentinelShim+"\x00") {
-		t.Errorf("pid 1 of the command's pid namespace is not the gate binary's %s shim: %q", confine.SentinelShim, out)
+		t.Errorf("command parent is not the gate binary's %s shim: %q", confine.SentinelShim, out)
 	}
 
 	recs := auditRecords(t, dir)

@@ -150,10 +150,13 @@ func TestJailMatrixP14(t *testing.T) {
 				if len(bytes.TrimSpace(control)) == 0 {
 					t.Fatal("SETUP: missing host process")
 				}
-				result := runP12(t, spec, command, nil)
-				if result.setupErr != nil || result.exit != 0 || result.stdout != string(control) {
-					t.Fatalf("host process invisible: %+v", result)
+				for repetition := 0; repetition < 20; repetition++ {
+					result := runP12(t, spec, command, nil)
+					if result.setupErr != nil || result.exit != 0 || result.stdout != string(control) {
+						t.Fatalf("host process invisible: %+v", result)
+					}
 				}
+
 			})
 		})
 	}

@@ -17,7 +17,7 @@ type Rung int
 
 const (
 	Rung3Unconfined Rung = iota // no kernel wall (labelled UNCONFINED)
-	Rung1Full                   // userns+mount+pid ns, ro /, Landlock, seccomp
+	Rung1Full                   // user/mount/IPC namespaces, host PID, ro /, Landlock, seccomp
 )
 
 func (r Rung) String() string {
@@ -36,7 +36,7 @@ func (r Rung) String() string {
 // restrictions, and the forced command passes no argv, so the agent can never
 // reach them.
 const (
-	SentinelShim   = "__jail"     // RunShim: pid-1 reaper of the new pid namespace (rung 1)
+	SentinelShim   = "__jail"     // RunShim: confined command subreaper
 	SentinelWorker = "__jailexec" // RunWorker: applies restrictions, then execs /bin/sh
 )
 
@@ -111,9 +111,11 @@ type Facts struct {
 
 // Jailed wraps the command and its private setup-report pipes.
 type Jailed struct {
-	Facts  Facts
-	strict bool
-	Cmd    *exec.Cmd
+	// CleanupError reports post-execution cleanup failure without changing status.
+	CleanupError string
+	Facts        Facts
+	strict       bool
+	Cmd          *exec.Cmd
 
 	// cmd is the command string the parent streams to the worker on fd 3.
 	cmd string
@@ -159,7 +161,7 @@ func (j *Jailed) Abort() {
 
 // Status must be called after Cmd.Wait. It returns nil ONLY if the worker
 // reported (on the fd-4 status pipe) that it completed every setup stage and
-// reached execve — a single 'X' byte. Anything else — an explicit
+// reached execve — an 'X' byte, optionally followed by shim cleanup metadata. An explicit
 // "F<stage>:<errno>" report, or EOF with no report (the worker died before
 // reporting) — is a *SetupError, meaning nothing ran.
 func (j *Jailed) Status() error {
@@ -185,6 +187,14 @@ func (j *Jailed) Status() error {
 			return &SetupError{Stage: "report"}
 		}
 		buf = []byte(tail)
+	}
+	if head, reason, ok := strings.Cut(string(buf), "\nC"); ok {
+		reason = strings.TrimSuffix(reason, "\n")
+		if reason == "" || strings.ContainsAny(reason, "\r\n") {
+			return &SetupError{Stage: "report"}
+		}
+		j.CleanupError = reason
+		buf = []byte(head)
 	}
 	if err := statusFromReport(buf); err != nil {
 		return err

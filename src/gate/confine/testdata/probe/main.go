@@ -287,7 +287,7 @@ func main() {
 			_ = unix.Close(int(fd))
 		}
 	default:
-		if filterProbe(os.Args[1], args) {
+		if hostPIDProbe(os.Args[1], args) || filterProbe(os.Args[1], args) {
 			break
 		}
 		fmt.Fprintln(os.Stderr, "unknown op:", os.Args[1])

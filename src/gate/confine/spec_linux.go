@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -72,7 +73,7 @@ func (s Spec) command(ctx context.Context, cmd string) (*Jailed, error) {
 	}, nil
 }
 
-// cloneSysProcAttr is the rung-1 clone policy: new user+mount+pid+ipc
+// cloneSysProcAttr is the rung-1 clone policy: new user+mount+ipc
 // namespaces (the ipc one isolates host SysV IPC and POSIX message queues),
 // identity uid/gid maps (so reads of the user's own files keep correct
 // ownership), and the mount-phase capabilities carried as ambient caps so they
@@ -80,13 +81,10 @@ func (s Spec) command(ctx context.Context, cmd string) (*Jailed, error) {
 func cloneSysProcAttr() *syscall.SysProcAttr {
 	uid, gid := os.Getuid(), os.Getgid()
 	attr := &syscall.SysProcAttr{
-		Cloneflags:  syscall.CLONE_NEWUSER | syscall.CLONE_NEWNS | syscall.CLONE_NEWPID | syscall.CLONE_NEWIPC,
+		Cloneflags:  syscall.CLONE_NEWUSER | syscall.CLONE_NEWNS | syscall.CLONE_NEWIPC,
 		AmbientCaps: []uintptr{unix.CAP_SYS_ADMIN, unix.CAP_SETPCAP},
 		Setpgid:     true,
 		Pdeathsig:   syscall.SIGKILL,
-	}
-	if jailmut.On("P-CLONE-PID") {
-		attr.Cloneflags &^= syscall.CLONE_NEWPID
 	}
 	if jailmut.On("P-CLONE-IPC") {
 		attr.Cloneflags &^= syscall.CLONE_NEWIPC
@@ -107,7 +105,7 @@ func cloneSysProcAttr() *syscall.SysProcAttr {
 	return attr
 }
 
-// RunShim is the __jail entrypoint: pid 1 of the new pid namespace on rung 1. It
+// RunShim is the subreaper for a confined command. It
 // forks exactly one worker, forwards fd 3/4, then reaps. It only ever reduces
 // privilege, so a direct local caller gains nothing.
 func RunShim(args []string) int {
@@ -117,14 +115,21 @@ func RunShim(args []string) int {
 		return ExitSetupFailed
 	}
 
-	if !jailmut.On("P-SHIM-PID1") && os.Getpid() != 1 {
-		_, _ = io.WriteString(statusW, formatFailReport("nsverify", unix.EPERM))
+	if err := EnableSubreaper(); err != nil {
+		_, _ = io.WriteString(statusW, formatFailReport("shim", errnoOf(err)))
 		return ExitSetupFailed
 	}
 	if err := unix.Prctl(unix.PR_SET_DUMPABLE, 0, 0, 0, 0); err != nil {
 		_, _ = io.WriteString(statusW, formatFailReport("nsverify", errnoOf(err)))
 		return ExitSetupFailed
 	}
+	if _, err := childPIDs(); err != nil {
+		_, _ = io.WriteString(statusW, formatFailReport("shim", errnoOf(err)))
+		return ExitSetupFailed
+	}
+	terminated := make(chan os.Signal, 1)
+	signal.Notify(terminated, syscall.SIGTERM)
+	defer signal.Stop(terminated)
 	c := exec.Command("/proc/self/exe", append([]string{SentinelWorker}, args...)...)
 	c.Stdin, c.Stdout, c.Stderr = os.Stdin, os.Stdout, os.Stderr
 	c.ExtraFiles = []*os.File{cmdR, statusW}
@@ -132,11 +137,10 @@ func RunShim(args []string) int {
 		_, _ = io.WriteString(statusW, formatFailReport("shim", errnoOf(err)))
 		return ExitSetupFailed
 	}
-	// Drop our copies so the parent sees EOF on the status pipe once the worker
-	// is done, and the command pipe's only reader is the worker.
+	// Keep the status pipe through cleanup; the worker closes it on exec.
 	_ = cmdR.Close()
-	_ = statusW.Close()
-	return reap(c.Process.Pid)
+	defer statusW.Close()
+	return reap(c.Process.Pid, terminated, statusW)
 }
 
 // RunWorker is the __jailexec entrypoint: it applies every restriction on a
@@ -239,6 +243,7 @@ func RunWorker(args []string) int {
 	}
 	filter := buildFilter(filterParams{
 		allowInet: spec.Net,
+		abi:       abi,
 	})
 	err = installSeccomp(filter, spec)
 	if err != nil {
@@ -280,8 +285,15 @@ func RunWorker(args []string) int {
 		raw, _ := json.Marshal(facts)
 		_, _ = fmt.Fprintf(statusW, "I%s\n", raw)
 	}
+	err = establishSession()
+	if stage, errno := spec.inject(); stage == "session" {
+		err = errno
+	}
+	if !jailmut.On("P-FAULT-session") && err != nil {
+		return fail("session", err)
+	}
 	// Report success, then hand off to /bin/sh. The execve closes fd 4 (CLOEXEC),
-	// so the parent reads exactly "X" then EOF.
+	// leaving only the shim able to append cleanup metadata.
 	_, _ = io.WriteString(statusW, statusReachedExec)
 	execErr := unix.Exec(execPath, []string{"sh", "-c", cmd}, jailEnv(cwd))
 	if jailmut.On("P-FAULT-exec") {
@@ -334,38 +346,6 @@ func jailEnv(cwd string) []string {
 		out = append(out, k+"="+v)
 	}
 	return out
-}
-
-// reap is the pid-1 reaper loop. It returns as soon as the worker (its direct
-// child) is reaped, mirroring the worker's status; it never blocks waiting for
-// backgrounded descendants (pid-namespace teardown kills any stragglers).
-func reap(workerPid int) int {
-	for {
-		var ws unix.WaitStatus
-		pid, err := unix.Wait4(-1, &ws, 0, nil)
-		if err == unix.EINTR {
-			continue
-		}
-		if err != nil {
-			// ECHILD before the worker was reaped: nothing left to wait on.
-			return ExitSetupFailed
-		}
-		if pid == workerPid {
-			// Drain any already-exited orphans without blocking, then exit.
-			for {
-				var z unix.WaitStatus
-				p, e := unix.Wait4(-1, &z, unix.WNOHANG, nil)
-				if e != nil || p <= 0 {
-					break
-				}
-			}
-			if ws.Signaled() {
-				return 128 + int(ws.Signal())
-			}
-			return ws.ExitStatus()
-		}
-		// An orphan exited before the worker; keep waiting for the worker.
-	}
 }
 
 // readCapped reads up to max bytes, returning an error if the source produces

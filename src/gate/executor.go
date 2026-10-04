@@ -75,11 +75,13 @@ type ExecOpts struct {
 // child's 0..255 code, 128+signum when signalled, or -1 if the process
 // never started.
 type ExecResult struct {
-	ExitCode    int
-	StdoutBytes int64
-	StderrBytes int64
-	Lines       int64
-	Duration    time.Duration
+	ExitCode int
+	// CleanupError reports post-execution cleanup failure without changing ExitCode.
+	CleanupError string
+	StdoutBytes  int64
+	StderrBytes  int64
+	Lines        int64
+	Duration     time.Duration
 	// Stdout/Stderr hold a (capped) copy of the bytes that reached the
 	// SSH stream, populated ONLY when ExecOpts.CaptureLimit > 0 (the
 	// audit `all+full` path). Empty otherwise.
@@ -273,17 +275,21 @@ func runRedacted(c *exec.Cmd, jailed *confine.Jailed, what string, opts ExecOpts
 	// structurally — independent of whether the classifier happens to flag a
 	// given program-from-stdin form.
 	c.Stdin = nil
-	// The child runs in its own process group (Setpgid set above, on BOTH the
-	// confined and unconfined Cmd) so ctx cancellation kills the whole tree.
-	// When ctx is cancelled, send SIGKILL to the whole process group.
-	// exec.CommandContext by default only signals the direct child;
-	// override Cancel so we get the group.
-	c.Cancel = func() error {
-		if c.Process == nil {
-			return os.ErrProcessDone
+	if jailed != nil {
+		if err := confine.EnableSubreaper(); err != nil {
+			jailed.Abort()
+			return ExecResult{ExitCode: -1}, fmt.Errorf("exec: gate subreaper: %w", err)
 		}
-		// Negative PID targets the process group.
-		return syscall.Kill(-c.Process.Pid, syscall.SIGKILL)
+		// WaitDelay escalates SIGTERM to SIGKILL and bounds pipes held by orphans.
+		c.WaitDelay = 500 * time.Millisecond
+		c.Cancel = func() error { return c.Process.Signal(syscall.SIGTERM) }
+	} else {
+		c.Cancel = func() error {
+			if c.Process == nil {
+				return os.ErrProcessDone
+			}
+			return syscall.Kill(-c.Process.Pid, syscall.SIGKILL)
+		}
 	}
 
 	start := time.Now()
@@ -301,6 +307,11 @@ func runRedacted(c *exec.Cmd, jailed *confine.Jailed, what string, opts ExecOpts
 		_ = jailed.Started()
 	}
 	waitErr := c.Wait()
+	var cleanupErr error
+	if jailed != nil {
+		cleanupErr = confine.CleanupDescendants()
+	}
+
 	// Flush the redact.Writer instances after the child exits so any
 	// bytes still held inside the safe-prefix tail (or inside a
 	// not-yet-completed PEM accumulator) reach the SSH stream — and the
@@ -342,6 +353,24 @@ func runRedacted(c *exec.Cmd, jailed *confine.Jailed, what string, opts ExecOpts
 		}
 	}
 
+	if jailed != nil {
+		res.CleanupError = jailed.CleanupError
+		if cleanupErr != nil {
+			reason := strings.Join(strings.Fields(cleanupErr.Error()), " ")
+			if res.CleanupError == "" {
+				fmt.Fprintln(errCount, "gate-jail: cleanup:", reason)
+			}
+			if res.CleanupError != "" {
+				res.CleanupError += "; "
+			}
+			res.CleanupError += reason
+		}
+		res.StderrBytes = errCount.bytes.Load()
+		res.Stderr = errCount.captured()
+		if errors.Is(waitErr, exec.ErrWaitDelay) {
+			waitErr = nil
+		}
+	}
 	if waitErr == nil {
 		res.ExitCode = 0
 		return res, nil
@@ -361,6 +390,10 @@ func runRedacted(c *exec.Cmd, jailed *confine.Jailed, what string, opts ExecOpts
 		// Fallback: ExitCode() returns -1 if signaled; use it as best effort.
 		res.ExitCode = exitErr.ExitCode()
 		return res, nil
+	}
+	if jailed != nil {
+		res.ExitCode = 1
+		return res, fmt.Errorf("exec: confined wait after execution: %w", waitErr)
 	}
 	// Non-ExitError wait failure (e.g. waitpid syscall error). Treat as
 	// a start/run failure so the caller can distinguish it.

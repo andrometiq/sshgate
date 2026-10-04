@@ -43,7 +43,7 @@ func TestMain(m *testing.M) {
 				case "same-mnt":
 					spec.ParentNS.Mnt = ids.Mnt
 				case "same-pid":
-					spec.ParentNS.Pid = ids.Pid
+					spec.ParentNS.Pid = ids.Pid + 1
 				case "same-ipc":
 					spec.ParentNS.IPC = ids.IPC
 				}

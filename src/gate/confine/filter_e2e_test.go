@@ -51,11 +51,6 @@ func TestJailMatrixP15(t *testing.T) {
 			t.Run("L-SIGNAL", func(t *testing.T) { legSignal(t, spec) })
 			t.Run("L-IPC-SYSV", func(t *testing.T) { legSysV(t, spec) })
 			t.Run("L-SCHED", func(t *testing.T) { legScheduler(t, spec) })
-			if os.Getenv("SSHGATE_JAIL_CI") == "1" {
-				t.Run("L-SCHED-USER", func(t *testing.T) { legUserScheduler(t, spec) })
-			} else {
-				t.Log("MUTATE-OMITTED(ci-only): L-SCHED-USER")
-			}
 			t.Run("L-UNIX-CONNECT", func(t *testing.T) { legUnixConnect(t, spec, false) })
 			t.Run("L-UNIX-ABSTRACT", func(t *testing.T) { legUnixConnect(t, spec, true) })
 			t.Run("L-IOCTL", func(t *testing.T) { legIoctlFilter(t, spec) })
@@ -493,41 +488,19 @@ func legScheduler(t *testing.T, spec Spec) {
 	callers := func(pid string) string {
 		return fmt.Sprintf("renice -n 19 -p %s && ionice -c3 -p %s && chrt -b -p 0 %s && taskset -pc %d %s && prlimit --nofile=7:7 --pid %s", pid, pid, pid, cpu, pid, pid)
 	}
-	sibling := runP12(t, spec, "sleep 30 & p=$!; "+callers("$p")+" && "+probe+" scheduler-state $p; result=$?; kill $p; wait $p; exit $result", nil)
-	if sibling.setupErr != nil || sibling.exit != 0 || !strings.Contains(sibling.stdout, "state=19:24576:3:7:1\n") {
-		t.Fatalf("SETUP: sibling retune effect control: %+v", sibling)
+	self := runP12(t, spec, "nice -n 19 ionice -c3 chrt -b 0 taskset -c "+strconv.Itoa(cpu)+" prlimit --nofile=7:7 "+probe+" scheduler-state 0", nil)
+	if self.setupErr != nil || self.exit != 0 || !strings.Contains(self.stdout, "state=19:24576:3:7:1\n") {
+		t.Fatalf("SETUP: self retune effect control: %+v", self)
 	}
 	victim := startSleeper(t)
 	pid := victim.Process.Pid
 	before := readScheduler(t, pid)
 	output := requireProbeOutput(t, runP12(t, spec, probe+" scheduler "+strconv.Itoa(pid)+"; "+strings.ReplaceAll(callers(strconv.Itoa(pid)), " && ", "; "), nil))
 	mutationEffect(t, "L-SCHED", "retuned", before != readScheduler(t, pid))
-	if !strings.Contains(output, "=3\n") && !strings.Contains(output, "=ok\n") {
+	if !strings.Contains(output, "=1\n") && !strings.Contains(output, "=ok\n") {
 		t.Errorf("scheduler errno: %s", output)
 	}
 }
-func legUserScheduler(t *testing.T, spec Spec) {
-	attr := cloneSysProcAttr()
-	attr.Cloneflags = unix.CLONE_NEWUSER | unix.CLONE_NEWPID
-	if runFilterFixture(t, "SSHGATE_SCHED_FIXTURE", attr, []string{"retuned"}) {
-		return
-	}
-	probe := buildProbe(t)
-	victim := startSleeper(t)
-	before := readScheduler(t, victim.Process.Pid)
-	// The confined uid-scoped operations must affect an in-jail sibling independently.
-	control := runP12(t, spec, "sleep 30 & p=$!; "+probe+" prio-user unused; "+probe+" ioprio-user unused; renice -n 19 -u $(id -u); ionice -c3 -u $(id -u); "+probe+" scheduler-state $p; result=$?; kill $p; wait $p; exit $result", nil)
-	if control.setupErr != nil || control.exit != 0 || !strings.Contains(control.stdout, "prio-user=ok\n") || !strings.Contains(control.stdout, "ioprio-user=ok\n") || !strings.Contains(control.stdout, "state=19:24576:") {
-		t.Fatalf("SETUP: uid control: %+v", control)
-	}
-	output := requireProbeOutput(t, runP12(t, spec, probe+" prio-user unused; "+probe+" ioprio-user unused", nil))
-	if !strings.Contains(output, "prio-user=ok\n") || !strings.Contains(output, "ioprio-user=ok\n") {
-		t.Fatalf("SETUP: uid scheduler calls: %s", output)
-	}
-	after := readScheduler(t, victim.Process.Pid)
-	mutationEffect(t, "L-SCHED-USER", "retuned", before.nice != after.nice || before.io != after.io)
-}
-
 func legIOUring(t *testing.T, spec Spec) {
 	probe := buildProbe(t)
 	path := filepath.Join(filterFixture(t), "owned")

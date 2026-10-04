@@ -27,3 +27,6 @@ func detect() Report {
 // matches the linux build.
 func RunShim([]string) int   { return ExitSetupFailed }
 func RunWorker([]string) int { return ExitSetupFailed }
+
+func EnableSubreaper() error    { return nil }
+func CleanupDescendants() error { return nil }

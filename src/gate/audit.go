@@ -196,6 +196,8 @@ type AuditRecord struct {
 	// ExitCode is the gate's exit code for the command (the child's code,
 	// or the deny code on a rejection).
 	ExitCode int `json:"exit_code"`
+	// CleanupError records post-execution cleanup failure; ExitCode stays unchanged.
+	CleanupError string `json:"cleanup_error,omitempty"`
 	// Meta is output metadata (bytes/lines/duration). nil for rejections
 	// that never executed a child.
 	Meta *AuditMeta `json:"meta,omitempty"`

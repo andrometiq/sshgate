@@ -21,7 +21,7 @@ import (
 
 type prot = harness.Protection
 
-var registry = append(p12Registry(), p15Registry()...)
+var registry = append(append(p12Registry(), p15Registry()...), hostPIDRegistry()...)
 
 func p12Leg(name, marker string) harness.Leg {
 	leg := harness.Leg{Name: name, Package: "./src/gate/confine", Names: map[string]string{"native": "TestJailMatrixP12/native/" + name, "abi1": "TestJailMatrixP12/abi1/" + name}}
@@ -38,15 +38,14 @@ func p12Registry() []prot {
 	}
 	add("P-SPEC", "decodeSpec / Spec.validate", p12Leg("L-SPEC-REJECT", "MUTATION-EFFECT reached-exec"))
 	nsLegs := []harness.Leg{}
-	for _, name := range []string{"L-NSVERIFY-user", "L-NSVERIFY-mnt", "L-NSVERIFY-pid", "L-NSVERIFY-ipc", "L-NSVERIFY-parent", "L-FAULT-nsverify"} {
+	for _, name := range []string{"L-NSVERIFY-user", "L-NSVERIFY-mnt", "L-NSVERIFY-pid", "L-NSVERIFY-ipc", "L-FAULT-nsverify"} {
 		nsLegs = append(nsLegs, p12Leg(name, "MUTATION-EFFECT reached-exec"))
 	}
-	nsLegs = append(nsLegs, p12Leg("L-HOSTMOUNTS-UNCHANGED", ""))
-	executor := harness.Leg{Name: "L-NSVERIFY", Package: "./src/gate", Names: map[string]string{"native": "TestExecWithRedactionConfineNSVerify/native/L-NSVERIFY", "abi1": "TestExecWithRedactionConfineNSVerify/abi1/L-NSVERIFY"}}
+	nsLegs = append(nsLegs, p12Leg("L-HOSTMOUNTS-UNCHANGED", "MUTATION-ABORT private"))
+	executor := harness.Leg{Markers: []string{"MUTATION-ABORT private"}, Name: "L-NSVERIFY", Package: "./src/gate", Names: map[string]string{"native": "TestExecWithRedactionConfineNSVerify/native/L-NSVERIFY", "abi1": "TestExecWithRedactionConfineNSVerify/abi1/L-NSVERIFY"}}
 	nsLegs = append(nsLegs, executor)
 	add("P-NSVERIFY", "RunWorker before setupMounts", nsLegs...)
-	add("P-SHIM-PID1", "RunShim before worker Start", p12Leg("L-SHIM-PID1", "MUTATION-ABORT spec"))
-	for _, stage := range []string{"spec", "cmdread", "mounts", "nnp", "caps", "rlimits", "landlock", "seccomp", "fds", "cwd", "exec"} {
+	for _, stage := range []string{"spec", "cmdread", "mounts", "nnp", "caps", "rlimits", "landlock", "seccomp", "fds", "cwd", "session", "exec"} {
 		legs := []harness.Leg{p12Leg("L-FAULT-"+stage, "MUTATION-EFFECT reached-exec")}
 		if stage == "caps" {
 			root := p12Leg("L-ROOT-STATE", "")
