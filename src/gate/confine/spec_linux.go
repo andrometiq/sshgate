@@ -207,7 +207,7 @@ func RunWorker(args []string) int {
 	}
 	cmd := string(cmdBytes)
 
-	abi := effectiveABI(probeLandlockABI(), spec.ForceABI)
+	abi, probeErr := workerLandlockABI(spec.ForceABI, probeLandlockABI)
 	rootSSH := os.Getuid() == 0
 
 	err = verifyNamespaces(spec.ParentNS)
@@ -250,7 +250,7 @@ func RunWorker(args []string) int {
 	if !jailmut.On("P-FAULT-rlimits") && err != nil {
 		return fail("rlimits", err)
 	}
-	err = applyLandlock(abi, writableSet())
+	err = applyWorkerLandlock(abi, probeErr)
 	restrictedABI := 0
 	if err == nil {
 		restrictedABI = abi
@@ -439,4 +439,21 @@ func clearShimCaps() error {
 		return err
 	}
 	return unix.Prctl(unix.PR_CAP_AMBIENT, unix.PR_CAP_AMBIENT_CLEAR_ALL, 0, 0, 0)
+}
+
+// workerLandlockABI accepts the probe as a parameter for errno regression tests.
+func workerLandlockABI(force int, probe func() (int, unix.Errno)) (int, unix.Errno) {
+	probed, errno := probe()
+	abi := effectiveABI(probed, force)
+	if abi < 1 && errno == 0 {
+		errno = unix.ENOSYS
+	}
+	return abi, errno
+}
+
+func applyWorkerLandlock(abi int, probeErr unix.Errno) error {
+	if abi < 1 && !jailmut.On("P-LL-REQUIRED") {
+		return probeErr
+	}
+	return applyLandlock(abi, writableSet())
 }

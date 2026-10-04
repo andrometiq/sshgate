@@ -203,7 +203,7 @@ func ExecWithRedaction(ctx context.Context, cmd string, opts ExecOpts) (res Exec
 		c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	}
 
-	return runRedacted(c, jailed, "/bin/sh", opts)
+	return runRedacted(ctx, c, jailed, "/bin/sh", opts)
 }
 
 // ExecArgvWithRedaction runs argv directly — no shell, no jail — with exactly
@@ -223,14 +223,14 @@ func ExecArgvWithRedaction(ctx context.Context, argv, env []string, opts ExecOpt
 	c := exec.CommandContext(ctx, argv[0], argv[1:]...)
 	c.Env = append([]string{}, env...) // non-nil: os/exec inherits the gate's env only for a nil Env
 	c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	return runRedacted(c, nil, argv[0], opts)
+	return runRedacted(ctx, c, nil, argv[0], opts)
 }
 
 // runRedacted is the shared tail of both exec entry points: it wires the
 // redacting/counting writers and /dev/null stdin onto c, runs it, and maps the
 // outcome to an ExecResult. jailed is non-nil only for a confined command; what
 // names the program in a start-failure error.
-func runRedacted(c *exec.Cmd, jailed *confine.Jailed, what string, opts ExecOpts) (res ExecResult, err error) {
+func runRedacted(ctx context.Context, c *exec.Cmd, jailed *confine.Jailed, what string, opts ExecOpts) (res ExecResult, err error) {
 	// Counting writers sit BELOW any redactor so the tally is the
 	// post-redaction byte/line count that actually reaches the SSH
 	// stream (see ExecResult). One per stream, never shared. CaptureLimit
@@ -281,7 +281,7 @@ func runRedacted(c *exec.Cmd, jailed *confine.Jailed, what string, opts ExecOpts
 			jailed.Abort()
 			return ExecResult{ExitCode: -1}, fmt.Errorf("exec: gate subreaper: %w", err)
 		}
-		// WaitDelay escalates SIGTERM to SIGKILL and bounds pipes held by orphans.
+		// WaitDelay escalates SIGTERM to SIGKILL independently of output delivery.
 		c.WaitDelay = 500 * time.Millisecond
 		c.Cancel = func() error { return c.Process.Signal(syscall.SIGTERM) }
 	} else {
@@ -293,6 +293,30 @@ func runRedacted(c *exec.Cmd, jailed *confine.Jailed, what string, opts ExecOpts
 		}
 	}
 
+	var outputReaders, outputWriters []*os.File
+	destinations := []io.Writer{c.Stdout, c.Stderr}
+	closers := []io.Closer{stdoutCloser, stderrCloser}
+	if jailed != nil {
+		defer func() {
+			for _, f := range outputReaders {
+				_ = f.Close()
+			}
+			for _, f := range outputWriters {
+				_ = f.Close()
+			}
+		}()
+		for range 2 {
+			reader, writer, pipeErr := os.Pipe()
+			if pipeErr != nil {
+				jailed.Abort()
+				return ExecResult{ExitCode: -1}, fmt.Errorf("exec: output pipe: %w", pipeErr)
+			}
+			outputReaders = append(outputReaders, reader)
+			outputWriters = append(outputWriters, writer)
+		}
+		c.Stdout, c.Stderr = outputWriters[0], outputWriters[1]
+	}
+
 	start := time.Now()
 	if err := c.Start(); err != nil {
 		if jailed != nil {
@@ -302,6 +326,21 @@ func runRedacted(c *exec.Cmd, jailed *confine.Jailed, what string, opts ExecOpts
 		// Nil-Confine path stays byte-identical to the pre-jail executor.
 		return ExecResult{ExitCode: -1, Duration: time.Since(start)}, fmt.Errorf("exec: start %s: %w", what, err)
 	}
+	outputDone := make(chan error, 2)
+	if jailed != nil {
+		for i, reader := range outputReaders {
+			_ = outputWriters[i].Close()
+			go func(i int, reader *os.File) {
+				defer reader.Close()
+				_, copyErr := io.Copy(destinations[i], reader)
+				if closers[i] != nil {
+					copyErr = errors.Join(copyErr, closers[i].Close())
+				}
+				outputDone <- copyErr
+			}(i, reader)
+		}
+		stdoutCloser, stderrCloser = nil, nil
+	}
 	if jailed != nil {
 		// Close the parent's child-side pipe ends and stream the command to the
 		// worker on fd 3 (from a goroutine, so a large command cannot deadlock).
@@ -309,8 +348,16 @@ func runRedacted(c *exec.Cmd, jailed *confine.Jailed, what string, opts ExecOpts
 	}
 	waitErr := c.Wait()
 	var cleanupErr error
+	outputJoined := true
 	if jailed != nil {
 		cleanupErr = confine.CleanupDescendants()
+		var outputErr error
+		outputJoined, outputErr = joinOutput(ctx, outputDone, c.WaitDelay)
+		if !outputJoined {
+			cleanupErr = errors.Join(cleanupErr, errors.New("output delivery abandoned after cancellation"))
+		} else if waitErr == nil {
+			waitErr = outputErr
+		}
 	}
 
 	// Flush the redact.Writer instances after the child exits so any
@@ -337,8 +384,10 @@ func runRedacted(c *exec.Cmd, jailed *confine.Jailed, what string, opts ExecOpts
 		StderrBytes: errCount.bytes.Load(),
 		Lines:       outCount.lines.Load(),
 		Duration:    dur,
-		Stdout:      outCount.captured(),
-		Stderr:      errCount.captured(),
+	}
+
+	if outputJoined {
+		res.Stdout, res.Stderr = outCount.captured(), errCount.captured()
 	}
 
 	// Fail closed on a jail setup failure: if the worker aborted before execve
@@ -360,16 +409,16 @@ func runRedacted(c *exec.Cmd, jailed *confine.Jailed, what string, opts ExecOpts
 		res.CleanupError = jailed.CleanupError
 		if cleanupErr != nil {
 			reason := strings.Join(strings.Fields(cleanupErr.Error()), " ")
-			if res.CleanupError == "" {
-				fmt.Fprintln(errCount, "gate-jail: cleanup:", reason)
-			}
+			// Report through audit metadata: stderr may itself be blocked.
 			if res.CleanupError != "" {
 				res.CleanupError += "; "
 			}
 			res.CleanupError += reason
 		}
 		res.StderrBytes = errCount.bytes.Load()
-		res.Stderr = errCount.captured()
+		if outputJoined {
+			res.Stderr = errCount.captured()
+		}
 		if errors.Is(waitErr, exec.ErrWaitDelay) {
 			waitErr = nil
 		}
@@ -402,4 +451,31 @@ func runRedacted(c *exec.Cmd, jailed *confine.Jailed, what string, opts ExecOpts
 	// a start/run failure so the caller can distinguish it.
 	res.ExitCode = -1
 	return res, fmt.Errorf("exec: wait: %w", waitErr)
+}
+
+// Output keeps normal backpressure until cancellation, including redactor flushes.
+func joinOutput(ctx context.Context, done <-chan error, grace time.Duration) (bool, error) {
+	var result error
+	cancelled := ctx.Done()
+	var deadline <-chan time.Time
+	var timer *time.Timer
+	defer func() {
+		if timer != nil {
+			timer.Stop()
+		}
+	}()
+	for remaining := 2; remaining > 0; {
+		select {
+		case err := <-done:
+			result = errors.Join(result, err)
+			remaining--
+		case <-cancelled:
+			timer = time.NewTimer(grace)
+			deadline = timer.C
+			cancelled = nil
+		case <-deadline:
+			return false, result
+		}
+	}
+	return true, result
 }

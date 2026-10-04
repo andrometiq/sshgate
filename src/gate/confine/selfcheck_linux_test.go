@@ -168,7 +168,7 @@ func TestStatusProtocolFacts(t *testing.T) {
 
 func TestDeniedSubtreeSafe(t *testing.T) {
 	// U-DeniedSubtreeSafe: judge the complete table, including hidden mounts.
-	sys := t.TempDir()
+	sys, proc := t.TempDir(), t.TempDir()
 	for _, device := range []struct{ number, controller, transport, driver string }{
 		{"259:0", "nvme0", "tcp", "nvme-tcp"},
 		{"259:1", "nvme1", "pcie", "nvme"},
@@ -180,6 +180,7 @@ func TestDeniedSubtreeSafe(t *testing.T) {
 		mkdir(t, driver)
 		link(t, driver, filepath.Join(filepath.Dir(disk), "driver"))
 		link(t, disk, filepath.Join(sys, "dev/block", device.number))
+		mkdir(t, filepath.Join(proc, "fs/jbd2", device.controller+"n1-8"))
 	}
 	for _, test := range []struct {
 		name, denied, point, fstype, device string
@@ -211,7 +212,7 @@ func TestDeniedSubtreeSafe(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got := deniedSubtreeSafe(entries, test.denied, test.accept, backingInspector{sys: sys}); got != test.want {
+			if got := deniedSubtreeSafe(entries, test.denied, test.accept, backingInspector{sys: sys, proc: proc}); got != test.want {
 				t.Fatalf("deniedSubtreeSafe = %v, want %v", got, test.want)
 			}
 		})
