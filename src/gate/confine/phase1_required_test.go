@@ -219,3 +219,28 @@ P-SUBREAPER
 		t.Fatalf("Phase-1 protection IDs differ from independent matrix: got %v; want %v", got, want)
 	}
 }
+
+func TestPhase1FIFOProof(t *testing.T) {
+	for _, protection := range registry {
+		if protection.ID != "P-LL-FS" {
+			continue
+		}
+		for _, set := range protection.MutationSets {
+			if len(set.IDs) != 1 || set.IDs[0] != "P-LL-FS" {
+				continue
+			}
+			for _, leg := range set.Legs {
+				if leg.Name != "L-FIFO-WRITE" {
+					continue
+				}
+				for _, abi := range []string{"native", "abi1"} {
+					if leg.Names[abi] != "TestJailMatrixWrite/"+abi+"/L-FIFO-WRITE" || !reflect.DeepEqual(leg.ExpectedMarkers(abi), []string{"MUTATION-EFFECT delivered"}) {
+						t.Fatalf("FIFO single-wall proof missing at %s: %+v", abi, leg)
+					}
+				}
+				return
+			}
+		}
+	}
+	t.Fatal("missing single-wall FIFO proof for P-LL-FS")
+}

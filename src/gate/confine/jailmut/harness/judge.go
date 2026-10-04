@@ -161,7 +161,7 @@ func Judge(stream io.Reader, stderr string, status int, legs []Leg, abi string) 
 func suspicious(output string) bool {
 	for _, line := range strings.Split(output, "\n") {
 		line = markerLine(line)
-		if strings.HasPrefix(line, "panic: ") || strings.HasPrefix(line, "fatal error: ") || strings.Contains(line, "test timed out after") || strings.Contains(line, "no tests to run") || strings.Contains(line, "SETUP:") || strings.Contains(line, "CONTROL-SKIPPED") {
+		if strings.HasPrefix(line, "panic: ") || strings.HasPrefix(line, "fatal error: ") || strings.Contains(line, "test timed out after") || strings.Contains(line, "no tests to run") || strings.Contains(line, "SETUP:") || strings.Contains(line, "UNEXPECTED:") || strings.Contains(line, "CONTROL-SKIPPED") {
 			return true
 		}
 	}

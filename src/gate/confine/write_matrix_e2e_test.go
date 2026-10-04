@@ -22,6 +22,7 @@ func TestJailMatrixWrite(t *testing.T) {
 	}{{"native", 0}, {"abi1", 1}} {
 		t.Run(cfg.name, func(t *testing.T) {
 			spec := Spec{Profile: ProfileROv1, ForceABI: cfg.abi, Net: true}
+			t.Run("L-FIFO-WRITE", func(t *testing.T) { legFifo(t, spec) })
 			t.Run("L-WRITE-ERRNO", func(t *testing.T) {
 				probe := buildProbe(t)
 				bad := false
@@ -144,12 +145,12 @@ func legMetadataMount(t *testing.T, spec Spec, submount bool) map[string]bool {
 	for _, op := range operations {
 		if fullEffect {
 			if !strings.Contains(output, op+"=ok\n") {
-				t.Errorf("%s mutation did not succeed: %s", op, output)
+				unexpected(t, "%s mutation did not succeed: %s", op, output)
 			}
 			continue
 		}
 		if !strings.Contains(output, op+"="+want+"\n") {
-			t.Errorf("%s expected errno %s: %s", op, want, output)
+			unexpected(t, "%s expected errno %s: %s", op, want, output)
 		}
 	}
 	return metadataChanges(before, readMetadata(t, path))

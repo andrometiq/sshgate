@@ -135,7 +135,7 @@ func legCrash(t *testing.T, spec Spec, lower bool) {
 		t.Cleanup(func() {
 			for _, path := range paths {
 				if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-					t.Errorf("core fixture cleanup: %v", err)
+					unexpected(t, "core fixture cleanup: %v", err)
 				}
 			}
 		})
@@ -143,7 +143,7 @@ func legCrash(t *testing.T, spec Spec, lower bool) {
 	if report != "" {
 		t.Cleanup(func() {
 			if err := os.Remove(report); err != nil && !os.IsNotExist(err) {
-				t.Errorf("fixture report cleanup: %v", err)
+				unexpected(t, "fixture report cleanup: %v", err)
 			}
 		})
 	}

@@ -348,7 +348,7 @@ func legCoreLock(t *testing.T, spec Spec) {
 	}
 	mutationEffect(t, "L-RLIMIT-CORE-LOCK", "shell", shell.exit == 0)
 	if shell.exit != 0 && !strings.Contains(strings.ToLower(shell.stderr), "operation not permitted") {
-		t.Errorf("shell core-limit errno: %+v", shell)
+		unexpected(t, "shell core-limit errno: %+v", shell)
 	}
 	command := runP12(t, spec, "prlimit --core=0:", nil)
 	if command.setupErr != nil {
@@ -356,7 +356,7 @@ func legCoreLock(t *testing.T, spec Spec) {
 	}
 	mutationEffect(t, "L-RLIMIT-CORE-LOCK", "prlimit", command.exit == 0)
 	if command.exit != 0 && !strings.Contains(strings.ToLower(command.stderr), "operation not permitted") {
-		t.Errorf("prlimit core-limit errno: %+v", command)
+		unexpected(t, "prlimit core-limit errno: %+v", command)
 	}
 }
 
@@ -439,7 +439,7 @@ func legNamespaceCalls(t *testing.T, spec Spec) {
 		if result.exit == 0 {
 			unshareAllowed = true
 		} else if !strings.Contains(result.stderr, "Operation not permitted") {
-			t.Errorf("unshare %s not EPERM: %+v", item.option, result)
+			unexpected(t, "unshare %s not EPERM: %+v", item.option, result)
 		}
 		control, err = exec.Command("unshare", "-Ur", "--", probe, "clone-ns", fmt.Sprint(item.flags)).CombinedOutput()
 		if err != nil || !strings.Contains(string(control), "clone=ok\n") {
@@ -449,7 +449,7 @@ func legNamespaceCalls(t *testing.T, spec Spec) {
 		if strings.Contains(output, "clone=ok\n") {
 			cloneAllowed = true
 		} else if !strings.Contains(output, "clone=1\n") {
-			t.Errorf("clone %#x not EPERM: %s", item.flags, output)
+			unexpected(t, "clone %#x not EPERM: %s", item.flags, output)
 		}
 	}
 	control, err := exec.Command("unshare", "-Urn", "--", probe, "setns", "unused").CombinedOutput()
@@ -458,7 +458,7 @@ func legNamespaceCalls(t *testing.T, spec Spec) {
 	}
 	output := requireProbeOutput(t, runP12(t, spec, probe+" setns unused", nil), "open", "setns")
 	if !strings.Contains(output, "setns=1\n") {
-		t.Errorf("setns(0) not EPERM: %s", output)
+		unexpected(t, "setns(0) not EPERM: %s", output)
 	}
 	mutationEffect(t, "L-NS-CREATE", "clone", cloneAllowed)
 	mutationEffect(t, "L-NS-CREATE", "unshare", unshareAllowed)
@@ -468,14 +468,14 @@ func legCeiling(t *testing.T, spec Spec) {
 	p12Control(t, spec)
 	output := requireProbeOutput(t, runP12(t, spec, probe+" raw 472", nil), "raw")
 	if !strings.Contains(output, "raw=38\n") {
-		t.Errorf("unknown syscall not ENOSYS: %s", output)
+		unexpected(t, "unknown syscall not ENOSYS: %s", output)
 	}
 	result := runP12(t, spec, "exec "+probe+" raw 1073741824", nil)
 	if result.setupErr != nil {
 		t.Fatalf("SETUP: x32 %v", result.setupErr)
 	}
 	if !isSeccompKill(result.exit) {
-		t.Errorf("x32 exit %d, expected SIGSYS: %+v", result.exit, result)
+		unexpected(t, "x32 exit %d, expected SIGSYS: %+v", result.exit, result)
 	}
 }
 
@@ -506,7 +506,7 @@ func legDatagram(t *testing.T, spec Spec, abstract bool) {
 	}
 	mutationEffect(t, name, "delivered", err == nil && n > 0)
 	if !strings.Contains(output, "socketpair=1\n") && !strings.Contains(output, "sendto=13\n") && !strings.Contains(output, "sendto=1\n") && !strings.Contains(output, "sendto=ok\n") {
-		t.Errorf("unexpected datagram errno: %s", output)
+		unexpected(t, "unexpected datagram errno: %s", output)
 	}
 }
 
@@ -538,7 +538,7 @@ func legSignal(t *testing.T, spec Spec) {
 	}
 	mutationEffect(t, "L-SIGNAL", "signal", delivered)
 	if !strings.Contains(output, "kill=3\n") && !strings.Contains(output, "kill=1\n") && !strings.Contains(output, "kill=ok\n") {
-		t.Errorf("signal errno: %s", output)
+		unexpected(t, "signal errno: %s", output)
 	}
 }
 func legSysV(t *testing.T, spec Spec) {
@@ -555,7 +555,7 @@ func legSysV(t *testing.T, spec Spec) {
 	output := requireProbeOutput(t, runP12(t, spec, probe+" shm-rmid "+strconv.Itoa(id), nil), "shmctl")
 	mutationEffect(t, "L-IPC-SYSV", "removed", !shmExists(id))
 	if !strings.Contains(output, "shmctl=22\n") && !strings.Contains(output, "shmctl=ok\n") {
-		t.Errorf("SysV errno: %s", output)
+		unexpected(t, "SysV errno: %s", output)
 	}
 }
 
@@ -612,7 +612,7 @@ func legScheduler(t *testing.T, spec Spec) {
 	}
 	mutationEffect(t, "L-SCHED", "retuned", before != readScheduler(t, pid))
 	if !strings.Contains(output, "=1\n") && !strings.Contains(output, "=ok\n") {
-		t.Errorf("scheduler errno: %s", output)
+		unexpected(t, "scheduler errno: %s", output)
 	}
 }
 func legIOUring(t *testing.T, spec Spec) {
@@ -649,10 +649,10 @@ func legIOUring(t *testing.T, spec Spec) {
 	mutationEffect(t, "L-IOURING", "connected", delivered)
 	_, err = unix.Getxattr(path, "user.sshgate_uring", value)
 	if err != unix.ENODATA {
-		t.Errorf("uring altered host xattr: %v", err)
+		unexpected(t, "uring altered host xattr: %v", err)
 	}
 	if !strings.Contains(output, "io_uring_setup=1\n") && !strings.Contains(output, "io_uring_register=1\n") && !strings.Contains(output, "io_uring_enter=1\n") && !strings.Contains(output, "uring-connect=ok\n") {
-		t.Errorf("unexpected uring errno: %s", output)
+		unexpected(t, "unexpected uring errno: %s", output)
 	}
 }
 
@@ -743,7 +743,7 @@ func legInet(t *testing.T, spec Spec, grant bool) {
 		}
 		if grant {
 			if !connected || !strings.Contains(output, "connect=ok\n") {
-				t.Errorf("granted %s failed: %s", network, output)
+				unexpected(t, "granted %s failed: %s", network, output)
 			}
 		} else {
 			badConnect = badConnect || connected
@@ -814,7 +814,7 @@ func legSSFallback(t *testing.T, spec Spec) {
 	}
 	output := result.stdout
 	if result.exit != 0 || strings.Count(strings.TrimSpace(output), "\n") != bytes.Count(bytes.TrimSpace(control), []byte("\n")) {
-		t.Errorf("ss procfs fallback lost listener: %+v", result)
+		unexpected(t, "ss procfs fallback lost listener: %+v", result)
 	}
 }
 
@@ -847,7 +847,7 @@ func legUnixConnect(t *testing.T, spec Spec, abstract bool) {
 	}
 	mutationEffect(t, name, "connected", connected)
 	if !strings.Contains(output, "socket=1\n") && !strings.Contains(output, "connect=13\n") && !strings.Contains(output, "connect=1\n") && !strings.Contains(output, "connect=ok\n") {
-		t.Errorf("unix connect errno: %s", output)
+		unexpected(t, "unix connect errno: %s", output)
 	}
 }
 func legIoctlFilter(t *testing.T, spec Spec) {
@@ -922,11 +922,11 @@ func legMetadataErrno(t *testing.T, spec Spec) {
 		after, err := os.Stat(path)
 		mutationSetup(t, err)
 		if after.Mode() != before.Mode() || after.ModTime() != before.ModTime() {
-			t.Error("metadata effect escaped read-only mount")
+			unexpected(t, "metadata effect escaped read-only mount")
 		}
 		_, err = unix.Getxattr(path, "system.posix_acl_access", make([]byte, 64))
 		if err != unix.ENODATA {
-			t.Errorf("metadata xattr escaped: %v", err)
+			unexpected(t, "metadata xattr escaped: %v", err)
 		}
 	}
 	mutationEffect(t, "L-META-ERRNO", "errno", badErrno)

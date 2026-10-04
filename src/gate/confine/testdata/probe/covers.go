@@ -39,6 +39,13 @@ func init() {
 		if report("statx", unix.Statx(unix.AT_FDCWD, args[0], unix.AT_STATX_DONT_SYNC, unix.STATX_MNT_ID, &state)) {
 			fmt.Printf("mntid=%d\n", state.Mnt_id)
 		}
+	case "cover-write":
+		fd, err := unix.Open(args[0], unix.O_WRONLY|unix.O_CREAT|unix.O_TRUNC|unix.O_CLOEXEC, 0666)
+		if report("open", err) {
+			_, err = unix.Write(fd, []byte("changed\n"))
+			report("write", err)
+			unix.Close(fd)
+		}
 	case "read":
 		coverRead(args[0])
 	case "jail-proc":

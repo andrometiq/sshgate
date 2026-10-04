@@ -4,6 +4,8 @@ import (
 	"os"
 	"testing"
 	"time"
+
+	"github.com/karthikeyan5/sshgate/src/gate/confine/jailmut/harness"
 )
 
 func TestFixture(t *testing.T) {
@@ -30,6 +32,9 @@ func TestFixture(t *testing.T) {
 				t.Errorf("MUTATION-EFFECT L-RED write")
 				if mode == "marker-setup" {
 					t.Fatal("SETUP: required invariant failed after expected marker")
+				}
+				if mode == "marker-unexpected" {
+					harness.Unexpected(t, "retained wall failed after expected marker")
 				}
 				if mode == "extra" {
 					t.Errorf("MUTATION-EFFECT L-RED extra")

@@ -22,6 +22,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -70,13 +71,14 @@ func TestJailMatrix(t *testing.T) {
 			r := runJailed(t, spec, "echo SHOULD_NOT_RUN")
 			var se *SetupError
 			if !errors.As(r.setupErr, &se) {
-				t.Fatalf("expected *SetupError, got %v", r.setupErr)
+				unexpected(t, "expected *SetupError, got %v", r.setupErr)
+				t.FailNow()
 			}
 			if se.Stage != "landlock" {
-				t.Errorf("SetupError stage=%q want landlock", se.Stage)
+				unexpected(t, "SetupError stage=%q want landlock", se.Stage)
 			}
 			if strings.Contains(r.stdout, "SHOULD_NOT_RUN") {
-				t.Errorf("command ran despite required Landlock being unavailable")
+				unexpected(t, "command ran despite required Landlock being unavailable")
 			}
 		})
 	}
@@ -115,14 +117,15 @@ func legReadsWork(t *testing.T, spec Spec) {
 	for _, cmd := range []string{"cat /etc/hostname", "id", "ls /", "echo RAN"} {
 		r := runJailed(t, spec, cmd)
 		if r.setupErr != nil {
-			t.Fatalf("%q: unexpected setup failure: %v (stderr=%q)", cmd, r.setupErr, r.stderr)
+			unexpected(t, "%q: unexpected setup failure: %v (stderr=%q)", cmd, r.setupErr, r.stderr)
+			t.FailNow()
 		}
 		if r.exit != 0 {
-			t.Errorf("%q: exit=%d want 0 (stderr=%q)", cmd, r.exit, r.stderr)
+			unexpected(t, "%q: exit=%d want 0 (stderr=%q)", cmd, r.exit, r.stderr)
 		}
 	}
 	if r := runJailed(t, spec, "echo RAN"); !strings.Contains(r.stdout, "RAN") {
-		t.Errorf("echo RAN produced no stdout (%q)", r.stdout)
+		unexpected(t, "echo RAN produced no stdout (%q)", r.stdout)
 	}
 }
 
@@ -163,14 +166,16 @@ func legBypassCorpus(t *testing.T, spec Spec) {
 		}
 		dir, err := os.MkdirTemp(homeDir(t), ".sshgate-bypass-")
 		if err != nil {
-			t.Fatalf("corpus %q: mkdir under home: %v", row.name, err)
+			unexpected(t, "corpus %q: mkdir under home: %v", row.name, err)
+			t.FailNow()
 		}
 		func() {
 			defer os.RemoveAll(dir)
 			target := filepath.Join(dir, "target")
 			seed := []byte("original-content\n")
 			if err := os.WriteFile(target, seed, 0o644); err != nil {
-				t.Fatalf("corpus %q: seed target: %v", row.name, err)
+				unexpected(t, "corpus %q: seed target: %v", row.name, err)
+				t.FailNow()
 			}
 			cmd, marker := row.build(t, dir, target)
 
@@ -187,7 +192,8 @@ func legBypassCorpus(t *testing.T, spec Spec) {
 
 			// Reset the fixtures, then run the SAME command jailed on this config.
 			if err := os.WriteFile(target, seed, 0o644); err != nil {
-				t.Fatalf("corpus %q: reset target: %v", row.name, err)
+				unexpected(t, "corpus %q: reset target: %v", row.name, err)
+				t.FailNow()
 			}
 			if marker != "" {
 				_ = os.Remove(marker)
@@ -197,10 +203,10 @@ func legBypassCorpus(t *testing.T, spec Spec) {
 			// never let a "contained" assertion pass without the exploit running.
 			_ = runJailedRan(t, spec, cmd)
 			if hashFile(t, target) != jBefore {
-				t.Errorf("corpus %q: jailed exploit MODIFIED the seeded target %s; the jail did not contain the write", row.name, target)
+				unexpected(t, "corpus %q: jailed exploit MODIFIED the seeded target %s; the jail did not contain the write", row.name, target)
 			}
 			if marker != "" && pathExists(marker) {
-				t.Errorf("corpus %q: jailed exploit created marker %s; the jail did not contain the write", row.name, marker)
+				unexpected(t, "corpus %q: jailed exploit created marker %s; the jail did not contain the write", row.name, marker)
 			}
 		}()
 	}
@@ -263,7 +269,8 @@ func bypassCorpus() []bypassRow {
 			name: "file_compile_bundle", tool: "file",
 			build: func(t *testing.T, dir, target string) (string, string) {
 				if err := os.WriteFile(filepath.Join(dir, "m"), []byte("0 string MAGIC testfile\n"), 0o644); err != nil {
-					t.Fatalf("seed magic: %v", err)
+					unexpected(t, "seed magic: %v", err)
+					t.FailNow()
 				}
 				return fmt.Sprintf("cd %s && file -rC -m m", dir), filepath.Join(dir, "m.mgc")
 			},
@@ -282,7 +289,8 @@ func bypassCorpus() []bypassRow {
 			build: func(t *testing.T, dir, target string) (string, string) {
 				out := filepath.Join(dir, "out")
 				if err := os.Mkdir(out, 0o755); err != nil {
-					t.Fatalf("mkdir out: %v", err)
+					unexpected(t, "mkdir out: %v", err)
+					t.FailNow()
 				}
 				src := seedPayload(t, dir) // dir/payload, outside the cwd subdir
 				return fmt.Sprintf("cd %s && curl -sO file://%s", out, src), filepath.Join(out, filepath.Base(src))
@@ -314,7 +322,8 @@ func bypassCorpus() []bypassRow {
 				marker := filepath.Join(dir, "marker")
 				inc := filepath.Join(dir, "inc.awk")
 				if err := os.WriteFile(inc, []byte(fmt.Sprintf("BEGIN { print \"pwned\" > \"%s\" }\n", marker)), 0o644); err != nil {
-					t.Fatalf("seed inc.awk: %v", err)
+					unexpected(t, "seed inc.awk: %v", err)
+					t.FailNow()
 				}
 				return fmt.Sprintf(`gawk '@include "%s"'`, inc), marker
 			},
@@ -338,7 +347,8 @@ func seedPayload(t *testing.T, dir string) string {
 	t.Helper()
 	p := filepath.Join(dir, "payload")
 	if err := os.WriteFile(p, []byte("EXFILTRATED\n"), 0o644); err != nil {
-		t.Fatalf("seed payload: %v", err)
+		unexpected(t, "seed payload: %v", err)
+		t.FailNow()
 	}
 	return p
 }
@@ -349,10 +359,12 @@ func seedPayload(t *testing.T, dir string) string {
 func mustGitRepo(t *testing.T, repo string) {
 	t.Helper()
 	if err := os.MkdirAll(repo, 0o755); err != nil {
-		t.Fatalf("mkdir repo: %v", err)
+		unexpected(t, "mkdir repo: %v", err)
+		t.FailNow()
 	}
 	if err := os.WriteFile(filepath.Join(repo, "f"), []byte("hello\n"), 0o644); err != nil {
-		t.Fatalf("seed repo file: %v", err)
+		unexpected(t, "seed repo file: %v", err)
+		t.FailNow()
 	}
 	ident := []string{"-c", "user.email=t@example.invalid", "-c", "user.name=t"}
 	for _, args := range [][]string{
@@ -363,7 +375,8 @@ func mustGitRepo(t *testing.T, repo string) {
 		c := exec.Command("git", append([]string{"-C", repo}, args...)...)
 		c.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null")
 		if out, err := c.CombinedOutput(); err != nil {
-			t.Fatalf("git %v: %v\n%s", args, err, out)
+			unexpected(t, "git %v: %v\n%s", args, err, out)
+			t.FailNow()
 		}
 	}
 }
@@ -394,13 +407,13 @@ func legFileWrite(t *testing.T, spec Spec) {
 	// (canary), so a setup failure cannot pass this leg vacuously.
 	r := runJailedRan(t, spec, "echo pwned >> "+target+" ; echo m > "+marker)
 	if r.exit == 0 {
-		t.Errorf("jailed write exited 0; expected failure")
+		unexpected(t, "jailed write exited 0; expected failure")
 	}
 	if after := hashFile(t, target); after != before {
-		t.Errorf("seeded target was modified by the jailed write (%s)", target)
+		unexpected(t, "seeded target was modified by the jailed write (%s)", target)
 	}
 	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
-		t.Errorf("marker %s exists (err=%v); the jailed write was not contained", marker, err)
+		unexpected(t, "marker %s exists (err=%v); the jailed write was not contained", marker, err)
 	}
 }
 
@@ -408,7 +421,8 @@ func legMetadata(t *testing.T, spec Spec) {
 	target := seedTarget(t)
 	ctl := filepath.Join(filepath.Dir(target), "ctl")
 	if err := os.WriteFile(ctl, []byte("x"), 0o644); err != nil {
-		t.Fatal(err)
+		unexpected(t, "%v", err)
+		t.FailNow()
 	}
 	ops := []string{"chmod 0777 %s", "touch -d 2000-01-01 %s", "truncate -s 0 %s"}
 	// Control: each op must work UNJAILED on the ctl file, or a missing tool
@@ -424,14 +438,14 @@ func legMetadata(t *testing.T, spec Spec) {
 	for _, op := range ops {
 		cmd := fmt.Sprintf(op, target)
 		if r := runJailedRan(t, spec, cmd); r.exit == 0 {
-			t.Errorf("%q exited 0; expected failure", cmd)
+			unexpected(t, "%q exited 0; expected failure", cmd)
 		}
 	}
 	if statMode(t, target) != before {
-		t.Errorf("seeded target metadata changed")
+		unexpected(t, "seeded target metadata changed")
 	}
 	if hashFile(t, target) != hashBefore {
-		t.Errorf("seeded target content changed (truncate got through)")
+		unexpected(t, "seeded target content changed (truncate got through)")
 	}
 }
 
@@ -443,7 +457,8 @@ func legChattr(t *testing.T, spec Spec, probe string) {
 	target := seedTarget(t)
 	ctl := filepath.Join(filepath.Dir(target), "ctl")
 	if err := os.WriteFile(ctl, []byte("x"), 0o644); err != nil {
-		t.Fatal(err)
+		unexpected(t, "%v", err)
+		t.FailNow()
 	}
 	// Control: chattr +d must work unjailed, or the filesystem cannot carry the
 	// flag and the leg is meaningless here.
@@ -454,10 +469,10 @@ func legChattr(t *testing.T, spec Spec, probe string) {
 
 	before := lsattr(t, target)
 	if r := runJailedRan(t, spec, "chattr +d "+target); r.exit == 0 {
-		t.Errorf("jailed `chattr +d` exited 0; expected failure")
+		unexpected(t, "jailed `chattr +d` exited 0; expected failure")
 	}
 	if after := lsattr(t, target); after != before {
-		t.Errorf("lsattr changed by the jailed chattr: %q -> %q", before, after)
+		unexpected(t, "lsattr changed by the jailed chattr: %q -> %q", before, after)
 	}
 
 	// Tool-independent: the probe exercises FS_IOC_SETFLAGS, FS_IOC_FSSETXATTR and
@@ -466,7 +481,8 @@ func legChattr(t *testing.T, spec Spec, probe string) {
 	// jailed run must have every one fail and leave lsattr unchanged.
 	pctl := filepath.Join(filepath.Dir(target), "setflags-ctl")
 	if err := os.WriteFile(pctl, []byte("x"), 0o644); err != nil {
-		t.Fatal(err)
+		unexpected(t, "%v", err)
+		t.FailNow()
 	}
 	// file_setattr exists only from Linux 6.17; ENOSYS there means "not
 	// applicable on this kernel", not a broken control. The two ioctl paths stay
@@ -483,18 +499,20 @@ func legChattr(t *testing.T, spec Spec, probe string) {
 	pbefore := lsattr(t, target)
 	r := runJailed(t, spec, probe+" setflags "+target+" ; echo "+ranCanary)
 	if r.setupErr != nil {
-		t.Fatalf("probe setflags: jail setup failed: %v", r.setupErr)
+		unexpected(t, "probe setflags: jail setup failed: %v", r.setupErr)
+		t.FailNow()
 	}
 	if !strings.Contains(r.stdout, ranCanary) {
-		t.Fatalf("probe setflags never ran; stdout=%q stderr=%q", r.stdout, r.stderr)
+		unexpected(t, "probe setflags never ran; stdout=%q stderr=%q", r.stdout, r.stderr)
+		t.FailNow()
 	}
 	for _, op := range []string{"setflags=ok", "fssetxattr=ok", "file_setattr=ok"} {
 		if strings.Contains(r.stdout, op) {
-			t.Errorf("jailed probe setflags reported %q; the metadata-ioctl path is open (stdout=%q)", op, r.stdout)
+			unexpected(t, "jailed probe setflags reported %q; the metadata-ioctl path is open (stdout=%q)", op, r.stdout)
 		}
 	}
 	if after := lsattr(t, target); after != pbefore {
-		t.Errorf("lsattr changed by the jailed probe setflags: %q -> %q", pbefore, after)
+		unexpected(t, "lsattr changed by the jailed probe setflags: %q -> %q", pbefore, after)
 	}
 }
 
@@ -526,7 +544,8 @@ func legXattr(t *testing.T, spec Spec, probe string) {
 	}
 	ctl := filepath.Join(filepath.Dir(target), "ctl")
 	if err := os.WriteFile(ctl, []byte("x"), 0o644); err != nil {
-		t.Fatal(err)
+		unexpected(t, "%v", err)
+		t.FailNow()
 	}
 	if out, err := exec.Command("setfattr", "-n", "user.ctl", "-v", "1", ctl).CombinedOutput(); err != nil {
 		t.Skipf("control setfattr failed (%v: %s)", err, out)
@@ -538,11 +557,11 @@ func legXattr(t *testing.T, spec Spec, probe string) {
 		"setfattr -x user.seed " + target,
 	} {
 		if r := runJailedRan(t, spec, cmd); r.exit == 0 {
-			t.Errorf("jailed %q exited 0; expected failure", cmd)
+			unexpected(t, "jailed %q exited 0; expected failure", cmd)
 		}
 	}
 	if after := getfattr(t, target); after != before {
-		t.Errorf("xattr list changed by the jailed setfattr:\n before=%q\n after =%q", before, after)
+		unexpected(t, "xattr list changed by the jailed setfattr:\n before=%q\n after =%q", before, after)
 	}
 	// Belt-and-braces via raw syscalls (tool-independent): every setxattr AND
 	// removexattr variant must fail inside the jail. An unjailed control on a
@@ -570,19 +589,21 @@ func legXattr(t *testing.T, spec Spec, probe string) {
 	} {
 		r := runJailed(t, spec, op.cmd+" ; echo "+ranCanary)
 		if r.setupErr != nil {
-			t.Fatalf("probe %s: jail setup failed: %v", op.name, r.setupErr)
+			unexpected(t, "probe %s: jail setup failed: %v", op.name, r.setupErr)
+			t.FailNow()
 		}
 		if !strings.Contains(r.stdout, ranCanary) {
-			t.Fatalf("probe %s never ran; stdout=%q stderr=%q", op.name, r.stdout, r.stderr)
+			unexpected(t, "probe %s never ran; stdout=%q stderr=%q", op.name, r.stdout, r.stderr)
+			t.FailNow()
 		}
 		for _, w := range op.writes {
 			if strings.Contains(r.stdout, w) {
-				t.Errorf("jailed probe %s reported %q; the xattr-write path is open (stdout=%q)", op.name, w, r.stdout)
+				unexpected(t, "jailed probe %s reported %q; the xattr-write path is open (stdout=%q)", op.name, w, r.stdout)
 			}
 		}
 	}
 	if after := getfattr(t, target); after != before {
-		t.Errorf("xattr list changed by the jailed probe ops:\n before=%q\n after =%q", before, after)
+		unexpected(t, "xattr list changed by the jailed probe ops:\n before=%q\n after =%q", before, after)
 	}
 }
 
@@ -593,14 +614,16 @@ func legAFUnix(t *testing.T, spec Spec, probe string) {
 	home := homeDir(t)
 	dir, err := os.MkdirTemp(home, ".sshgate-jailsock-")
 	if err != nil {
-		t.Fatalf("mkdir sock dir: %v", err)
+		unexpected(t, "mkdir sock dir: %v", err)
+		t.FailNow()
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	sock := filepath.Join(dir, "s.sock")
 
 	ln, err := net.Listen("unix", sock)
 	if err != nil {
-		t.Fatalf("listen unix: %v", err)
+		unexpected(t, "listen unix: %v", err)
+		t.FailNow()
 	}
 	defer ln.Close()
 	go func() {
@@ -615,18 +638,21 @@ func legAFUnix(t *testing.T, spec Spec, probe string) {
 
 	// Control: the probe dials the socket successfully OUTSIDE the jail.
 	if out, err := exec.Command(probe, "dial-unix", sock).CombinedOutput(); err != nil {
-		t.Fatalf("unjailed control dial failed (%v): %s", err, out)
+		unexpected(t, "unjailed control dial failed (%v): %s", err, out)
+		t.FailNow()
 	} else if !strings.Contains(string(out), "socket=ok") || !strings.Contains(string(out), "connect=ok") {
-		t.Fatalf("unjailed control dial did not connect: %s", out)
+		unexpected(t, "unjailed control dial did not connect: %s", out)
+		t.FailNow()
 	}
 
 	// Jailed: socket(AF_UNIX) is denied at creation (EPERM==1), before any connect.
 	r := runJailed(t, spec, probe+" dial-unix "+sock)
 	if r.exit == 0 {
-		t.Fatalf("jailed AF_UNIX dial succeeded; expected EPERM")
+		unexpected(t, "jailed AF_UNIX dial succeeded; expected EPERM")
+		t.FailNow()
 	}
 	if !strings.Contains(r.stdout, "socket="+strconv.Itoa(int(unix.EPERM))) {
-		t.Errorf("jailed probe did not report socket=EPERM(%d); stdout=%q stderr=%q",
+		unexpected(t, "jailed probe did not report socket=EPERM(%d); stdout=%q stderr=%q",
 			int(unix.EPERM), r.stdout, r.stderr)
 	}
 }
@@ -643,16 +669,17 @@ func legProcMem(t *testing.T, spec Spec, probe string) {
 	// Control: an UNJAILED probe can now open /proc/<testpid>/mem.
 	out, _ := exec.Command(probe, "read-mem", pid).CombinedOutput()
 	if !strings.Contains(string(out), "open=ok") {
-		t.Fatalf("unjailed control could not open /proc/<testpid>/mem (PR_SET_PTRACER ineffective?): %s", out)
+		unexpected(t, "unjailed control could not open /proc/<testpid>/mem (PR_SET_PTRACER ineffective?): %s", out)
+		t.FailNow()
 	}
 
 	// The host /proc stays visible; cross-userns ptrace and Landlock deny memory access.
 	r := runJailedRan(t, spec, probe+" read-mem "+pid)
 	if strings.Contains(r.stdout, "open=ok") {
-		t.Errorf("jailed probe opened /proc/<testpid>/mem (stdout=%q); the read should be blocked", r.stdout)
+		unexpected(t, "jailed probe opened /proc/<testpid>/mem (stdout=%q); the read should be blocked", r.stdout)
 	}
 	if r.exit == 0 {
-		t.Errorf("jailed read-mem exited 0; expected failure")
+		unexpected(t, "jailed read-mem exited 0; expected failure")
 	}
 }
 
@@ -667,46 +694,43 @@ func legRlimits(t *testing.T, spec Spec) {
 				found = true
 				values := strings.Fields(strings.TrimPrefix(line, name))
 				if len(values) < 2 || values[0] != want || values[1] != want {
-					t.Errorf("%s: %q", name, line)
+					unexpected(t, "%s: %q", name, line)
 				}
 			}
 		}
 		if !found {
-			t.Errorf("missing limit %s", name)
+			unexpected(t, "missing limit %s", name)
 		}
 	}
 }
 
 // legFifo proves mandatory Landlock blocks writes to existing host FIFOs.
 func legFifo(t *testing.T, spec Spec) {
-	if !haveTool(t, "mkfifo") {
-		t.Skip("mkfifo not installed")
-	}
-	home := homeDir(t)
-	dir, err := os.MkdirTemp(home, ".sshgate-jailfifo-")
-	if err != nil {
-		t.Fatalf("mkdir fifo dir: %v", err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	probe := buildProbe(t)
+	dir, err := os.MkdirTemp(homeDir(t), ".sshgate-jailfifo-")
+	mutationSetup(t, err)
+	t.Cleanup(func() { os.RemoveAll(dir) })
 
-	// Control: an unjailed write reaches the reader.
 	if got := fifoRoundTrip(t, dir, "ctl", func(fifo string) {
-		if out, err := exec.Command("sh", "-c", "printf FIFOWRITE > "+fifo).CombinedOutput(); err != nil {
-			t.Fatalf("unjailed control fifo write failed (%v): %s", err, out)
+		out, err := exec.Command(probe, "device-write", fifo).CombinedOutput()
+		if err != nil || string(out) != "open=ok\nwrite=ok\n" {
+			t.Fatalf("SETUP: FIFO control: %v %s", err, out)
 		}
-	}); !strings.Contains(got, "FIFOWRITE") {
-		t.Fatalf("control: FIFO write did not reach the reader (got %q)", got)
+	}); got != "x" {
+		t.Fatalf("SETUP: FIFO control delivery: got %q", got)
 	}
 
-	// Jailed write (runJailedRan proves the shell ran, so a setup failure cannot
-	// masquerade as a contained write).
+	var output string
 	got := fifoRoundTrip(t, dir, "jail", func(fifo string) {
-		runJailedRan(t, spec, "printf FIFOWRITE > "+fifo)
+		output = requireProbeOutput(t, runP12(t, spec, probe+" device-write "+fifo, nil), "open", "open>write")
 	})
-	reached := strings.Contains(got, "FIFOWRITE")
-
-	if reached {
-		t.Errorf("jailed FIFO write reached the reader (got %q); expected it to be denied", got)
+	mutationEffect(t, "L-FIFO-WRITE", "delivered", len(got) != 0)
+	if got == "" {
+		if output != "open=13\n" {
+			unexpected(t, "FIFO denial: want EACCES, got %q", output)
+		}
+	} else if got != "x" || output != "open=ok\nwrite=ok\n" {
+		unexpected(t, "FIFO delivery/report mismatch: bytes=%q report=%q", got, output)
 	}
 }
 
@@ -716,11 +740,13 @@ func legIPC(t *testing.T, spec Spec, probe string) {
 	ctlID := shmCreate(t)
 	if out, err := exec.Command(probe, "shm-rmid", strconv.Itoa(ctlID)).CombinedOutput(); err != nil {
 		shmRemove(ctlID)
-		t.Fatalf("unjailed control shm-rmid failed (%v): %s", err, out)
+		unexpected(t, "unjailed control shm-rmid failed (%v): %s", err, out)
+		t.FailNow()
 	}
 	if shmExists(ctlID) {
 		shmRemove(ctlID)
-		t.Fatalf("control: segment %d still exists after an unjailed ipcrm", ctlID)
+		unexpected(t, "control: segment %d still exists after an unjailed ipcrm", ctlID)
+		t.FailNow()
 	}
 
 	id := shmCreate(t)
@@ -729,10 +755,10 @@ func legIPC(t *testing.T, spec Spec, probe string) {
 	r := runJailedRan(t, spec, probe+" shm-rmid "+strconv.Itoa(id))
 
 	if !shmExists(id) {
-		t.Errorf("rung 1: host shm segment %d was deleted from inside the jail; CLONE_NEWIPC should isolate it", id)
+		unexpected(t, "rung 1: host shm segment %d was deleted from inside the jail; CLONE_NEWIPC should isolate it", id)
 	}
 	if r.exit == 0 {
-		t.Errorf("rung 1: jailed shm-rmid exited 0; the host id should be invalid in the new IPC namespace")
+		unexpected(t, "rung 1: jailed shm-rmid exited 0; the host id should be invalid in the new IPC namespace")
 	}
 }
 
@@ -743,32 +769,35 @@ func legMQueue(t *testing.T, spec Spec, probe string) {
 	unjailed := func(op string) {
 		t.Helper()
 		if out, err := exec.Command(probe, op, name).CombinedOutput(); err != nil {
-			t.Fatalf("unjailed control %s failed (%v): %s", op, err, out)
+			unexpected(t, "unjailed control %s failed (%v): %s", op, err, out)
+			t.FailNow()
 		}
 	}
 
 	unjailed("mq-create")
 	if !mqExists(t, name) {
-		t.Fatal("control: the unjailed probe did not create a host queue")
+		unexpected(t, "control: the unjailed probe did not create a host queue")
+		t.FailNow()
 	}
 	unjailed("mq-unlink")
 	if mqExists(t, name) {
-		t.Fatal("control: the unjailed probe did not remove the host queue")
+		unexpected(t, "control: the unjailed probe did not remove the host queue")
+		t.FailNow()
 	}
 
 	unjailed("mq-create")
 	r := runJailedRan(t, spec, probe+" mq-unlink "+name)
 	if !mqExists(t, name) {
-		t.Errorf("jailed mq_unlink deleted the host queue %q (stdout=%q)", name, r.stdout)
+		unexpected(t, "jailed mq_unlink deleted the host queue %q (stdout=%q)", name, r.stdout)
 	}
 	if r.exit == 0 {
-		t.Errorf("jailed mq_unlink exited 0; want it refused (stdout=%q)", r.stdout)
+		unexpected(t, "jailed mq_unlink exited 0; want it refused (stdout=%q)", r.stdout)
 	}
 	mqUnlink(t, name)
 
 	r = runJailedRan(t, spec, probe+" mq-create "+name)
 	if mqExists(t, name) {
-		t.Errorf("jailed mq_open(O_CREAT) left a queue %q on the host (stdout=%q)", name, r.stdout)
+		unexpected(t, "jailed mq_open(O_CREAT) left a queue %q on the host (stdout=%q)", name, r.stdout)
 	}
 }
 
@@ -783,7 +812,8 @@ func mqExists(t *testing.T, name string) bool {
 	case unix.ENOENT:
 		return false
 	default:
-		t.Fatalf("mq_open(%q) on the host: %v", name, e)
+		unexpected(t, "mq_open(%q) on the host: %v", name, e)
+		t.FailNow()
 		return false
 	}
 }
@@ -797,7 +827,8 @@ func cstr(t *testing.T, s string) *byte {
 	t.Helper()
 	p, err := unix.BytePtrFromString(s)
 	if err != nil {
-		t.Fatal(err)
+		unexpected(t, "%v", err)
+		t.FailNow()
 	}
 	return p
 }
@@ -815,20 +846,20 @@ func legFailClosed(t *testing.T, spec Spec) {
 
 		var se *SetupError
 		if !errors.As(r.setupErr, &se) {
-			t.Errorf("stage %q: expected *SetupError, got %v", stage, r.setupErr)
+			unexpected(t, "stage %q: expected *SetupError, got %v", stage, r.setupErr)
 			continue
 		}
 		if se.Stage != stage {
-			t.Errorf("stage %q: SetupError names stage %q", stage, se.Stage)
+			unexpected(t, "stage %q: SetupError names stage %q", stage, se.Stage)
 		}
 		if strings.Contains(r.stdout, "SHOULD_NOT_RUN") {
-			t.Errorf("stage %q: command executed despite injected setup failure", stage)
+			unexpected(t, "stage %q: command executed despite injected setup failure", stage)
 		}
 		if hashFile(t, target) != before {
-			t.Errorf("stage %q: seeded target changed; the command ran", stage)
+			unexpected(t, "stage %q: seeded target changed; the command ran", stage)
 		}
 		if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
-			t.Errorf("stage %q: marker exists; the command ran", stage)
+			unexpected(t, "stage %q: marker exists; the command ran", stage)
 		}
 	}
 }
@@ -837,7 +868,8 @@ func legFailClosed(t *testing.T, spec Spec) {
 func legTruncateScratch(t *testing.T, spec Spec) {
 	r := runJailedRan(t, spec, "printf data > /dev/shm/truncate-test && printf x >> /dev/shm/truncate-test && truncate -s 0 /dev/shm/truncate-test && test ! -s /dev/shm/truncate-test")
 	if r.exit != 0 {
-		t.Fatalf("scratch append/truncate failed: %+v", r)
+		unexpected(t, "scratch append/truncate failed: %+v", r)
+		t.FailNow()
 	}
 }
 
@@ -859,14 +891,15 @@ func legFill(t *testing.T, spec Spec) {
 			}
 		}
 		if fillExit == "" || fillExit == "0" {
-			t.Errorf("rung 1: tmpfs fill exit=%q; expected non-zero (ENOSPC at the tmpfs bound); stdout=%q", fillExit, r.stdout)
+			unexpected(t, "rung 1: tmpfs fill exit=%q; expected non-zero (ENOSPC at the tmpfs bound); stdout=%q", fillExit, r.stdout)
 		}
 		n, err := strconv.ParseInt(size, 10, 64)
 		if err != nil {
-			t.Fatalf("rung 1: fill size %q not a number (stdout=%q stderr=%q): %v", size, r.stdout, r.stderr, err)
+			unexpected(t, "rung 1: fill size %q not a number (stdout=%q stderr=%q): %v", size, r.stdout, r.stderr, err)
+			t.FailNow()
 		}
 		if n <= 0 || n > tmpfsSizeBytes {
-			t.Errorf("rung 1: tmpfs fill reached %d bytes; want 0 < n <= %d", n, tmpfsSizeBytes)
+			unexpected(t, "rung 1: tmpfs fill reached %d bytes; want 0 < n <= %d", n, tmpfsSizeBytes)
 		}
 		return
 	}
@@ -884,25 +917,28 @@ func legFill(t *testing.T, spec Spec) {
 func legProcfsReadOnly(t *testing.T, spec Spec) {
 	const write = "echo sshgate-ctl > /proc/self/comm"
 	if out, err := exec.Command("/bin/sh", "-c", write).CombinedOutput(); err != nil {
-		t.Fatalf("unjailed control could not write /proc/self/comm: %v: %s", err, out)
+		unexpected(t, "unjailed control could not write /proc/self/comm: %v: %s", err, out)
+		t.FailNow()
 	}
 	ctl := []string{"/proc/sysrq-trigger", "/proc/sys/kernel/sysrq", "/proc/irq", "/proc/bus", "/proc/fs"}
 	for _, p := range ctl {
 		if _, err := os.Stat(p); err != nil {
-			t.Fatalf("unjailed control: %s missing on this host: %v", p, err)
+			unexpected(t, "unjailed control: %s missing on this host: %v", p, err)
+			t.FailNow()
 		}
 	}
 
 	if r := runJailedRan(t, spec, write); r.exit == 0 || !strings.Contains(r.stderr, "Read-only file system") {
-		t.Errorf("jailed write to /proc/self/comm: exit=%d stderr=%q; want an EROFS failure", r.exit, r.stderr)
+		unexpected(t, "jailed write to /proc/self/comm: exit=%d stderr=%q; want an EROFS failure", r.exit, r.stderr)
 	}
 	if r := runJailedRan(t, spec, "ls -d "+strings.Join(ctl, " ")); r.exit != 0 {
-		t.Errorf("control files not visible in the jail (exit=%d stderr=%q); the leg would be vacuous", r.exit, r.stderr)
+		unexpected(t, "control files not visible in the jail (exit=%d stderr=%q); the leg would be vacuous", r.exit, r.stderr)
 	}
 	r := runJailedRan(t, spec, "cat /proc/self/mountinfo")
 	entries, err := parseMountInfo(strings.NewReader(strings.TrimPrefix(r.stdout, ranCanary+"\n")))
 	if err != nil {
-		t.Fatalf("parse jailed mountinfo: %v", err)
+		unexpected(t, "parse jailed mountinfo: %v", err)
+		t.FailNow()
 	}
 	var procOpts []string
 	for _, e := range entries {
@@ -911,10 +947,10 @@ func legProcfsReadOnly(t *testing.T, spec Spec) {
 		}
 	}
 	if len(procOpts) == 0 || procOpts[0] != "ro" {
-		t.Errorf("jail /proc mount options = %v; want ro", procOpts)
+		unexpected(t, "jail /proc mount options = %v; want ro", procOpts)
 	}
 	if r := runJailedRan(t, spec, "echo VIA_FD > /dev/stdout"); r.exit != 0 || !strings.Contains(r.stdout, "VIA_FD") {
-		t.Errorf("write through /dev/stdout broke in the jail: exit=%d stdout=%q stderr=%q", r.exit, r.stdout, r.stderr)
+		unexpected(t, "write through /dev/stdout broke in the jail: exit=%d stdout=%q stderr=%q", r.exit, r.stdout, r.stderr)
 	}
 }
 
@@ -927,16 +963,17 @@ func legReaper(t *testing.T, spec Spec) {
 	r := runJailedTimeout(t, spec, "sleep 30 & echo BG", 25*time.Second)
 	elapsed := time.Since(start)
 	if r.setupErr != nil {
-		t.Fatalf("reaper leg: jail setup failed: %v", r.setupErr)
+		unexpected(t, "reaper leg: jail setup failed: %v", r.setupErr)
+		t.FailNow()
 	}
 	if r.exit != 0 {
-		t.Errorf("reaper leg: exit=%d want 0 (a hang would be killed at the timeout; stderr=%q)", r.exit, r.stderr)
+		unexpected(t, "reaper leg: exit=%d want 0 (a hang would be killed at the timeout; stderr=%q)", r.exit, r.stderr)
 	}
 	if !strings.Contains(r.stdout, "BG") {
-		t.Errorf("reaper leg: no BG output (%q); the command did not run", r.stdout)
+		unexpected(t, "reaper leg: no BG output (%q); the command did not run", r.stdout)
 	}
 	if elapsed > 20*time.Second {
-		t.Errorf("reaper leg: returned in %v; the backgrounded sleep held the gate (subreaper cleanup should free it immediately)", elapsed)
+		unexpected(t, "reaper leg: returned in %v; the backgrounded sleep held the gate (subreaper cleanup should free it immediately)", elapsed)
 	}
 }
 
@@ -945,7 +982,8 @@ func legProcState(t *testing.T, spec Spec, probe string) {
 	// Control target: prove prlimit/setpriority/setaffinity WORK unjailed.
 	ctl := startSleeper(t)
 	if out, err := exec.Command(probe, "proc-state", strconv.Itoa(ctl.Process.Pid)).CombinedOutput(); err != nil || !allProbeOK(string(out)) {
-		t.Fatalf("unjailed control could not retune an outside process (%v: %s)", err, out)
+		unexpected(t, "unjailed control could not retune an outside process (%v: %s)", err, out)
+		t.FailNow()
 	}
 
 	// Victim target: snapshot its state, run the JAILED attempt, assert NOTHING
@@ -958,22 +996,24 @@ func legProcState(t *testing.T, spec Spec, probe string) {
 
 	r := runJailed(t, spec, probe+" proc-state "+strconv.Itoa(vpid)+" ; echo "+ranCanary)
 	if r.setupErr != nil {
-		t.Fatalf("proc-state leg: jail setup failed (nothing ran): %v", r.setupErr)
+		unexpected(t, "proc-state leg: jail setup failed (nothing ran): %v", r.setupErr)
+		t.FailNow()
 	}
 	if !strings.Contains(r.stdout, ranCanary) {
-		t.Fatalf("proc-state leg: probe never ran; stdout=%q stderr=%q", r.stdout, r.stderr)
+		unexpected(t, "proc-state leg: probe never ran; stdout=%q stderr=%q", r.stdout, r.stderr)
+		t.FailNow()
 	}
 	if strings.Contains(r.stdout, "=ok") {
-		t.Errorf("a jailed proc-state op succeeded against an outside process; every op must be refused (stdout=%q)", r.stdout)
+		unexpected(t, "a jailed proc-state op succeeded against an outside process; every op must be refused (stdout=%q)", r.stdout)
 	}
 	if n := readNice(t, vpid); n != niceBefore {
-		t.Errorf("victim nice changed %d -> %d through the jail", niceBefore, n)
+		unexpected(t, "victim nice changed %d -> %d through the jail", niceBefore, n)
 	}
 	if n := readNofile(t, vpid); n != nofileBefore {
-		t.Errorf("victim RLIMIT_NOFILE changed %d -> %d through the jail", nofileBefore, n)
+		unexpected(t, "victim RLIMIT_NOFILE changed %d -> %d through the jail", nofileBefore, n)
 	}
 	if a := readAffinity(t, vpid); a != affBefore {
-		t.Errorf("victim affinity changed %d -> %d cpus through the jail", affBefore, a)
+		unexpected(t, "victim affinity changed %d -> %d cpus through the jail", affBefore, a)
 	}
 }
 
@@ -986,26 +1026,29 @@ func legTtyIsolated(t *testing.T, spec Spec) {
 
 	ctlPath, ctlFd := openPty(t)
 	if out, err := exec.Command("stty", append([]string{"-F", ctlPath}, strings.Fields(set)...)...).CombinedOutput(); err != nil {
-		t.Fatalf("unjailed control stty failed (%v): %s", err, out)
+		unexpected(t, "unjailed control stty failed (%v): %s", err, out)
+		t.FailNow()
 	}
 	if tio, ws := ttyState(t, ctlFd); tio.Lflag&unix.ECHO != 0 || ws.Row != 7 || ws.Col != 9 {
-		t.Fatalf("control: stty did not change the pty (echo=%v rows=%d cols=%d)", tio.Lflag&unix.ECHO != 0, ws.Row, ws.Col)
+		unexpected(t, "control: stty did not change the pty (echo=%v rows=%d cols=%d)", tio.Lflag&unix.ECHO != 0, ws.Row, ws.Col)
+		t.FailNow()
 	}
 
 	vPath, vFd := openPty(t)
 	tioBefore, wsBefore := ttyState(t, vFd)
 	if tioBefore.Lflag&unix.ECHO == 0 {
-		t.Fatalf("victim pty starts with ECHO off; the leg cannot observe a change")
+		unexpected(t, "victim pty starts with ECHO off; the leg cannot observe a change")
+		t.FailNow()
 	}
 	if r := runJailedRan(t, spec, "stty -F "+vPath+" "+set); r.exit == 0 {
-		t.Errorf("jailed stty -F on an outside pty exited 0; expected failure")
+		unexpected(t, "jailed stty -F on an outside pty exited 0; expected failure")
 	}
 	tioAfter, wsAfter := ttyState(t, vFd)
 	if tioAfter != tioBefore {
-		t.Errorf("victim termios changed through the jail: %+v -> %+v", tioBefore, tioAfter)
+		unexpected(t, "victim termios changed through the jail: %+v -> %+v", tioBefore, tioAfter)
 	}
 	if wsAfter != wsBefore {
-		t.Errorf("victim winsize changed through the jail: %+v -> %+v", wsBefore, wsAfter)
+		unexpected(t, "victim winsize changed through the jail: %+v -> %+v", wsBefore, wsAfter)
 	}
 }
 
@@ -1016,20 +1059,24 @@ func openPty(t *testing.T) (string, int) {
 	t.Helper()
 	m, err := unix.Open("/dev/ptmx", unix.O_RDWR|unix.O_NOCTTY|unix.O_CLOEXEC, 0)
 	if err != nil {
-		t.Fatalf("open /dev/ptmx: %v", err)
+		unexpected(t, "open /dev/ptmx: %v", err)
+		t.FailNow()
 	}
 	t.Cleanup(func() { _ = unix.Close(m) })
 	if err := unix.IoctlSetPointerInt(m, unix.TIOCSPTLCK, 0); err != nil {
-		t.Fatalf("unlockpt: %v", err)
+		unexpected(t, "unlockpt: %v", err)
+		t.FailNow()
 	}
 	n, err := unix.IoctlGetUint32(m, unix.TIOCGPTN)
 	if err != nil {
-		t.Fatalf("ptsname: %v", err)
+		unexpected(t, "ptsname: %v", err)
+		t.FailNow()
 	}
 	path := "/dev/pts/" + strconv.Itoa(int(n))
 	s, err := unix.Open(path, unix.O_RDWR|unix.O_NOCTTY|unix.O_CLOEXEC, 0)
 	if err != nil {
-		t.Fatalf("open %s: %v", path, err)
+		unexpected(t, "open %s: %v", path, err)
+		t.FailNow()
 	}
 	t.Cleanup(func() { _ = unix.Close(s) })
 	return path, s
@@ -1039,11 +1086,13 @@ func ttyState(t *testing.T, fd int) (unix.Termios, unix.Winsize) {
 	t.Helper()
 	tio, err := unix.IoctlGetTermios(fd, unix.TCGETS)
 	if err != nil {
-		t.Fatalf("TCGETS: %v", err)
+		unexpected(t, "TCGETS: %v", err)
+		t.FailNow()
 	}
 	ws, err := unix.IoctlGetWinsize(fd, unix.TIOCGWINSZ)
 	if err != nil {
-		t.Fatalf("TIOCGWINSZ: %v", err)
+		unexpected(t, "TIOCGWINSZ: %v", err)
+		t.FailNow()
 	}
 	return *tio, *ws
 }
@@ -1065,7 +1114,8 @@ func legReadCorpus(t *testing.T, spec Spec) {
 		}
 	}
 	if len(rows) == 0 {
-		t.Fatal("no READ rows parsed from the classifier corpus")
+		unexpected(t, "no READ rows parsed from the classifier corpus")
+		t.FailNow()
 	}
 	const perCmd = 5 * time.Second
 	var broke, logged, ran int
@@ -1078,11 +1128,11 @@ func legReadCorpus(t *testing.T, spec Spec) {
 		ran++
 		r := runJailedTimeout(t, spec, cmd, perCmd)
 		if r.setupErr != nil {
-			t.Errorf("read %q: jail setup failed: %v", cmd, r.setupErr)
+			unexpected(t, "read %q: jail setup failed: %v", cmd, r.setupErr)
 			continue
 		}
 		if isSeccompKill(r.exit) {
-			t.Errorf("read %q: killed by seccomp (exit=%d); the jail broke a legitimate read", cmd, r.exit)
+			unexpected(t, "read %q: killed by seccomp (exit=%d); the jail broke a legitimate read", cmd, r.exit)
 			continue
 		}
 		if r.exit == 0 {
@@ -1098,13 +1148,13 @@ func legReadCorpus(t *testing.T, spec Spec) {
 			continue
 		}
 		broke++
-		t.Errorf("read %q works on the host but exits %d in the jail (stderr=%q)", cmd, r.exit, strings.TrimSpace(r.stderr))
+		unexpected(t, "read %q works on the host but exits %d in the jail (stderr=%q)", cmd, r.exit, strings.TrimSpace(r.stderr))
 	}
 	t.Logf("read corpus: %d rows executed in the jail, %d non-daemon breaks, %d daemon rows logged", ran, broke, logged)
 	// A near-empty run (corpus truncated, or no host control passed) would look
 	// green; require a floor of real reads so this leg cannot pass vacuously.
 	if ran < 20 {
-		t.Errorf("only %d corpus rows actually ran in the jail; expected at least 20 (corpus/host-control problem)", ran)
+		unexpected(t, "only %d corpus rows actually ran in the jail; expected at least 20 (corpus/host-control problem)", ran)
 	}
 }
 
@@ -1135,10 +1185,12 @@ func runJailedRan(t *testing.T, spec Spec, cmd string) jailResult {
 	t.Helper()
 	r := runJailed(t, spec, "echo "+ranCanary+" ; "+cmd)
 	if r.setupErr != nil {
-		t.Fatalf("jail setup failed (nothing ran) for %q: %v (stderr=%q)", cmd, r.setupErr, r.stderr)
+		unexpected(t, "jail setup failed (nothing ran) for %q: %v (stderr=%q)", cmd, r.setupErr, r.stderr)
+		t.FailNow()
 	}
 	if !strings.Contains(r.stdout, ranCanary) {
-		t.Fatalf("command %q never reached the shell (no canary); stdout=%q stderr=%q", cmd, r.stdout, r.stderr)
+		unexpected(t, "command %q never reached the shell (no canary); stdout=%q stderr=%q", cmd, r.stdout, r.stderr)
+		t.FailNow()
 	}
 	return r
 }
@@ -1153,7 +1205,8 @@ func startSleeper(t *testing.T) *exec.Cmd {
 	}
 	c := exec.Command("sleep", "3600")
 	if err := c.Start(); err != nil {
-		t.Fatalf("start sleeper: %v", err)
+		unexpected(t, "start sleeper: %v", err)
+		t.FailNow()
 	}
 	t.Cleanup(func() {
 		_ = c.Process.Kill()
@@ -1168,20 +1221,24 @@ func readNice(t *testing.T, pid int) int {
 	t.Helper()
 	b, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
 	if err != nil {
-		t.Fatalf("read stat %d: %v", pid, err)
+		unexpected(t, "read stat %d: %v", pid, err)
+		t.FailNow()
 	}
 	s := string(b)
 	i := strings.LastIndexByte(s, ')')
 	if i < 0 {
-		t.Fatalf("malformed stat for %d: %q", pid, s)
+		unexpected(t, "malformed stat for %d: %q", pid, s)
+		t.FailNow()
 	}
 	fields := strings.Fields(s[i+1:]) // fields[0]=state, so nice is index 16
 	if len(fields) < 17 {
-		t.Fatalf("stat for %d has too few fields: %q", pid, s)
+		unexpected(t, "stat for %d has too few fields: %q", pid, s)
+		t.FailNow()
 	}
 	n, err := strconv.Atoi(fields[16])
 	if err != nil {
-		t.Fatalf("parse nice for %d (%q): %v", pid, fields[16], err)
+		unexpected(t, "parse nice for %d (%q): %v", pid, fields[16], err)
+		t.FailNow()
 	}
 	return n
 }
@@ -1192,7 +1249,8 @@ func readNofile(t *testing.T, pid int) uint64 {
 	t.Helper()
 	var lim unix.Rlimit
 	if err := unix.Prlimit(pid, unix.RLIMIT_NOFILE, nil, &lim); err != nil {
-		t.Fatalf("read nofile for %d: %v", pid, err)
+		unexpected(t, "read nofile for %d: %v", pid, err)
+		t.FailNow()
 	}
 	return lim.Cur
 }
@@ -1202,7 +1260,8 @@ func readAffinity(t *testing.T, pid int) int {
 	t.Helper()
 	var set unix.CPUSet
 	if err := unix.SchedGetaffinity(pid, &set); err != nil {
-		t.Fatalf("read affinity for %d: %v", pid, err)
+		unexpected(t, "read affinity for %d: %v", pid, err)
+		t.FailNow()
 	}
 	return set.Count()
 }
@@ -1213,7 +1272,8 @@ func runJailedTimeout(t *testing.T, spec Spec, cmd string, d time.Duration) jail
 	defer cancel()
 	j, err := spec.Command(ctx, cmd)
 	if err != nil {
-		t.Fatalf("Command(%q): %v", cmd, err)
+		unexpected(t, "Command(%q): %v", cmd, err)
+		t.FailNow()
 	}
 	var out, errb bytes.Buffer
 	j.Cmd.Stdout = &out
@@ -1221,7 +1281,8 @@ func runJailedTimeout(t *testing.T, spec Spec, cmd string, d time.Duration) jail
 	j.Cmd.Stdin = nil
 	if err := j.Cmd.Start(); err != nil {
 		j.Abort()
-		t.Fatalf("start jail for %q: %v", cmd, err)
+		unexpected(t, "start jail for %q: %v", cmd, err)
+		t.FailNow()
 	}
 	_ = j.Started()
 	waitErr := j.Cmd.Wait()
@@ -1256,12 +1317,14 @@ func seedTarget(t *testing.T) string {
 	t.Helper()
 	dir, err := os.MkdirTemp(homeDir(t), ".sshgate-jailtest-")
 	if err != nil {
-		t.Fatalf("mkdir temp in home: %v", err)
+		unexpected(t, "mkdir temp in home: %v", err)
+		t.FailNow()
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	target := filepath.Join(dir, "target")
 	if err := os.WriteFile(target, []byte("original-content"), 0644); err != nil {
-		t.Fatalf("seed target: %v", err)
+		unexpected(t, "seed target: %v", err)
+		t.FailNow()
 	}
 	return target
 }
@@ -1270,7 +1333,8 @@ func homeDir(t *testing.T) string {
 	t.Helper()
 	home, err := os.UserHomeDir()
 	if err != nil {
-		t.Fatalf("home dir: %v", err)
+		unexpected(t, "home dir: %v", err)
+		t.FailNow()
 	}
 	return home
 }
@@ -1285,7 +1349,8 @@ func hashFile(t *testing.T, path string) string {
 	t.Helper()
 	b, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatalf("read %s: %v", path, err)
+		unexpected(t, "read %s: %v", path, err)
+		t.FailNow()
 	}
 	return fmt.Sprintf("%x", sha256.Sum256(b))
 }
@@ -1294,7 +1359,8 @@ func statMode(t *testing.T, path string) string {
 	t.Helper()
 	fi, err := os.Stat(path)
 	if err != nil {
-		t.Fatalf("stat %s: %v", path, err)
+		unexpected(t, "stat %s: %v", path, err)
+		t.FailNow()
 	}
 	return fmt.Sprintf("%v|%d|%d", fi.Mode(), fi.Size(), fi.ModTime().UnixNano())
 }
@@ -1303,7 +1369,8 @@ func lsattr(t *testing.T, path string) string {
 	t.Helper()
 	out, err := exec.Command("lsattr", path).Output()
 	if err != nil {
-		t.Fatalf("lsattr %s: %v", path, err)
+		unexpected(t, "lsattr %s: %v", path, err)
+		t.FailNow()
 	}
 	// lsattr prints "<flags> <path>"; keep only the flags.
 	return strings.Fields(string(out))[0]
@@ -1313,7 +1380,8 @@ func getfattr(t *testing.T, path string) string {
 	t.Helper()
 	out, err := exec.Command("getfattr", "-d", "-m", "-", path).CombinedOutput()
 	if err != nil {
-		t.Fatalf("getfattr %s: %v\n%s", path, err, out)
+		unexpected(t, "getfattr %s: %v\n%s", path, err, out)
+		t.FailNow()
 	}
 	return string(out)
 }
@@ -1325,12 +1393,14 @@ func fifoRoundTrip(t *testing.T, dir, name string, write func(fifo string)) stri
 	t.Helper()
 	fifo := filepath.Join(dir, name+".fifo")
 	if err := unix.Mkfifo(fifo, 0o644); err != nil {
-		t.Fatalf("mkfifo: %v", err)
+		unexpected(t, "mkfifo: %v", err)
+		t.FailNow()
 	}
 	defer os.Remove(fifo)
 	rf, err := os.OpenFile(fifo, os.O_RDONLY|unix.O_NONBLOCK, 0)
 	if err != nil {
-		t.Fatalf("open fifo read end: %v", err)
+		unexpected(t, "open fifo read end: %v", err)
+		t.FailNow()
 	}
 	defer rf.Close()
 
@@ -1340,8 +1410,13 @@ func fifoRoundTrip(t *testing.T, dir, name string, write func(fifo string)) stri
 	var got bytes.Buffer
 	buf := make([]byte, 64)
 	for time.Now().Before(deadline) {
-		_ = rf.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+		if err := rf.SetReadDeadline(time.Now().Add(100 * time.Millisecond)); err != nil {
+			t.Fatalf("SETUP: FIFO reader deadline: %v", err)
+		}
 		n, err := rf.Read(buf)
+		if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, unix.EAGAIN) && !errors.Is(err, unix.EWOULDBLOCK) && !errors.Is(err, os.ErrDeadlineExceeded) {
+			t.Fatalf("SETUP: FIFO reader: %v", err)
+		}
 		if n > 0 {
 			got.Write(buf[:n])
 			break
@@ -1409,7 +1484,8 @@ func readCorpusRows(t *testing.T) []string {
 	path := filepath.Join("..", "..", "..", "tests", "testdata", "classifier-corpus.txt")
 	f, err := os.Open(path)
 	if err != nil {
-		t.Fatalf("open corpus: %v", err)
+		unexpected(t, "open corpus: %v", err)
+		t.FailNow()
 	}
 	defer f.Close()
 	var rows []string
@@ -1434,7 +1510,8 @@ func readCorpusRows(t *testing.T) []string {
 		rows = append(rows, cmd)
 	}
 	if err := sc.Err(); err != nil {
-		t.Fatalf("scan corpus: %v", err)
+		unexpected(t, "scan corpus: %v", err)
+		t.FailNow()
 	}
 	return rows
 }

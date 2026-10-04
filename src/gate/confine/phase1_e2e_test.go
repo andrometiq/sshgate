@@ -87,7 +87,7 @@ func TestJailMatrixPhase1(t *testing.T) {
 							t.Fatalf("SETUP: null operation %+v", result)
 						}
 					} else if result.stdout != "open=13\n" || result.exit != 1 {
-						t.Errorf("device %s not denied: %+v", node, result)
+						unexpected(t, "device %s not denied: %+v", node, result)
 					}
 				}
 			})
@@ -121,7 +121,8 @@ func TestJailMatrixPhase1(t *testing.T) {
 				after, err := os.ReadFile(file.Name())
 				mutationSetup(t, err)
 				if string(after) != "host-canary" {
-					t.Fatal("host scratch canary changed")
+					unexpected(t, "host scratch canary changed")
+					t.FailNow()
 				}
 			})
 			t.Run("L-SCRATCH-NOEXEC", func(t *testing.T) {

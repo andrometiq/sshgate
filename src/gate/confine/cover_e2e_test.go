@@ -68,7 +68,7 @@ func legFuseIoctl(t *testing.T, spec Spec) {
 		landed := strings.Contains(log, "IOCTL")
 		changed = changed || landed
 		if !landed && (log != "" || !strings.Contains(result.stdout, "open=2\n")) {
-			t.Errorf("cover touched FUSE or wrong errno: %+v log=%s", result, log)
+			unexpected(t, "cover touched FUSE or wrong errno: %+v log=%s", result, log)
 		}
 	}
 	mutationEffect(t, "L-FUSE-IOCTL", "fuse-ioctl", changed)
@@ -79,16 +79,18 @@ func legCoverNested(t *testing.T, spec Spec) {
 	}
 	fixture := startCoverFuse(t, filepath.Join(t.TempDir(), "fuse"), "--nested")
 	fixture.control(t)
+	controlMark := fixture.mark(t)
 	out, err := exec.Command(coverProbe(), "fuse-ioctl", fixture.point+"/nested/f", "0x40085301", "42").CombinedOutput()
 	if err != nil {
 		t.Fatalf("SETUP: nested control: %v %s", err, out)
 	}
+	fixture.waitRelease(t, controlMark)
 	mark := fixture.mark(t)
 	result, _ := coverResult(t, spec, coverSetter(fixture.point+"/f")+"; "+coverSetter(fixture.point+"/nested/f"), nil)
 	coverRan(t, result)
 	log := fixture.since(t, mark)
 	if log != "" || strings.Count(result.stdout, "open=2\n") != 2 {
-		t.Errorf("nested mounts not covered: %+v log=%s", result, log)
+		unexpected(t, "nested mounts not covered: %+v log=%s", result, log)
 	}
 }
 func legCoverUnknown(t *testing.T, spec Spec) {
@@ -104,7 +106,7 @@ func legCoverUnknown(t *testing.T, spec Spec) {
 	coverRan(t, result)
 	if jailmut.On("SAFE-DROP=ramfs") {
 		if !strings.Contains(result.stdout, "open=2\n") {
-			t.Errorf("unknown filesystem remained visible: %+v", result)
+			unexpected(t, "unknown filesystem remained visible: %+v", result)
 		}
 		mutationEffect(t, "L-COVER-UNKNOWN", "covered", strings.Contains(result.stdout, "open=2\n"))
 	} else if !strings.Contains(result.stdout, "read=ok\n") {
@@ -146,7 +148,7 @@ func legCoverSync(t *testing.T, spec Spec) {
 				} else {
 					defer func() {
 						if err := os.WriteFile(ratioPath, previous, 0); err != nil {
-							t.Errorf("restore FUSE min_ratio: %v", err)
+							unexpected(t, "restore FUSE min_ratio: %v", err)
 						}
 					}()
 				}
@@ -195,7 +197,8 @@ func legCoverSync(t *testing.T, spec Spec) {
 	coverRan(t, result)
 	checkWindow()
 	if len(facts.Unmet) != 0 || !strings.Contains(result.stdout, "open=2\n") {
-		t.Fatalf("covered mount was not hidden in strict run: %+v %+v", result, facts)
+		unexpected(t, "covered mount was not hidden in strict run: %+v %+v", result, facts)
+		t.FailNow()
 	}
 	mutationEffect(t, "L-SC-SYNC", "sync-writeback", strings.Contains(fixture.since(t, mark), "WRITE\n"))
 	want := "sync=1\n"
@@ -203,7 +206,7 @@ func legCoverSync(t *testing.T, spec Spec) {
 		want = "sync=ok\n"
 	}
 	if !strings.Contains(result.stdout, want) {
-		t.Errorf("sync errno: %+v", result)
+		unexpected(t, "sync errno: %+v", result)
 	}
 }
 func legSelfcheckMounts(t *testing.T, spec Spec) {
@@ -221,14 +224,14 @@ func legSelfcheckMounts(t *testing.T, spec Spec) {
 	result, _ := coverResult(t, spec, "echo COMMAND_RAN", nil)
 	if coverAbort(t, "L-SELFCHECK-MOUNTS", result) {
 		if strings.Contains(fixture.since(t, mark), "IOCTL") {
-			t.Error("aborted run touched ioctl")
+			unexpected(t, "aborted run touched ioctl")
 		}
 		if jailmut.On("P-COVERS") {
 			spec.Strict = false
 			nonStrict, facts := coverResult(t, spec, "echo COMMAND_RAN", nil)
 			coverRan(t, nonStrict)
 			if nonStrict.stdout != "COMMAND_RAN\n" || !strings.Contains(strings.Join(facts.Unmet, " "), "fs-view:fuse@") {
-				t.Errorf("non-strict missing filesystem unmet: %+v %+v", nonStrict, facts)
+				unexpected(t, "non-strict missing filesystem unmet: %+v %+v", nonStrict, facts)
 			}
 		}
 		return
@@ -251,21 +254,14 @@ func legCoverOverlay(t *testing.T, spec Spec) {
 	if err != nil || !strings.Contains(fixture.since(t, mark), "READ") {
 		t.Fatalf("SETUP: delegated read control: %v %s", err, out)
 	}
-	// FUSE sends RELEASE asynchronously; wait so it is not charged to the jailed read.
-	deadline := time.Now().Add(3 * time.Second)
-	for !strings.Contains(fixture.since(t, mark), "RELEASE") {
-		if time.Now().After(deadline) {
-			t.Fatal("SETUP: delegated read control release not observed")
-		}
-		time.Sleep(time.Millisecond)
-	}
+	fixture.waitRelease(t, mark)
 	mark = fixture.mark(t)
 	result, _ := coverResult(t, spec, coverCommand("read", merged+"/f"), nil)
 	coverRan(t, result)
 	log := fixture.since(t, mark)
 	landed := strings.Contains(log, "OPEN") && strings.Contains(log, "READ")
 	if !landed && (!strings.Contains(result.stdout, "open=2\n") || log != "") {
-		t.Errorf("overlay not empty/quiet: %+v log=%s", result, log)
+		unexpected(t, "overlay not empty/quiet: %+v log=%s", result, log)
 	}
 	mutationEffect(t, "L-COVER-OVERLAY", "delegated-read", landed)
 }
@@ -290,7 +286,7 @@ func legCoverStacked(t *testing.T, spec Spec) {
 				aborted = coverAbort(t, "L-COVER-STACKED", result)
 			}
 			if strings.Contains(fixture.since(t, mark), "LOOKUP") {
-				t.Error("cross-check looked inside unconfirmed FUSE")
+				unexpected(t, "cross-check looked inside unconfirmed FUSE")
 			}
 			continue
 		}
@@ -298,7 +294,7 @@ func legCoverStacked(t *testing.T, spec Spec) {
 		landed := strings.Contains(log, "IOCTL")
 		changed = changed || landed
 		if !landed && log != "" {
-			t.Errorf("stack touched hidden FUSE: %s", log)
+			unexpected(t, "stack touched hidden FUSE: %s", log)
 		}
 		var id uint64
 		for _, line := range strings.Split(result.stdout, "\n") {
@@ -322,18 +318,18 @@ func legCoverStacked(t *testing.T, spec Spec) {
 			if uint64(entry.id) == id {
 				found = true
 				if entry.point != point || (!landed && entry.fstype != "tmpfs") || (!landed && flag != "--stack-under" && !slices.Contains(entry.opts, "noexec")) {
-					t.Errorf("wrong visible mount ID %d: %+v", id, entry)
+					unexpected(t, "wrong visible mount ID %d: %+v", id, entry)
 				}
 			}
 		}
 		if !found {
-			t.Errorf("statx ID %d absent from command mountinfo", id)
+			unexpected(t, "statx ID %d absent from command mountinfo", id)
 		}
 		if flag == "--stack-under" && !strings.Contains(result.stdout, "read=ok\n") {
-			t.Errorf("safe stack top disappeared: %+v", result)
+			unexpected(t, "safe stack top disappeared: %+v", result)
 		}
 		if flag == "--stack-under" && landed {
-			t.Error("safe stack top exposed FUSE below")
+			unexpected(t, "safe stack top exposed FUSE below")
 		}
 	}
 	mutationEffect(t, "L-COVER-STACKED", "fuse-ioctl", changed)
@@ -343,20 +339,20 @@ func legCoverStacked(t *testing.T, spec Spec) {
 	mutationSetup(t, unix.Mount("tmpfs", point, "tmpfs", 0, ""))
 	t.Cleanup(func() {
 		if err := unix.Unmount(point, unix.MNT_DETACH); err != nil {
-			t.Errorf("shadow base cleanup: %v", err)
+			unexpected(t, "shadow base cleanup: %v", err)
 		}
 	})
 	mutationSetup(t, os.Mkdir(point+"/sub", 0755))
 	mutationSetup(t, unix.Mount("tmpfs", point+"/sub", "tmpfs", 0, ""))
 	t.Cleanup(func() {
 		if err := unix.Unmount(point+"/sub", unix.MNT_DETACH); err != nil {
-			t.Errorf("shadow child cleanup: %v", err)
+			unexpected(t, "shadow child cleanup: %v", err)
 		}
 	})
 	mutationSetup(t, unix.Mount("tmpfs", point, "tmpfs", 0, ""))
 	t.Cleanup(func() {
 		if err := unix.Unmount(point, unix.MNT_DETACH); err != nil {
-			t.Errorf("shadow top cleanup: %v", err)
+			unexpected(t, "shadow top cleanup: %v", err)
 		}
 	})
 	mutationSetup(t, os.Mkdir(point+"/sub", 0755))
@@ -370,7 +366,7 @@ func legCoverStacked(t *testing.T, spec Spec) {
 			}
 		}
 		if len(ids) != 2 || ids[0] != ids[1] {
-			t.Errorf("shadowed-name lookup: %+v", result)
+			unexpected(t, "shadowed-name lookup: %+v", result)
 		}
 	}
 }
@@ -406,22 +402,23 @@ func legSelfcheckDeniedSafe(t *testing.T, spec Spec) {
 			result, facts := coverResult(t, spec, command, nil)
 			coverRan(t, result)
 			if !strings.Contains(result.stdout, "COMMAND_RAN\n") || len(facts.Unmet) != 0 {
-				t.Fatalf("strict denied subtree: %+v facts=%+v", result, facts)
+				unexpected(t, "strict denied subtree: %+v facts=%+v", result, facts)
+				t.FailNow()
 			}
 			if fixture == nil {
 				if slices.Contains(facts.CoverAtAncestor, "cover_at_ancestor@"+closed) {
-					t.Errorf("safe subtree covered at ancestor: %+v", facts)
+					unexpected(t, "safe subtree covered at ancestor: %+v", facts)
 				}
 				return
 			}
 			if log := fixture.since(t, mark); log != "" {
-				t.Errorf("covered subtree touched FUSE: %s", log)
+				unexpected(t, "covered subtree touched FUSE: %s", log)
 			}
 			if !strings.Contains(result.stdout, "open=2\n") {
-				t.Errorf("unsafe mount not hidden: %+v", result)
+				unexpected(t, "unsafe mount not hidden: %+v", result)
 			}
 			if os.Getuid() != 0 && !slices.Contains(facts.CoverAtAncestor, "cover_at_ancestor@"+closed) {
-				t.Errorf("missing denied ancestor cover: %+v", facts)
+				unexpected(t, "missing denied ancestor cover: %+v", facts)
 			}
 		})
 	}

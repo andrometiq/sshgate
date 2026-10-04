@@ -45,7 +45,14 @@ CI lane needs `useradd` and `userdel` for disposable-uid retune and NPROC contro
 `L-RETUNE-SETPARAM` additionally requires host `CAP_SYS_NICE` to prepare a
 capless real-time victim; its control lowers SCHED_RR priority from 2 to 1.
 Probe crashes, stderr diagnostics and missing operation reports are infrastructure
-failures even when another assertion emits an expected mutation marker.
+failures even when another assertion emits an expected mutation marker. All other
+non-marker jail assertions use the shared `UNEXPECTED:` failure helper; the judge
+rejects these exactly like `SETUP:`, including after an expected red marker.
+Cover legs validate each probe report and its exit status before observing effects,
+and wait for asynchronous FUSE control releases before marking the jail log window.
+`L-FIFO-WRITE` proves the single `{P-LL-FS}` removal at native and ABI 1: its
+unjailed control delivers a byte, the intact jail returns EACCES with zero bytes,
+and the mutation must emit `delivered` from the outside reader.
 
 Run crash coverage on disposable CI hosts with inherited hard core limit
 unlimited. `L-CRASH-NO-HELPER` checks the configured file or supported pipe handler

@@ -73,12 +73,14 @@ func TestJailMatrixP12(t *testing.T) {
 				}
 				mutationAbort(t, "L-HOSTMOUNTS-UNCHANGED", "private", setup.Stage == "private")
 				if result.stdout != "" {
-					t.Fatal("command ran after namespace clobber")
+					unexpected(t, "command ran after namespace clobber")
+					t.FailNow()
 				}
 				after, err := os.ReadFile("/proc/self/mountinfo")
 				mutationSetup(t, err)
 				if !bytes.Equal(before, after) {
-					t.Fatal("host mountinfo changed")
+					unexpected(t, "host mountinfo changed")
+					t.FailNow()
 				}
 			})
 			t.Run("L-FAULT-nsverify", func(t *testing.T) { legFault(t, spec, "nsverify") })
@@ -163,7 +165,8 @@ func legNamespace(t *testing.T, spec Spec, namespace string) {
 		mutationSetup(t, err)
 		result := runP12(t, spec, "readlink /proc/self/ns/pid", nil)
 		if result.setupErr != nil || result.exit != 0 || strings.TrimSpace(result.stdout) != expected {
-			t.Fatalf("pid namespace is not the host's: %+v", result)
+			unexpected(t, "pid namespace is not the host's: %+v", result)
+			t.FailNow()
 		}
 	}
 	before, err := os.ReadFile("/proc/self/mountinfo")
@@ -173,7 +176,8 @@ func legNamespace(t *testing.T, spec Spec, namespace string) {
 	after, err := os.ReadFile("/proc/self/mountinfo")
 	mutationSetup(t, err)
 	if !bytes.Equal(before, after) {
-		t.Fatal("host mountinfo changed")
+		unexpected(t, "host mountinfo changed")
+		t.FailNow()
 	}
 }
 
@@ -198,7 +202,8 @@ func legSpecReject(t *testing.T, abi int) {
 	p12Control(t, spec)
 	result := runP12(t, spec, command+"; echo COMMAND_RAN", func(j *Jailed) {
 		if err := json.Unmarshal([]byte(j.Cmd.Args[2]), &spec); err != nil {
-			t.Fatal(err)
+			unexpected(t, "%v", err)
+			t.FailNow()
 		}
 		spec.Profile = "invalid"
 		raw, err := json.Marshal(spec)
@@ -208,7 +213,8 @@ func legSpecReject(t *testing.T, abi int) {
 	info, err = os.Stat(target)
 	mutationSetup(t, err)
 	if info.Mode().Perm() != 0600 {
-		t.Fatal("invalid spec changed target mode")
+		unexpected(t, "invalid spec changed target mode")
+		t.FailNow()
 	}
 	// The gate's Facts check may still reject the report after the command ran;
 	// reaching exec is the effect either way.
@@ -243,11 +249,12 @@ func legRootState(t *testing.T, spec Spec) {
 	for _, name := range []string{"uid_map", "gid_map"} {
 		start := strings.Index(result.stdout, name+":\n")
 		if start < 0 {
-			t.Fatalf("missing %s", name)
+			unexpected(t, "missing %s", name)
+			t.FailNow()
 		}
 		line := strings.SplitN(result.stdout[start+len(name)+2:], "\n", 2)[0]
 		if strings.Join(strings.Fields(line), " ") != "0 0 4294967295" {
-			t.Errorf("%s is not full-range: %q", name, line)
+			unexpected(t, "%s is not full-range: %q", name, line)
 		}
 	}
 	for _, name := range []string{"CapPrm", "CapEff", "CapBnd", "CapInh", "CapAmb"} {
@@ -261,20 +268,20 @@ func legRootState(t *testing.T, spec Spec) {
 				found = true
 				value, err := strconv.ParseUint(strings.TrimSpace(strings.TrimPrefix(line, name+":")), 16, 64)
 				if err != nil || value != want {
-					t.Errorf("%s got %q want %#x", name, line, want)
+					unexpected(t, "%s got %q want %#x", name, line, want)
 				}
 			}
 		}
 		if !found {
-			t.Errorf("missing %s", name)
+			unexpected(t, "missing %s", name)
 		}
 	}
 	if !strings.Contains(result.stdout, "open_by_handle_at=1\n") {
-		t.Error("open_by_handle_at did not return EPERM")
+		unexpected(t, "open_by_handle_at did not return EPERM")
 	}
 	// The init-userns capability check also denies handles; pin the filter wall independently.
 	if evalFilter(t, buildFilter(filterParams{}), dataFor(unix.SYS_OPEN_BY_HANDLE_AT, x8664)) != actDeny {
-		t.Error("root filter permits open_by_handle_at")
+		unexpected(t, "root filter permits open_by_handle_at")
 	}
 }
 
@@ -287,7 +294,8 @@ func legRootNproc(t *testing.T, spec Spec) {
 	}
 	result := runP12(t, spec, probe+" root-nproc unused", nil)
 	if result.setupErr != nil || result.exit != 0 || (!strings.Contains(result.stdout, "fork-root=ok") || !strings.Contains(result.stdout, "nproc=256:256")) {
-		t.Fatalf("root NPROC exemption: %+v", result)
+		unexpected(t, "root NPROC exemption: %+v", result)
+		t.FailNow()
 	}
 }
 
@@ -301,12 +309,14 @@ func legRootProc(t *testing.T, spec Spec) {
 		t.Fatalf("SETUP: %+v", result)
 	}
 	if result.exit == 0 || !strings.Contains(strings.ToLower(result.stderr), "read-only") {
-		t.Fatalf("expected EROFS: %+v", result)
+		unexpected(t, "expected EROFS: %+v", result)
+		t.FailNow()
 	}
 	after, err := os.ReadFile(path)
 	mutationSetup(t, err)
 	if !bytes.Equal(before, after) {
-		t.Fatal("printk changed")
+		unexpected(t, "printk changed")
+		t.FailNow()
 	}
 }
 

@@ -178,7 +178,8 @@ func catalogueFile(t *testing.T, spec Spec, row bypassRow) {
 	result := runP12(t, spec, "printf 'CATALOGUE_RAN\\n'; "+command, nil)
 	coverRan(t, result)
 	if !strings.Contains(result.stdout, "CATALOGUE_RAN\n") {
-		t.Fatalf("catalogue command did not execute: %+v", result)
+		unexpected(t, "catalogue command did not execute: %+v", result)
+		t.FailNow()
 	}
 	mutationEffect(t, "L-CATALOGUE/"+row.name, "file", catalogueChanged(t, target, before))
 }
@@ -238,7 +239,7 @@ func catalogueNetwork(t *testing.T, spec Spec, kind string) {
 			coverRan(t, result)
 			received := requests.Load() - before
 			if allow && (received > 1 || kind != "curl_dump_header" && received != 1) {
-				t.Errorf("network grant received %d requests: %+v", received, result)
+				unexpected(t, "network grant received %d requests: %+v", received, result)
 			}
 			if !allow {
 				mutationEffect(t, "L-CATALOGUE/"+kind, "network", received != 0)
@@ -269,13 +270,7 @@ func catalogueNamespace(t *testing.T, root bool) bool {
 	}
 	output, err := command.CombinedOutput()
 	fmt.Print(string(output))
-	if err != nil {
-		if command.Process == nil {
-			t.Errorf("SETUP: catalogue namespace: %v", err)
-		} else {
-			t.Errorf("catalogue fixture process: %v", err)
-		}
-	}
+	propagateFixtureFailure(t, output, err)
 	return false
 }
 func catalogueMount(t *testing.T, spec Spec, longOptions bool) {
@@ -310,10 +305,10 @@ func catalogueMount(t *testing.T, spec Spec, longOptions bool) {
 	coverRan(t, result)
 	if mounted() {
 		unix.Unmount(point, unix.MNT_DETACH)
-		t.Error("catalogue mounted an outside filesystem")
+		unexpected(t, "catalogue mounted an outside filesystem")
 	}
 	if result.exit == 0 {
-		t.Errorf("catalogue mount not denied: %+v", result)
+		unexpected(t, "catalogue mount not denied: %+v", result)
 	}
 }
 func catalogueSysctl(t *testing.T, spec Spec, system bool) {
@@ -350,12 +345,12 @@ func catalogueSysctl(t *testing.T, spec Spec, system bool) {
 	result := runP12(t, spec, command, nil)
 	coverRan(t, result)
 	if result.exit == 0 {
-		t.Errorf("catalogue sysctl write accepted: %+v", result)
+		unexpected(t, "catalogue sysctl write accepted: %+v", result)
 	}
 	after, err := os.ReadFile("/proc/sys/kernel/domainname")
 	mutationSetup(t, err)
 	if !bytes.Equal(original, after) {
-		t.Error("sysctl changed outside value")
+		unexpected(t, "sysctl changed outside value")
 	}
 }
 

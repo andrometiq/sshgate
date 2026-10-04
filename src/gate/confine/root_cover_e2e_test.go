@@ -27,9 +27,7 @@ func legCoverLoop(t *testing.T, spec Spec) {
 	result, _ := coverResult(t, spec, "ls -A "+coverQuote(point), nil)
 	coverRan(t, result)
 	mutationEffect(t, "L-COVER-LOOP", "visible", strings.Contains(result.stdout, "f"))
-	if result.exit != 0 || result.stdout != "" {
-		t.Errorf("loop cover is not empty: %+v", result)
-	}
+	mutationEffect(t, "L-COVER-LOOP", "nonempty", result.stdout != "")
 }
 
 func autofsKinds(t *testing.T, point string) []string {
@@ -58,7 +56,7 @@ func legAutofs(t *testing.T, spec Spec) {
 	t.Cleanup(func() {
 		output, err := exec.Command("systemd-mount", "--umount", point).CombinedOutput()
 		if err != nil {
-			t.Errorf("autofs cleanup: %v: %s", err, output)
+			unexpected(t, "autofs cleanup: %v: %s", err, output)
 		}
 	})
 	kinds := autofsKinds(t, point)
@@ -71,7 +69,7 @@ func legAutofs(t *testing.T, spec Spec) {
 	triggered := len(kinds) != 1 || kinds[0] != "autofs"
 	mutationEffect(t, "L-AUTOFS", "triggered", triggered)
 	if result.exit != 0 || result.stdout != "" {
-		t.Errorf("autofs cover not empty: %+v", result)
+		unexpected(t, "autofs cover not empty: %+v", result)
 	}
 	output, err = exec.Command("ls", "-A", point).CombinedOutput()
 	if err != nil {
@@ -95,7 +93,7 @@ func legBinfmtFixed(t *testing.T, spec Spec) {
 	mutationSetup(t, unix.Mount("binfmt_misc", registry, "binfmt_misc", unix.MS_NOSUID|unix.MS_NODEV, ""))
 	t.Cleanup(func() {
 		if err := unix.Unmount(registry, unix.MNT_DETACH); err != nil {
-			t.Errorf("binfmt unmount: %v", err)
+			unexpected(t, "binfmt unmount: %v", err)
 		}
 	})
 	name := fmt.Sprintf("sshgate-fixed-%d", os.Getpid())
@@ -103,7 +101,7 @@ func legBinfmtFixed(t *testing.T, spec Spec) {
 	mutationSetup(t, os.WriteFile(filepath.Join(registry, "register"), []byte(registration), 0600))
 	t.Cleanup(func() {
 		if err := os.WriteFile(filepath.Join(registry, name), []byte("-1"), 0600); err != nil {
-			t.Errorf("binfmt unregister: %v", err)
+			unexpected(t, "binfmt unregister: %v", err)
 		}
 	})
 	image := filepath.Join(directory, "fixed-image")
@@ -112,19 +110,21 @@ func legBinfmtFixed(t *testing.T, spec Spec) {
 	if err != nil || !strings.Contains(string(control), "INTERPRETER_RAN") {
 		t.Fatalf("SETUP: fixed interpreter control: %v: %s", err, control)
 	}
+	releaseMark := fixture.mark(t)
 	interpreter, err := os.Open(filepath.Join(point, "f"))
 	mutationSetup(t, err)
 	mutationSetup(t, unix.Fadvise(int(interpreter.Fd()), 0, 0, unix.FADV_DONTNEED))
 	mutationSetup(t, interpreter.Close())
+	fixture.waitRelease(t, releaseMark)
 	mark := fixture.mark(t)
 	result, _ := coverResult(t, spec, coverQuote(image)+" INTERPRETER_RAN", nil)
 	coverRan(t, result)
 	if result.exit != 0 || !strings.Contains(result.stdout, "INTERPRETER_RAN") {
-		t.Errorf("R18 fixed interpreter residual absent: %+v", result)
+		unexpected(t, "R18 fixed interpreter residual absent: %+v", result)
 	}
 	log := fixture.since(t, mark)
 	if !strings.Contains(log, "READ\n") {
-		t.Errorf("R18 fixed interpreter did not delegate reads after cover: %s", log)
+		unexpected(t, "R18 fixed interpreter did not delegate reads after cover: %s", log)
 	}
 	t.Log("CHARACTERISATION R18: fixed binfmt interpreter executes through retained FUSE reference")
 }

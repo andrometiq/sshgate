@@ -27,7 +27,8 @@ func TestFidelitySmoke(t *testing.T) {
 		}
 		name, category, ok := strings.Cut(line, " → ")
 		if !ok || expected[name] != "" {
-			t.Fatalf("bad smoke golden row %q", line)
+			unexpected(t, "bad smoke golden row %q", line)
+			t.FailNow()
 		}
 		expected[name] = category
 	}
@@ -117,7 +118,8 @@ func TestFidelitySmoke(t *testing.T) {
 								}
 							}
 							if expected[row.name] != "SS-PROCFS-V6ONLY" {
-								t.Fatal("missing SS-PROCFS-V6ONLY category")
+								unexpected(t, "missing SS-PROCFS-V6ONLY category")
+								t.FailNow()
 							}
 						}
 						if row.name == "journalctl -n 20" {
@@ -135,27 +137,32 @@ func TestFidelitySmoke(t *testing.T) {
 						}
 						if row.name == "pidof executable" {
 							if expected[row.name] != "PIDOF-EXE-DENIED" || string(baseline) != strconv.Itoa(sleeper.Process.Pid)+"\n" {
-								t.Fatalf("pidof control/category: %q / %q", baseline, expected[row.name])
+								unexpected(t, "pidof control/category: %q / %q", baseline, expected[row.name])
+								t.FailNow()
 							}
 							if result.exit != 1 || result.stdout != "" || result.stderr != "" {
-								t.Fatalf("unlisted pidof difference: %+v", result)
+								unexpected(t, "unlisted pidof difference: %+v", result)
+								t.FailNow()
 							}
 							link := fmt.Sprintf("/proc/%d/exe", sleeper.Process.Pid)
 							resolved, err := os.Readlink(link)
 							mutationSetup(t, err)
 							if resolved != victim.Name() {
-								t.Fatalf("victim executable: %q", resolved)
+								unexpected(t, "victim executable: %q", resolved)
+								t.FailNow()
 							}
 							denied := runP12(t, Spec{Profile: ProfileROv1, Net: false, ForceABI: cfg.abi, Cwd: "/"}, "LC_ALL=C readlink -v "+link, nil)
 							wantError := "readlink: " + link + ": Permission denied\n"
 							if denied.setupErr != nil || denied.exit != 1 || denied.stdout != "" || denied.stderr != wantError {
-								t.Fatalf("pidof exe denial not established: %+v", denied)
+								unexpected(t, "pidof exe denial not established: %+v", denied)
+								t.FailNow()
 							}
 							t.Log("FIDELITY pidof executable → PIDOF-EXE-DENIED; pgrep -x checks the same victim")
 							continue
 						}
 						if result.exit != 0 {
-							t.Fatalf("smoke command failed: %+v", result)
+							unexpected(t, "smoke command failed: %+v", result)
+							t.FailNow()
 						}
 						if row.name == "ss -tuna" {
 							command = exec.Command("/bin/sh", "-c", row.command)
@@ -176,7 +183,7 @@ func TestFidelitySmoke(t *testing.T) {
 								}
 							}
 							if err := compareSmokeSockets(string(baseline), result.stdout, string(final), result.stderr); err != nil {
-								t.Errorf("unlisted fidelity difference: %v", err)
+								unexpected(t, "unlisted fidelity difference: %v", err)
 							}
 							t.Log("FIDELITY ss -tuna → SS-PROCFS-V6ONLY")
 							return
@@ -192,21 +199,24 @@ func TestFidelitySmoke(t *testing.T) {
 									found = found || field == pid
 								}
 								if !found {
-									t.Fatalf("process observer %s lost PID %s: %s", row.name, pid, output)
+									unexpected(t, "process observer %s lost PID %s: %s", row.name, pid, output)
+									t.FailNow()
 								}
 							}
 							if result.stderr != "" {
-								t.Fatalf("observer stderr: %s", result.stderr)
+								unexpected(t, "observer stderr: %s", result.stderr)
+								t.FailNow()
 							}
 							if (row.name == "pgrep" || row.name == "pidof") && (string(baseline) != pid+"\n" || result.stdout != pid+"\n") {
-								t.Fatalf("%s returned unexpected PIDs: control %q, jail %q", row.name, baseline, result.stdout)
+								unexpected(t, "%s returned unexpected PIDs: control %q, jail %q", row.name, baseline, result.stdout)
+								t.FailNow()
 							}
 							continue
 						}
 						before, after := projectIdentity(t, row.name, string(baseline)), result.stdout+result.stderr
 						if row.name == "ps aux" {
 							if result.stderr != "" {
-								t.Errorf("unlisted fidelity difference: ps stderr: %s", result.stderr)
+								unexpected(t, "unlisted fidelity difference: ps stderr: %s", result.stderr)
 							}
 							// PID 1 and this test process live throughout both samples.
 							// Other rows and accounting columns may change between runs.
@@ -219,7 +229,7 @@ func TestFidelitySmoke(t *testing.T) {
 								stable[pid] = initial[pid]
 							}
 							if !strings.HasPrefix(strings.TrimSpace(after), "USER") || !strings.Contains(strings.SplitN(after, "\n", 2)[0], "PID") {
-								t.Errorf("unlisted fidelity difference: ps header missing: %q", after)
+								unexpected(t, "unlisted fidelity difference: ps header missing: %q", after)
 							}
 							before = stablePS(before, stable)
 							after = stablePS(after, stable)
@@ -227,10 +237,10 @@ func TestFidelitySmoke(t *testing.T) {
 						changed := result.exit != 0 || normalizeSmoke(row.name, before) != normalizeSmoke(row.name, after)
 						category := expected[row.name]
 						if changed && category == "" {
-							t.Errorf("unlisted fidelity difference\ncontrol: %s\njail: %+v", baseline, result)
+							unexpected(t, "unlisted fidelity difference\ncontrol: %s\njail: %+v", baseline, result)
 						}
 						if !changed && category != "" {
-							t.Errorf("listed difference %s disappeared", category)
+							unexpected(t, "listed difference %s disappeared", category)
 						}
 						if category != "" {
 							t.Logf("FIDELITY %s → %s", row.name, category)
@@ -249,7 +259,7 @@ func TestFidelitySmoke(t *testing.T) {
 			found = found || row.name == name
 		}
 		if !found {
-			t.Errorf("unexecuted golden row %s", name)
+			unexpected(t, "unexecuted golden row %s", name)
 		}
 	}
 }
@@ -565,10 +575,12 @@ func TestSmokeSocketProcfsIPv6(t *testing.T) {
 				jailed.Cmd.Env = append(jailed.Cmd.Env, environment...)
 			})
 			if result.setupErr != nil || result.exit != 0 {
-				t.Fatalf("ss procfs fixture: %+v", result)
+				unexpected(t, "ss procfs fixture: %+v", result)
+				t.FailNow()
 			}
 			if err := compareSmokeSockets(want, result.stdout, want, result.stderr); err != nil {
-				t.Fatal(err)
+				unexpected(t, "%v", err)
+				t.FailNow()
 			}
 		})
 	}

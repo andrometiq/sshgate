@@ -35,7 +35,7 @@ func TestJailMatrixSyscallSweep(t *testing.T) {
 						want = 38
 					}
 					if !strings.Contains(output, fmt.Sprintf("%s=%d\n", row.name, want)) {
-						t.Errorf("%s expected %d: %s", row.name, want, output)
+						unexpected(t, "%s expected %d: %s", row.name, want, output)
 					}
 				}
 				controlArgs := append([]string{"-Urmpf", probe, "sc-sweep"}, args...)

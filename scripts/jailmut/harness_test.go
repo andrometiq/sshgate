@@ -15,7 +15,7 @@ func fixtureLeg() harness.Leg {
 }
 
 func TestHarnessFixtures(t *testing.T) {
-	for _, mode := range []string{"red", "marker-setup", "panic", "timeout", "setup", "pass", "missing", "extra", "sibling", "ancestor", "skip", "build"} {
+	for _, mode := range []string{"red", "marker-setup", "marker-unexpected", "panic", "timeout", "setup", "pass", "missing", "extra", "sibling", "ancestor", "skip", "build"} {
 		t.Run(mode, func(t *testing.T) {
 			path := "./testdata/fixture"
 			if mode == "build" {
@@ -46,8 +46,8 @@ func TestHarnessFixtures(t *testing.T) {
 			} else if err == nil {
 				t.Fatalf("accepted %s infrastructure/undetected mutation", mode)
 			}
-			if mode == "marker-setup" && !strings.Contains(err.Error(), "infrastructure") {
-				t.Fatalf("wrong marker-plus-SETUP diagnostic: %v", err)
+			if (mode == "marker-setup" || mode == "marker-unexpected") && !strings.Contains(err.Error(), "infrastructure") {
+				t.Fatalf("wrong marker-plus-infrastructure diagnostic: %v", err)
 			}
 			if mode == "pass" && !strings.Contains(err.Error(), "mutation not detected") {
 				t.Fatalf("wrong diagnostic: %v", err)

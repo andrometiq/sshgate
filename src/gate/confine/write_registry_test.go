@@ -34,7 +34,7 @@ func writeRegistry() []prot {
 			{IDs: []string{"P-RO", "P-SELFCHECK-MOUNTS", "P-LL-FS"}, Legs: writeLegs(true)},
 			{IDs: []string{"P-SC-META", "P-RO", "P-SELFCHECK-MOUNTS"}, Legs: metadataLegs(true)},
 		}},
-		{ID: "P-LL-FS", Site: "applyLandlock root access rights", Class: "multi", Partners: []string{"P-RO", "P-SELFCHECK-MOUNTS"}, MutationSets: []harness.MutationSet{{IDs: []string{"P-RO", "P-SELFCHECK-MOUNTS", "P-LL-FS"}, Legs: writeLegs(true)}}},
+		{ID: "P-LL-FS", Site: "applyLandlock root access rights", Class: "multi", Partners: []string{"P-RO", "P-SELFCHECK-MOUNTS"}, MutationSets: []harness.MutationSet{{IDs: []string{"P-LL-FS"}, Legs: []harness.Leg{writeMatrixLeg("L-FIFO-WRITE", "MUTATION-EFFECT delivered")}}, {IDs: []string{"P-RO", "P-SELFCHECK-MOUNTS", "P-LL-FS"}, Legs: writeLegs(true)}}},
 		{ID: "P-NOSUID", Site: "setupMounts recursive NOSUID", Class: "direct", MutationSets: []harness.MutationSet{
 			{IDs: []string{"P-NOSUID"}, Legs: []harness.Leg{check}},
 			{IDs: []string{"P-NOSUID", "P-SELFCHECK-MOUNTS"}, Legs: []harness.Leg{credentialLeg("L-SETUID", "MUTATION-EFFECT nosuid-state")}},

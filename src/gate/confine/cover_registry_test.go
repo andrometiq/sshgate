@@ -19,7 +19,7 @@ func coverRegistry() []prot {
 	shimCaps := harness.MutationSet{IDs: []string{"P-SHIM-SEAL", "P-LL-REQUIRED", "P-SELFCHECK-LL"}, Legs: []harness.Leg{coverLeg("L-SHIM-PROC")}}
 	shimSeal := harness.MutationSet{IDs: []string{"SHIM-NOCAPS", "P-LL-REQUIRED", "P-SELFCHECK-LL"}, Legs: []harness.Leg{coverLeg("L-SHIM-PROC")}}
 	shimEffect := harness.MutationSet{IDs: []string{"P-SHIM-SEAL", "SHIM-NOCAPS", "P-LL-REQUIRED", "P-SELFCHECK-LL"}, Legs: []harness.Leg{effect("L-SHIM-PROC", "shim-proc")}}
-	loop := effect("L-COVER-LOOP", "visible")
+	loop := coverLeg("L-COVER-LOOP", "MUTATION-EFFECT visible", "MUTATION-EFFECT nonempty")
 	loop.Root = true
 	loop.CIOnly = true
 	privateEffect := harness.MutationSet{IDs: []string{"P-PRIVATE", "P-SELFCHECK-MOUNTS"}, Legs: []harness.Leg{effect("L-PRIVATE-PROPAGATION", "fuse-ioctl")}}

@@ -122,7 +122,8 @@ func hostSignalEffect(t *testing.T, specs []Spec, leg string) {
 				<-done
 			}
 			if !strings.Contains(out, "signal=1\n") && !strings.Contains(out, "signal=ok\n") {
-				t.Fatalf("unexpected signal %d errno: %s", nr, out)
+				unexpected(t, "unexpected signal %d errno: %s", nr, out)
+				t.FailNow()
 			}
 		}
 	}
@@ -189,7 +190,8 @@ func hostAsyncEffect(t *testing.T, specs []Spec, leg string) {
 		out := requireProbeOutput(t, runP12(t, spec, probe+" async-errno "+strconv.Itoa(os.Getpid()), nil), append(strings.Fields(strings.Repeat("setown ", 5)+strings.Repeat("ioctl ", 3)), "setown_ex", "clear", "setsig")...)
 		badErrno = badErrno || strings.Count(out, "setown=1\n") != 5 || !strings.Contains(out, "setown_ex=1\n") || strings.Count(out, "ioctl=1\n") != 3
 		if !strings.Contains(out, "clear=ok\n") || !strings.Contains(out, "setsig=ok\n") {
-			t.Fatalf("async zero-owner/setsig controls: %s", out)
+			unexpected(t, "async zero-owner/setsig controls: %s", out)
+			t.FailNow()
 		}
 	}
 	mutationEffect(t, leg, "errno", badErrno)

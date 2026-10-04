@@ -35,7 +35,8 @@ func TestJailMatrixCredentials(t *testing.T) {
 					t.Fatalf("SETUP: unexpected abort: %+v", result)
 				}
 				if result.exit != 0 || result.stdout != "COMMAND_RAN" {
-					t.Fatalf("intact NNP did not reach exec: %+v", result)
+					unexpected(t, "intact NNP did not reach exec: %+v", result)
+					t.FailNow()
 				}
 			})
 			t.Run("L-SELFCHECK-CREDS", func(t *testing.T) {
@@ -81,15 +82,18 @@ func TestJailMatrixCredentials(t *testing.T) {
 				}
 				parts := strings.SplitN(result.stdout, "\nMOUNTS\n", 2)
 				if len(parts) != 2 {
-					t.Fatal("missing mount report")
+					unexpected(t, "missing mount report")
+					t.FailNow()
 				}
 				if !strings.Contains(parts[0], "NoNewPrivs:\t1\n") {
-					t.Fatal("NoNewPrivs is not 1")
+					unexpected(t, "NoNewPrivs is not 1")
+					t.FailNow()
 				}
 				entries, err = parseMountInfo(strings.NewReader(parts[1]))
 				mutationSetup(t, err)
 				if len(entries) == 0 {
-					t.Fatal("empty jailed mountinfo")
+					unexpected(t, "empty jailed mountinfo")
+					t.FailNow()
 				}
 				missing := false
 				for _, entry := range entries {

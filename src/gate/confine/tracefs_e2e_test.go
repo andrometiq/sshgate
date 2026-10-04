@@ -25,14 +25,14 @@ func legTracefs(t *testing.T, spec Spec) {
 	mutationSetup(t, unix.Mount("tracefs", point, "tracefs", unix.MS_NOSUID|unix.MS_NODEV, ""))
 	t.Cleanup(func() {
 		if err := unix.Unmount(point, unix.MNT_DETACH); err != nil {
-			t.Errorf("tracefs unmount: %v", err)
+			unexpected(t, "tracefs unmount: %v", err)
 		}
 	})
 	instance := filepath.Join(point, "instances", fmt.Sprintf("sshgate-%d", os.Getpid()))
 	mutationSetup(t, os.Mkdir(instance, 0700))
 	t.Cleanup(func() {
 		if err := os.Remove(instance); err != nil {
-			t.Errorf("trace instance cleanup: %v", err)
+			unexpected(t, "trace instance cleanup: %v", err)
 		}
 	})
 	mutationSetup(t, os.WriteFile(filepath.Join(instance, "tracing_on"), []byte("1"), 0600))
@@ -54,11 +54,11 @@ func legTracefs(t *testing.T, spec Spec) {
 	mutationEffect(t, "L-TRACEFS", "trace-consumed", consumed)
 	if consumed {
 		if !strings.Contains(result.stdout, marker) {
-			t.Error("marker disappeared without being read by jail")
+			unexpected(t, "marker disappeared without being read by jail")
 		}
 		mutationSetup(t, os.WriteFile(filepath.Join(instance, "trace_marker"), []byte(marker+"\n"), 0600))
 	} else if !strings.Contains(result.stdout, "open=2\n") {
-		t.Errorf("trace pipe not hidden: %+v", result)
+		unexpected(t, "trace pipe not hidden: %+v", result)
 	}
 	control, err := exec.Command(probe, "trace-drain", pipe).CombinedOutput()
 	mutationSetup(t, err)

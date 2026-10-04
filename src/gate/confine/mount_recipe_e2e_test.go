@@ -51,10 +51,11 @@ func TestJailMatrixP14(t *testing.T) {
 						}
 						if node == "null" {
 							if result.exit != 0 || !strings.Contains(result.stdout, "write=ok\n") {
-								t.Fatalf("null broke: %+v", result)
+								unexpected(t, "null broke: %+v", result)
+								t.FailNow()
 							}
 						} else if !strings.Contains(result.stdout, "open=13\n") {
-							t.Errorf("device write not EACCES: %+v", result)
+							unexpected(t, "device write not EACCES: %+v", result)
 						}
 					})
 				}
@@ -78,12 +79,12 @@ func TestJailMatrixP14(t *testing.T) {
 					t.Fatalf("SETUP: %+v", result)
 				}
 				if !strings.Contains(result.stdout, "open=13\n") {
-					t.Errorf("pty open not denied: %+v", result)
+					unexpected(t, "pty open not denied: %+v", result)
 				}
 				exclusive, err = unix.IoctlGetInt(fd, unix.TIOCGEXCL)
 				mutationSetup(t, err)
 				if exclusive != 0 {
-					t.Error("outside tty changed")
+					unexpected(t, "outside tty changed")
 				}
 			})
 			t.Run("L-SCRATCH", func(t *testing.T) {
@@ -99,12 +100,12 @@ func TestJailMatrixP14(t *testing.T) {
 					t.Fatalf("SETUP: %+v", result)
 				}
 				if result.exit != 126 || !strings.Contains(strings.ToLower(result.stderr), "permission denied") {
-					t.Errorf("scratch isolation/noexec: %+v", result)
+					unexpected(t, "scratch isolation/noexec: %+v", result)
 				}
 				after, err := os.ReadFile(file.Name())
 				mutationSetup(t, err)
 				if string(after) != "host-shm-canary" {
-					t.Error("host scratch object changed")
+					unexpected(t, "host scratch object changed")
 				}
 			})
 			t.Run("L-WRITE-ROOT", func(t *testing.T) { legWriteSweep(t, spec, false) })
@@ -121,7 +122,8 @@ func TestJailMatrixP14(t *testing.T) {
 				want := min(uint64(1), hard)
 				result := runP12(t, spec, probe+" core-limit unused", nil)
 				if result.setupErr != nil || result.exit != 0 || strings.TrimSpace(result.stdout) != fmt.Sprintf("core=%d:%d", want, want) {
-					t.Fatalf("core limit (inherited hard=%d): %+v", hard, result)
+					unexpected(t, "core limit (inherited hard=%d): %+v", hard, result)
+					t.FailNow()
 				}
 			})
 			t.Run("L-TMP-VISIBLE", func(t *testing.T) {
@@ -136,7 +138,8 @@ func TestJailMatrixP14(t *testing.T) {
 				mutationSetup(t, err)
 				result := runP12(t, spec, "cat "+path, nil)
 				if result.setupErr != nil || result.exit != 0 || result.stdout != string(control) {
-					t.Fatalf("tmp invisible: %+v", result)
+					unexpected(t, "tmp invisible: %+v", result)
+					t.FailNow()
 				}
 			})
 			t.Run("L-PS-VISIBLE", func(t *testing.T) {
@@ -154,7 +157,8 @@ func TestJailMatrixP14(t *testing.T) {
 				for repetition := 0; repetition < 20; repetition++ {
 					result := runP12(t, spec, command, nil)
 					if result.setupErr != nil || result.exit != 0 || result.stdout != string(control) {
-						t.Fatalf("host process invisible: %+v", result)
+						unexpected(t, "host process invisible: %+v", result)
+						t.FailNow()
 					}
 				}
 

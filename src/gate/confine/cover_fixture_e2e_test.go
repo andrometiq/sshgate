@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -83,13 +84,7 @@ func coverNamespace(t *testing.T, nonroot bool) bool {
 	}
 	output, err := command.CombinedOutput()
 	fmt.Print(string(output))
-	if err != nil {
-		if command.Process == nil {
-			t.Errorf("SETUP: cover namespace: %v", err)
-		} else {
-			t.Errorf("cover fixture process: %v", err)
-		}
-	}
+	propagateFixtureFailure(t, output, err)
 	return false
 }
 func coverUnavailable(t *testing.T, err error) {
@@ -102,9 +97,77 @@ func coverUnavailable(t *testing.T, err error) {
 func coverProbe() string             { return os.Getenv("SSHGATE_COVER_PROBE") }
 func coverQuote(value string) string { return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'" }
 func coverCommand(operation, path string) string {
-	return coverQuote(coverProbe()) + " " + operation + " " + coverQuote(path)
+	return coverProbeCommand(operation, path)
 }
-func coverSetter(path string) string { return coverCommand("fuse-ioctl", path) + " 0x40085301 42" }
+func coverSetter(path string) string {
+	return coverProbeCommand("fuse-ioctl", path, "0x40085301", "42")
+}
+
+// Frame each probe separately: a later shell command must not hide its failure.
+func coverProbeCommand(operation string, arguments ...string) string {
+	command := coverQuote(coverProbe()) + " " + operation
+	for _, argument := range arguments {
+		command += " " + coverQuote(argument)
+	}
+	return "{ printf 'COVER-BEGIN " + operation + "\\n'; " + command + "; printf 'COVER-END %s\\n' \"$?\"; }"
+}
+
+func validateCoverReports(result jailResult, count int) (string, error) {
+	if result.setupErr != nil || result.exit != 0 || result.stderr != "" || (result.stdout != "" && !strings.HasSuffix(result.stdout, "\n")) {
+		return "", fmt.Errorf("abnormal cover command completion")
+	}
+	var output strings.Builder
+	lines := strings.SplitAfter(result.stdout, "\n")
+	seen := 0
+	for index := 0; index < len(lines); index++ {
+		line := lines[index]
+		if !strings.HasPrefix(line, "COVER-BEGIN ") {
+			if strings.HasPrefix(line, "COVER-END ") {
+				return "", fmt.Errorf("orphan probe completion")
+			}
+			output.WriteString(line)
+			continue
+		}
+		operation := strings.TrimSuffix(strings.TrimPrefix(line, "COVER-BEGIN "), "\n")
+		expected := map[string][]string{
+			"fuse-ioctl":  {"open", "open>ioctl"},
+			"read":        {"open", "open>read", "read>bytes"},
+			"mntid":       {"statx", "statx>bytes"},
+			"sync":        {"sync"},
+			"jail-proc":   {"target", "open", "open>read", "read>bytes"},
+			"cover-write": {"open", "open>write"},
+		}[operation]
+		if expected == nil {
+			return "", fmt.Errorf("undeclared cover probe %q", operation)
+		}
+		var report strings.Builder
+		index++
+		for index < len(lines) && !strings.HasPrefix(lines[index], "COVER-END ") {
+			report.WriteString(lines[index])
+			index++
+		}
+		if index >= len(lines) {
+			return "", fmt.Errorf("missing probe completion")
+		}
+		status, err := strconv.Atoi(strings.TrimSuffix(strings.TrimPrefix(lines[index], "COVER-END "), "\n"))
+		if err != nil {
+			return "", fmt.Errorf("malformed probe completion")
+		}
+		validation := report.String()
+		if operation == "mntid" {
+			validation = strings.ReplaceAll(validation, "mntid=", "bytes=")
+		}
+		if err := validateProbeOutput(jailResult{stdout: validation, exit: status}, expected, probeExitAnyFailure); err != nil {
+			return "", fmt.Errorf("%s: %w", operation, err)
+		}
+		output.WriteString(report.String())
+		seen++
+	}
+	if seen != count {
+		return "", fmt.Errorf("got %d probes, want %d", seen, count)
+	}
+	return output.String(), nil
+}
 
 type fuseFixture struct {
 	point, log string
@@ -177,8 +240,13 @@ func (f *fuseFixture) control(t *testing.T) {
 	if err != nil || !strings.Contains(string(out), "ioctl=ok") || !strings.Contains(f.since(t, mark), "IOCTL") {
 		t.Fatalf("SETUP: FUSE ioctl control: %v %s", err, out)
 	}
+	f.waitRelease(t, mark)
+}
+
+func (f *fuseFixture) waitRelease(t *testing.T, mark int64) {
+	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)
-	for !strings.Contains(f.since(t, mark), "RELEASE") {
+	for !strings.Contains(f.since(t, mark), "RELEASE\n") {
 		if time.Now().After(deadline) {
 			t.Fatal("SETUP: FUSE control release not observed")
 		}
@@ -187,7 +255,18 @@ func (f *fuseFixture) control(t *testing.T) {
 
 }
 
-func coverResult(t *testing.T, spec Spec, command string, afterX func()) (jailResult, Facts) {
+func coverResult(t *testing.T, spec Spec, command string, afterX func()) (result jailResult, facts Facts) {
+	defer func() {
+		// L-SHIM-PROC validates its raw report after its explicit no-Landlock facts exception.
+		if result.setupErr != nil || (strings.Contains(command, coverQuote(coverProbe())+" jail-proc") && !strings.Contains(command, "COVER-BEGIN ")) {
+			return
+		}
+		output, err := validateCoverReports(result, strings.Count(command, "COVER-BEGIN "))
+		if err != nil {
+			t.Fatalf("SETUP: cover probe: %v: %+v", err, result)
+		}
+		result.stdout = output
+	}()
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -309,7 +388,11 @@ func coverControlAfterX(t *testing.T, command string, after func()) string {
 	if err != nil {
 		t.Fatalf("SETUP: unjailed post-X control: %v %s", err, diagnostic.String())
 	}
-	return output.output.String()
+	report, validationErr := validateCoverReports(jailResult{stdout: strings.TrimPrefix(output.output.String(), "POST_X\n"), stderr: diagnostic.String(), exit: exitCodeOf(err)}, strings.Count(command, "COVER-BEGIN "))
+	if validationErr != nil {
+		t.Fatalf("SETUP: unjailed probe completion: %v", validationErr)
+	}
+	return report
 }
 
 func coverPropagationControl(t *testing.T, command string) func() string {
@@ -343,6 +426,10 @@ func coverPropagationControl(t *testing.T, command string) func() string {
 		if err := <-done; err != nil {
 			t.Fatalf("SETUP: propagation control: %v %s", err, diagnostic.String())
 		}
-		return output.output.String()
+		report, err := validateCoverReports(jailResult{stdout: strings.TrimPrefix(output.output.String(), "POST_X\n"), stderr: diagnostic.String()}, strings.Count(command, "COVER-BEGIN "))
+		if err != nil {
+			t.Fatalf("SETUP: propagation probe completion: %v", err)
+		}
+		return report
 	}
 }

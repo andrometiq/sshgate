@@ -27,14 +27,14 @@ func legCoverCwd(t *testing.T, spec Spec) {
 	defer os.Chdir(previous)
 	spec.Cwd = fixture.point
 	mark := fixture.mark(t)
-	command := coverSetter("./f") + "; " + coverSetter("/proc/self/cwd/f") + "; " + coverCommand("read", "./f") + "; " + coverQuote(coverProbe()) + " jail-proc shim cwd/f; " + coverQuote(coverProbe()) + " jail-proc gate cwd/f; " + coverCommand("mntid", ".") + "; cat /proc/self/mountinfo"
+	command := coverSetter("./f") + "; " + coverSetter("/proc/self/cwd/f") + "; " + coverCommand("read", "./f") + "; " + coverProbeCommand("jail-proc", "shim", "cwd/f") + "; " + coverProbeCommand("jail-proc", "gate", "cwd/f") + "; " + coverCommand("mntid", ".") + "; cat /proc/self/mountinfo"
 	result, facts := coverResult(t, spec, command, nil)
 	if coverAbort(t, "L-COVER-CWD", result) {
 		spec.Strict = false
 		nonStrict, info := coverResult(t, spec, "echo COMMAND_RAN", nil)
 		coverRan(t, nonStrict)
 		if !strings.Contains(strings.Join(info.Unmet, " "), "fs-view:cwd@") {
-			t.Errorf("non-strict cwd omitted unmet: %+v", info)
+			unexpected(t, "non-strict cwd omitted unmet: %+v", info)
 		}
 		return
 	}
@@ -61,10 +61,10 @@ func legCoverCwd(t *testing.T, spec Spec) {
 			}
 		}
 		if !matched {
-			t.Errorf("cwd mount %d is not the cover", id)
+			unexpected(t, "cwd mount %d is not the cover", id)
 		}
 		if strings.Count(result.stdout, "open=2\n") != 3 || strings.Count(result.stdout, "open=13\n") != 2 || facts.CwdReset || log != "" {
-			t.Errorf("cwd cover/proc state: %+v facts=%+v log=%s", result, facts, log)
+			unexpected(t, "cwd cover/proc state: %+v facts=%+v log=%s", result, facts, log)
 		}
 	}
 	if jailmut.On("P-CWD") {
@@ -74,7 +74,7 @@ func legCoverCwd(t *testing.T, spec Spec) {
 	result, facts = coverResult(t, spec, "pwd", nil)
 	coverRan(t, result)
 	if result.stdout != "/\n" || !facts.CwdReset {
-		t.Errorf("covered descendant cwd not reset: %+v %+v", result, facts)
+		unexpected(t, "covered descendant cwd not reset: %+v %+v", result, facts)
 	}
 }
 func legShimProc(t *testing.T, spec Spec) {
@@ -123,7 +123,7 @@ func legShimProc(t *testing.T, spec Spec) {
 	}
 	mutationEffect(t, "L-SHIM-PROC", "shim-proc", readable == 4)
 	if readable != 0 && readable != 4 {
-		t.Errorf("inconsistent shim exposure: %s", results.String())
+		unexpected(t, "inconsistent shim exposure: %s", results.String())
 	}
 }
 func legCoverWalkDenied(t *testing.T, spec Spec) {
@@ -158,7 +158,7 @@ func legCoverWalkDenied(t *testing.T, spec Spec) {
 		}
 		mutationEffect(t, "L-COVER-WALKDENIED", marker, landed)
 		if !landed && (log != "" || !strings.Contains(result.stdout, "open=2\n") || len(facts.CoverAtAncestor) == 0) {
-			t.Errorf("ancestor cover: %+v facts=%+v log=%s", result, facts, log)
+			unexpected(t, "ancestor cover: %+v facts=%+v log=%s", result, facts, log)
 		}
 		// A real unconfined post-exec chmod control: the shell waits before opening.
 		mutationSetup(t, os.Chmod(closed, 0))
@@ -203,13 +203,13 @@ func legCoverWalkDenied(t *testing.T, spec Spec) {
 			}
 			t.Cleanup(func() {
 				if err := unix.Unmount(base+"/exposed/fuse", unix.MNT_DETACH); err != nil {
-					t.Errorf("renamed fixture unmount: %v", err)
+					unexpected(t, "renamed fixture unmount: %v", err)
 				}
 			})
 		})
 		coverRan(t, result)
 		if len(facts.CoverAtAncestor) == 0 || !strings.Contains(result.stdout, "ioctl=ok") || !strings.Contains(fixture.since(t, mark), "IOCTL") {
-			t.Errorf("R16 rename exposure (differentUID=%v): %+v facts=%+v log=%s", differentUID, result, facts, fixture.since(t, mark))
+			unexpected(t, "R16 rename exposure (differentUID=%v): %+v facts=%+v log=%s", differentUID, result, facts, fixture.since(t, mark))
 		}
 	}
 }
@@ -228,7 +228,7 @@ func legPrivatePropagation(t *testing.T, spec Spec) {
 	controlFinish := coverPropagationControl(t, "cat /proc/self/mountinfo; echo control > "+coverQuote(base+"/late/control")+"; "+coverSetter(base+"/latefuse/f"))
 	var fixture *fuseFixture
 	var mark int64
-	command := "echo POST_X; read release; cat /proc/self/mountinfo; echo changed > " + coverQuote(base+"/late/f") + "; " + coverSetter(base+"/latefuse/f")
+	command := "echo POST_X; read release; cat /proc/self/mountinfo; " + coverCommand("cover-write", base+"/late/f") + "; " + coverSetter(base+"/latefuse/f")
 	result, _ := coverResult(t, spec, command, func() {
 		mutationSetup(t, unix.Mount("tmpfs", base+"/late", "tmpfs", 0, "mode=0777"))
 		fixture = startCoverFuse(t, base+"/latefuse")
@@ -247,7 +247,7 @@ func legPrivatePropagation(t *testing.T, spec Spec) {
 	}
 	mutationEffect(t, "L-PRIVATE-PROPAGATION", "write", wrote)
 	if !jailmut.On("P-PRIVATE") && strings.Contains(result.stdout, " "+base+"/late ") {
-		t.Error("host late mount appeared in private jail")
+		unexpected(t, "host late mount appeared in private jail")
 	}
 	controlMark := fixture.mark(t)
 	control := controlFinish()
