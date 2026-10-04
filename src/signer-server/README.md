@@ -7,9 +7,12 @@ approval UI, authenticates operators with TOTP or WebAuthn, applies N-of-M and
 deny-veto policy, signs only after approval, and writes an append-only audit
 stream.
 
-**Release status:** the v0.2 policy-authority and release gates are still open.
-Treat this guide as engineering/deployment reference, not as a declaration that
-the current branch is a release-ready hosted boundary.
+**Release status:** not release-ready. No SSHGate release has been tagged
+yet, and the work that lets this server enforce approval policy on its own
+(the hosted policy authority) and the v0.2 release gates are still open (see
+[`docs/ROADMAP.md`](../../docs/ROADMAP.md)). Treat this guide as an
+engineering/deployment reference, not as a declaration that the current code
+is a release-ready hosted boundary.
 
 The server listens on private HTTP. A reverse proxy must provide the stable public HTTPS origin used by WebAuthn and the session-CSRF boundary.
 
@@ -18,7 +21,7 @@ The server listens on private HTTP. A reverse proxy must provide the stable publ
 Prerequisites: Linux with systemd, Go, OpenSSL, a public DNS name, and an HTTPS reverse proxy configuration ready for that name.
 
 ```bash
-git clone https://github.com/karthikeyan5/SSHGate.git
+git clone https://github.com/andrometiq/sshgate.git
 cd SSHGate/src/signer-server
 sudo env \
   SIGNER_SERVER_RP_ID=signer.example.com \
@@ -37,7 +40,7 @@ Important generated files:
 
 - `/etc/sshgate-signer-server/keys/api-key.txt` — copy securely to each approved laptop.
 - `/etc/sshgate-signer-server/keys/signing-key.ed25519` — master private key; never copy to a laptop.
-- `/etc/sshgate-signer-server/keys/signing-key.ed25519.pub` — copy to the laptop path used as SSHGate's gate signing public key before provisioning hosts.
+- `/etc/sshgate-signer-server/keys/signing-key.ed25519.pub` — copy to `~/.config/sshgate/pubkey-distrib/gate.pub` on each laptop (where `sshgate add` looks for the gate signing public key) before provisioning hosts.
 - `/var/lib/sshgate-signer-server/state.db` — approval, operator, factor, session, and audit-index state.
 - `/var/lib/sshgate-signer-server/bootstrap-<operator>.txt` — one-time 0600 TOTP enrollment artifact; remove after enrollment.
 
@@ -45,7 +48,7 @@ Re-running the installer preserves all keys and the database. An incomplete sign
 
 ## Add an operator
 
-Run the offline bootstrap command as the service account. It creates a new operator but refuses to rotate an existing operator's factor.
+Run the offline bootstrap command as the service account. It creates a new operator but refuses to rotate an existing operator's factor. Always pass `--db` as shown: the binary's built-in default (`/var/lib/signer-server/state.db`) is not the path the installer uses.
 
 ```bash
 sudo -u sshgate-signer-server \
@@ -64,7 +67,8 @@ Factor changes after bootstrap require an authenticated session plus a fresh cur
 Policy terminal compaction and recovery-lease owner clearing are offline-only
 operations. Stop the serving process first; the command takes the exclusive
 maintenance lease before opening either resource. Both paths require absolute
-paths, an existing migration-6 database with a verified authority binding, and
+paths, an existing database already at schema version 6 (the migration that
+adds the policy tables) with a verified authority binding, and
 an existing owner-only archive whose binding matches the database. They never
 create or migrate a database and never repair an archive during preflight.
 
@@ -138,7 +142,7 @@ shared bearer token rather than a different credential per laptop, so
 distribute that token only within the intended requester boundary during
 approved engineering exercises. Per-client credentials remain follow-up work.
 
-The gate on every writable server must trust the hosted signer's public key. Place the generated 32-byte public-key file at the configured local `gate.pub` path before running the human-only `sshgate add` flow.
+The gate on every writable server must trust the hosted signer's public key. Place the generated public-key file at `~/.config/sshgate/pubkey-distrib/gate.pub` on the laptop before running the human-only `sshgate add` flow, which installs it on each server it provisions without `--read-only`.
 
 ## HTTP planes
 
@@ -171,7 +175,7 @@ rows.
 - TLS termination, DNS, backups, and log shipping remain operator responsibilities.
 - `SIGNER_SERVER_REQUIRED_APPROVALS` sets the positive N copied into each new request. The installer rejects a fresh roster that cannot satisfy N after self-approval policy is applied. There is no operator-facing policy-management screen yet.
 - The machine plane uses one shared bearer token. Per-client keys and cryptographic client-to-operator binding are follow-up work.
-- Hosted standing grants, secret reveal, box-to-box transfer, and transfer-key registration fail closed; use the local Telegram signer for those features.
+- Hosted standing grants, secret reveal, box-to-box transfer, and transfer-key registration fail closed; use the local Telegram signer for those features. In practice the agent's `request_grant`, `transfer` and `run` with `reveal=true` are refused under the hosted backend, and so is `sshgate xfer-register`.
 - WebAuthn registration is supported by the authenticated API, while the minimal reference UI focuses on login and approval. TOTP bootstrap is the complete default path.
 - `/healthz` is liveness, not dependency readiness; production monitoring should also exercise an authenticated workflow.
 

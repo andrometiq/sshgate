@@ -1,257 +1,200 @@
 # Install SSHGate
 
-> **For human users:** open a Claude Code session in any directory and paste:
->
->     follow https://github.com/karthikeyan5/SSHGate/blob/main/INSTALL.md to install sshgate
->
-> (or `follow /path/to/local/SSHGate/INSTALL.md` if you've cloned locally)
->
-> The agent walks you through everything below. A few steps are YOURS to run
-> personally because no agent can issue them: the interactive `/plugin
-> marketplace add` + `/plugin install` commands in the Claude Code UI, and the
-> QUIT+RELAUNCH of Claude Code that activates the MCP server (step 3). You'll
-> also be asked for sudo (Tier 2 only) and a Telegram bot token (Tier 2 only).
-> Tier 1 is read-only and needs no sudo.
+## For humans
 
-> **For Claude Code (or any) agent reading this:** you are installing SSHGate
-> for the user. Before any commands, **surface the Preamble section below
-> verbatim to the user and wait for explicit go-ahead** (default-yes on
-> empty / "y" / "yes" / "sure" / "ok"; only "n" / "no" stops). Then execute
-> the numbered steps in order. Surface errors verbatim and stop on first
-> failure. Don't paraphrase commands — run them exactly. Every step is
-> idempotent (safe to re-run).
+Open a Claude Code session in any directory and paste:
 
-> **Launch flag — NOT required.** Unlike plugins that stream channel
-> notifications into the conversation, SSHGate does NOT need
-> `--dangerously-load-development-channels`. SSHGate is a regular MCP plugin
-> that exposes tool calls; approvals flow OUT to the user's phone via
-> Telegram, never INTO the Claude conversation. Plain `claude` works.
+    follow https://github.com/andrometiq/sshgate/blob/main/INSTALL.md to install sshgate
+
+(or `follow /path/to/your/clone/INSTALL.md` if you have already cloned the repo).
+
+The agent walks you through everything below. A few steps are yours, because no agent can run
+them:
+
+- the `/plugin marketplace add` and `/plugin install` commands, typed into the Claude Code UI;
+- quitting and relaunching Claude Code so the MCP server starts (step 3);
+- the `sudo` installer run and the Telegram bot token (Tier 2 only);
+- adding servers with the `sshgate` CLI (step 7). The agent cannot add servers by design.
+
+Tier 1 is read-only and needs no sudo and no Telegram. Plain `claude` is fine: SSHGate needs no
+special launch flags.
+
+If you would rather do it all by hand, use
+[docs/install-step-by-step.md](docs/install-step-by-step.md).
+
+## For the agent
+
+You are installing SSHGate for the user. Before running anything, **show the user the Preamble
+section below as written and wait for their go-ahead** (empty, "y", "yes", "sure" or "ok" means
+yes; only "n" or "no" stops). Then follow the numbered steps in order. Run commands exactly as
+written, show errors verbatim, and stop at the first failure. Every step is safe to re-run.
 
 ---
 
-## Preamble — what SSHGate is and what you're about to install
+## Preamble — what SSHGate is and what you are about to install
 
-> **Agent: this section is for the human. Surface it as written. After the
-> "Proceed with install?" line, wait for their answer.**
+> **Agent: this section is for the human. Show it as written. After the "Proceed with install?"
+> line, wait for their answer.**
 
 ### What SSHGate is
 
-SSHGate is a Claude Code plugin that lets the agent SSH into your Linux
-servers to read diagnostics or apply fixes. Read commands (`df -h`,
-`journalctl`, `top`, etc.) execute freely and stream the output back to the
-conversation. Write commands (restart, install, edit, anything that mutates
-state) trigger ONE phone-tap approval via a dedicated Telegram bot before
-they run.
+SSHGate lets an AI agent work on your Linux servers over SSH without a shell. Read commands
+(`df -h`, `journalctl`, `ps`, and so on) run immediately and their output comes back to the
+conversation. Write commands (restart, install, edit, anything that changes state) wait for one
+tap on your phone, through your own Telegram bot, before they run.
 
-The signing key that authorizes writes is isolated under a separate Unix
-user, so the agent cannot forge approvals even if it tried. On the same
-machine this is a safety rail, not a hard wall — an agent that can escalate
-privileges on the host (e.g. has `sudo`) could read the signing key directly
-and bypass approval. After the hosted policy-authority and release gates close,
-run the signer on a separate machine (the hosted-signer tier) for a guarantee
-that holds against a privileged rogue agent. See
-`docs/approval-architecture.md`. The
-cryptographic gate is enforced on each remote server independently.
+Each server enforces this on its own. SSHGate's SSH key can only start the `gate` program there,
+and the gate runs a write only if it carries a signature made after your tap. The signing key
+lives under a separate Unix user that the agent cannot read. On one machine that is a safety
+rail, not a wall: an agent that can get root on this machine (for example through `sudo`) could
+read the key. A signer on a separate machine (Tier 3) is meant to close that gap, but it is not
+release-ready yet. See [docs/approval-architecture.md](docs/approval-architecture.md) and
+[docs/THREAT-MODEL.md](docs/THREAT-MODEL.md).
 
-### What we're about to set up
+On servers that support it, the gate also runs every read inside a kernel jail, so a read cannot
+change the server's files, reach local daemons over Unix sockets, or signal other processes. You
+can check each server after adding it (step 7).
 
-1. A dedicated SSH key pair — separate from your daily-driver `~/.ssh/id_*`,
-   used only by SSHGate to reach remote servers through the gate.
-2. *(Tier 2 only)* A `sshgatesigner` Unix user that holds the master Ed25519
-   signing key. Isolated from your Claude session — Claude cannot read it.
-3. *(Tier 2 only)* A Telegram bot — your phone-side approval endpoint. Made
-   via @BotFather. If you don't have one yet, you'll be walked through it.
-4. `~/.config/sshgate/` and *(Tier 2 only)* `/var/lib/sshgatesigner/` — local
-   config + key + audit-log paths, mode-tightened (dirs 0700 / 0750; key,
-   token, and audit-log files 0600).
-5. SSHGate binaries — installed by `make install-local`. `sshgate-mcp`,
-   `sshgate-signer-telegram`, and the human-only `sshgate` provisioning CLI
-   are built from your clone onto your `$PATH`;
-   the remote `sshgate-gate-linux-amd64` is **copied** from the committed,
-   CI-verified `dist/gate/` artifact into `~/.config/sshgate/bin/` — it is
-   never rebuilt locally, because a local rebuild would hash to something
-   no published release matches and fail the update approval cross-check.
-   See README's "Verified release channel" section for how gate updates
-   are approved. No remote dependencies fetched at runtime.
+### What gets set up
 
-### What you'll need handy
+1. A dedicated SSH key pair, separate from your own `~/.ssh/id_*`, used only by SSHGate.
+2. SSHGate's binaries, built from your clone by `make install-local`: `sshgate-mcp` (the MCP
+   server), `sshgate-signer-telegram` (the signer), and `sshgate` (the human-only provisioning
+   CLI) go into `~/go/bin`. The server-side gate is **copied**, not rebuilt, from the committed,
+   CI-verified `dist/gate/` build into `~/.config/sshgate/bin/`. A local rebuild would not match
+   the published hash that gate updates are checked against (see the README's "Approving a gate
+   update").
+3. `~/.config/sshgate/` for your key, server list and staged gate.
+4. *(Tier 2 only)* A `sshgatesigner` system user that holds the Ed25519 signing key, a
+   `sshgate-signer-telegram` systemd service, and `/var/lib/sshgatesigner/` for its key, bot
+   token, config and approval log (directories 0700/0750; key, token and log files 0600).
+5. *(Tier 2 only)* Your own Telegram bot, made with @BotFather. You will be walked through it.
 
-- **Tier 1 (read-only):** nothing beyond Go ≥1.25 and one Linux server you
-  can SSH into right now. No sudo, no Telegram. ~2 minutes.
-- **Tier 2 (full v1):** sudo access on this machine, `jq` on `$PATH`
-  (`/sshgate:setup` uses it to enumerate registered servers), a Telegram
-  account, and ~10 minutes. The bot token and your Telegram user-id can be
-  generated mid-flow if you don't have them yet — you'll be pointed at
-  @BotFather and @userinfobot.
+### What you need
 
-### Choose the tier when prompted
+- **Tier 1 (read-only):** Go 1.25 or newer, and a Linux (x86-64) server you can already SSH into.
+  No sudo, no Telegram. About 2 minutes.
+- **Tier 2 (phone approvals):** also a systemd-based Linux machine where you have sudo, `jq` on
+  your `PATH`, and a Telegram account. About 10 minutes. You can create the bot token and look up
+  your Telegram user ID during the install (@BotFather and @userinfobot).
 
-Pick **Tier 1** first if you want to try SSHGate without committing to the
-phone-tap flow. **Tier 2** is the local upgrade path — re-run `/sshgate:setup`
-any time to add the signer. **Tier 3** has a source foundation for a separate
-systemd host with an embedded approval UI, but its v0.2 policy-authority and
-release gates remain open. It is not release-ready or automated by the local
-setup menu. Follow `src/signer-server/README.md` for current engineering status
-and deployment requirements.
+### Which tier
 
-**Proceed with install?** *(default: yes — just hit enter)*
+Pick **Tier 1** to try SSHGate without the phone flow. **Tier 2** adds phone approvals; re-run
+`/sshgate:setup` any time to add it. Servers you added under Tier 1 stay read-only until you
+remove and re-add them. **Tier 3** (a hosted signer on a separate machine with a web approval UI)
+exists as source code but is not release-ready, and this installer does not set it up; see
+[src/signer-server/README.md](src/signer-server/README.md).
+
+**Proceed with install?** *(default: yes, just press enter)*
 
 ---
 
-## 1. Verify prerequisites
+## 1. Check prerequisites
 
 ```bash
 go version
 ```
 
-If "command not found": tell the user to install Go ≥1.25 from
-https://go.dev/dl/, then re-run this install. Stop.
+If the command is not found, tell the user to install Go 1.25 or newer from https://go.dev/dl/
+and re-run this install. Stop.
 
-If the printed version is older than 1.25: tell the user to upgrade Go and
-re-run. Stop.
+If the version is older than 1.25, tell the user to upgrade Go and re-run. Stop. (Go 1.25 will
+download the toolchain version pinned in `go.mod` on the first build; that needs network access.)
 
-Tier 2 also needs `sudo` access on the local machine and a Telegram account
-(for the approval bot). Tier 1 needs neither — defer those checks until the
-user picks a tier in step 5 (`/sshgate:setup`).
+Tier 2 also needs sudo on this machine and a Telegram account. Don't check those yet; the user
+picks a tier in step 5.
 
-The remote hosts must be Linux with SSH reachable. They get checked
-per-server later, when you provision each one with the human-only `sshgate`
-CLI (`sshgate pubkey` + `sshgate add`), not here.
+Servers are checked later, one at a time, when the user adds each with `sshgate add`.
 
-## 2. Clone the repo, build binaries onto $PATH, persist the PATH
+## 2. Clone, build, and put the binaries on PATH
 
-Claude Code's `/plugin install` copies ONLY the plugin subtree
-(`.claude-plugin/`, `commands/`, `skills/`, `.mcp.json`) into a versioned
-cache — it strips `src/`, `scripts/`, `Makefile`, and `bin/`. So the MCP
-binary cannot live under the cache; it must be on your `$PATH`. The
-canonical fresh-machine order is: install Go → clone → `make install-local`
-→ PERSIST `~/go/bin` to your LOGIN profile → confirm `command -v sshgate-mcp`
-→ THEN (re)launch Claude Code from a PATH-correct shell, before
-`/plugin install`.
+Tell the user to run these in their terminal:
 
-Tell the user, in order:
-
-> "1. Pick a directory to keep the SSHGate source (e.g. `~/src`), clone it,
->    and build the binaries onto your PATH:
+> "1. Clone SSHGate (any directory works; `~/src` is used here) and build it:
 >
->        mkdir -p ~/src && cd ~/src && git clone https://github.com/karthikeyan5/SSHGate
+>        mkdir -p ~/src && cd ~/src && git clone https://github.com/andrometiq/sshgate
 >        cd ~/src/SSHGate && make install-local
 >
->    `make install-local` puts `sshgate-mcp`, `sshgate-signer-telegram`, and
->    the human-only `sshgate` provisioning CLI in `~/go/bin`, and the remote
->    gate binary in `~/.config/sshgate/bin/`.
+> 2. Add `~/go/bin` to your PATH in your **login** profile, not only `~/.bashrc` or `~/.zshrc`:
 >
-> 2. PERSIST `~/go/bin` to your LOGIN profile — not just an interactive rc
->    file. Claude Code spawns plugin MCP servers with its LAUNCH-time env, and
->    GUI/login launches read the login profile, not `~/.zshrc`/`~/.bashrc`.
->    Append the export to the file your login shell sources (`~/.zprofile`
->    for zsh login, `~/.bash_profile` for bash login, or `~/.zshenv`):
+>        echo 'export PATH="$HOME/go/bin:$PATH"' >> ~/.zprofile   # zsh; for bash use ~/.bash_profile
 >
->        echo 'export PATH="$HOME/go/bin:$PATH"' >> ~/.zprofile   # zsh; use ~/.bash_profile for bash
+> 3. Open a **new login shell** (or log out and back in), then check:
 >
-> 3. Open a NEW login shell (or log out and back in) so the persisted PATH
->    takes effect, then confirm the binary resolves:
->
->        command -v sshgate-mcp || echo 'NOT ON PATH — add ~/go/bin (or `go env GOPATH`/bin) to your LOGIN profile and re-open the shell'
->
->    A `command -v` pass in this terminal does NOT by itself guarantee the
->    spawned MCP server will see `~/go/bin`: Claude Code inherits the PATH of
->    the shell it was LAUNCHED from. That is why the PATH must be persisted to
->    the login profile AND Claude Code launched from a shell where it resolves."
+>        command -v sshgate-mcp || echo 'NOT ON PATH: add ~/go/bin (or $(go env GOPATH)/bin) to your login profile and open a new shell'"
 
-Wait for the user to confirm `command -v sshgate-mcp` resolves and capture
-the clone path (we'll need it in step 3). Do NOT proceed to `/plugin install`
-until the binary is on PATH in a login shell.
+Why the login profile: Claude Code starts the `sshgate-mcp` server with the environment Claude
+Code itself was launched with. `/plugin install` copies only the plugin files
+(`.claude-plugin/`, `commands/`, `skills/`, `.mcp.json`) into a cache, not the source or `bin/`,
+so the MCP binary must be found on `PATH`. A shell where `command -v` works is not enough if
+Claude Code was started from somewhere else.
 
-## 3. (RE)LAUNCH Claude Code, then install the plugin — YOU run these, not the agent
+Wait until the user confirms `command -v sshgate-mcp` prints a path, and note the clone path for
+step 3. Do not go on to step 3 before that.
 
-> **YOU — the human — must run these in the Claude Code UI. An agent cannot
-> issue them.** `/plugin marketplace add`, `/plugin install`, and the restart
-> below are interactive commands typed into the Claude Code client; the agent
-> driving this install has no way to invoke them. Run them yourself.
+## 3. Relaunch Claude Code and install the plugin (the user does this)
 
-First, (re)launch Claude Code FROM the login shell where `command -v
-sshgate-mcp` resolved in step 2. Claude Code spawns the `sshgate-mcp` MCP
-server with its own launch-time env, so it must start from a PATH-correct
-shell. Then, in the Claude Code UI, run:
+> **The user must type these in the Claude Code UI. An agent cannot run them.**
+
+First, quit Claude Code and start it again **from the login shell** where `command -v sshgate-mcp`
+worked. Then, in the Claude Code UI:
 
 ```
 /plugin marketplace add ~/src/SSHGate
 /plugin install sshgate@sshgate
 ```
 
-Replace `~/src/SSHGate` with wherever you cloned.
+Replace `~/src/SSHGate` with the clone path. `sshgate@sshgate` means
+`<plugin-name>@<marketplace-name>`; both are `sshgate` (from `.claude-plugin/marketplace.json`).
+If unsure, run `/plugin` first to see the marketplace name that `add` registered.
 
-`sshgate@sshgate` parses as `<plugin-name>@<marketplace-name>` — both come
-from `.claude-plugin/marketplace.json` (the marketplace `name` and the
-plugin `name` happen to both be `sshgate`). Before installing, run `/plugin`
-and confirm the marketplace id that `add` registered, so `install` targets
-the right `@<marketplace-name>`.
+Then **quit and relaunch Claude Code once more** (not `/reload-plugins`). This is always required:
+`/reload-plugins` loads the slash commands, but a newly installed plugin's MCP server only starts
+when Claude Code starts. Until then the slash commands appear but the `sshgate` tools do not.
 
-Then **fully QUIT and RELAUNCH Claude Code** (not `/reload-plugins`). This
-is the UNCONDITIONAL final step of plugin install, not a PATH edge-case:
-`/reload-plugins` activates the new slash-commands and skills, but a NEW
-plugin's stdio MCP server (`sshgate-mcp`) is only spawned on a fresh Claude
-Code start. Until you quit and relaunch, the slash commands appear but the
-`sshgate` MCP tools do not exist.
+> **Resume after the relaunch.** The relaunch ends this session, so the agent loses its context
+> here. In the new session, continue at step 4: run `/mcp` to confirm `sshgate` is connected, then
+> `/sshgate:setup`. Setup checks what is already installed and continues from there.
 
-> **Resume after the relaunch.** The relaunch discards this session, so the
-> agent driving this install loses its context here — this breadcrumb, not
-> agent memory, is what carries the install forward. In the fresh session,
-> continue at step 4 below: run `/mcp` to confirm the `sshgate` server is
-> connected, then `/sshgate:setup` — it re-probes on-disk state, classifies
-> the current tier, and picks up exactly where you left off.
+## 4. Check the plugin loaded
 
-## 4. Verify the plugin loaded — binary on PATH AND the MCP server live
-
-After the relaunch in step 3, two separate things must hold. Binary-on-PATH
-is necessary but NOT sufficient — the MCP server must actually be spawned and
-connected.
-
-First, confirm the binaries resolve (the cache does NOT contain `src/` or
-`go.mod` — that is expected and correct; the binaries live on `$PATH`):
+Two things must hold: the binaries are on `PATH`, and the MCP server is running.
 
 ```bash
-command -v sshgate-mcp >/dev/null 2>&1 && echo "mcp-bin: ok ($(command -v sshgate-mcp))" || echo "mcp-bin: MISSING — re-run 'make install-local' in your clone and ensure ~/go/bin is on your LOGIN profile PATH"
-command -v sshgate-signer-telegram >/dev/null 2>&1 && echo "signer-bin: ok" || echo "signer-bin: MISSING (only needed for Tier 2) — re-run 'make install-local'"
+command -v sshgate-mcp >/dev/null 2>&1 && echo "mcp-bin: ok ($(command -v sshgate-mcp))" || echo "mcp-bin: MISSING: re-run 'make install-local' in the clone and put ~/go/bin on your login-profile PATH"
+command -v sshgate-signer-telegram >/dev/null 2>&1 && echo "signer-bin: ok" || echo "signer-bin: MISSING (only needed for Tier 2): re-run 'make install-local'"
+command -v sshgate >/dev/null 2>&1 && echo "cli: ok" || echo "cli: MISSING: re-run 'make install-local'"
 ```
 
-Then verify the MCP SERVER is live. In the Claude Code UI, run:
+The plugin cache has no `src/` or `go.mod`; that is expected.
+
+Then, in the Claude Code UI:
 
 ```
 /mcp
 ```
 
-Confirm an `sshgate` server appears and is **connected**. Treat the plugin
-as "loaded" ONLY once `/mcp` shows the `sshgate` server connected — the
-slash commands appearing is not enough.
+The plugin is loaded only when `/mcp` lists an `sshgate` server as **connected**. Slash commands
+showing up is not enough.
 
-If `/mcp` does NOT list `sshgate`:
+If `/mcp` does not list `sshgate`:
 
-1. Fully QUIT and RELAUNCH Claude Code (a stdio MCP server for a freshly
-   installed plugin only spawns on a clean start), then re-run `/mcp`.
-2. If it is still missing, run the server by hand in a shell to read its
-   startup error:
+1. Quit and relaunch Claude Code (from the login shell), then run `/mcp` again.
+2. If it is still missing, start the server by hand to see its startup error:
 
    ```bash
    sshgate-mcp </dev/null
    ```
 
-   The most common cause is `sshgate-mcp` not resolving on the PATH Claude
-   Code was launched with — go back to step 2, persist `~/go/bin` to the
-   login profile, and relaunch Claude Code from that login shell.
-
-If `sshgate-mcp` is MISSING from `command -v`, the binary is not on `$PATH`:
-send the user back to step 2's `make install-local` and the login-profile
-PATH persistence. The MCP tool surface stays dead until `sshgate-mcp`
-resolves on `$PATH` AND Claude Code has been relaunched from that shell.
+   The usual cause is that `sshgate-mcp` is not on the `PATH` Claude Code was launched with. Go
+   back to step 2, fix the login profile, and relaunch Claude Code from a new login shell.
 
 ## 5. Run /sshgate:setup
 
-`/sshgate:setup` is the tiered installer. It probes on-disk state, classifies
-the current tier (fresh, tier-1 present, tier-2 present, or partial), and
-either offers a tier menu or a re-run menu. It's idempotent — safe to invoke
-any time.
+`/sshgate:setup` is the tiered installer. It checks what is already on disk, works out the
+current state (fresh, Tier 1, Tier 2, or a half-finished install), and offers the next steps. It
+is safe to run any time.
 
 Tell the user:
 
@@ -259,110 +202,106 @@ Tell the user:
 >
 >     /sshgate:setup
 >
-> It will ask which tier you want:
+> It asks which tier you want:
 >
->   - **Tier 1 (read-only)** — gate is deployed on remotes, no signer.
->     Reads work; writes are denied locally at the gate. No sudo, no
->     Telegram, fastest install (~2 min).
->   - **Tier 2 (local Telegram signer)** — full v1. Master keypair under
->     `sshgatesigner` system user, systemd unit, Telegram bot for
->     approvals. Writes need a phone tap. Adds ~10 min and a sudo run.
->   - **Tier 3 (hosted server signer)** — source foundation present, but not
->     release-ready until its policy-authority and release gates close. This
->     local setup command points to `src/signer-server/README.md`; it does not
->     provision a VPS.
+>   - **Tier 1 (read-only)**: the gate goes on your servers with no signer. Reads work; writes
+>     are refused on the server. No sudo, no Telegram, about 2 minutes.
+>   - **Tier 2 (local Telegram signer)**: a signing key under a separate `sshgatesigner` user, a
+>     systemd service, and your own Telegram bot. Writes need a phone tap. About 10 more
+>     minutes and one sudo run.
+>   - **Tier 3 (hosted signer)**: not release-ready. Setup only points you to
+>     `src/signer-server/README.md`; it does not install anything.
 >
-> Pick Tier 1 first if you want to try SSHGate without committing to the
-> phone-tap flow. You can add the Tier 2 signer later by re-running this same
-> command, but existing Tier 1 aliases remain read-only until you manually
-> de-provision and re-add them under Tier 2. Tier 3 becomes the separate
-> hard-boundary option only after its release gates close."
+> Pick Tier 1 to try SSHGate first. You can add Tier 2 later by running this command again, but
+> servers added under Tier 1 stay read-only until you remove and re-add them."
 
-The setup command walks every step itself. For Tier 2 it will:
+Let `/sshgate:setup` do the work; don't repeat its steps here. For Tier 2 it will:
 
-- Confirm the binaries from `make install-local` are on `$PATH`
-  (`sshgate-mcp`, `sshgate-signer-telegram`) and the gate cross-binary is
-  staged at `~/.config/sshgate/bin/sshgate-gate-linux-amd64`.
-- PAUSE for the user to run `sudo scripts/install.sh` from their clone
-  (e.g. `sudo ~/src/SSHGate/scripts/install.sh`) in a separate terminal —
-  the plugin cache has no `scripts/`, so the script runs from the clone. This
-  is a SINGLE interactive pass: it prompts for the Telegram user_id and the
-  bot token in the same run (no hand-editing of the config, no second pass).
-- Have the user_id (from @userinfobot) and a @BotFather bot token ready to
-  paste into that one pass.
-- Capture chat_id from a `/start` Telegram message.
-- (Optional) the LLM command-explainer add-on — see
-  `docs/install-step-by-step.md` §4b.
+- confirm the binaries from `make install-local` are on `PATH` and the gate is staged at
+  `~/.config/sshgate/bin/sshgate-gate-linux-amd64`;
+- pause while the user runs the installer from the clone in a separate terminal, for example
+  `sudo ~/src/SSHGate/scripts/install.sh` (the plugin cache has no `scripts/`). This is one
+  interactive run that asks for the Telegram user ID (from @userinfobot) and the bot token (from
+  @BotFather); there is no config file to edit by hand;
+- capture the Telegram chat when the user sends `/start` to the new bot;
+- ask the user to **log out and back in, then relaunch Claude Code**. The installer adds the user
+  to the `sshgatesigner` group, and a group only takes effect in a new login session. Until then
+  reads work but every write fails with "permission denied" at the signer socket. Running
+  `newgrp` in another terminal does not fix an already-running Claude Code;
+- optionally, set up the LLM command explainer (see
+  [docs/install-step-by-step.md](docs/install-step-by-step.md) §4b).
 
-The agent driving this INSTALL.md script does NOT need to duplicate
-`/sshgate:setup`'s logic — just invoke it and let the user respond to its
-prompts. Surface errors verbatim if `/sshgate:setup` reports any.
+Show any error `/sshgate:setup` reports verbatim.
 
-## 6. Verify
+## 6. Check the install
 
-After `/sshgate:setup` reports completion, run:
+After `/sshgate:setup` finishes, run:
 
 ```
 /sshgate:status
 ```
 
-For a Tier 1 install with no servers yet registered, expect (note the
-`status: not configured` line — the signer socket is absent on Tier 1,
-which is the normal read-only state, NOT an error):
+**Tier 1, no servers yet:** the signer shows as *not configured* (read-only / Tier 1, writes
+refused at the gate), followed by a hint to add a server with `sshgate pubkey` and `sshgate add`.
+A not-configured signer is normal on Tier 1. Do not debug a daemon that was never installed.
 
-```
-Signer
-  socket:    /run/sshgatesigner/sock
-  status:    not configured (read-only / Tier 1) — writes denied at the gate
+**Tier 2, no servers yet:** the signer socket is reachable.
 
-No servers registered. Provision one with the `sshgate` CLI:
-  sshgate pubkey   # paste the printed line into the target's authorized_keys
-  sshgate add <alias> <user@host> [--read-only]
-```
+If the signer shows as **present but not accessible (permission denied)**, the Claude Code
+session is not in the `sshgatesigner` group yet: log out and back in, relaunch Claude Code, and
+check again. The daemon is fine.
 
-For a Tier 2 install with no servers yet, expect the signer socket
-reachable. Either case is healthy at this point.
-
-If status reports `configured: true` AND `reachable: no` (Tier 2 only — the
-socket file exists but the dial failed), the daemon didn't come up. Run
+If the signer is configured but **not reachable** (Tier 2), the daemon did not start. Run
 `systemctl status sshgate-signer-telegram` and
-`journalctl -u sshgate-signer-telegram -n 30 --no-pager`, surface the
-output, and ask the user whether to keep debugging or roll back. On Tier 1
-a `not configured` signer is expected — do NOT debug a daemon that was
-never installed.
+`journalctl -u sshgate-signer-telegram -n 30 --no-pager`, show the output, and ask the user
+whether to keep debugging or roll back.
 
-## 7. Tell the user the install is complete
+## 7. Add a server, check its read jail, and finish
+
+Tell the user:
 
 > "Installation complete.
 >
-> **No special launch flag needed** — plain `claude` is fine. (Unlike
-> plugins that stream channel notifications into the conversation,
-> SSHGate doesn't push anything into the conversation; all tool I/O is
-> normal MCP request/response, and approvals flow to your phone via
-> Telegram.)
+> **Add a server.** This is a human-only step on purpose: the agent can never add machines to
+> its own reach. In your terminal:
 >
-> Add a server — this is a human-only CLI step (I, the agent, can't do it; provisioning is deliberately off my tool surface):
+>     sshgate pubkey
+>     # add the printed line to ~/.ssh/authorized_keys on the server yourself
+>     sshgate add <alias> <user@host>[:port] --read-only   # Tier 1
+>     sshgate add <alias> <user@host>[:port]               # Tier 2 (signed writes)
 >
->     sshgate pubkey                                  # prints SSHGate's key line
->     # paste that line into <host>:~/.ssh/authorized_keys yourself
->     sshgate add <alias> <user@host> [--read-only]   # installs gate, locks the key down
+> `sshgate add` connects with SSHGate's key, installs the gate, and locks that key line down so it
+> can only start the gate. On Tier 1 you must pass `--read-only`, because there is no signer key
+> to install yet. The alias is lowercase letters, digits and dashes, starting with a letter.
 >
-> Then ask me anything in plain English — `What's eating disk on prod-db?`
-> or `Restart nginx on staging.` Reads stream back instantly. Writes
-> queue for a Telegram approval and run after you tap approve.
+> **Check the read jail (optional, recommended).** Log in to the server yourself, as the same
+> user you gave to `sshgate add`, and run:
 >
-> Provisioning (human-only `sshgate` CLI):
->   `sshgate pubkey`   — print SSHGate's dedicated public-key line to paste
->   `sshgate add`      — install gate on a server + lock the key down + register
+>     ~/.sshgate-gate/gate doctor
 >
-> Useful slash commands going forward (agent-callable):
->   `/sshgate:setup`   — re-run the tiered installer (idempotent)
->   `/sshgate:status`  — health check signer + every registered server
->   `/sshgate:run`     — explicit one-shot SSH command (debug aid)
->   `/sshgate:revoke`  — uninstall gate from a server (needs approval)
+> The `reads:` line shows what happens to reads there: `jailed:full` means reads run inside the
+> kernel jail; `unconfined` means the host lacks unprivileged user namespaces or Landlock, so reads
+> are guarded by the classifier only, as before. Stock Ubuntu 24.04 restricts the unprivileged
+> user namespaces the jail needs through AppArmor (`gate doctor` then shows
+> `apparmor_userns_clamp: yes`); reads there run unconfined until root lifts that restriction or
+> gives the gate an AppArmor profile. If the host is `jailed:full`, you can run
+> `~/.sshgate-gate/gate doctor --pin` so that from then on the gate refuses reads rather than ever
+> running them unjailed there.
 >
-> Day-to-day guide: `docs/install-step-by-step.md` covers the manual flow
-> and troubleshooting if anything in `/sshgate:setup` falls over."
+> **Use it.** Ask me in plain English, for example *What's eating disk on prod-db?* or
+> *Restart nginx on staging.* Reads come back at once. On Tier 2, writes wait for your tap on
+> Telegram.
+>
+> **Useful commands**
+>
+> - `/sshgate:setup`: run the installer again (safe to repeat; adds Tier 2 later)
+> - `/sshgate:status`: health of the signer and every server
+> - `/sshgate:run`, `/sshgate:run_batch`: run one command, or several with one approval
+> - `/sshgate:revoke`: remove the gate from a Tier 2 server (needs approval)
+> - `sshgate revoke <alias>`: prints the exact manual steps to remove a server; this is the only
+>   way for a Tier 1 server, and it changes nothing itself
+>
+> For the manual flow and troubleshooting, see `docs/install-step-by-step.md`."
 
 End.
 
@@ -370,8 +309,7 @@ End.
 
 ## Manual install (without an agent)
 
-The same steps run by hand work fine — see
-[`docs/install-step-by-step.md`](docs/install-step-by-step.md) for the full
-human-readable walkthrough with copy-paste shell blocks for each tier, the
-Telegram bot creation flow, the optional LLM command explainer, and the
-troubleshooting guide.
+Every step above also works by hand. [docs/install-step-by-step.md](docs/install-step-by-step.md)
+has the full walkthrough with copy-paste shell blocks for each tier, the Telegram bot setup, the
+optional LLM command explainer, troubleshooting, and uninstall. For MCP clients other than
+Claude Code, see [docs/install-generic-mcp.md](docs/install-generic-mcp.md).

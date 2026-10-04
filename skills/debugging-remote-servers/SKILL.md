@@ -1,348 +1,376 @@
 ---
 name: debugging-remote-servers
-description: This skill should be used when the user asks to debug, diagnose, or operate a remote server registered with SSHGate — phrases like "debug X on prod-db", "what's eating disk on staging", "restart nginx on the app server", "is my server reachable", "ssh into prod and check journalctl", "tail the logs on web-1", or "fix the broken nginx config on staging". Teaches the right tool order (list_servers → run for diagnostics → run_batch for fixes), the cost shape (reads are free, writes need one Telegram tap each), and the bulk-approval pattern that keeps multi-step fixes to a single approval.
+description: This skill should be used when the user asks to debug, diagnose, or operate a remote server registered with SSHGate — phrases like "debug X on prod-db", "what's eating disk on staging", "restart nginx on the app server", "is my server reachable", "ssh into prod and check journalctl", "tail the logs on web-1", "fix the broken nginx config on staging", "copy the .env from prod to staging", or "remove web-1 from SSHGate". Teaches the right tool order (list_servers → run for diagnostics → run_batch for fixes), the cost shape (reads are free, writes need one Telegram tap each), the bulk-approval pattern that keeps a multi-step fix to one approval, and how to read denials, exit codes and the read jail.
 ---
 
 # Debugging remote servers with SSHGate
 
-SSHGate gives you SSH access to the user's registered servers. Your MCP
-tool surface is exactly eleven tools — `sshgate.run`, `sshgate.run_batch`,
-`sshgate.list_servers`, `sshgate.status`, `sshgate.ping`, `sshgate.revoke_server`,
-`sshgate.request_grant`, `sshgate.revoke_grant`, `sshgate.list_grants`,
-`sshgate.update_gate`, and `sshgate.transfer` — and debugging mostly uses the
-first three (`sshgate.ping` is a READ-class reachability probe of ONE named
-server — a short SSHGATE_OK check, no approval and no signer — cheaper than
-`status` when you only need to know if a single box is up; the grant tools are
-for unattended write windows, `update_gate`
-pushes a signed, human-approved update of the gate binary itself, and
-`sshgate.transfer` moves a secret file between two registered servers end-to-end
-encrypted through the gate under one human approval — the MCP relays only
-ciphertext, so the plaintext never reaches you; it needs the local Tier-2
-Telegram signer (the hosted Tier-3 signer fails closed on transfers) — see **Standing grants** and
-**Updating a server's gate** below). Read commands run instantly. Write
-commands need the user to tap a Telegram approval button on their phone.
-Optimise for: fast diagnosis, one approval per fix, no surprises.
+SSHGate gives you SSH access to the user's registered servers. Read commands
+run at once. Write commands need the user to tap an approval button in
+Telegram, usually on their phone. Optimise for fast diagnosis, one approval
+per fix, and no surprises.
 
-**You cannot add a server.** Provisioning a new machine is a human-only
-`sshgate` CLI step (`sshgate pubkey` then `sshgate add`), deliberately kept
-off your tool surface so you can only operate within the servers a human
-has already registered. If the user wants a new server reachable, point
-them at that CLI — never attempt to onboard one yourself.
+Your tool surface is exactly eleven tools:
+
+| Tool | What it does | Approval |
+|---|---|---|
+| `sshgate.list_servers` | Registered aliases, with host, user and tier | none |
+| `sshgate.run` | One command. Reads run directly; a write asks for a tap | write: one tap |
+| `sshgate.run_batch` | A list of commands; all its writes share one tap | one tap for all writes |
+| `sshgate.ping` | Is ONE server reachable right now (short probe) | none |
+| `sshgate.status` | Signer health plus reachability of every server | none |
+| `sshgate.request_grant` | Ask for a standing grant (tap-free write window) | its own tap |
+| `sshgate.revoke_grant` | Drop a grant early | none |
+| `sshgate.list_grants` | List live grants | none |
+| `sshgate.update_gate` | Signed update of the gate binary on a server | its own tap |
+| `sshgate.transfer` | Move a secret file between two servers, end-to-end encrypted | its own tap |
+| `sshgate.revoke_server` | Remove SSHGate from a server and forget the alias | its own tap |
+
+Most debugging uses the first three.
+
+**You cannot add a server.** Provisioning is a human-only `sshgate` CLI step
+(`sshgate pubkey`, paste the key on the host, then `sshgate add <alias>
+<user@host>`). It is deliberately off your tool surface, so you can only reach
+servers a human already registered. If the user wants a new server, give them
+those steps; never try to onboard one yourself.
 
 ## Tool order
 
-1. **`sshgate.list_servers`** first, every session, before touching
-   anything. Confirms the alias the user mentioned is actually
-   registered and surfaces the host/user so you can speak about it
-   accurately. If the alias is not registered, say so and stop — tell the
-   user to provision it with the human-only `sshgate` CLI (`sshgate pubkey`
-   then `sshgate add <alias> <user@host>`) rather than guessing. You have
-   no tool to add it yourself.
-2. **`sshgate.run`** for diagnostics. Reads execute on the remote
-   immediately, no approval, no notification. Stream the output back
-   and reason from it.
-3. **`sshgate.run_batch`** for fixes. Group every write that belongs
-   to one logical change into a single batch so the user approves
-   once, not N times.
+1. **`sshgate.list_servers`** first, every session. Confirm the alias the user
+   named is registered and note its tier. If it is not registered, say so and
+   stop.
+2. **`sshgate.run`** for diagnostics. Reads run immediately, with no approval
+   and no notification.
+3. **`sshgate.run_batch`** for fixes. Put every write of one logical change in
+   one batch so the user approves once, not N times.
 4. **`sshgate.run`** again at the end, to verify the fix landed.
 
-## Cost shape — reads free, writes tap
+## Cost shape: reads are free, writes cost a tap
 
-Every write command triggers a Telegram DM to the user with the
-command text and `[✓ Approve all] [✗ Deny]` buttons. The user is
-probably away from the laptop; each prompt is a small interruption.
+Every write sends the user a Telegram message with the command text and
+Approve / Deny buttons. The user is probably away from the laptop, so each
+prompt is an interruption.
 
-- A single `sshgate.run` with a write costs **one tap**.
-- A `sshgate.run_batch` with N writes costs **one tap total** — the
-  user approves the whole batch in one go.
-- N separate `sshgate.run` calls with writes cost **N taps**. Avoid
-  this. Always batch related writes.
+- One `sshgate.run` with a write costs **one tap**.
+- One `sshgate.run_batch` with N writes costs **one tap in total**.
+- N separate `sshgate.run` writes cost **N taps**. Avoid this; batch related
+  writes.
 
-Read commands cost nothing. Run as many as you need to understand
-the situation.
+Reads cost nothing. Run as many as you need.
 
-## Standing grants — a tap-free write window
+## Diagnostics: the free part
 
-When you expect **many writes** on one server over a stretch where the
-user can't tap each (an overnight maintenance run, a migration, a long
-unattended build), ask for a **standing grant** instead of N approvals:
+For "what's wrong with X", start with these (all reads):
 
-- **`sshgate.request_grant(alias, scope, commands?, duration_hours, reason?)`**
-  *requests* a grant — it does **not** create one. The user must approve a
-  distinct "STANDING GRANT" Telegram message (alias + scope + duration). You
-  can never self-grant. Once approved, matching writes **auto-sign for the
-  window with no further tap**.
-- **`scope`:** prefer `commands` — only the exact command strings you list
-  (exact match, no patterns) auto-sign; everything else still prompts. Use
-  `scope=all` (every write auto-signs) **only** for a throwaway/dedicated
-  target, never a live box that holds anything that matters.
-- **Bounds:** `duration_hours` ≤ 24h, and the grant lives **in-memory in the
-  signer** — it dies on signer restart. **Reveal never auto-signs** — a
-  secret-read always prompts even under a grant.
-- **`sshgate.revoke_grant(alias)`** drops the grant early. Pure
-  de-escalation: always safe, no approval, no-op if none exists. Drop a grant
-  as soon as the window's work is done.
-- **`sshgate.list_grants(alias?)`** lists the signer's live standing grants
-  (optionally filtered to one alias). Read-only, no approval, always safe — it
-  reports state, never changes it.
+- `df -h`: disk full?
+- `free -h`: memory pressure?
+- `top -bn1 | head -30`: what's hot?
+- `uptime` and `who`: load, and who is logged in.
+- `systemctl status <unit>`: is the service alive?
+- `journalctl -u <unit> -n 50 --no-pager`: recent log lines.
+- `ss -tlnp` or `ss -tnp state established`: open sockets.
+- `ls -lah <path>` / `cat <file>`: inspect specific paths.
 
-Always show the user the exact scope + command set before requesting.
+Send them one after another with `sshgate.run`. The user is not pinged.
 
-**Phantom-live grant after a `request_grant` error/timeout.** If `request_grant`
-returns an error or times out, the grant may still have gone live — the human
-approved, but the response didn't make it back to you. Call `sshgate.list_grants`
-to check the true state *before* re-requesting. Re-requesting blindly would
-prompt the human a second time and risk a double grant.
+**Never run a command that does not end on its own** (`tail -f`,
+`journalctl -f`, `watch`, `top` without `-b -n1`). The gate puts no time limit
+on a read, so the call just hangs. Always bound reads with `-n`, `--since` or
+`| tail`.
 
-## Updating a server's gate
+**Output is capped.** `run` and `run_batch` cut each command's stdout and
+stderr at 256 KiB by default and add a truncation marker. Prefer a narrower
+read over a bigger cap. `max_output_bytes` overrides the cap for one call
+(`0` means unlimited; use it rarely, since the whole output enters your
+context).
 
-When a gate change needs to reach an **already-registered** server (a new
-redaction rule, a classifier fix), you don't re-provision — you request a
-signed, in-place binary update:
+## Reads run in a kernel read jail
 
-- **`sshgate.update_gate(alias)`** pushes a fresh gate binary onto the named
-  server. You supply **only the alias** — never binary bytes or a hash. The MCP
-  hashes the operator's locally-staged gate binary and the user must approve a
-  distinct **"GATE BINARY UPDATE"** Telegram banner bound to that exact SHA-256
-  before it runs.
-- It is **fail-closed**: a hash mismatch, a wrong-architecture binary, or a
-  read-only (Tier-1) server all refuse locally and write nothing — same as any
-  other write. It is signed and audited.
-- It does **not** expand your reach — no new server is onboarded (provisioning
-  stays the human-only `sshgate` CLI), and a **standing grant never auto-signs an
-  update** (any admin verb always forces a fresh human tap).
+On hosts whose kernel supports it, the gate runs every read in a kernel jail.
+The jail is what makes "reads can't change anything" true on the server
+itself, not just in the classifier. What this means for you:
 
-## Secret-reveal — the rare "see a value" escape hatch
+- **A read cannot write to the host.** The host filesystem is read-only, and
+  `/tmp` and `/var/tmp` are visible but read-only. The only writable space is
+  a private 64 MiB `/dev/shm` (`TMPDIR` points there), discarded when the read
+  ends. Anything that has to change the box is a write: put it in a batch.
+- **Network still works.** A read can reach TCP/UDP services, including
+  `curl http://localhost:<port>/health`.
+- **No local daemons over Unix sockets.** A fixed set of `systemctl` and
+  `docker` reads still works, because the gate runs them outside the jail,
+  but only in their plain form: one command, no pipe, no quotes.
+  - `systemctl status | is-active | is-enabled | is-failed | list-units |
+    list-unit-files | show | cat | get-default`, with display flags such as
+    `--no-pager`, `-l`/`--full`, `-a`/`--all`, `--no-legend`, `--plain`,
+    `--type=…`, `--state=…`, `-n`/`--lines`, `-p`/`--property`.
+  - `docker ps | inspect | logs | images | version | info | top`, and
+    `docker stats --no-stream`.
 
-Your reads are **redacted by default**. To see ONE secret value raw, call
-`sshgate.run(alias, command, reveal=true, reason="…")` — it bypasses the
-redactor for that single command. It takes its **own distinct approval**, a
-**mandatory** `reason`, is **single-command only** (never in `run_batch`),
-and is **never** auto-signed under a standing grant (every secret-read
-prompts, even mid-grant). The raw value enters your context → transcript, so
-use it sparingly; prefer moving secret-bearing files box-to-box instead.
+  So `systemctl list-units --state=failed` works on a jailed host, but
+  `systemctl list-units | grep nginx`, `timedatectl` and
+  `systemctl is-system-running` fail there with a "Failed to connect to bus"
+  style error. Read the plain output yourself instead of piping it.
+- **Root-only kernel reads can fail.** `dmesg` may print "Operation not
+  permitted" because the jail drops capabilities. `journalctl -k` reads the
+  same kernel messages.
+- **On a host without jail support**, reads run as before, protected by the
+  classifier only. You can't see which one applies; a human can check with
+  `~/.sshgate-gate/gate doctor` on the host.
 
-## Diagnostics — the free part
+If a read comes back with **exit 77 and stderr `gate: read jail unavailable`**
+(in `run`, the denial class is `read_jail_unavailable`), nothing ran: the gate
+could not confirm or set up the jail (or the host is pinned to require it and
+lacks it), and in that case it never falls back to running the read unjailed.
+Don't retry, because every read on that host fails the same
+way until it is fixed. Tell the user to run `~/.sshgate-gate/gate doctor` on
+the host. Writes are not affected.
 
-For "what's wrong with X" questions, lead with these:
+## Fixes: the batched part
 
-- `df -h` — disk full?
-- `free -h` — memory pressure?
-- `top -bn1 | head -30` — what's hot?
-- `uptime` and `who` — when did it start, who's logged in?
-- `systemctl status <unit>` — is the service alive?
-- `journalctl -u <unit> -n 50 --no-pager` — recent log lines.
-- `ss -tlnp` or `ss -tnp state established` — open sockets.
-- `ls -lah <path>` / `cat <file>` — inspect specific paths.
-
-All of these are reads. Fire them off one after another via
-`sshgate.run`. The user does not get pinged.
-
-## Fixes — the batched part
-
-Before calling `run_batch`, **show the user the planned writes**. Use
-a fenced block, exactly the commands you'll send, no surprises:
+Before calling `run_batch`, **show the user the planned writes** in a fenced
+block, exactly the commands you will send:
 
 ```
 Planned writes on prod-db (one Telegram approval covers all 4):
 
-  1. nginx -t                                # validate new config
-  2. cp /etc/nginx/sites-available/app.conf /etc/nginx/sites-available/app.conf.bak
-  3. tee /etc/nginx/sites-available/app.conf < /tmp/new-app.conf
+  1. cp /etc/nginx/sites-available/app.conf /etc/nginx/sites-available/app.conf.bak
+  2. sed -i 's#/live/old-domain/#/live/new-domain/#' /etc/nginx/sites-available/app.conf
+  3. nginx -t                                  # validate before reloading
   4. systemctl reload nginx
 
-Approving the prompt on your phone will run them in order. Reply
-"go" to proceed, or tell me to adjust.
+Approving the prompt on your phone runs them in order. Reply "go" to
+proceed, or tell me what to change.
 ```
 
-Wait for the user to acknowledge. Then call `sshgate.run_batch` with
-the same list, `stop_on_error: true` (the default for any batch that
-contains a write — abort the sequence if any step fails; an all-read
-batch instead defaults to continue-on-error so one failed diagnostic
-doesn't skip the rest — set `stop_on_error` explicitly to override
-either way). Surface the per-step output verbatim
-when it comes back. After a successful batch, run one more diagnostic
-read (`systemctl status nginx`, `nginx -t`, whatever proves the fix)
-to confirm.
+Wait for the user's go. Then call `sshgate.run_batch` with the same list.
 
-## Long-running tasks — launch detached, then poll (don't block)
+`stop_on_error` defaults to **true** for a batch that contains any write: the
+batch stops at the first **write** that exits non-zero, so a failed `nginx -t`
+never reaches the reload. A read inside a write batch that exits non-zero
+(an empty `grep`, a missing file) does not stop it unless you set
+`stop_on_error: true` explicitly. An all-read batch defaults to continuing past
+failures. A stopped batch can leave earlier steps applied (here, the edited
+file), so say how to roll back (`cp …app.conf.bak …app.conf`).
 
-For anything that runs more than ~a minute (DB dumps/restores, `rsync`,
-backups, builds, package installs), do **not** call a blocking
-`sshgate.run` and wait. A synchronous `run` holds your whole turn for the
-duration **and** dies if the SSH pipe drops (the remote job gets SIGHUP and
-is killed). Instead launch it **detached** and poll:
+Show the per-step output when it comes back, then run one more read
+(`systemctl status nginx`, `curl -sI http://localhost`) to confirm the fix.
 
-1. **Launch** (one write — the redirect/`&` make it a write; under a standing
-   grant on that server it auto-approves with no tap):
-   `sshgate.run <alias> "nohup <cmd> >~/job.log 2>&1 & echo $!"` → returns the
-   **PID** immediately. For an exit code, launch as
-   `nohup sh -c '<cmd>; echo done:$? >~/job.done' &`.
-2. **Poll with reads** (free, no tap): `sshgate.run <alias> "tail -n 40 ~/job.log"`,
-   `sshgate.run <alias> "ps -p <pid> -o pid=,stat=,etime="`, or
-   `sshgate.run <alias> "cat ~/job.done"` for completion.
-3. **Cancel** (your "Ctrl-C"): `sshgate.run <alias> "kill <pid>"` (a write).
-
-The detached job **survives a dropped pipe**; a synchronous long `run` does
-not. State lives in the OS + the logfile on the target, so nothing is lost if
-your session is interrupted — reconnect and `tail` the log.
-
-> A first-class `job_run` / `job_status` / `job_kill` tool family (gate verbs
-> `SSHGATE_JOB_RUN` / `SSHGATE_JOB_STATUS` / `SSHGATE_JOB_KILL`) is planned —
-> see the roadmap. When it ships, prefer it over hand-rolled `nohup`; until
-> then, use the `nohup` + poll pattern above.
-
-## Read-only (Tier-1) servers — writes refused before any tap
-
-A server can be provisioned **read-only** (a human ran
-`sshgate add … --read-only`): the gate is installed but no signer pubkey
-was pushed, so it executes reads and denies every write locally. You can
-tell a server's tier BEFORE attempting a write: `sshgate.list_servers`,
-`sshgate.status`, and `sshgate.ping` each report a `read_only` boolean per
-server (`true` = Tier-1 read-only). When you send a write to such a server,
-`sshgate.run` / `sshgate.run_batch` **refuse it before soliciting any
-Telegram approval** — no tap is wasted — and return an error like:
+**Multi-line file content.** To write a file, send the content inline in the
+command (a heredoc or `printf`), never as a reference to a file you assume is
+already on the box. The command string must contain real newlines and an
+unindented closing `EOF`:
 
 ```
-server "prod-db" is registered read-only — writes are denied at the
-gate (no signer pubkey was pushed).
+cat > /etc/systemd/system/app.service <<'EOF'
+[Unit]
+After=network.target
+[Service]
+ExecStart=/srv/app/bin/app
+EOF
 ```
 
-Do NOT retry. Surface the correct upgrade path to the user and stop:
-making the server signed-write is a **human-only** action — they run
-`/sshgate:setup` to add a Telegram signer (if they don't have one), then
-de-provision the server by hand and re-add it: on the host, replace SSHGate's
-forced `command="..."` line in `~/.ssh/authorized_keys` with `sshgate pubkey`'s
-plain line, drop the alias from the registry (`~/.config/sshgate/servers.json`),
-then `sshgate add prod-db <user@host>` (no `--read-only`). A Tier-1 gate has no
-signer pubkey, so a signed remote revoke can't run — `/sshgate:revoke` refuses a
-read-only host before any tap. You have no tool to do this, and an in-place
-upgrade was also considered and rejected for security (any unsigned tier-flip
-the CLI could exercise, the agent could emulate) — see roadmap #17 (redefined).
-Reads on the same server still work normally — keep diagnosing with `sshgate.run`.
+## Standing grants: a tap-free write window
 
-## Denial, timeout, and signer-access handling
+When you expect **many writes** on one server while the user can't tap each
+one (an overnight maintenance run, a long unattended build), request a
+standing grant instead:
 
-A failed write surfaces one of these. **Do not loop** on any of them —
-resubmitting the same batch is rude and (for the first three) hopeless.
+- **`sshgate.request_grant(alias, scope, commands?, duration_hours, reason?)`**
+  only *asks*. The user approves a distinct "STANDING GRANT" message. You can
+  never grant yourself. Once approved, matching writes are signed without a
+  tap until the grant expires.
+- **`scope`:** prefer `commands`: only the exact strings you list (exact match,
+  no patterns) are signed automatically; everything else still prompts. Use
+  `scope=all` only on a throwaway or dedicated box, never a live server that
+  holds anything that matters.
+- **Bounds:** `duration_hours` is 1 to 24. The grant lives in the signer's
+  memory and dies if the signer restarts.
+- **Never covered by a grant:** secret-reveal, `update_gate`, `transfer` and
+  `revoke_server` always need their own tap.
+- **`sshgate.revoke_grant(alias)`** drops the grant early. Always safe, no
+  approval. Drop it as soon as the work is done.
+- **`sshgate.list_grants(alias?)`** shows live grants. Read-only.
 
-- **Denied** (`denied by operator`) — the user tapped Deny. Surface it
-  verbatim; ask why (wrong time, wrong server, command needs a tweak);
-  propose an alternative or wait for direction.
-- **Timeout** (`approval timed out`) — the approval window elapsed
-  (signer's default is ~5 minutes / 300s). The user was probably away. Tell them and
-  offer to re-send when they're ready, but don't auto-resubmit.
-- **Verdict undelivered** (`verdict undelivered — the signer decided but the
-  response did not arrive; a human may have DENIED this`) — the signer reached a
-  decision but its response never got back to you, so a Deny may be hiding behind
-  this. **Do NOT auto-retry** — a denied write must never be silently
-  re-submitted. Check `sshgate.status` and the Telegram approval thread; resubmit
-  only once you confirm it was not a denial.
-- **Signer permission denied** (`signer socket … is present but not
-  accessible (permission denied) — your shell/session is not yet in the
-  sshgatesigner group`) — the daemon is ALIVE; the current Claude Code
-  session just hasn't picked up `sshgatesigner` group membership. This
-  happens right after the first `/sshgate:setup`. STOP and tell the user
-  to **log out and back in, fully restart Claude Code, then run `/mcp`**
-  to confirm the `sshgate` server is live before retrying. Do not treat
-  this as "the daemon is dead."
-- **Unreachable** (`signer unreachable` / "not configured") — if
-  `sshgate.status` reports the socket `configured:false`, there is no
-  signer at all (Tier-1 read-only): writes need `/sshgate:setup`. If it
-  reports `configured:true` but UNREACHABLE, the daemon is installed but
-  down — escalate with `systemctl status sshgate-signer-telegram` and
-  `journalctl -u sshgate-signer-telegram -n 50`.
+Always show the user the exact scope and command list before requesting.
 
-### Gate deny exit codes (77 / 65)
+**If `request_grant` errors or times out, the grant may still be live**: the
+user approved but the reply didn't reach you. Call `sshgate.list_grants` before
+asking again; a blind re-request prompts the user twice and risks a double
+grant.
 
-A write that reaches the gate but is rejected there comes back with a
-non-zero exit, now **annotated** with remediation: `sshgate.run`
-surfaces it as the tool error; `sshgate.run_batch` folds it into the
-failing command's stderr and the batch summary. You don't have to
-memorise the codes, but:
+## Secret-reveal: seeing one value raw
 
-- **exit 77** — missing signature OR the host has no signer pubkey
-  (read-only / Tier-1). Check `sshgate.status`; if the signer is not
-  configured, the user runs `/sshgate:setup`, then re-tiers the server by hand
-  (strip its forced `command="..."` line back to `sshgate pubkey`'s plain line
-  on the host, drop the alias from the registry, then `sshgate add`, no
-  `--read-only`) to upgrade — a human-only step you can't perform, and one
-  `/sshgate:revoke` can't do for a Tier-1 host (no signer pubkey to verify a
-  signed revoke).
-- **exit 65** — bad / expired signature: usually clock skew or a stale
-  approval. Retry once.
+Output is redacted by default. To see ONE secret value raw, call
+`sshgate.run(alias, command, reveal=true, reason="…")`. It needs its own
+approval and a non-empty `reason` (shown to the approver), works for a single
+`run` only (never `run_batch`), and is never covered by a grant. The value
+then sits in your context and the transcript, so use it rarely. To move a
+secret between servers, use `transfer` instead.
 
-## Classification gotchas
+## Moving a secret file: `transfer`
 
-The local classifier flags any command as a write if it can't prove
-it's a read. A few non-obvious cases:
+`sshgate.transfer(src_alias, src_path, dest_alias, dest_path, mode?)` copies one
+file from one registered server to another without the secret ever reaching
+you. The source gate encrypts it for the destination; the MCP relays only
+ciphertext; the destination gate decrypts and writes it. You get back only
+metadata (`xfer_id`, byte count).
 
-- **`journalctl --rotate`**, **`journalctl --vacuum-time=…`** — writes
-  (they mutate the journal).
-- **`apt update`** — write (mutates the apt cache).
-- **`curl -X POST …`**, any non-GET HTTP method — write.
-- **Pipelines are classified per-segment** (since v1.1). A pure-read
-  pipeline like `cat /etc/hosts | grep foo` or `ps aux | grep nginx`
-  is a READ — no Telegram approval. A pipeline with *any* write
-  segment (e.g. `cat /etc/foo | tee /tmp/bar`, or `cmd > /tmp/x |
-  echo done`) is a WRITE.
-- **An unquoted newline is a command separator** (like `;`). The gate
-  execs via `sh -c`, so `ls\nrm -rf x` runs two commands — the
-  classifier splits on the newline and any write segment makes the
-  whole thing a WRITE. (This closed a read-only-gate bypass where a
-  read first line masked a write second line. Newlines *inside* quotes
-  do not split.)
-- **Redirects (`>`, `>>`)** are ALWAYS WRITE, regardless of what's on
-  the left side.
-- **Command substitution `$(...)`** and **process substitution
-  `<(...)`, `>(...)`** are ALWAYS WRITE (fail-safe: the classifier
-  doesn't try to inspect the substituted command).
-- **`tee`, `sudo`, `find -delete / -exec / -fprint*`, `awk` with
-  `system()`, `sed` with `e`/`w`/`r` script flags** — always WRITE
-  (true-write triggers, no exceptions).
-- **`sed -i` / `--in-place`, including bundled short flags** — always
-  WRITE. The classifier catches the in-place flag even when it is
-  bundled onto other no-arg flags, e.g. `sed -ni`, `sed -Ei`,
-  `sed -ri`, `sed -si`, `sed -nri …`, and suffix forms like `-i.bak`.
-  (A bundled `-i` editing in place is a file mutation, not a read —
-  this closed a read-only-gate bypass.) Plain `sed 's/a/b/' file`
-  with no `-i` and no dangerous script flag is still a READ.
-- **`docker exec …`** — write (the inner command is opaque to the
-  classifier).
+- Paths are absolute. `mode` is optional and only `0600` is accepted today.
+  The file is replaced atomically if it exists. The limit is 8 MiB.
+- One "SECRET TRANSFER" approval covers both ends; a grant never covers it.
+- Both servers must be signed-write (Tier-2) and registered for transfer, and
+  it needs the local Telegram signer (the hosted signer refuses transfers).
+- `src/dest server not registered for transfer` means that server has no
+  transfer key yet. The user runs `sshgate xfer-register <alias>` on their
+  machine; then retry.
 
-If a pure-read pipeline still classifies as write (e.g. an obscure
-read tool the classifier doesn't recognise), run the segments
-unpipelined and grep the output yourself in the conversation.
+Prefer `transfer` to `cat`-with-reveal plus a write: it keeps the value out of
+your context and the logs.
 
-## Concrete example — bulk-approval pattern
+## Updating a server's gate: `update_gate`
 
-User: "The nginx config on prod-db is wrong; ssl_certificate points
-at the old path. Fix it."
+When a gate change (a new redaction rule, a classifier fix) must reach an
+already-registered server, call **`sshgate.update_gate(alias)`**. You supply
+only the alias, never bytes or a hash. The MCP hashes the gate binary the
+operator staged locally, and the user approves a distinct "GATE BINARY UPDATE"
+message bound to that SHA-256. It refuses and writes nothing on a hash
+mismatch, a wrong-architecture binary or a read-only server. It onboards no
+new server and is never covered by a grant.
 
-1. `sshgate.list_servers` → confirm `prod-db` is registered.
-2. `sshgate.run prod-db "cat /etc/nginx/sites-available/app.conf"` →
-   read the current config. Diagnose: `ssl_certificate` line points
-   at `/etc/letsencrypt/live/old-domain/fullchain.pem`.
-3. `sshgate.run prod-db "ls -la /etc/letsencrypt/live/"` → find the
-   new cert dir.
-4. Compose the fixed config locally (in conversation). Show it to
-   the user.
-5. Show the user the planned write batch:
+## Removing a server: `revoke_server`
 
-   ```
-   Planned writes on prod-db (one approval, 4 commands):
-     1. cp /etc/nginx/sites-available/app.conf /etc/nginx/sites-available/app.conf.bak
-     2. tee /etc/nginx/sites-available/app.conf < /tmp/new-app.conf
-     3. nginx -t
-     4. systemctl reload nginx
-   ```
+Use **`sshgate.revoke_server(alias)`** only when the user explicitly asks to
+remove SSHGate from a server. After one approval, the gate removes its
+`authorized_keys` line (keeping a backup at
+`~/.ssh/authorized_keys.sshgate-revoke-backup`) and its `~/.sshgate-gate/`
+directory, and the alias is dropped from the registry. After that you can't
+reach the server at all, and only a human can re-add it. A read-only (Tier-1)
+server is refused before any tap; a human removes it by hand
+(`sshgate revoke <alias>` prints the steps).
 
-6. On "go" → `sshgate.run_batch` with those 4 commands. One Telegram
-   tap covers all 4. Each command is still individually signed —
-   audit log is preserved.
-7. After approval and run, `sshgate.run prod-db "systemctl status
-   nginx"` → confirm reload succeeded, no errors in the most recent
-   log lines.
+## Long-running tasks: launch detached, then poll
 
-That's the pattern. One read pass → propose → one approval → one
-verify pass.
+For anything that runs more than about a minute (dumps, restores, `rsync`,
+builds, big installs), don't make a blocking `sshgate.run` call. It holds
+your turn, and the job is killed if the SSH connection drops. Launch it
+detached instead:
+
+1. **Launch** (a write; under a matching grant it is signed without a tap):
+   `nohup <cmd> >~/job.log 2>&1 & echo $!` returns the PID at once. To capture
+   the exit code, launch `nohup sh -c '<cmd>; echo done:$? >~/job.done' >~/job.log 2>&1 &`.
+2. **Poll with reads** (free): `tail -n 40 ~/job.log`,
+   `ps -p <pid> -o pid=,stat=,etime=`, `cat ~/job.done`.
+3. **Cancel:** `kill <pid>` (a write).
+
+The detached job survives a dropped connection; its state lives in the log
+file on the server.
+
+## Read-only (Tier-1) servers
+
+A server added with `sshgate add … --read-only` has the gate but no signer
+key, so it runs reads and refuses every write. `list_servers`, `status` and
+`ping` show `read_only: true` for such a server (the field is absent for a
+signed-write server). A write to it is refused **before any Telegram prompt**
+(denial class `read_only_server`), with an error like:
+
+```
+server "prod-db" is registered read-only — writes are denied at the gate (no signer pubkey was pushed).
+```
+
+Don't retry. If you meant the command as a read, simplify it and resend. If
+it is a real write, the user has to change the tier, which is a human-only
+step: set up a signer with `/sshgate:setup` if there is none, remove the
+server by hand (`sshgate revoke <alias>` prints the exact steps and changes
+nothing), then `sshgate add <alias> <user@host>` without `--read-only`. There
+is no in-place tier switch, by design. Reads on the server keep working.
+
+## Denials, timeouts and signer problems
+
+When a command does not run, `run` and `run_batch` return a structured
+`denial` object next to the error text:
+
+- `verdict_class`: what happened (for example `approval_denied`).
+- `summary`: one line in plain words.
+- `required_action`: `retry`, `stop_do_not_retry`, `escalate_to_human`,
+  `rephrase_as_read` or `provide_reason`.
+- `retryable`: true only for `approval_timeout` and `bad_signature`.
+- `how_to`: the concrete next steps.
+
+**Read `required_action` first and follow `how_to`.** The common cases:
+
+| `verdict_class` | Meaning | What to do |
+|---|---|---|
+| `approval_denied` | The user tapped Deny | Don't resubmit. Ask why and propose an alternative. |
+| `approval_timeout` | No tap within the 5-minute window | Resubmit the same call **once**. If it times out again, ask the user when they can approve. |
+| `verdict_unknown` | The signer decided, but the answer never arrived; it may have been a Deny | Don't auto-retry. Check `sshgate.status` and ask the user what they tapped. |
+| `bad_signature` | Exit 65: signature expired or invalid (clock skew, stale approval) | Resubmit once. If it fails again, check the host clock. |
+| `missing_signature` | Exit 77 on a write: the host has no signer key, or the signature was missing | Don't retry. Check `sshgate.status`; a human fixes the tier. |
+| `read_only_server` | Write to a Tier-1 server | See the read-only section above. |
+| `read_jail_unavailable` | Exit 77 on a read: the jail could not be set up | Don't retry. A human runs `~/.sshgate-gate/gate doctor`. |
+| `no_signer_configured` | No signer installed yet | The user runs `/sshgate:setup`. |
+| `signer_permission` | The signer runs, but this session isn't in the `sshgatesigner` group yet (normal right after the first setup) | Stop. The user logs out and back in, restarts Claude Code fully and runs `/mcp`. The daemon is not dead. |
+| `signer_unreachable` | The signer socket exists but doesn't answer | Stop. The user checks `systemctl status sshgate-signer-telegram` and `journalctl -u sshgate-signer-telegram -n 50`. |
+| `reveal_needs_reason` | `reveal=true` without a reason | Resend with a real reason. |
+
+In `run_batch`, a denied or timed-out approval returns `denied: true`, no
+results and the `denial` object; nothing ran. A gate refusal of one write
+inside a batch that otherwise ran shows up in that command's stderr and the
+batch-level `denial`. A read refused by the jail inside a batch shows as exit
+77 with `gate: read jail unavailable` in its stderr.
+
+## What counts as a read
+
+The MCP and the gate classify every command with the same classifier. It
+**fails closed**: a command is a read only when every part of it is a
+recognised read. Anything it can't confirm is a write and needs a tap. The
+classifier only decides the route; on a signed-write server the gate's
+signature check is what actually blocks unapproved writes, and on a jailed
+host the jail blocks reads from writing.
+
+- **Chains of reads are reads.** `df -h && free -h`, `df -h; free -h`,
+  `ps aux | grep nginx` and `cat /x 2>/dev/null || echo missing` are reads.
+  One write or unrecognised segment makes the whole command a write:
+  `df -h && nginx -t` is a write. One simple command per call is still the
+  safest habit.
+- **`sh -c`, `bash -c`, `xargs`, `sudo`** are always writes.
+- **Redirects into a file** (`>`, `>>`) are writes, even into `/dev/shm`.
+  Redirects to `/dev/null` and `2>&1` are fine.
+- **`$(...)`, backticks, `<(...)`, `>(...)`** are always writes.
+- **An unquoted newline separates commands**, like `;`: `ls` newline `rm -rf x`
+  is a write.
+- **Tool forms that change state** are writes: `tee`; `sed -i` in any spelling
+  (`-ni`, `-Ei`, `-i.bak`); `find -delete` / `-exec` / `-fprint`; `awk` with
+  `system()`; `curl -X POST` or `curl -o <file>`; `journalctl --rotate` /
+  `--vacuum-*`; `docker exec`; `kill`; `apt update`.
+- **Not on the read list, so writes:** `nginx -t`, `sshd -t`, `ufw status`,
+  `nft list ruleset`, `iptables -L`, `blkid`, `findmnt`, `dpkg -l`,
+  `apt-cache policy`, `openssl x509 …`, and most `--version` flags on tools
+  outside the read list (`nginx -v`, `psql --version`, `git --version`,
+  `docker --version`, `systemctl --version`). `systemctl --failed` is also a
+  write; use `systemctl list-units --state=failed`.
+- **Some env prefixes** (`PAGER=`, `LD_PRELOAD=`, `HOME=`, `PATH=` …) make a
+  command a write. Plain prefixes such as `LANG=C` are fine.
+
+When a read comes back classified as a write, the error says which segment
+and why. **Simplify it** (drop the redirect, split the chain, use a common
+tool) instead of resending it unchanged or wrapping it. If a check really
+needs an unrecognised tool, fold it into the write batch it belongs to.
+
+## Concrete example: the bulk-approval pattern
+
+User: "The nginx config on prod-db is wrong; ssl_certificate points at the
+old path. Fix it."
+
+1. `sshgate.list_servers` → `prod-db` is registered and not read-only.
+2. `sshgate.run prod-db "cat /etc/nginx/sites-available/app.conf"` → the
+   `ssl_certificate` line points at `/etc/letsencrypt/live/old-domain/`.
+3. `sshgate.run prod-db "ls -la /etc/letsencrypt/live/"` → the new directory
+   is `new-domain`.
+4. Show the plan (the four writes from **Fixes** above) and wait for "go".
+5. `sshgate.run_batch` with those four commands: one tap covers all four.
+   Each command is still signed separately and audited.
+6. `sshgate.run prod-db "systemctl status nginx"` → confirm the reload
+   worked and the log shows no errors.
+
+That's the pattern: one read pass, one proposal, one approval, one verify
+pass.

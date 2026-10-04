@@ -1,6 +1,6 @@
 ---
 name: linux-server-debugging
-description: This skill should be used when something is WRONG on a registered Linux server and you need a method to find the cause, not a command dump — phrases like "why is X slow", "the server is down / not responding", "diagnose high load on staging", "prod-db is throwing 500s", "the box is out of disk", "why did the app get OOM-killed", "the service won't start", "figure out what's wrong with web-1", or "narrow down what's happening". Teaches a systematic triage METHOD: classify the symptom, run the cheapest discriminating read first, state a hypothesis and pick the ONE read that confirms or kills it, stop when confirmed, then propose the fix as a batched approval. Complements debugging-remote-servers (which owns the gate mechanics); this owns HOW TO THINK through a diagnosis.
+description: This skill should be used when something is WRONG on a registered Linux server and you need a method to find the cause, not a command dump — phrases like "why is X slow", "the server is down / not responding", "diagnose high load on staging", "prod-db is throwing 500s", "the box is out of disk", "why did the app get OOM-killed", "the service won't start", "figure out what's wrong with web-1", or "narrow down what's happening". Teaches a systematic triage METHOD — classify the symptom, run the cheapest discriminating read first, state a hypothesis and pick the ONE read that confirms or kills it, stop when confirmed, then propose the fix as a batched approval. Complements debugging-remote-servers (which owns the gate mechanics); this owns HOW TO THINK through a diagnosis.
 ---
 
 # Linux server debugging — a triage method
@@ -13,7 +13,8 @@ Reads are free, so nothing stops the wandering. What's missing is a *method*.
 This skill is the method. It's a decision tree, not a command list. For the
 **gate mechanics** it leans on — read-vs-write classification, one-tap batch
 approval, standing grants, denial/timeout handling, Tier-1 read-only servers,
-long-job launching — see the **`debugging-remote-servers`** skill. This skill
+long-job launching, the read jail and the output cap — see the
+**`debugging-remote-servers`** skill. This skill
 does not re-teach those; it tells you *what to run, in what order, and when to
 stop*.
 
@@ -34,7 +35,9 @@ stop*.
    exact failure this skill exists to prevent.
 5. **Bounded reads, always.** Never `cat` a whole log or `journalctl` with no
    limit. Every log read is bounded (`-n`, `--since`, `| tail`, `| grep`) so
-   you get signal, not a wall. A single unbounded read can bury the finding.
+   you get signal, not a wall. A single unbounded read can bury the finding
+   (and output past 256 KiB is cut off). Never use a follow mode (`-f`,
+   `watch`): the call never returns.
 
 ## Step 0 — orient (two reads, always the same)
 
@@ -53,7 +56,7 @@ Before classifying, know the box is reachable and which box it is:
 
 | Class | Symptom the user reports | Cheapest discriminating first read |
 |---|---|---|
-| **DOWN** | "not responding", "can't reach it", a service is dead | `sshgate.ping <alias>`, then `systemctl status <unit>` / `systemctl --failed` |
+| **DOWN** | "not responding", "can't reach it", a service is dead | `sshgate.ping <alias>`, then `systemctl status <unit>` / `systemctl list-units --state=failed` |
 | **SLOW** | "sluggish", "requests hang", "high latency" | `uptime` (load vs core count) |
 | **ERRORING** | "throwing 500s", "app crashes", "logs full of errors" | `journalctl -u <unit> -n 50 --no-pager` (or the app's own log, bounded) |
 | **DISK** | "out of space", "can't write", "disk full" | `df -h` |
@@ -93,13 +96,17 @@ decides. Stop the instant you've named the cause.
      nothing, that's a signal the service isn't even starting — jump to DOWN.
 
 ### DOWN
-1. `systemctl status <unit>` (or `systemctl --failed` if you don't know the unit).
+1. `systemctl status <unit>` (or `systemctl list-units --state=failed` if you
+   don't know the unit; `systemctl --failed` classifies as a write).
    - `active (running)` but user says down → it's up but not *serving*; treat as
      ERRORING (read its log) or SLOW (network/bind). Don't declare it down.
    - `failed` / `inactive` → read *why*: `journalctl -u <unit> -n 40 --no-pager`.
      The last lines before exit are the cause. Common: config parse error, a
      dependency (DB) down, a full disk (`df -h`), or OOM (MEMORY chain).
-   - Unit won't be found → wrong unit name; `systemctl list-units --type=service | grep <name>`.
+   - Unit won't be found → wrong unit name. List the unit files and search
+     them: `ls /etc/systemd/system /usr/lib/systemd/system | grep -i <name>`.
+     (Don't pipe `systemctl` itself: on a jailed host only its plain form can
+     reach systemd.)
 
 ### DISK
 1. `df -h` → which filesystem is full (watch `/`, `/var`, `/tmp`).
@@ -115,9 +122,11 @@ decides. Stop the instant you've named the cause.
 
 ### MEMORY
 1. `free -h` → is RAM exhausted, is swap in use?
-   - Something got OOM-killed → confirm: `dmesg -T 2>/dev/null | grep -i "killed process" | tail -5`
-     (or `journalctl -k --since "-1h" | grep -i oom`). That names the victim PID
-     and process.
+   - Something got OOM-killed → confirm:
+     `journalctl -k --since "-1h" --no-pager | grep -i "killed process"`. That
+     names the victim PID and process. (`dmesg -T | grep -i "killed process"`
+     shows the same, but `dmesg` can fail with "Operation not permitted" inside
+     the read jail.)
    - RAM high, nothing killed yet → who's holding it:
      `ps -eo pid,rss,comm --sort=-rss | head -10`.
    - Swapping hard (high `si/so`) → same `ps` by RSS; the fix is usually
@@ -147,9 +156,10 @@ decides. Stop the instant you've named the cause.
   read tools stays a READ — see `debugging-remote-servers` for why).
 - App logfiles: `tail -n 80 /var/log/<app>/<file>.log`, or
   `tail -n 200 <file> | grep -i <token>`. Never `cat` a multi-MB log.
-- Send **separate `sshgate.run` calls**, one simple command each. Do **not**
-  chain diagnostics with `&&`/`;`/`sh -c` — the gate classifies any such
-  compound as a write and it needs a tap for no reason. One read, one call.
+- Prefer **separate `sshgate.run` calls**, one simple command each. A chain of
+  reads (`df -h && free -h`) is still a read, but one unrecognised segment
+  makes the whole chain a write, and `sh -c` is always a write. One read per
+  call keeps every read free and its output easy to attribute.
 - If a read is refused as a write, **simplify it** (drop the redirect/compound/
   uncommon tool) — don't retry the same thing. Note `journalctl --rotate` /
   `--vacuum-*` are genuine writes (they mutate the journal); a plain bounded
@@ -159,8 +169,9 @@ decides. Stop the instant you've named the cause.
 
 `df -h`, `df -i`, `free -h`, `uptime`, `nproc`, `top -bn1 | head -20`,
 `ps -eo pid,rss,comm --sort=-rss | head`, `ss -tlnp`,
-`ss -tnp state established | head`, `dmesg -T | tail`. All reads, all free, all
-single simple commands. Fire them per the chain — not all at once as a reflex.
+`ss -tnp state established | head`, `journalctl -k -n 20 --no-pager`. All
+reads, all free, all single simple commands. Fire them per the chain — not all
+at once as a reflex.
 
 ## When a FIX becomes appropriate
 
@@ -214,9 +225,9 @@ wiping a directory. For any of these:
 
 User: "prod-db has gone really sluggish in the last hour, figure out why."
 
-1. **Orient.** `sshgate.list_servers` → `prod-db` registered, `read_only:false`
-   (Tier-2). `sshgate.ping prod-db` → reachable, 40 ms. It's up; this is an
-   in-box problem. **Class: SLOW.**
+1. **Orient.** `sshgate.list_servers` → `prod-db` registered, no `read_only`
+   flag (Tier-2, signed-write). `sshgate.ping prod-db` → reachable, 40 ms.
+   It's up; this is an in-box problem. **Class: SLOW.**
 2. **Cheapest discriminating read.** `sshgate.run prod-db "uptime"` →
    `load average: 9.80, 8.40, 5.10`. `sshgate.run prod-db "nproc"` → `4`.
    *Hypothesis: load ≫ 4 cores → saturation. Is it CPU or I/O wait?*

@@ -37,7 +37,9 @@ and one concrete next step.
 - **The user denies any approval-related step (token paste, sudo
   prompt, Telegram link).** Stop. Do not re-prompt — ask why and
   offer to skip the tier or roll back.
-- **A required external dependency is missing (Go < 1.25, `jq`
+- **A required external dependency is missing (Go < 1.25 — a newer Go is
+  fine; `go.mod` pins toolchain go1.26.4, which Go downloads on the first
+  build if needed, so the first build needs network access — `jq`
   missing for the registry-enumeration step, `systemctl` absent
   because the user is on macOS or a non-systemd distro).** Tell the
   user which dependency is missing and stop; do not try to install
@@ -57,8 +59,9 @@ and one concrete next step.
   approval. `gate.pub` is staged locally; each existing Tier-1 alias
   must be manually de-provisioned and re-added before it becomes
   signed-write.
-- **Tier 3 — Hosted server signer:** source foundation present, but its v0.2
-  policy-authority and release gates remain open. This local setup command does
+- **Tier 3 — Hosted server signer:** source foundation present, but the
+  hosted policy authority and the v0.2 release gates remain open
+  (`docs/ROADMAP.md`); there is no tagged release of any tier yet. This local setup command does
   not configure it; hand off to `src/signer-server/README.md` for current
   engineering/deployment requirements.
 
@@ -74,8 +77,8 @@ service unit.
 
 ## Step -1 — Plugin-load preflight
 
-The MCP binary is on the user's `$PATH` (Claude Code's `/plugin install`
-strips `src/`/`bin/` from the cache, so it cannot live there). Verify the
+The MCP binary must be on the user's `$PATH`: Claude Code's `/plugin
+install` copies the plugin files, not built Go binaries. Verify the
 binary resolves AND locate the user's clone (which has `src/` for builds).
 
 ```bash
@@ -91,13 +94,16 @@ CLONE="${SSHGATE_CLONE:-$HOME/src/SSHGate}"
 test -f "$CLONE/go.mod" && echo "clone:ok ($CLONE)" || echo "clone:missing"
 ```
 
+(`SSHGATE_CLONE` is only a convenience for this walkthrough; nothing else
+in SSHGate reads it.)
+
 If `mcp-bin:missing`, tell the user verbatim:
 
 > "The `sshgate-mcp` binary is not on your `$PATH`. Claude Code's
 > `/plugin install` only copies the plugin subtree — it does not build or
 > ship binaries. Build them from your clone:
 >
-> 1. Clone if you haven't: `git clone https://github.com/karthikeyan5/SSHGate ~/src/SSHGate`
+> 1. Clone if you haven't: `git clone https://github.com/andrometiq/sshgate ~/src/SSHGate`
 > 2. Build onto PATH: `cd ~/src/SSHGate && make install-local`
 > 3. Persist `~/go/bin` (or `\`go env GOPATH\`/bin`) to your LOGIN profile
 >    (`~/.zprofile`/`~/.bash_profile`/`~/.zshenv`, not just `~/.zshrc`/`~/.bashrc`)
@@ -231,9 +237,12 @@ Branch on the answer:
 ### Branch D: PARTIAL
 
 Print the detected state line by line (which of `ssh/user/key/tg`
-came back yes/no) and tell the user the install is mid-migration.
-Suggest running `scripts/uninstall.sh` or manually cleaning state.
-Stop.
+came back yes/no) and tell the user the install is incomplete. The most
+common case is `user:yes` with `tg:no`: `scripts/install.sh` ran but the
+Telegram prompts were skipped or the run was cut short. `install.sh` is
+idempotent, so re-running `sudo $CLONE/scripts/install.sh` usually
+finishes it. Otherwise suggest `scripts/uninstall.sh` or cleaning state
+by hand. Stop.
 
 ---
 
@@ -275,6 +284,9 @@ Claude Code (quit and relaunch) — not just `/reload-plugins` — so the
 
 ### T1.3 — Create the SSHGate SSH key
 
+(`sshgate pubkey` would also create this key on first use; creating it
+here keeps the walkthrough explicit.)
+
 The SSHGate dedicated SSH key (`sshgate_ed25519`) is what the
 `sshgate add` CLI lays into each remote's `authorized_keys` behind
 the `command="~/.sshgate-gate/gate"` forcing entry. The key never
@@ -304,6 +316,9 @@ chmod 644 "${HOME}/.config/sshgate/ssh/sshgate_ed25519.pub"
 ```
 
 ### T1.4 — Initialise the registry
+
+(Optional: a missing registry counts as empty, and the first `sshgate add`
+creates it. Writing `{}` now lets the Verify flow count servers.)
 
 ```bash
 mkdir -p "${HOME}/.config/sshgate" && touch "${HOME}/.config/sshgate/servers.json"
@@ -336,6 +351,15 @@ Print verbatim:
 >
 >     gate: no signing key configured (read-only install — re-run /sshgate:setup to add a signer)
 >
+> On servers with Landlock and unprivileged user namespaces, the gate runs
+> each read inside a kernel jail that cannot write to the host. To see
+> whether a server gets it, log in with your own admin access as the
+> registered user and run `~/.sshgate-gate/gate doctor` (the `reads:` line
+> says `jailed:full` or `unconfined`). Optionally run
+> `~/.sshgate-gate/gate doctor --pin` there to make the gate refuse reads
+> rather than run them unconfined if the jail ever becomes unavailable.
+> Details: docs/install-step-by-step.md, "Check the server's read jail".
+>
 > Re-run /sshgate:setup any time to add a Telegram signer.
 
 If the caller picked Tier 1, stop here. If they picked Tier 2,
@@ -348,21 +372,24 @@ continue to **Tier 2 flow** (Tier-1 state is the prerequisite).
 This builds on Tier 1 (which must be in place — re-probe Step 0 if you
 got here without running Tier 1 first).
 
-### T2.1 — Confirm the signer binary + bin/ artifacts (already built by install-local)
+### T2.1 — Confirm the files install.sh needs (already built by install-local)
 
 `make install-local` (run in T1.2) depends on `make build`, so it already
-produced the clone's `bin/*` artifacts — including `bin/sshgate-signer-telegram`
-and `bin/sshgate-gate-linux-amd64` — that `scripts/install.sh` (T2.2)
-consumes from `$CLONE/bin/`. Do NOT run a separate `make build`;
-`install-local` is the single build command.
+produced `bin/sshgate-mcp` and `bin/sshgate-signer-telegram`, which
+`scripts/install.sh` (T2.2) takes from `$CLONE/bin/`. The gate binary it
+installs is the committed `dist/gate/sshgate-gate-linux-amd64`, which is
+part of the clone (never rebuilt locally). Do NOT run a separate
+`make build`; `install-local` is the single build command.
 
-Just confirm the artifacts install.sh needs are present:
+Just confirm the files install.sh needs are present:
 
 ```bash
-ls -la "$CLONE/bin/sshgate-signer-telegram" "$CLONE/bin/sshgate-gate-linux-amd64"
+ls -la "$CLONE/bin/sshgate-mcp" "$CLONE/bin/sshgate-signer-telegram" "$CLONE/dist/gate/sshgate-gate-linux-amd64"
 ```
 
-If either is missing (e.g. T1.2 was skipped), run `cd "$CLONE" && make install-local`.
+If a `bin/` file is missing (e.g. T1.2 was skipped), run
+`cd "$CLONE" && make install-local`. If the `dist/gate/` file is missing,
+the clone is damaged: restore it with `git checkout -- dist/gate/`.
 
 ### T2.2 — Run the installer (single pass — user_id + token in one run)
 
@@ -371,8 +398,9 @@ ONE idempotent run does everything: creates the `sshgatesigner` user, the
 `/var/lib/sshgatesigner/` skeleton, the systemd unit, the `--init` signing
 keypair, AND — in the same pass — configures the Telegram backend (prompts for
 your numeric user_id, writes the `[backend.telegram]` block, flips the backend
-type from `stub` to `telegram`) and prompts for the bot token. There is no
-second pass and no hand-editing of the root-owned config.
+type from `stub` to `telegram`), prompts for the bot token, and copies the new
+`gate.pub` to `~/.config/sshgate/pubkey-distrib/gate.pub` for the user who ran
+`sudo`. There is no second pass and no hand-editing of the root-owned config.
 
 Have TWO things ready before the user runs it — the script prompts for each in
 order:
@@ -488,21 +516,30 @@ If still not present after 30s, tell the user to double-check they
 sent `/start` to the right bot, then re-poll once. If still nothing,
 stop and surface `journalctl -u sshgate-signer-telegram -n 30 --no-pager`.
 
-### T2.4 — Stage gate.pub; manually re-provision each existing alias
+### T2.4 — Confirm gate.pub is staged; manually re-provision each existing alias
 
-The signer is now live with a new master key. Stage its public key for the
-human-only provisioning CLI. This does **not** alter any existing Tier-1
-server: each remains read-only until the user manually de-provisions and
-re-adds that exact alias.
+The signer is now live with a new master key, and `scripts/install.sh`
+staged its public key for the human-only provisioning CLI. This does
+**not** alter any existing Tier-1 server: each remains read-only until the
+user manually de-provisions and re-adds that exact alias.
 
-Make the pubkey available to the MCP layer at the canonical local
-path:
+Confirm the staged pubkey:
 
 ```bash
-mkdir -p "${HOME}/.config/sshgate/pubkey-distrib"
-sudo cp /var/lib/sshgatesigner/keys/gate.pub "${HOME}/.config/sshgate/pubkey-distrib/gate.pub"
-sudo chown "$USER" "${HOME}/.config/sshgate/pubkey-distrib/gate.pub"
-chmod 644 "${HOME}/.config/sshgate/pubkey-distrib/gate.pub"
+ls -la "${HOME}/.config/sshgate/pubkey-distrib/gate.pub"
+```
+
+Only if it is missing (the user runs SSHGate with a custom
+`$XDG_CONFIG_HOME`, which `sudo` hides from the installer, or the staging
+step warned), copy it by hand into the config directory SSHGate actually
+uses:
+
+```bash
+CFG="${XDG_CONFIG_HOME:-$HOME/.config}/sshgate/pubkey-distrib"
+mkdir -p "$CFG"
+sudo cp /var/lib/sshgatesigner/keys/gate.pub "$CFG/gate.pub"
+sudo chown "$USER" "$CFG/gate.pub"
+chmod 644 "$CFG/gate.pub"
 ```
 
 Then enumerate the existing aliases so the user can explicitly re-provision
@@ -521,14 +558,16 @@ re-provision.
 > first") — it does NOT upgrade in place. An in-place tier flip was
 > considered and rejected for security: any unsigned upgrade path the CLI
 > could exercise is a path the agent could emulate — read-only is
-> read-only (see roadmap #17, redefined, in `docs/ROADMAP.md`). Re-tiering
+> read-only (see #17 in `docs/ROADMAP.md`). Re-tiering
 > is a manual de-provision + re-add: a Tier-1 gate has no signer pubkey, so
 > `/sshgate:revoke` can't run on it — instead, on the host, replace SSHGate's
 > forced `command="..."` line in `~/.ssh/authorized_keys` with `sshgate
 > pubkey`'s plain line, drop the alias from the registry
 > (`~/.config/sshgate/servers.json`), then `sshgate add <alias> <user@host>`
 > without `--read-only` (with the signer already set up), which finds the
-> staged `gate.pub` and deploys signed-write.
+> staged `gate.pub` and deploys signed-write. `sshgate revoke <alias>`
+> prints the exact strip + forget commands for one alias; it changes
+> nothing itself.
 
 Do not claim an alias is upgraded until the user has completed those manual
 steps for that alias. If the user does not want to re-provision an alias now,

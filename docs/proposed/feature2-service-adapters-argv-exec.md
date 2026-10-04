@@ -1,16 +1,53 @@
-# SSHGate — Per-Service Adapters & argv-exec (structural fix #22 + read-only SQL)
+# SSHGate — Per-Service Adapters & argv-exec (a shell-free read path + read-only SQL)
 
-> Status: **proposal** — not yet implemented. A starting point for the feature described in [ROADMAP](../ROADMAP.md).
+> **Status: OPEN PROPOSAL, not scheduled, and partly overtaken.** It is "Feature 2" in
+> [ROADMAP.md](../ROADMAP.md); [BUILD-PLAN.md](../BUILD-PLAN.md) does not schedule the adapters,
+> `lex.Parse`, the in-Go pipeline runner or the SQL adapters, and none of them exist in the code.
+> The `SSHGATE_ADAPTER_CLASSIFY` and `SSHGATE_ARGV_EXEC` flags below are proposed names only.
+>
+> What changed since this was written:
+> - **The kernel sandbox shipped first, as the primary read wall, not as a phase-6 follow-on.**
+>   v0.1.5 runs every read in the `ro-v1` jail (`src/gate/confine/`) on hosts that support it:
+>   user, mount and IPC namespaces, a read-only view of the host, Landlock, and a seccomp table
+>   whose default is `ENOSYS`. It does not deny `execve`, so the `git`/pager concern below does not
+>   apply, and it needs both user namespaces and Landlock; hosts without them run reads
+>   classifier-only. "#22" in [BUILD-PLAN.md](../BUILD-PLAN.md) now names that jail work
+>   (work item 1), not this design. The [sandbox section](#sandbox--defense-in-depth-recommendation),
+>   open question 2 and task T9 are kept for the reasoning only.
+> - **Shell-free exec exists for one narrow case.** A fixed allowlist of `systemctl`/`docker` read
+>   verbs ("Lane 2", `src/gate/cmd/sshgate-gate/lane2.go`) runs as argv with no shell, no jail
+>   and an environment built from nothing (`ExecArgvWithRedaction` in `src/gate/executor.go`).
+>   BUILD-PLAN step P3.1 builds a canonical-argv grammar for those verbs; any adapter work here
+>   should reuse it rather than design a second one.
+> - Every other read still runs through `/bin/sh -c` (inside the jail when there is one), so the
+>   two-parser mismatch this design attacks still exists; the jail now bounds what a mismatch can
+>   do on jailed hosts.
 
 ## Summary
 
-SSHGate's read-only classifier is a heuristic re-implementation of `/bin/sh`'s grammar placed *in front of* a real `/bin/sh -c` at `executor.go:74`. Every documented bypass — the backslash-escape RCE, newline-split, `$()`-in-double-quotes, top-level redirect — is the same root cause: **two parsers see the same string and disagree**, and the shell wins. You cannot win an arms-race against `/bin/sh` with a string heuristic feeding `/bin/sh`.
+SSHGate's read-only classifier is a heuristic re-implementation of `/bin/sh`'s grammar placed *in front of* a real `/bin/sh -c` (`ExecWithRedaction` in `src/gate/executor.go`). Every documented bypass — the backslash-escape RCE, newline-split, `$()`-in-double-quotes, top-level redirect — is the same root cause: **two parsers see the same string and disagree**, and the shell wins. You cannot win an arms-race against `/bin/sh` with a string heuristic feeding `/bin/sh`.
 
 This design retires that arms-race **structurally** by deleting `/bin/sh` from the *unsigned read path*: the gate lexes the command once into clean argv, classifies that argv, and `execve`s **byte-for-byte that same argv** with no shell. Classification view ≡ execution view by construction — the mismatch class cannot be expressed. On top of this, the per-binary rules are repackaged as a **per-service Adapter registry** with a *fail-closed unknown-flag posture* for enumerated-surface binaries, which is the one idea that actually retires the recurring per-tool flag-leak race (`sort -o`, `curl -D`, the next `--compress-program`). Feature 2 (read-only SQL) is then **three more adapters** (`psql`, `mysql`/`mariadb`, `sqlite3`) that rewrite the invocation into a server-enforced read-only form, parse the SQL as a cheap outer gate, and route write-SQL through the existing Telegram signer.
 
-We choose **Approach A (argv-exec + fail-closed adapters)** as the primary, phase-1 fix — the best risk-for-cost path per the adversarial review — and stage the kernel sandbox (Approach B's seccomp/Landlock) as an explicit **defense-in-depth follow-on (phase 6)**, *not* as the primary boundary, because its core `execve`-deny conflicts with the legitimate read corpus (`git`/`journalctl` fork helpers) and its FS protection vanishes on the hardened hosts where it would matter most. The signed path keeps `/bin/sh -c` (a human approved the literal bytes); only the unsigned read path — the entire historical attack surface — loses the shell.
+Three approaches were compared: **A**, argv-exec with fail-closed adapters; **B**, a kernel sandbox (seccomp, Landlock, user namespaces) as the primary boundary; **C**, keep the shell and make every read pipeline a signed command. This design chose **Approach A** as the primary, phase-1 fix — the best risk-for-cost path in the threat analysis — and staged the kernel sandbox (Approach B) as an explicit **defense-in-depth follow-on (phase 6)**, *not* as the primary boundary, because its core `execve`-deny conflicts with the legitimate read corpus (`git`/`journalctl` fork helpers) and its FS protection vanishes on the hardened hosts where it would matter most. The signed path keeps `/bin/sh -c` (a human approved the literal bytes); only the unsigned read path — the entire historical attack surface — loses the shell.
 
-All ten mandatory mitigations from the adversarial review are incorporated, the most load-bearing being **#1: a single classifier source of truth shared by the MCP client and the gate, pinned by a CI differential test** — without it, the "view ≡ exec" claim is true only inside the gate and a MCP↔gate drift in the write→read direction is a silent unsigned write.
+A threat analysis of the three approaches produced a list of required mitigations, referenced below by number:
+
+1. A single classifier source of truth shared by the MCP client and the gate, pinned by a CI
+   differential test.
+2. Tighten per-binary posture to fail-closed, one binary at a time, each with red-team rows.
+3. Trusted absolute-path resolution and an explicitly scrubbed child environment.
+4. SQL clients resolved by trusted path/inode, with the whole argv built by the adapter.
+5. A wall-clock timeout, a correct process group for every pipeline stage, and teardown on a
+   partial start.
+6. Redaction parity on the new exec path, proven by a test.
+7. If argv is ever signed, the envelope type is part of the signed payload and cross-type
+   execution is refused.
+8. Sandbox profiles chosen from a parent-controlled fd, never from child-influenced argv, and a
+   loud failure when the filesystem backstop is missing.
+9. Lexer-seam hardening: assignment detection on the pre-unescape lexeme; empty tokens preserved.
+
+The most load-bearing is **#1** — without it, the "view ≡ exec" claim is true only inside the gate and a MCP↔gate drift in the write→read direction is a silent unsigned write.
 
 ---
 
@@ -22,7 +59,7 @@ All ten mandatory mitigations from the adversarial review are incorporated, the 
 - **G3.** Ship Feature 2: read-only SQL over `psql`/`mysql`/`sqlite3` executed without a Telegram tap, with writes routed to the existing signer.
 - **G4.** Preserve every existing constraint: the redactor choke point, process-group cancellation, exit-code mapping (128+signum / 65/70/77), and the full `classify` + red-team test surface staying green throughout.
 - **G5.** Keep the single-static-binary install model (no `bwrap`, no per-host runtime dependency).
-- **G6.** Add the two things the current executor lacks and the brief flagged: an explicit **scrubbed child env** and a **wall-clock timeout**.
+- **G6.** Add an explicit **scrubbed child env** and a **wall-clock timeout** to the read path. (Today only the Lane-2 daemon reads get an environment built from nothing; jailed reads inherit the gate's environment with the temp and history variables pointed at `/dev/shm`; no read has a wall-clock deadline.)
 
 ### Non-goals
 - **N1.** Sandboxing reads against *content* exposure. A correctly-classified read that prints `id_rsa` is the redactor's job, unchanged; the adapter/sandbox does not make reads safe content-wise.
@@ -71,7 +108,7 @@ SSH_ORIGINAL_COMMAND (raw string)
 - *Repackaged, not re-authored:* the `readAllowlist`/`argRule` rules (`rules_text.go`, `rules_net.go`, `rules_system.go`, `env.go`) move *inside* `ShellAdapter` unchanged in logic, gaining only the fail-closed posture flip in a later phase.
 - *New:* `lex.Parse`'s structured `[]Stage` output, the `Adapter` interface + registry, the in-Go pipeline runner replacing the single shell exec, the three SQL adapters, the scrubbed-env + trusted-path + timeout hardening, and (phase 6) the sandbox package.
 
-**Single source of truth (mandatory mitigation #1).** `Classify(string) Kind` is consumed at three sites — gate `main.go:121,153`, MCP `run.go:131`, `run_batch.go:103`. The adapter registry's `Inspect` is the **one** code path behind all three; the public `Classify` shim folds `Decision → Kind` for the MCP call sites and the test corpus. A CI **differential test** runs the entire corpus through both the MCP-side and gate-side entry and asserts byte-identical verdicts, failing the build on any drift. This closes the #1 risk: a MCP-stricter-than-gate drift is a silent unsigned-write bypass; sharing the literal code path makes it inexpressible.
+**Single source of truth (mitigation #1).** The classifier is consumed by the gate (`classify.Classify` in `src/gate/cmd/sshgate-gate/main.go`) and by the MCP (`classify.Explain`, which returns the same `Kind` plus a reason, in `src/mcp/tools/run.go` and `run_batch.go`). The adapter registry's `Inspect` would be the **one** code path behind all of them; the public `Classify` shim folds `Decision → Kind` for the MCP call sites and the test corpus. A CI **differential test** runs the entire corpus through both the MCP-side and gate-side entry and asserts byte-identical verdicts, failing the build on any drift. This closes the #1 risk: a MCP-stricter-than-gate drift is a silent unsigned-write bypass; sharing the literal code path makes it inexpressible.
 
 ---
 
@@ -220,15 +257,15 @@ A Postgres read-only *transaction does NOT block* `COPY TO PROGRAM`/`pg_read_fil
 Because the adapter constructs `Plan.Argv` and the executor runs it verbatim via `execve` (no shell), the hardening flags cannot be stripped or reinterpreted en route.
 
 ### Write-SQL via the signing path
-A statement classified WRITE is **not** blanket-denied — `signedWritePlan` packages the **adapter-normalized statement** for SSHGate's existing signer (`Sign.Sign` → Telegram approve → `SSHGATE_SIG`), which the brief confirms is classifier-agnostic. The human approves *exactly the normalized form* that will run, and the gate's `VerifySigned` re-runs that form.
+A statement classified WRITE is **not** blanket-denied — `signedWritePlan` packages the **adapter-normalized statement** for SSHGate's existing signer (`Sign.Sign` → Telegram approve → `SSHGATE_SIG`), which is classifier-agnostic: it signs whatever command string it is asked to approve. The human approves *exactly the normalized form* that will run, and the gate's `VerifySigned` re-runs that form.
 
-**Two-increment shippability + the envelope decision (mitigation #7).** Signing a normalized *argv* (not the raw string) introduces a second signed-execution path alongside the existing signed-*string* path — a confusion/replay surface. If the normalized-argv envelope is chosen, the **envelope type (string vs normalized-argv) MUST be part of the signed payload, and the gate MUST refuse cross-type execution** (a string-signed payload cannot run as argv, and vice-versa). The daemon today only accepts `kind=="sign"` and the `sign-envelope` kind is *not* on this branch — so until that envelope work lands, **fallback:** write-SQL is `DENY`-with-hint ("write SQL must be signed; envelope signing not yet enabled"); **read-SQL ships fully in increment 1.** This is an Open questions item (string-envelope vs new argv-envelope).
+**Two-increment shippability + the envelope decision (mitigation #7).** Signing a normalized *argv* (not the raw string) introduces a second signed-execution path alongside the existing signed-*string* path — a confusion/replay surface. If the normalized-argv envelope is chosen, the **envelope type (string vs normalized-argv) MUST be part of the signed payload, and the gate MUST refuse cross-type execution** (a string-signed payload cannot run as argv, and vice-versa). The signer has no argv-envelope kind today, so until that envelope work lands, **fallback:** write-SQL is `DENY`-with-hint ("write SQL must be signed; envelope signing not yet enabled"); **read-SQL ships fully in increment 1.** This is an Open questions item (string-envelope vs new argv-envelope).
 
 ---
 
 ## Read-pipeline handling
 
-Read pipelines (`ps aux | grep sshd`, `journalctl -u x | tail`, `dmesg | grep -i error`) are the single most common diagnostic idiom; forcing a Telegram tap for every `| grep` would gut the read experience and push operators toward "sign everything," defeating the gate. **Decision (recommended): a safe in-process pipeline executor — keep read pipelines unsigned, but run them with NO shell.** (This is an Open questions item; the fallback is sign-only pipelines as in Approach C, deferring the mini-executor.)
+Read pipelines (`ps aux | grep sshd`, `journalctl -u x | tail`, `dmesg | grep -i error`) are the single most common diagnostic idiom; forcing a Telegram tap for every `| grep` would gut the read experience and push operators toward "sign everything," defeating the gate. **Decision (recommended): a safe in-process pipeline executor — keep read pipelines unsigned, but run them with NO shell.** (This is an Open questions item; the fallback is sign-only pipelines as in Approach C, deferring the mini-executor.) Note that today's classifier already treats a pipe, `&&`, `;` or `||` between recognised reads as a read; the shell still runs it.
 
 ```go
 func runPipeline(ctx context.Context, plans []adapter.Plan, io StdIO) (int, error) {
@@ -249,7 +286,7 @@ Rules and correctness requirements:
 - **READ iff *all* stages are READ.** Any WRITE stage routes the whole pipeline to signing; any DENY stage ⇒ DENY (mirrors today's "any write segment wins," now over real argv).
 - **There is no `|` for a tool to reinterpret** — the pipe is an OS-level fd connection made in Go. `grep "a | rm b"` is one literal argv token to `grep`. This structurally kills the separator/quote-mismatch class for pipelines.
 - **Bounded:** `lex.Parse` caps pipeline length (≤ 8 stages) and total argv bytes; over-limit ⇒ DENY with a "sign this" hint.
-- **Correct process group (mitigation #5, fixes Approach A's bug):** only the leader sets `Setpgid: true`; stages 2..N set `Pgid = leader.Process.Pid` **after the leader's `Start()`** (the pgid is unknown until then). `c.Cancel` SIGKILLs `-pgid` for the whole pipeline. The naive `Setpgid: i==0` snippet would leave later stages in the gate's group — a cancellation/cleanup bug and a sandbox-escape-adjacent issue; this design fixes and tests it with a hung middle stage.
+- **Correct process group (mitigation #5):** only the leader sets `Setpgid: true`; stages 2..N set `Pgid = leader.Process.Pid` **after the leader's `Start()`** (the pgid is unknown until then). `c.Cancel` SIGKILLs `-pgid` for the whole pipeline. The naive `Setpgid: i==0` snippet would leave later stages in the gate's group — a cancellation/cleanup bug and a sandbox-escape-adjacent issue; this design fixes and tests it with a hung middle stage.
 - **Explicit teardown on partial start (mitigation #5):** if stage k fails to `Start()`, close all already-created pipe fds and SIGKILL all already-started stages; `ExtraFiles=nil` and parent-side pipe ends closed after each `Start`. Tested with an unresolvable middle stage.
 - **Deadlock avoidance:** the redact writer on last-stdout must keep draining even when an upstream stage errors; the timeout bounds any residual hang.
 
@@ -280,16 +317,23 @@ Rules and correctness requirements:
 | **Wrapper-binary unwrap** (`env rm x`) | recursive `env` adapter | Re-lexes trailing argv, re-dispatches through the registry; `rm` not read-allowlisted ⇒ DENY. No shell to unwrap. |
 | **awk `print x > var` residual** | awk adapter, exact program scan | The program is one argv token (not re-split by sh), so the `>`/`system(`/`| "cmd"` scan is exact, not heuristic. |
 | **Pager/PTY escape** (`less !sh`) | `LESSSECURE=1`+`-n` in `Plan.Env` | Adapter owns the env; `!`/`|`/`:e`/`v` structurally disabled. |
-| **SQL** (`\!`, `\copy`, `COPY TO PROGRAM`, `pg_read_file`, `lo_export`, `.shell`, `load_extension`, `INTO OUTFILE`, `ATTACH`, multi-`;`) | SQL adapter + server read-only role + (phase-6) sandbox | Adapter rejects meta/dot-commands + DDL/DML and builds the whole argv; the read-only role lacks `pg_execute_server_program`; phase-6 seccomp denies the psql child's `fork`/`execve`. |
-| **Unknown future flag-leak** (the open tail) | adapter fail-closed (phase 1); sandbox (phase 6) | Phase 1 fails closed for enumerated binaries. The truly open-ended tail is the phase-6 sandbox's job — see below. |
+| **SQL** (`\!`, `\copy`, `COPY TO PROGRAM`, `pg_read_file`, `lo_export`, `.shell`, `load_extension`, `INTO OUTFILE`, `ATTACH`, multi-`;`) | SQL adapter + server read-only role + the read jail | Adapter rejects meta/dot-commands + DDL/DML and builds the whole argv; the read-only role lacks `pg_execute_server_program`. (This design assumed a phase-6 seccomp would deny the psql child's `fork`/`execve`. The shipped jail does not deny `execve`, and it cannot stop a database server, which runs outside the jail, from acting on what a jailed client sends it over TCP; a jailed client also cannot reach a server's Unix socket at all. The server-side read-only role stays the trust anchor.) |
+| **Unknown future flag-leak** (the open tail) | adapter fail-closed (phase 1); the read jail | Phase 1 fails closed for enumerated binaries. On hosts with the jail, the open-ended tail is already contained: a mis-classified read cannot write to the host filesystem. |
 
-**Meta-point.** The shell-mismatch / escape / env / wrapper families (rows 1, 2, 5, 7) are killed *by construction* — argv-exec removes the second interpreter, so "the classifier saw X but sh did Y" is inexpressible. The per-tool surface (rows 3, 4, 6, 8, 9) is killed by the **adapter fail-closed posture**, which argv-exec *enables* by handing the adapter clean, exact tokens. Neither half suffices alone; together they retire the documented history in pure userspace. The single remaining open tail (an undiscovered write-flag on an *allow-by-default* binary) is what the phase-6 sandbox backstops.
+**Meta-point.** The shell-mismatch / escape / env / wrapper families (rows 1, 2, 5, 7) are killed *by construction* — argv-exec removes the second interpreter, so "the classifier saw X but sh did Y" is inexpressible. The per-tool surface (rows 3, 4, 6, 8, 9) is killed by the **adapter fail-closed posture**, which argv-exec *enables* by handing the adapter clean, exact tokens. Neither half suffices alone; together they retire the documented history in pure userspace. The single remaining open tail (an undiscovered write-flag on an *allow-by-default* binary) is what the shipped read jail now backstops on hosts that support it.
 
 ---
 
 ## Sandbox / defense-in-depth recommendation
 
-**Recommendation: the kernel sandbox is a phase-6 defense-in-depth follow-on, NOT the primary phase-1 boundary.** The adversarial review is decisive here: Approach B's sandbox is *not* the strict superset it presents as.
+> **Superseded.** The project chose the opposite order: the `ro-v1` read jail shipped in v0.1.5 as
+> the primary read wall (see the status note at the top and work item 1 in
+> [BUILD-PLAN.md](../BUILD-PLAN.md)). It avoids the first objection below by not denying `execve`,
+> and handles the second by being all-or-nothing: a host without user namespaces and Landlock runs
+> reads classifier-only, and the operator can pin a `jail-floor` so such a host refuses reads
+> instead. The original reasoning follows for the record.
+
+**Recommendation (original): the kernel sandbox is a phase-6 defense-in-depth follow-on, NOT the primary phase-1 boundary.** The threat analysis argued that Approach B's sandbox is *not* the strict superset it presents as.
 
 - **Its core mechanism conflicts with the legitimate read corpus.** seccomp `execve`-deny breaks `git` (execs `git-log`/pager), `journalctl`/`git` pagers, `docker`, `systemctl`. You cannot deny `execve` wholesale without regressing reads; allowing it per-tool means the sandbox *profile selection is itself classifier output* — the very fallibility the sandbox claims to transcend reappears at the syscall layer.
 - **Its FS protection vanishes where it matters most.** On hardened RHEL (user namespaces disabled) with an older kernel (no Landlock), B degrades to seccomp-only, and `sort -o authorized_keys` is a plain `write()`, not `execve` — so B collapses to A on exactly the hosts you'd most want a backstop. "Logged loudly" is honest but the value is host-dependent and absent there.
@@ -316,22 +360,22 @@ So phase 1 ships A's userspace fix, whose fail-closed posture *is* the correct s
 - **Phase 3 — tighten per-binary posture (mitigation #2).** Flip enumerated-surface binaries from allow-by-default to fail-closed unknown-flag→DENY, **one binary per commit**, each with red-team rows (existing harden/bypass rows stay WRITE/DENY; READ controls stay `executed`; add a "novel write flag denies" row). **Fallback:** posture is per-binary data — revert one entry.
 - **Phase 4 — land the SQL adapter (Feature 2).** Add `SQLAdapter` (read classification + hardened read Plans + trusted-inode resolution + whole-argv construction). Wire write-SQL to the signer; if the normalized-argv envelope (mitigation #7) isn't ready, **fallback:** write-SQL is DENY-with-hint while read-SQL ships fully. Add SQL beacon targets (`COPY TO PROGRAM`/`\!`/`.shell`/`INTO OUTFILE`/`lo_export`/`ATTACH`/multi-`;`) to the red-team canary zone; green gate = each dangerous escape is WRITE/deny producing 0 fs/inotify writes, every plain `SELECT` is an executed READ.
 - **Phase 5 — remove the legacy shell-exec read path + flags.** After phases 1–3 soak green, delete the old `Classify` internals' role as exec authority and remove the env flags; the front-end survives only as the lexer, `argRule` funcs survive inside `ShellAdapter`, and `Classify` remains a thin `Kind` shim over the adapter fold (for the MCP call sites + test surface).
-- **Phase 6 — sandbox defense-in-depth (follow-on).** Add the `src/sandbox` package (seccomp floor + Landlock/user-ns FS + per-adapter profiles + fail-loud probe), gated, after the adapters are proven. Red-team gains a deliberately-holed adapter behind the sandbox asserting `executed && fs_unchanged` (write attempted, EPERM'd) — the test only this layer can pass.
+- **Phase 6 — sandbox defense-in-depth (follow-on; superseded by the shipped read jail).** Add the `src/sandbox` package (seccomp floor + Landlock/user-ns FS + per-adapter profiles + fail-loud probe), gated, after the adapters are proven. Red-team gains a deliberately-holed adapter behind the sandbox asserting `executed && fs_unchanged` (write attempted, EPERM'd) — the test only this layer can pass.
 
 ---
 
-## Phased build plan (ordered tasks for subagent execution)
+## Build tasks
 
 1. **T0 — lexer promotion.** Extract `containsSubstitution`/`hasTopLevelRedirect`/`splitSegments`/`tokenize`/`isAssignment` into `src/classify/lex` as `Parse(raw) (Pipeline, error)` emitting `[]Stage` + typed rejections (`ErrSubstitution`/`ErrRedirect`/`ErrMultiCommand`). **Mitigation #9:** assignment detection on the pre-unescape lexeme; preserve empty `''` tokens. Add corpus rows `find -name ''`, `FOO\=bar cmd`, `uniq '' out`. Gate: existing `classifier_*_test.go` green (tokenization output unchanged).
 2. **T1 — adapter package + registry.** Define `Adapter`/`Stage`/`Decision`/`Plan`/`Context` in `src/adapter`; registry keyed by basename. Implement `resolveTrusted`/`resolveTrustedSQL` (gate-owned absolute-path/inode table) and the scrubbed-env builder (mitigations #3, #7-env).
 3. **T2 — ShellAdapter (verbatim rules).** Move `readAllowlist` + each `*Rule` + `dangerousEnvVars` + `env` recursion into `ShellAdapter`, logic unchanged. Add `classifyViaAdapters` + the **differential test** across `Classify`/adapters/MCP-entry/gate-entry (mitigation #1). Gate behind `SSHGATE_ADAPTER_CLASSIFY`.
-4. **T3 — wire classification (phase 1).** Point gate `main.go:121,153` and MCP `run.go:131`/`run_batch.go:103` at the shared `Inspect`-backed path via the `Classify` shim. Default `SSHGATE_ADAPTER_CLASSIFY=1`. Gate: full corpus + red-team rig.
+4. **T3 — wire classification (phase 1).** Point the gate's `classify.Classify` calls and the MCP's `classify.Explain` calls at the shared `Inspect`-backed path via the `Classify` shim. Default `SSHGATE_ADAPTER_CLASSIFY=1`. Gate: full corpus + red-team rig.
 5. **T4 — pipeline executor (phase 2).** Implement `runPipeline` in `src/gate/executor.go` for the unsigned-READ path: `os.Pipe` wiring, correct leader-pgroup + post-`Start` `Pgid`, partial-start teardown, `ExtraFiles=nil`, redaction parity on last-stdout + all-stderr with post-`Wait` `Close()`, `context.WithTimeout`, scrubbed `Plan.Env`, trusted `Plan.Path`. Keep `ExecWithRedaction`/`/bin/sh -c` for the signed path. Gate behind `SSHGATE_ARGV_EXEC`; tests: hung middle stage, unresolvable middle stage, secret-redaction-through-new-path, exit-code mapping (128+signum, 65/70/77).
 6. **T5 — posture tightening (phase 3).** One commit per enumerated-surface binary flipping to fail-closed unknown-flag→DENY, each with red-team rows. (mitigation #2.)
 7. **T6 — SQL adapters (phase 4).** `src/adapter/sql_{psql,mysql,sqlite}.go`: `parseInvocation`, `hasClientEscape`, `parseSingleSQL` (dialect-aware, single-statement, read-only classification), whole-argv `hardenedReadPlan`, trusted-inode resolution (mitigation #4). `signedWritePlan` → existing signer; if envelope not ready, DENY-with-hint fallback. SQL red-team beacons + corpus.
 8. **T7 — envelope plumbing (conditional, mitigation #7).** Only if the maintainer chooses the normalized-argv envelope: add envelope-type to the signed payload; gate refuses cross-type execution; daemon accepts the new kind. Otherwise sign the normalized string via the existing path.
 9. **T8 — legacy removal (phase 5).** Delete old exec-authority internals + env flags once soaked; `Classify` remains the shim.
-10. **T9 — sandbox (phase 6, follow-on).** `src/sandbox`: seccomp floor + Landlock/user-ns FS + per-adapter profiles selected from a parent-controlled fd + fail-loud probe + re-exec stub (mitigation #8); deliberately-holed-adapter red-team row.
+10. **T9 — sandbox (phase 6, follow-on; superseded by the shipped read jail).** `src/sandbox`: seccomp floor + Landlock/user-ns FS + per-adapter profiles selected from a parent-controlled fd + fail-loud probe + re-exec stub (mitigation #8); deliberately-holed-adapter red-team row.
 
 **Standing acceptance gate at every exec-changing task (T4, T5, T6, T9):** the red-team rig at 0 bypasses on all WRITE rows + all READ controls still `executed`, plus the differential test (mitigation #1) and redaction-parity test (mitigation #6) green.
 
@@ -341,7 +385,7 @@ So phase 1 ships A's userspace fix, whose fail-closed posture *is* the correct s
 
 1. **Read pipelines — safe in-process executor vs. sign-only?** Recommended: build the in-Go `os.Pipe` pipeline executor so `ps aux | grep x` stays an unsigned read (no shell). Cheaper alternative (Approach C): defer the mini-executor and make every read *pipeline* a one-tap signed command. The recommended path costs the pipeline-correctness engineering in T4 (pgroup/teardown/deadlock); the cheaper path costs diagnostic ergonomics and risks "sign everything" drift.
 
-2. **Sandbox now vs. later?** Recommended: **later (phase 6)** — ship A's userspace fix first; add seccomp/Landlock as a backstop after the adapters soak green. This accepts that phase 1 has no kernel net under an *allow-by-default* binary's undiscovered write-flag (mitigated by fail-closed posture on enumerated binaries + the red-team rig as a standing gate).
+2. **Sandbox now vs. later?** *(Resolved the other way: the read jail shipped first, in v0.1.5.)* Original recommendation: **later (phase 6)** — ship A's userspace fix first; add seccomp/Landlock as a backstop after the adapters soak green. This accepts that phase 1 has no kernel net under an *allow-by-default* binary's undiscovered write-flag (mitigated by fail-closed posture on enumerated binaries + the red-team rig as a standing gate).
 
 3. **SQL write path — reuse the existing string-signer, or build the normalized-argv envelope?** Recommended for increment 1: **read-SQL ships now; write-SQL via the existing string-signer** (sign the adapter-normalized statement as a string). The cleaner-but-new normalized-argv envelope (so the human approves the exact argv, with an envelope-type tag + cross-type refusal) is a separate increment requiring new daemon `kind` plumbing — build it only if argv-level approval fidelity is wanted now.
 

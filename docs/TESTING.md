@@ -1,135 +1,66 @@
 # SSHGate — Developer Testing Guide
 
-This is a part-by-part guide to testing SSHGate **with zero sudo, Docker,
-network, systemd, or CGO**. The standing invariant is:
+This is a part-by-part guide to testing SSHGate. The standing invariant is:
 
-> `go test ./...` must stay green with none of those at every commit (~11s of
-> per-package work, parallelised to ~8s wall).
+> `go test ./...` stays green at every commit **with no sudo, Docker, network,
+> systemd or CGO**.
 
-The only tests that need real Docker targets are the integration-tagged
-red-team live test under `internal/redteam` and the suite under
-`tests/integration`. They are **not** part of the unit gate (see §11).
+Three groups of tests sit outside that unit gate, each behind a build tag or a
+make target:
 
-Everything below is grounded in the actual tree as of this writing. File:func
-citations are exact; if you change the code, re-derive them.
+- **Docker integration** — the red-team live test under `internal/redteam` and
+  the suite under `tests/integration` (see §11).
+- **The kernel read jail** — the jail's acceptance matrix and mutation proof need
+  a Linux host with unprivileged user namespaces and Landlock, and some lanes need
+  root on a disposable machine (see §12).
+- **Release checks** — `make release-gate` and `make verify-dist` (see the table
+  below).
+
+File and function names below are exact; line numbers are approximate and drift
+as the code changes. If you change the code, re-derive them.
 
 ---
 
-## 0. TL;DR / quickstart
+## 0. Quickstart
+
+Everyday commands (no special host needed):
 
 ```sh
 go test ./...            # full unit suite — no sudo/Docker/network/systemd/CGO
 go test -count=1 ./...   # same, but defeat the build/test cache when verifying
-go test -race ./...      # run this before merge (needs CGO; see §10)
+make test                # go test -race ./... (needs CGO; run before merge, see §10)
+make vet
+make preflight           # before every push
 ```
 
-The tagged jail mutation suite (`make test-jail-mutate`) omits CI-only controls
-outside `SSHGATE_JAIL_CI=1`. These include `L-SOCKDIAG`, both socket sweeps and
-`L-CRASH-NO-HELPER` and `L-CRASH-LOWER-PIPE`. An omitted effect leg does not prevent a set's table leg
-from proving the mutation; a set with no remaining red leg is `NOT-RUN`.
-Phase-end acceptance requires both CI lane reports and no omission in their union.
+All the make targets that run tests or checks:
 
-Before the live matrix, run the independent Phase-1 registry floor and the
-probe/observer regressions (these commands do not start a jail):
+| Target | What it does | Needs | When |
+| --- | --- | --- | --- |
+| `make test` | `go test -race ./...`, the unit gate | a C toolchain (for `-race`) | every commit |
+| `make vet` | `go vet` | — | every commit |
+| `make preflight` | `vet test test-refapp-js gitleaks build verify-dist verify-versions verify-repro verify-no-sqlite-local verify-no-humanauth-local` | Node.js; gitleaks (skipped with a warning if missing) | before every push |
+| `make verify-dist` | checks that the committed `dist/gate/` binary matches its `.sha256`, and that `VERSION`, the plugin manifest and `server.json` agree (part of `preflight`) | — | before every push |
+| `make release-gate` | the **only** target that writes `dist/gate/`: a reproducible gate build with the pinned toolchain, checked to contain no test hooks | network access the first time (Go downloads the pinned toolchain) | at release only |
+| `make test-integration` | the Docker suites (§11) | Docker | exercising real `sshd` |
+| `make smoke` | `scripts/smoke-fresh-install.sh` (keyless first-run startup) | — | fresh-user regression |
+| `make e2e` | `preflight test-integration smoke` | Docker | after a large build / before release |
+| `make test-jail` | the read jail's acceptance matrix, non-root lane (§12) | Linux with unprivileged user namespaces that can mount, Landlock, FUSE | any change to the jail or the gate's read path |
+| `make test-jail-root` | the same matrix as root | root on a **disposable** machine | same |
+| `make test-jail-mutate MUTATE=<IDs>` | the mutation proof: removes protections and checks a named test catches each (§12) | as `test-jail` (root lane: run it as root) | when you add or touch a jail protection |
+| `make test-fidelity-smoke` | compares jailed and unjailed output of `ps`, `top`, `pgrep`, `ss` | as `test-jail` | jail changes |
+| `make selftest-testjail`, `make selftest-jailmut` | self-tests of the jail test runner and the mutation harness | — | when you change the jail test tooling |
 
-```sh
-go test -race -count=1 ./src/gate/confine/... -run 'Registry|Phase1|Harness|Judge|Smoke|Projection'
-go test -tags=jail_e2e -count=1 ./src/gate/confine -run 'TestProbeOutputContract|TestRetuneFieldIsolation|TestPhase1Crash|TestPhase1WriteSweepObservationsIndependent'
-make selftest-jailmut
-```
-
-Provision at least two allowed CPUs for `L-RETUNE`: each handler has a fresh
-victim, a distinct initial field value, and its own unjailed effect control.
-Missing fixture prerequisites fail `SETUP`, including one-CPU runners. The root
-CI lane needs `useradd` and `userdel` for disposable-uid retune and NPROC controls.
-`L-RETUNE-SETPARAM` additionally requires host `CAP_SYS_NICE` to prepare a
-capless real-time victim; its control lowers SCHED_RR priority from 2 to 1.
-Probe crashes, stderr diagnostics and missing operation reports are infrastructure
-failures even when another assertion emits an expected mutation marker. All other
-non-marker jail assertions use the shared `UNEXPECTED:` failure helper; the judge
-rejects these exactly like `SETUP:`, including after an expected red marker.
-Cover legs validate each probe report and its exit status before observing effects,
-and wait for asynchronous FUSE control releases before marking the jail log window.
-`L-FIFO-WRITE` proves the single `{P-LL-FS}` removal at native and ABI 1: its
-unjailed control delivers a byte, the intact jail returns EACCES with zero bytes,
-and the mutation must emit `delivered` from the outside reader.
-
-Run crash coverage on disposable CI hosts with inherited hard core limit
-unlimited. `L-CRASH-NO-HELPER` checks the configured file or supported pipe handler
-using an unlimited unjailed control. File patterns must name a file in the
-process's working directory (for example `core.%p`), which keeps every generated
-core inside the owned fixture directory. Other file destinations fail `SETUP`.
-The separate `L-CRASH-LOWER-PIPE` applies only to pipe handlers; file and socket
-patterns are NOT-APPLICABLE for that leg. Socket dumps are outside the normal
-file/pipe protection claim. Both crash legs are CI-only in mutation runs.
-
-The io_uring probe waits for a published completion before checking the outside
-TCP/xattr effects. Its deterministic completion tests live under `testdata`, so
-run them explicitly; `go test ./...` does not discover them. Repeat the live leg
-on a jail-capable host with:
-
-```sh
-go test -race ./src/gate/confine/testdata/probe
-go test -tags=jail_e2e ./src/gate/confine -run '^TestJailMatrixP15/(native|abi1)/L-IOURING$' -count=20
-```
-
-`TestGateBinaryJailedRead` also checks that reads in the jail keep TCP/UDP
-network access. The real gate binary runs the existing INET probe against IPv4
-and, when available, IPv6 loopback listeners: the jailed read connects and each
-listener accepts it, matching the unjailed controls. The
-filter's deny/grant legs remain registered under `P-SC-NET`.
-
-Host-PID lifecycle cleanup is best effort, independent of confinement. The shim
-and gate have one reaping owner each, use pidfds to kill children, and retry
-failed enumeration for up to five seconds. Hosts without procfs `children`
-files use parent PIDs from `/proc/*/stat`. Cleanup failures preserve the executed
-command's status, emit one `gate-jail: cleanup: <reason>` stderr line, and populate
-the audit's `cleanup_error` field. Fatal gate signals, sustained forking and
-deadline expiry can leave confined descendants alive; there is no execution
-deadline for a read.
-
-`L-LIFECYCLE` and `TestExecWithRedactionConfineLifecycle` cover detached children,
-nested subreapers, bounded repeated forking during teardown, shim SIGTERM and
-SIGKILL, cancellation escalation, and inherited output pipes. Enumeration
-fallback and failure retries have unit seams. Run these with `make test-jail`
-and mutation-check `P-SUBREAPER,P-SESSION` with `make test-jail-mutate`.
-
-`make test-fidelity-smoke` repeats each jailed `ps aux`, `top -bn1` and `pgrep`
-observer 20 times per ABI. Its owned, uniquely named process makes `pidof` and
-`pgrep` controls independent of other host processes. `PIDOF-EXE-DENIED` applies
-only to executable-path matching with overridden argv[0]: the user namespace
-denies `/proc/<pid>/exe` readlink. That row requires exit 1 and empty output,
-plus the readlink permission error; ordinary argv-name matching and `pgrep -x`
-must still return exactly the owned PID. The `ss` projection accepts headers
-with or without a trailing `Process` label. After procfs normalization, listening
-and bound sockets must match the bracketing controls, allowing bracket churn.
-Connection-state rows may appear or disappear between samples, but every socket
-present in both controls must appear in the jail. Owned listeners and a held TCP
-connection keep these checks non-vacuous.
-
-What is **not** in the unit gate:
-
-- The Docker integration suites (`internal/redteam` and `tests/integration`,
-  `//go:build integration`) — real `sshd` in a container, real `ssh` client.
-  Run via `make test-integration`.
-- The fresh-install keyless-startup smoke (`scripts/smoke-fresh-install.sh`,
-  `make smoke`).
-- The full `make e2e` target (preflight + integration + smoke), for after a
-  large build or before a release.
-
-The standing gates live in `docs/E2E-TEST-STRATEGY.md`:
-
-| When | Command | Needs Docker |
-| --- | --- | --- |
-| Before every push | `make preflight` (`vet test test-refapp-js gitleaks build verify-dist verify-versions verify-repro verify-no-sqlite-local verify-no-humanauth-local`) | no |
-| After a large build / before release | `make e2e` (`preflight test-integration smoke`) | yes |
+The standing gates are also listed in `docs/E2E-TEST-STRATEGY.md`. The rule of
+thumb: a green `make preflight` is the bar to push; a green `make e2e` is the bar
+to call an install or feature "works end to end"; a change to the jail or the
+gate's read path also needs `make test-jail` (and the lanes in §12) green.
 
 > Note on `make test`: the Makefile's `test:` target is `go test -race ./...`,
 > which **does** require CGO (the race detector needs it). The *no-CGO
-> invariant* is about plain `go test ./...` — proven below — which `make
-> preflight` depends on via `make test`. If you are on a machine without a C
-> toolchain, run plain `go test ./...` directly; it is green with
-> `CGO_ENABLED=0` (verified).
+> invariant* is about plain `go test ./...`, which stays green with
+> `CGO_ENABLED=0`. If you are on a machine without a C toolchain, run plain
+> `go test ./...` directly.
 
 ---
 
@@ -203,7 +134,8 @@ multi-step remote conversation in memory rather than against a real sshd.
 
 These are **package-var** seams, not env vars, and that is deliberate. The
 clearest case: `gateDirFn` resolves where the gate reads `gate.pub` (the
-signature-verification trust anchor). If that location were `$ENV`-overridable,
+signature-verification trust anchor), and also its other static operator files
+(`jail-floor`, `audit-level`, `audit-path`). If that location were `$ENV`-overridable,
 an attacker who controlled the environment could point the gate at a `gate.pub`
 they own and **forge signatures** — every "signed" admin command would verify.
 So the seam exists *only* so in-package tests can point resolution at a
@@ -299,9 +231,15 @@ Constants in `main.go` (sysexits-style); each asserted by a named case in
 | 1 | `exitGeneric` | generic runtime failure / empty inner command | `TestRunSignedWritePassthrough` (empty inner) |
 | 65 | `exitDataErr` (EX_DATAERR) | bad signature, bad envelope, expired sig, validity window too long | `TestRunVerifiedPaths` (bad signature / tampered cmd / expired) |
 | 70 | `exitSoftware` (EX_SOFTWARE) | `gate.pub` unreadable / corrupt / insecure mode | `TestRunPubkeyFailures` (corrupt / insecure-mode) |
-| 77 | `exitNoPermVal` (EX_NOPERM) | write command without a verified `SSHGATE_SIG` prefix | `TestRunWriteDenial` (unsigned write); `TestRunReadOnlyMode` (write in read-only) |
+| 77 | `exitNoPermVal` (EX_NOPERM) | write command without a verified `SSHGATE_SIG` prefix; also a read refused because the read jail cannot be trusted or set up (stderr says `read jail unavailable`) | `TestRunWriteDenial` (unsigned write); `TestRunReadOnlyMode` (write in read-only); `TestRunReadFailsClosed` (probe error, damaged or higher floor); `TestRunReadJailSetupFailureDenies` (jail setup failure; needs a jail-capable host, run by `make test-jail`) |
 | 0–255 | passthrough | child's own exit code passed straight through | `TestRunSignedWritePassthrough` (child exits 42 → 42) |
 | 128+signum | passthrough | child killed by signal → `128+signal` | `TestRunSignedWritePassthrough` (SIGTERM → 143) |
+
+For a jailed read, the gate returns the command's real exit code or signal
+whenever the jail reports it, also when the read was cancelled or the client went
+away. Only if that status is unavailable does it return 143 on cancellation, or
+otherwise the jail shim's own status (`confinedExit` in
+`src/gate/confined_execution.go`).
 
 ### 4.3 The unsigned-admin-command guard
 
@@ -324,8 +262,12 @@ sigwire.MaxSigValidity` with `ErrValidityTooLong` (mapped to exit 65).
 
 ### 4.5 Executor caveat: real `/bin/sh` + coreutils
 
-`executor.go` runs `exec.CommandContext(ctx, "/bin/sh", "-c", cmd)` — a real
-shell. `executor_test.go` therefore genuinely shells out and depends on
+Without a jail spec, `executor.go` runs `exec.CommandContext(ctx, "/bin/sh",
+"-c", cmd)` — a real shell. With a jail spec (a read on a jail-capable host), the
+gate re-executes itself to build the jail, and the jailed worker then runs
+`/bin/sh` (`src/gate/confine/doc.go`); those paths are tested in §12, not here.
+The fixed `systemctl`/`docker` read verbs run shell-free through
+`ExecArgvWithRedaction`. `executor_test.go` genuinely shells out and depends on
 coreutils being present: `TestExec` runs `echo hello` and asserts stdout
 `"hello\n"`; a large-output case runs `yes x | head -c 65536`; a timeout case
 runs `sleep 10`. This is the one place the unit suite assumes a POSIX `/bin/sh`
@@ -443,7 +385,7 @@ the whole backend suite (the telegram-bot-api shutdown channel is benign).
 - `startRawSigner` (`rawsigner_test.go:28`) gives the handler raw byte control
   (write a partial line, no trailing `\n`, then close) to drive the client's
   `bufio.ReadBytes('\n')` EOF path deterministically
-  (`TestSign_ReadSideEOF_PartialLine_ReadResponseError`).
+  (`TestSign_ReadSideEOF_PartialLine_MalformedResponse`).
 - `dialWithCtx` seam (`var dialWithCtx` in `client.go`) lets internal tests inject a
   `writeFailConn` etc. to exercise write-side failures with no real socket.
 - Error classification (`client.go`): `var ErrUnreachable` vs
@@ -462,22 +404,26 @@ the whole backend suite (the telegram-bot-api shutdown channel is benign).
 
 ### 8.1 Fakes and the real registry
 
-- `fakeSign` (`run_test.go:21`) implements the `Sign(ctx, requestID, []CmdReq)`
+- `fakeSign` (`run_test.go`) implements the `Sign(ctx, requestID, []CmdReq)`
   SignClient surface, recording whether it was called and with what.
-- `fakeSSH` (`run_test.go:40`) implements the `Run(ctx, host, user, port, cmd)`
+- `fakeSSH` (`run_test.go`) implements the `Run(ctx, host, user, port, cmd)`
   SSHRunner surface, returning canned stdout/stderr/exit and recording a
   `callHistory` (used to assert "no dial happened" in pre-flight tests).
-- Real registry on `t.TempDir()`: `freshRegistry(t)`
-  (`add_server_bootstrap_test.go`) creates `t.TempDir()/servers.json` via
-  `registry.New`; `newRegistryWithEntry(t, alias, e)` seeds one entry. Registry
+- Real registry on `t.TempDir()`: provisioning tests build their paths with
+  `provisionMaterials(t)` (`provision_test.go`) and open the registry with
+  `registry.New(cfg.ServersPath)` to assert what was registered. Registry
   persistence (atomic write, mode 0600, reload) is itself tested in
   `registry/servers_test.go` (§9).
 
-### 8.2 The `bootstrapSession` seam for `add_server`
+### 8.2 The `bootstrapSession` seam (gate deploy / provisioning)
+
+Provisioning is the human-only `sshgate add` CLI; there is no `add_server` MCP
+tool. The CLI's pipeline is `Provision` in `provision.go`, and the SSH plumbing
+it uses still lives in `add_server.go`.
 
 This is the **Pattern B** (interface + factory) seam for the gate-deploy path —
 use it as the template for testing any future "do a multi-step thing over SSH"
-tool:
+code:
 
 - Interface `bootstrapSession` (`add_server.go`): `Run` / `Upload` / `Close`.
 - Factory `var newBootstrapSession` (`add_server.go`): prod default dials,
@@ -488,29 +434,30 @@ tool:
   upload path, models remote `authorized_keys` so idempotency probes work, and
   captures the rewritten `authorized_keys` bytes for assertion. Installed via
   `installFakeBootstrapSession(t, sess, fp)`, which also captures the
-  dial params so tests assert the `ssh.ClientConfig` was correct.
-- `TestAddServer_FullBootstrapHappyPath` drives the whole Tier-2 pipeline in
-  memory: dial → probe `authorized_keys` → mkdir → upload `gate` → upload
-  `gate.pub` → backup → rewrite `authorized_keys` → verify → register, and
-  asserts the registry entry has `ReadOnly=false` and the output carries the
-  fingerprint. Companion sub-seams: `dialAgentSock` (`add_server.go`, fake
-  `$SSH_AUTH_SOCK` via `net.Pipe`) and `parsePrivateKey` (`add_server.go`,
-  inject a failing parser).
+  dial params so tests assert the `ssh.ClientConfig` was correct;
+  `installFailingBootstrapDial` makes the dial itself fail.
+- `TestProvision_WriteHappyPath` and `TestProvision_ReadOnlyHappyPath`
+  (`provision_test.go`) drive the whole Tier-2 and Tier-1 pipelines in memory
+  (dial, upload the gate and, for Tier 2 only, `gate.pub`, rewrite the pasted
+  plain key line into the forced-command line, verify, register) and assert the
+  registry entry's tier and the fingerprint. The Tier-1 test points `gate.pub` at
+  a missing file to prove Tier 1 never reads it. Companion sub-seams:
+  `dialAgentSock` (`add_server.go`, fake `$SSH_AUTH_SOCK` via `net.Pipe`) and
+  `parsePrivateKey` (`add_server.go`, inject a failing parser).
 
-### 8.3 What's testable **without** the seam — the pre-flight guards
+### 8.3 The pre-flight guards
 
-`add_server_preflight_test.go` proves every guard fires **before any dial** (each
-asserts `len(ssh.callHistory) == 0`):
+These prove a guard fires before anything is uploaded or registered:
 
 | Test | Guard |
 | --- | --- |
-| `TestAddServer_BootstrapMethodExactlyOne` | exactly one of `bootstrap_key_path` / `bootstrap_agent` |
-| `TestAddServer_AliasAlreadyRegistered` | duplicate alias → "revoke_server first" |
-| `TestAddServer_BootstrapAgentEmptySocket` | empty `$SSH_AUTH_SOCK` |
-| `TestAddServer_InsecureBootstrapKeyRejected` | bootstrap key mode 0644 rejected |
-| `TestAddServer_MissingBootstrapKeyRejected` | bootstrap key file missing |
-| `TestAddServer_MissingLocalMaterials` | gate binary / `gate.pub` / sshgate pubkey not found (table swaps one path per row) |
-| `TestAddServer_ReadOnlySkipsGatePub` | Tier-1 read-only path does **not** read `gate.pub` |
+| `TestProvision_BadAlias` | invalid alias rejected |
+| `TestProvision_AlreadyRegistered` | duplicate alias → "already registered" |
+| `TestProvision_WriteRequiresGatePub` | Tier 2 without a staged `gate.pub` fails before any upload |
+| `TestBootstrapAuthMethod_EmptyAgentSocket` (`add_server_white_test.go`) | empty `$SSH_AUTH_SOCK` |
+| `TestBootstrapAuthMethod_InsecureKeyMode` | bootstrap key with a group/world-readable mode rejected |
+| `TestBootstrapAuthMethod_MissingKeyFile` | bootstrap key file missing |
+| `TestProvision_VerifyFailureRollsBack` | a failed post-install verify restores the original `authorized_keys` |
 
 ### 8.4 Status: permission vs unreachable
 
@@ -611,31 +558,6 @@ persist at mode 0600, reload-after-`Add`. The edge test has an
 
 ## 11. The integration / e2e boundary
 
-For the mount-cover and self-check matrix, run `make test-jail` on Linux with
-user namespaces, Landlock, `/dev/fuse`, and `fusermount3` available. The test
-FUSE daemon is built from `src/gate/confine/testdata/fuseioctl`; its protocol
-tests can run without a mount:
-
-```sh
-export GOCACHE="$PWD/local-workspace/gocache"
-go test -race -count=1 ./src/gate/confine/testdata/fuseioctl
-make test-jail
-make test-jail-mutate MUTATE=P-COVERS
-```
-
-Missing FUSE support reports `NOT-APPLICABLE` outside CI and fails `SETUP` with
-`SSHGATE_JAIL_CI=1`; it never uses a Go test skip. Run both non-root and root CI
-lanes on disposable machines. The root CI lane additionally requires systemd,
-`systemd-mount`, loop devices, `losetup`, `mkfs.ext4`, and `binfmt_misc` for the
-autofs, loop-backing, and fixed-interpreter characterisations. These fixtures
-must not run against a production host. Catalogue controls use disposable git
-repositories and local HTTP listeners. Both dash and bash must be installed.
-The shim-seal singleton mutations are expected to stay green: each leaves the
-other proc-access wall intact. The existing runner prints `NOT-RUN` for their
-lack of a red leg even though it executes and judges their green legs. Use the
-checked lane reports and CI union gate, which require those green outcomes and
-a red proof for every protection at both ABIs.
-
 Docker-backed tests live in `internal/redteam/tripwire_live_test.go` and
 `tests/integration`, behind `//go:build integration` (e.g. `e2e_test.go`,
 `phase2/3/4_test.go`, `helpers_test.go`, `setup_test.go`). The build tag means
@@ -654,25 +576,153 @@ The red-team live test drives its own disposable target on that same default
 host port and verifies the filesystem write tripwire. The two package groups
 therefore run serially and uncached in the release gate.
 
-Makefile targets (and `docs/E2E-TEST-STRATEGY.md`):
+The full list of make targets is the table in §0.
 
-| Target | What it runs | Docker? | When |
-| --- | --- | --- | --- |
-| `make test` | `go test -race ./...` (the unit gate, CGO) | no | always |
-| `make preflight` | `vet test test-refapp-js gitleaks build verify-dist verify-versions verify-repro verify-no-sqlite-local verify-no-humanauth-local` | no | before every push |
-| `make test-integration` | `go test -count=1 -p=1 -race -tags=integration ./internal/redteam ./tests/integration/... -timeout=300s -v` | **yes** | exercising real hosts |
-| `make smoke` | `scripts/smoke-fresh-install.sh` (keyless first-run startup) | no | fresh-user regression |
-| `make e2e` | `preflight test-integration smoke` | **yes** | after a large build / before release |
+---
 
-The rule of thumb: a green `make preflight` is the bar to push; a green
-`make e2e` (which alone touches Docker) is the bar to call an install or feature
-"works end-to-end."
+## 12. The kernel read jail test system
+
+The read jail (`src/gate/confine/`, see [THREAT-MODEL.md](THREAT-MODEL.md)) is
+tested outside the unit gate, because its tests build real namespaces, mounts,
+Landlock rulesets and seccomp filters. They are tagged `jail_e2e` and run only
+through the make targets below. The rules every jail test follows are in
+[BUILD-PLAN.md](BUILD-PLAN.md) §"Test-system rules"; this section is how to run
+them.
+
+### 12.1 What you need
+
+- **Non-root lane (`make test-jail`):** Linux on amd64 with unprivileged user
+  namespaces that can mount (on Ubuntu 24.04 that means
+  `kernel.apparmor_restrict_unprivileged_userns=0` or an AppArmor profile for the
+  test binaries), Landlock, seccomp, `/dev/fuse` and `fusermount3`, at least two
+  CPUs, and both `dash` and `bash`. The CI workflow `.github/workflows/jail.yml`
+  shows a complete runner setup.
+- **Root lane (`make test-jail-root`):** everything above, run as root, plus
+  systemd, `systemd-mount`, loop devices, `losetup`, `mkfs.ext4`, `binfmt_misc`,
+  `useradd` and `userdel`, and host `CAP_SYS_NICE`. **Use a disposable VM or
+  runner, never a production host:** the fixtures create users, mounts and loop
+  devices.
+- **Crash legs** need a hard core-size limit of unlimited and a `core_pattern`
+  that names a file in the working directory (for example `core.%p`) or a pipe
+  handler. Socket handlers are outside these legs.
+
+The targets fail rather than skip: any `--- SKIP`, a missing test, a missing
+`PASS` line for a required test, or a missing fixture prerequisite (reported as
+`SETUP:`) fails the run. Outside CI, a missing optional observer (for example no
+FUSE) is reported `NOT-APPLICABLE`; with `SSHGATE_JAIL_CI=1` it fails.
+
+### 12.2 Running it
+
+```sh
+make test-jail                         # acceptance matrix, non-root lane
+sudo make test-jail-root               # same, root lane (disposable host)
+make test-fidelity-smoke               # jailed vs unjailed ps/top/pgrep/ss
+make test-jail-mutate MUTATE=P-LL-FS   # mutation proof for one protection
+make test-jail-mutate                  # every mutation set (slow)
+```
+
+`make test-jail` runs three groups and requires each to pass: the jail matrix in
+`src/gate/confine` (with the untagged registry and table tests), the executor's
+real-effect tests in `src/gate` (`TestExecWithRedactionConfine*`), and the gate
+binary's read-path tests in `src/gate/cmd/sshgate-gate` (for example
+`TestGateBinaryJailedRead`, which drives a forced-command read through the real
+gate binary and also checks that jailed reads keep TCP/UDP network access). It
+then checks the combined log against the case manifest (see 12.4).
+
+Some fast checks need no jail at all:
+
+```sh
+go test -race -count=1 ./src/gate/confine/... -run 'Registry|Phase1|Harness|Judge|Smoke|Projection'
+go test -race -count=1 ./src/gate/confine/testdata/fuseioctl   # the test FUSE daemon's protocol
+go test -race ./src/gate/confine/testdata/probe                # io_uring completion tests
+make selftest-testjail selftest-jailmut
+```
+
+The `testdata` packages are not discovered by `go test ./...`, so run them
+explicitly when you change them.
+
+### 12.3 The mutation proof
+
+Every protection in the jail (a mount flag, a Landlock right, a seccomp rule, a
+self-check, a cleanup step) has an ID such as `P-LL-FS` in the registry
+(`src/gate/confine/protections_test.go`; 195 protections today) and a hook,
+`jailmut.On("P-LL-FS")`, at the exact line that applies it. In a normal build the
+hook is a constant `false` and does nothing. `make test-jail-mutate
+MUTATE=P-LL-FS` rebuilds the tests with the `jail_mutation` build tag and that ID
+switched on, which removes exactly that protection, then runs the tests
+registered for it, once at the host's native Landlock ABI and once forced down to
+ABI 1. With no `MUTATE`, it runs every registered set.
+
+A protection counts as proved only if removing it makes a named test observe the
+effect it was there to stop. For example, with `P-LL-FS` removed, the
+`L-FIFO-WRITE` leg writes into a named pipe from inside the jail and a reader
+outside must report the byte as `delivered`; with the protection in place the
+same write gets `EACCES` and zero bytes. The judge accepts a run only if the test
+passes, `go test` exits 0 and the reported markers are exactly the expected ones;
+anything else (a crash, a `SETUP:` or `UNEXPECTED:` line, a missing marker) is a
+failure, never a detection. Where several walls stop the same effect, the set
+removes all of them together, and removing one alone must either trip a
+self-check or leave the effect blocked by the others. Release binaries must
+carry no hooks: `make release-gate` refuses a binary built with the mutation tag,
+and `TestDistGateHasNoMutationBuild` checks the committed one.
+
+### 12.4 Lanes, CI mode and the phase-end gate
+
+- **Local runs omit what they cannot show.** Root-only legs are declared
+  omissions in the non-root lane, and some controls (among them the socket-family
+  sweeps, the module-autoload control, the crash legs and some cover fixtures)
+  run only with `SSHGATE_JAIL_CI=1`. In a mutation run, a set with no remaining red
+  leg prints `NOT-RUN`; a step's commit names those sets, and they must be red in
+  the phase-end run.
+- **Proof records.** Each test case declares what it must show (an unjailed
+  control, the jailed attempt, the outside observation) and prints exactly one
+  `PROOF-COMPLETE` line when it finishes. `PROOF-OMITTED` needs a declared reason
+  (CI accepts only lane reasons) and `PROOF-RESIDUAL` must name an accepted
+  residual. `make test-jail` and `make test-jail-root` check their logs against
+  the case manifest, so free-text omissions give no coverage.
+- **Phase-end gate.** On a disposable runner, run both lanes in CI mode and keep
+  their evidence:
+
+  ```sh
+  SSHGATE_JAIL_CI=1 make test-jail JAIL_BASELINE=/tmp/jail.json
+  SSHGATE_JAIL_CI=1 make test-jail-mutate JAIL_PROOF_LOG=/tmp/jail.json MUTATION_REPORT=/tmp/nonroot.json
+  # same two commands as root, with test-jail-root and /tmp/root.json
+  make test-jail-mutate MUTATION_UNION=/tmp/nonroot.json,/tmp/root.json
+  ```
+
+  `JAIL_BASELINE` is written only when every invocation and proof check passed,
+  with a `.status` companion; the importer rejects plain verbose logs. The union
+  passes only if every registered set was red in at least one lane where its legs
+  ran, every manifest case completed (or is an accepted residual), and no
+  omission is left.
+
+Notes on specific legs:
+
+- **`L-RETUNE`** needs at least two allowed CPUs; `L-RETUNE-SETPARAM` needs host
+  `CAP_SYS_NICE`. The root lane uses disposable users for the retune and process
+  limit controls.
+- **Lifecycle.** `L-LIFECYCLE` and `TestExecWithRedactionConfineLifecycle` cover
+  detached children, nested subreapers, repeated forking during teardown, shim
+  `SIGTERM`/`SIGKILL`, cancellation and inherited output pipes. Cleanup is best
+  effort (five-second retry, then one `gate-jail: cleanup: <reason>` stderr line
+  and the audit's `cleanup_error` field); the command's exit status is kept.
+- **Fidelity.** `make test-fidelity-smoke` repeats each jailed `ps aux`,
+  `top -bn1` and `pgrep` observer 20 times per ABI against an owned, uniquely
+  named process. `pidof` by executable path is expected to fail in the jail
+  (`PIDOF-EXE-DENIED`: the user namespace denies `/proc/<pid>/exe`); matching by
+  name must still find the process. Listening and bound sockets in `ss` must match
+  the unjailed controls.
+- **The shim-seal mutations** are expected to stay green on their own (each
+  leaves the other wall intact), so the runner prints `NOT-RUN` for them; the
+  union gate checks their green outcomes.
+- **Logs.** Human-readable logs are rendered from `go test -json`; the JSON events
+  stay the authority for pass/fail.
 
 ---
 
 ## Section index
 
-0. TL;DR / quickstart
+0. Quickstart — everyday commands and every make target
 1. The no-sudo mandate & why
 2. The fake / seam catalogue (collaborator map, the two seam patterns, the
    trust-anchor env-override rule)
@@ -689,29 +739,5 @@ The rule of thumb: a green `make preflight` is the bar to push; a green
    tests, real loopback sshd
 10. Running & CI conventions
 11. The integration / e2e boundary
-
-Jail proof cases declare their completion mode and required control, jailed-run and
-observation evidence. A finalized case emits exactly one `PROOF-COMPLETE` record;
-mutation builds still pass the test and place the exact detected markers in that
-record. The mutation judge requires the leg and package to pass and `go test` to
-exit zero. A marker cannot excuse another failure or an unfinished proof.
-
-`test-jail` and `test-jail-root` validate their combined logs against the case
-manifest. `PROOF-OMITTED` requires a declared reason; CI permits only lane marks.
-`PROOF-RESIDUAL` requires a case's explicit accepted residual. Free-text omission
-messages supply no coverage. The mutation union additionally requires a completed
-proof (or accepted residual) for every manifest case and a registered expectation
-or characterisation for every possible marker. CI sets `SSHGATE_JAIL_CI=1` and
-installs FUSE so missing observer prerequisites fail rather than silently omit.
-
-Export each lane's baseline with `make test-jail JAIL_BASELINE=/path/to/jail.json`
-(or `test-jail-root`). The target captures authoritative `go test -json` events and a `.status` companion
-only after all invocations, logging, and proof checks pass. Supply
-`JAIL_PROOF_LOG=/path/to/jail.json` when producing `MUTATION_REPORT=/path/to/report.json`.
-The importer requires the companion status to be zero, every package and test to
-have a PASS terminal, and every proof to belong to its passing test. Plain verbose
-logs are rejected. This carries cases with no mutation set into the union; omitting
-that evidence makes union validation fail.
-
-Human logs render JSON Output fields without interpreting nested child test frames.
-The original JSON events remain the authority for terminal outcomes.
+12. The kernel read jail test system — requirements, targets, the mutation proof,
+    lanes and the phase-end gate

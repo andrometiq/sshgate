@@ -14,33 +14,36 @@ Cursor, Gemini CLI, or a hand-written `mcpServers` config.
 
 ## 1. Build / install `sshgate-mcp`
 
-The MCP server is a Go binary. There are no prebuilt binaries until a release is
-tagged, so build from source:
+The MCP server is a Go binary. There are no tagged releases and no prebuilt
+binaries yet (the code line is v0.1.5), so build from a clone:
 
 ```sh
-git clone https://github.com/karthikeyan5/SSHGate
+git clone https://github.com/andrometiq/sshgate
 cd SSHGate
 make install-local     # puts sshgate-mcp (+ sshgate, sshgate-signer-telegram) on your $PATH via `go install`
 ```
 
 `make install-local` installs to `$(go env GOPATH)/bin` (usually `~/go/bin`) —
-make sure that is on your `PATH`. Confirm:
+make sure that is on your `PATH`. It also copies the committed gate binary
+(`dist/gate/sshgate-gate-linux-amd64`) to `~/.config/sshgate/bin/`, which is
+where `sshgate add` takes the gate it installs on each server. Confirm:
 
 ```sh
 sshgate-mcp --version   # e.g. sshgate-mcp v0.1.5
 ```
 
-Once a release is tagged you can instead `go install` a pinned version directly:
+You can also `go install` the MCP server straight from the default branch.
+Without a tag this builds an untagged snapshot of that branch:
 
 ```sh
-go install github.com/karthikeyan5/sshgate/src/mcp/cmd/sshgate-mcp@v0.1.5
+go install github.com/karthikeyan5/sshgate/src/mcp/cmd/sshgate-mcp@latest
 ```
 
-> Note: a plain `go install` applies no build flags, so a binary installed this
-> way reports `--version` as `dev` rather than the tag. The version is cosmetic
-> (it appears only in the MCP handshake); the binary is otherwise identical. For
-> a stamped binary, build from a checkout with `make` (which passes the version
-> via `-ldflags`) or download the release asset.
+> Note: a plain `go install` applies no build flags, so the binary reports
+> `--version` as `dev`. The version is cosmetic (it appears only in the MCP
+> handshake). This route gives you only the MCP server: it does not stage the
+> gate binary that `sshgate add` needs, so you still need a clone and
+> `make install-local` before you can register a server.
 
 ## 2. Generic `mcpServers` snippet (any stdio MCP client)
 
@@ -71,7 +74,7 @@ natively, so installing the whole plugin is two commands (GitHub shorthand is
 supported):
 
 ```sh
-codex plugin marketplace add karthikeyan5/SSHGate
+codex plugin marketplace add andrometiq/sshgate
 codex plugin add sshgate@sshgate
 ```
 
@@ -105,7 +108,7 @@ SSHGate carries a root [`gemini-extension.json`](../gemini-extension.json), so
 Gemini CLI can install it as an extension straight from the repo:
 
 ```sh
-gemini extensions install https://github.com/karthikeyan5/SSHGate
+gemini extensions install https://github.com/andrometiq/sshgate
 ```
 
 The extension launches `sshgate-mcp` with the signer-socket env. Until releases
@@ -113,12 +116,25 @@ exist, this installs from source — the `sshgate-mcp` binary still needs to be
 built and on your `PATH` (§1); a release-archive path that bundles the binary is
 a future improvement.
 
-## 6. The hard caveat, again
+## 6. What the agent gets
+
+`sshgate-mcp` registers eleven tools, the same in every client: `run`,
+`run_batch`, `list_servers`, `status`, `ping`, `revoke_server`,
+`request_grant`, `revoke_grant`, `list_grants`, `update_gate` and `transfer`.
+There is no tool to add a server: that stays with the human `sshgate` CLI.
+The Claude Code slash commands (`/sshgate:setup`, `/sshgate:run`, …) are
+plugin prompts, not MCP tools, so other clients may not show them.
+
+## 7. The hard caveat, again
 
 Whatever client you use, the same boundary applies:
 
 - **Reads run free.** Reachability + diagnostics work as soon as a server is
-  registered.
+  registered. On a host that supports it (unprivileged user namespaces and
+  Landlock), the gate runs each read inside a kernel jail that cannot write to
+  the host; elsewhere reads run unconfined. See
+  [Check the server's read jail](install-step-by-step.md#5-check-the-servers-read-jail)
+  for how to check a host.
 - **Writes need the signer daemon + a provisioned gate.** Set those up per
   [`INSTALL.md`](../INSTALL.md). Without them, every write is denied at the gate —
   by design, not by bug. The security boundary is the Ed25519 signature checked

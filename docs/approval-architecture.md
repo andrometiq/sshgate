@@ -12,14 +12,17 @@ replayed indefinitely or against another server.
 
 The read/write classifier decides whether a command is sent for signing; it is
 not the security boundary. If it misclassifies a write as a read, that command
-can run unsigned. The full residual-risk treatment is in
+runs unsigned. On a host with the kernel read jail it then runs inside the jail,
+where it cannot change host files, reach local daemons over Unix sockets or touch
+other processes, though it can still use the network; on a host without the jail
+it runs unconfined. The full residual-risk treatment is in
 [THREAT-MODEL.md](THREAT-MODEL.md).
 
 ## Tier 1 — read-only
 
-Tier 1 deploys the gate but does not give it a signing public key. Reads work;
-writes are refused locally by the gate. There is no signer, master key, or
-approval channel.
+Tier 1 deploys the gate but does not give it a signing public key. Reads work
+(inside the read jail where the host supports it); writes are refused locally
+by the gate. There is no signer, master key, or approval channel.
 
 Use Tier 1 to try SSHGate or when read-only access is the intended boundary.
 
@@ -55,8 +58,9 @@ or WebAuthn, and applies N-of-M approval with deny-veto before signing.
 Once its policy-authority and release gates close, this is the approval boundary
 that continues to hold against a privileged rogue agent on the laptop: the
 agent may request a signature but cannot read the key or forge the server's
-human approval. The current branch contains the hosted foundation, not a
-release-ready v0.2 deployment. It is separate from the local setup menu; its
+human approval. The repository contains the hosted foundation, not yet a
+release-ready deployment; its remaining release gates are tracked in the
+[roadmap](ROADMAP.md). It is separate from the local setup menu; its
 DNS, HTTPS, backups, reverse proxy, and credential-distribution requirements are
 documented in
 [the hosted signer guide](../src/signer-server/README.md).

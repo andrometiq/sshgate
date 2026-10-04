@@ -64,11 +64,15 @@ hosts run reads classifier-only, as before. What Phase 1 built:
   ptrace rules. The command starts in its own session and process group.
 - **A read-only view of `/`.** The whole view is recursively read-only, `nodev` and `nosuid`.
   Host `/proc`, `/tmp` and `/var/tmp` stay visible, read-only. The only writable mount is a
-  private 64 MiB `/dev/shm`, discarded at exit. Every reachable mount whose filesystem type is
-  not on a reviewed read-safe list (FUSE, network filesystems, `overlay`, unknown types), or whose
-  backing block device is not directly attached (`loop`, `nbd`, `ublk`, network transports), is
-  covered with an empty read-only tmpfs. The command's working directory is re-resolved inside
-  the final view.
+  private 64 MiB `/dev/shm`, discarded at exit. The jail covers with an empty read-only tmpfs
+  every reachable mount whose filesystem type is not on a reviewed read-safe list (FUSE, network
+  filesystems, `overlay`, unknown types), or whose backing block device is not directly attached
+  (`loop`, `nbd`, `ublk`, network transports), wherever it can place the cover. Phase 1 runs
+  non-strict: a mount it cannot cover (for example an `overlay` or ZFS root filesystem, or a
+  mount below a directory the SSH user cannot enter whose parent cannot be covered either) is
+  recorded as an unmet fact inside the jail, not refused, and stays visible, read-only. Strict
+  runs that refuse such a read arrive with P2.1. The command's working directory is re-resolved
+  inside the final view.
 - **Credentials and filters.** Every capability is dropped, `no_new_privs` is set, Landlock is
   required, and seccomp runs a total syscall table whose default is `ENOSYS`, with allowlists
   for `socket`, `socketpair`, `fcntl` and `flock`, named `ioctl` blocks, and a locked
@@ -93,11 +97,13 @@ What Phase 1 does not do yet, and where it is done:
 | Gap | Step |
 |---|---|
 | Whether a read is jailed is still decided by the interim capability probe and the older `jail-floor` pin | P2.1 |
+| Runs are non-strict: a mount the jail cannot cover stays visible instead of refusing the read, and the gap is not in the audit record | P2.1 |
 | Reads have network access | P2.1, P4.2–P4.4 |
 | The fixed `systemctl`/`docker` read verbs run outside the jail | P3.2 |
 | No `SSHGATE_JAIL` capability verb; the MCP shows only the signer tier | P2.2, P5.1 |
 | No host is labelled kernel read-only; the label is compiled off | P7.1 |
 | The MCP instructions and user docs do not yet explain network permissions, pins and labels | P5.2 |
+| A read the jail refuses inside `run_batch` returns exit 77 and stderr but no structured `denial` object (`run` has one) | P5.1 |
 
 ---
 

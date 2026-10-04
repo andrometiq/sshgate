@@ -165,18 +165,17 @@ install-local: build
 test:
 	go test -race ./...
 
-# test-jail: the kernel-jail acceptance matrix (confine package, #22 Phase 0) PLUS
+# test-jail: the kernel-jail acceptance matrix (confine package, #22) PLUS
 # the gate-package real-effect confine tests (TestExecWithRedactionConfine*), which
 # exercise ExecWithRedaction end to end — the matrix alone never proves the
-# executor actually entered the jail. The gate-package fail-closed/fd-leak tests
-# use rung 2 (Landlock, no userns), so they run even on an AppArmor-clamped runner.
-# The gate read-path tests run run() on the live rung, and build the real gate
-# binary to drive a forced-command read through its own jail re-exec; both fail
-# on a rung-3 host.
-# Tagged jail_e2e so the matrix is OUT of the default `make test`. It needs an
-# unprivileged user namespace for the rung-1 legs and Landlock for rung-2. Run on
-# the Phase-0 go/no-go host (userns + Landlock), never "green by skip": this target
-# FAILS on any `--- SKIP`/`SKIP rung` as well as on any FAIL. -count=1: the go
+# executor actually entered the jail. The gate read-path tests run run() on the
+# host's live jail level, and build the real gate binary to drive a forced-command
+# read through its own jail re-exec. All of these need the full ro-v1 jail
+# (unprivileged user namespaces that can mount, plus Landlock); they fail on a
+# host that runs reads unconfined.
+# Tagged jail_e2e so the matrix is OUT of the default `make test`. Run on a host
+# with unprivileged userns + Landlock (see docs/TESTING.md §12), never "green by
+# skip": this target FAILS on any `--- SKIP`/`SKIP rung` as well as on any FAIL. -count=1: the go
 # test cache does not track host jail facts, so a cached replay proves nothing.
 # Each invocation owns its status file; a later pass cannot erase an earlier failure.
 # The confine run also includes the untagged unit-proof tests (filter and syscall

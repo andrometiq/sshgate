@@ -1,14 +1,14 @@
 name: jail
 
 # The kernel-jail acceptance matrix (confine package, #22). This is the ONLY job
-# that exercises rung 1 (unprivileged user namespace + mounts + Landlock), so it
-# must never be "green by skip": it first PROBES that an unprivileged userns can
-# be created and can mount, and then fails if `make test-jail` skipped the rung-1
-# legs anyway. The hermetic unit job lives in tests.yml; this one is separate
-# because it needs userns, Landlock and the e2e build.
+# that exercises the ro-v1 read jail (unprivileged user namespace + mounts +
+# Landlock), so it must never be "green by skip": it first PROBES that an
+# unprivileged userns can be created and can mount, and then fails if
+# `make test-jail` skipped any jail leg anyway. The hermetic unit job lives in
+# tests.yml; this one is separate because it needs userns, Landlock and the e2e build.
 #
 # ubuntu-latest ships the AppArmor unprivileged-userns restriction on by default
-# (kernel.apparmor_restrict_unprivileged_userns=1), which would clamp the rung-1
+# (kernel.apparmor_restrict_unprivileged_userns=1), which would block the jail's
 # mounts. We turn it off for the runner so the primary wall is actually tested;
 # on a host that genuinely lacks userns the probe fails and the job stops before
 # claiming a pass.
@@ -71,7 +71,7 @@ jobs:
             echo "unprivileged userns + mount available"
           else
             echo "userns=no" >> "$GITHUB_OUTPUT"
-            echo "::error::unprivileged userns probe FAILED; the rung-1 jail cannot be exercised on this runner"
+            echo "::error::unprivileged userns probe FAILED; the read jail cannot be exercised on this runner"
             exit 1
           fi
 
@@ -84,8 +84,9 @@ jobs:
         if: steps.probe.outputs.userns == 'yes'
         run: |
           # The userns probe passed and the runner has Landlock + the jail tooling,
-          # so NOTHING should skip: a skipped rung-1 OR rung-2 leg, or any in-leg
-          # t.Skip (chattr/xattr/sleep unavailable), means the wall was not tested.
+          # so NOTHING should skip: a skipped jail leg (the patterns below include
+          # older rung markers), or any in-leg t.Skip (chattr/xattr/sleep
+          # unavailable), means the wall was not tested.
           if grep -qE -- '--- SKIP|SKIP rung1|SKIP rung2' jail.log; then
             echo "::error::make test-jail SKIPPED a leg despite userns+Landlock+tooling being present — the wall was not fully tested"
             grep -nE -- '--- SKIP|SKIP rung1|SKIP rung2' jail.log || true
