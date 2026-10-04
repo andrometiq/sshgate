@@ -29,13 +29,13 @@ const landlockFSBaseABI1 = unix.LANDLOCK_ACCESS_FS_EXECUTE |
 // A right that is "handled" but not granted by any rule is denied.
 func handledFS(abi int) uint64 {
 	h := uint64(landlockFSBaseABI1)
-	if abi >= 2 {
+	if abi >= 2 && !jailmut.On("P-LL-REFER") {
 		h |= unix.LANDLOCK_ACCESS_FS_REFER // deny cross-dir link/rename implicitly
 	}
-	if abi >= 3 {
+	if abi >= 3 && !jailmut.On("P-LL-TRUNCATE") {
 		h |= unix.LANDLOCK_ACCESS_FS_TRUNCATE
 	}
-	if abi >= 5 {
+	if abi >= 5 && !jailmut.On("P-LL-IOCTL-DEV") {
 		h |= unix.LANDLOCK_ACCESS_FS_IOCTL_DEV
 	}
 	if abi >= 9 && !jailmut.On("P-LL-RESOLVE-UNIX") {

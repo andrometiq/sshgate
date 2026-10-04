@@ -50,6 +50,9 @@ func setRlimits() error {
 		{unix.RLIMIT_NPROC, "nproc", unix.Rlimit{Cur: defaultRlimitNproc, Max: defaultRlimitNproc}},
 	}
 	for _, r := range limits {
+		if (r.res == unix.RLIMIT_NPROC && jailmut.On("P-RL-NPROC")) || (r.res == unix.RLIMIT_FSIZE && jailmut.On("P-RL-FSIZE")) || (r.res == unix.RLIMIT_CORE && jailmut.On("P-RL-CORE")) {
+			continue
+		}
 		if err := unix.Setrlimit(r.res, &r.lim); err != nil {
 			return fmt.Errorf("setrlimit %s: %w", r.name, err)
 		}

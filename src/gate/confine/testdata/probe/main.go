@@ -111,7 +111,7 @@ func main() {
 			name  string
 			flags int
 		}{{"write", unix.O_WRONLY}, {"append", unix.O_WRONLY | unix.O_APPEND}, {"open-trunc", unix.O_WRONLY | unix.O_TRUNC}, {"open-rdonly-trunc", unix.O_RDONLY | unix.O_TRUNC}} {
-			fd, err := unix.Open(dir+"/file", item.flags|unix.O_CLOEXEC, 0)
+			fd, err := unix.Open(dir+"/"+item.name, item.flags|unix.O_CLOEXEC, 0)
 			if err == nil {
 				if item.flags&unix.O_WRONLY != 0 {
 					_, err = unix.Write(fd, []byte("changed"))
@@ -120,7 +120,7 @@ func main() {
 			}
 			report(item.name, err)
 		}
-		report("truncate-path", unix.Truncate(dir+"/file", 0))
+		report("truncate-path", unix.Truncate(dir+"/truncate-path", 0))
 		report("unlink", unix.Unlink(dir+"/remove"))
 		report("rmdir", unix.Rmdir(dir+"/empty"))
 		report("mkdir", unix.Mkdir(dir+"/made", 0700))
@@ -303,7 +303,7 @@ func main() {
 			_ = unix.Close(int(fd))
 		}
 	default:
-		if hostPIDProbe(os.Args[1], args) || filterProbe(os.Args[1], args) {
+		if hostPIDProbe(os.Args[1], args) || filterProbe(os.Args[1], args) || phase1Probe(os.Args[1], args) {
 			break
 		}
 		fmt.Fprintln(os.Stderr, "unknown op:", os.Args[1])

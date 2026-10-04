@@ -49,8 +49,17 @@ func coverRegistry() []prot {
 }
 func completeRegistry() []prot {
 	result := append(append(append(append(append(p12Registry(), p15Registry()...), hostPIDRegistry()...), coverRegistry()...), credentialRegistry()...), writeRegistry()...)
+	result = append(result, phase1Registry()...)
 	for i := range result {
 		protection := &result[i]
+		for j := range protection.MutationSets {
+			set := &protection.MutationSets[j]
+			if set.Name() == "P-RO,P-SELFCHECK-MOUNTS,P-LL-FS" {
+				crash := p15Leg("L-CRASH-NO-HELPER")
+				crash.CIOnly = true
+				set.Legs = append(set.Legs, crash)
+			}
+		}
 		if protection.ID == "P-SC-SYNC" {
 			// Only root can pin the FUSE bdi's min_ratio; without it strictlimit
 			// writeback makes the observation a race on Linux 6.1.

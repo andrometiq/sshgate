@@ -25,9 +25,37 @@ go test -race ./...      # run this before merge (needs CGO; see §10)
 
 The tagged jail mutation suite (`make test-jail-mutate`) omits CI-only controls
 outside `SSHGATE_JAIL_CI=1`. These include `L-SOCKDIAG`, both socket sweeps and
-`L-CRASH-NO-HELPER`. An omitted effect leg does not prevent a set's table leg
+`L-CRASH-NO-HELPER` and `L-CRASH-LOWER-PIPE`. An omitted effect leg does not prevent a set's table leg
 from proving the mutation; a set with no remaining red leg is `NOT-RUN`.
 Phase-end acceptance requires both CI lane reports and no omission in their union.
+
+Before the live matrix, run the independent Phase-1 registry floor and the
+probe/observer regressions (these commands do not start a jail):
+
+```sh
+go test -race -count=1 ./src/gate/confine/... -run 'Registry|Phase1|Harness|Judge|Smoke|Projection'
+go test -tags=jail_e2e -count=1 ./src/gate/confine -run 'TestProbeOutputContract|TestRetuneFieldIsolation|TestPhase1Crash|TestPhase1WriteSweepObservationsIndependent'
+make selftest-jailmut
+```
+
+Provision at least two allowed CPUs for `L-RETUNE`: each handler has a fresh
+victim, a distinct initial field value, and its own unjailed effect control.
+Missing fixture prerequisites fail `SETUP`, including one-CPU runners. The root
+CI lane needs `useradd` and `userdel` for disposable-uid retune and NPROC controls.
+`L-RETUNE-SETPARAM` additionally requires host `CAP_SYS_NICE` to prepare a
+capless real-time victim; its control lowers SCHED_RR priority from 2 to 1.
+Probe crashes, stderr diagnostics and missing operation reports are infrastructure
+failures even when another assertion emits an expected mutation marker.
+
+Run crash coverage on disposable CI hosts with inherited hard core limit
+unlimited. `L-CRASH-NO-HELPER` checks the configured file or supported pipe handler
+using an unlimited unjailed control. File patterns must name a file in the
+process's working directory (for example `core.%p`), which keeps every generated
+core inside the owned fixture directory. Other file destinations fail `SETUP`.
+The separate `L-CRASH-LOWER-PIPE` applies only to pipe handlers; file and socket
+patterns are NOT-APPLICABLE for that leg. Socket dumps are outside the normal
+file/pipe protection claim. Both crash legs are CI-only in mutation runs.
+
 The io_uring probe waits for a published completion before checking the outside
 TCP/xattr effects. Its deterministic completion tests live under `testdata`, so
 run them explicitly; `go test ./...` does not discover them. Repeat the live leg

@@ -31,6 +31,7 @@ func filterProbe(op string, args []string) bool {
 		report("keyring", err)
 	case "uring":
 		uringProbe(args[0], int(number(args[1])))
+		fmt.Println("uring-complete=ok")
 	case "metadata-mount":
 		path := args[0]
 		fd, err := unix.Open(path, unix.O_RDONLY|unix.O_CLOEXEC, 0)
@@ -316,7 +317,9 @@ func filterProbe(op string, args []string) bool {
 	case "crash":
 		if args[0] == "lower" {
 			var limit unix.Rlimit
-			unix.Getrlimit(unix.RLIMIT_CORE, &limit)
+			if err := unix.Getrlimit(unix.RLIMIT_CORE, &limit); err != nil {
+				panic(err)
+			}
 			limit.Cur = 0
 			report("lower", unix.Setrlimit(unix.RLIMIT_CORE, &limit))
 		}

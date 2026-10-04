@@ -89,6 +89,12 @@ func cloneSysProcAttr() *syscall.SysProcAttr {
 		Setpgid:     true,
 		Pdeathsig:   syscall.SIGKILL,
 	}
+	if jailmut.On("P-CLONE-USER") {
+		attr.Cloneflags &^= syscall.CLONE_NEWUSER
+	}
+	if jailmut.On("P-CLONE-MNT") {
+		attr.Cloneflags &^= syscall.CLONE_NEWNS
+	}
 	if jailmut.On("P-CLONE-IPC") {
 		attr.Cloneflags &^= syscall.CLONE_NEWIPC
 	}
@@ -382,7 +388,12 @@ func readCapped(r io.Reader, max int) ([]byte, error) {
 }
 
 // closeInheritedFDs is fail-closed even on ENOSYS; the supported floor has close_range.
-func closeInheritedFDs() error { return unix.CloseRange(3, ^uint(0), unix.CLOSE_RANGE_CLOEXEC) }
+func closeInheritedFDs() error {
+	if jailmut.On("P-FDS") {
+		return nil
+	}
+	return unix.CloseRange(3, ^uint(0), unix.CLOSE_RANGE_CLOEXEC)
+}
 
 func sealShim() error {
 	if jailmut.On("P-SHIM-SEAL") {

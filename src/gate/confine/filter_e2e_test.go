@@ -34,6 +34,7 @@ func TestJailMatrixP15(t *testing.T) {
 			t.Run("L-FCNTL-RWHINT", func(t *testing.T) { legRWHint(t, spec) })
 			t.Run("L-FLOCK-EX", func(t *testing.T) { legFlock(t, spec) })
 			t.Run("L-CRASH-NO-HELPER", func(t *testing.T) { legCrashNoHelper(t, spec) })
+			t.Run("L-CRASH-LOWER-PIPE", func(t *testing.T) { legCrashLowerPipe(t, spec) })
 			t.Run("L-RLIMIT-CORE-LOCK", func(t *testing.T) { legCoreLock(t, spec) })
 			t.Run("L-SC-SYNC-ERRNO", func(t *testing.T) { legSyncErrno(t, spec, false) })
 			t.Run("L-SC-SYNCFS-ERRNO", func(t *testing.T) { legSyncErrno(t, spec, true) })
@@ -69,15 +70,120 @@ func filterFixture(t *testing.T) string {
 	t.Cleanup(func() { os.RemoveAll(dir) })
 	return dir
 }
-func requireProbeOutput(t *testing.T, result jailResult) string {
+
+type probeExitMode int
+
+const (
+	probeExitMixed probeExitMode = iota
+	probeExitAnyFailure
+	probeExitObservations
+)
+
+func requireProbeOutput(t *testing.T, result jailResult, expected ...string) string {
 	t.Helper()
-	if result.setupErr != nil {
-		t.Fatalf("SETUP: jail: %+v", result)
-	}
-	if result.stdout == "" {
-		t.Fatalf("SETUP: empty probe result: %+v", result)
+	return requireProbeOutputMode(t, result, probeExitMixed, expected...)
+}
+
+func requireProbeOutputMode(t *testing.T, result jailResult, mode probeExitMode, expected ...string) string {
+	t.Helper()
+	if err := validateProbeOutput(result, expected, mode); err != nil {
+		t.Fatalf("SETUP: probe: %v: %+v", err, result)
 	}
 	return result.stdout
+}
+
+// A predecessor>field contract requires field only after predecessor succeeds.
+// Repeating a field declares the exact number of reports for a syscall sweep.
+func validateProbeOutput(result jailResult, expected []string, mode probeExitMode) error {
+	if result.setupErr != nil || result.exit != 0 && result.exit != 1 && result.exit != 3 {
+		return fmt.Errorf("abnormal probe termination")
+	}
+	if result.stderr != "" || result.stdout == "" || !strings.HasSuffix(result.stdout, "\n") || len(expected) == 0 {
+		return fmt.Errorf("diagnostic, empty, unterminated or undeclared probe output")
+	}
+	counts := make(map[string]int)
+	success := make(map[string]bool)
+	succeeded, failed := 0, 0
+	for _, line := range strings.Split(strings.TrimSuffix(result.stdout, "\n"), "\n") {
+		field, value, found := strings.Cut(line, "=")
+		if !found || field == "" || value == "" {
+			return fmt.Errorf("malformed operation line %q", line)
+		}
+		switch field {
+		case "size", "before", "after", "state", "session", "attempts", "target", "bytes", "uring-complete":
+			// These fields carry observations rather than syscall results.
+		default:
+			if value != "ok" {
+				errno, err := strconv.Atoi(value)
+				if err != nil || errno < 0 || errno > 4095 || (errno == 0 && mode != probeExitObservations) {
+					return fmt.Errorf("malformed syscall result %q", line)
+				}
+				if errno != 0 {
+					failed++
+				} else {
+					succeeded++
+				}
+			} else {
+				succeeded++
+			}
+		}
+		counts[field]++
+		success[field] = success[field] || value == "ok"
+	}
+	want := make(map[string]int)
+	for _, field := range expected {
+		if predecessor, next, conditional := strings.Cut(field, ">"); conditional {
+			if !success[predecessor] {
+				continue
+			}
+			field = next
+		}
+		want[field]++
+	}
+	for field, count := range want {
+		if counts[field] != count {
+			return fmt.Errorf("operation %s: got %d reports, want %d", field, counts[field], count)
+		}
+	}
+	wantExit := 0
+	if mode != probeExitObservations && failed > 0 {
+		wantExit = 1
+		if mode == probeExitMixed && succeeded > 0 {
+			wantExit = 3
+		}
+	}
+	if result.exit != wantExit {
+		return fmt.Errorf("exit %d disagrees with operation reports (want %d)", result.exit, wantExit)
+	}
+	return nil
+}
+
+func TestProbeOutputContract(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		result    jailResult
+		wantError bool
+	}{
+		{"denied", jailResult{exit: 3, stdout: "open=ok\nioctl=1\n"}, false},
+		{"allowed", jailResult{stdout: "open=ok\nioctl=ok\n"}, false},
+		{"failed-after-success", jailResult{exit: 1, stdout: "open=ok\nioctl=ok\n"}, true},
+		{"wrong-mixed-exit", jailResult{exit: 1, stdout: "open=ok\nioctl=1\n"}, true},
+		{"zero-after-denial", jailResult{stdout: "open=ok\nioctl=1\n"}, true},
+		{"crashed", jailResult{exit: 139, stdout: "open=ok\n"}, true},
+		{"signal", jailResult{exit: -1, stdout: "open=ok\nioctl=1\n"}, true},
+		{"partial", jailResult{exit: 1, stdout: "open=ok\n"}, true},
+		{"duplicate", jailResult{exit: 3, stdout: "open=ok\nioctl=1\nioctl=1\n"}, true},
+		{"stderr", jailResult{exit: 3, stdout: "open=ok\nioctl=1\n", stderr: "panic: failed\n"}, true},
+		{"malformed-zero", jailResult{exit: 3, stdout: "open=ok\nioctl=0\n"}, true},
+		{"malformed-errno", jailResult{exit: 3, stdout: "open=ok\nioctl=garbage\n"}, true},
+		{"unterminated", jailResult{exit: 3, stdout: "open=ok\nioctl=1"}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := validateProbeOutput(tc.result, []string{"open", "ioctl"}, probeExitMixed); (err != nil) != tc.wantError {
+				t.Fatalf("validation: %v", err)
+			}
+		})
+	}
 }
 
 func legPipeSize(t *testing.T, spec Spec) {
@@ -112,7 +218,7 @@ func legPipeSize(t *testing.T, spec Spec) {
 	before, err = unix.FcntlInt(r.Fd(), unix.F_GETPIPE_SZ, 0)
 	mutationSetup(t, err)
 	result := runP12(t, spec, probe+" pipesz "+strconv.Itoa(target), func(j *Jailed) { j.Cmd.Stdin = r })
-	output := requireProbeOutput(t, result)
+	output := requireProbeOutput(t, result, "pipesz", "size")
 	after, err := unix.FcntlInt(r.Fd(), unix.F_GETPIPE_SZ, 0)
 	mutationSetup(t, err)
 	mutationEffect(t, "L-FCNTL-PIPESZ", "pipe-size", after != before)
@@ -145,7 +251,7 @@ func legRWHint(t *testing.T, spec Spec) {
 		t.Fatalf("SETUP: owned-file control did not persist hint: %s", out)
 	}
 	fileHint(t, fd, true, 0)
-	output := requireProbeOutput(t, runP12(t, spec, probe+" rwhint "+path, nil))
+	output := requireProbeOutput(t, runP12(t, spec, probe+" rwhint "+path, nil), "open", "rwhint")
 	mutationEffect(t, "L-FCNTL-RWHINT", "hint", fileHint(t, fd, false, 0) != 0)
 	mutationEffect(t, "L-FCNTL-RWHINT", "errno", !strings.Contains(output, "rwhint=1\n"))
 }
@@ -226,7 +332,7 @@ func legCoreLock(t *testing.T, spec Spec) {
 	if !strings.Contains(string(control), "setrlimit=ok") || !strings.Contains(string(control), "prlimit64=ok") {
 		t.Fatalf("SETUP: limit control: %s", control)
 	}
-	output := requireProbeOutput(t, runP12(t, spec, probe+" rlimit-lock unused", nil))
+	output := requireProbeOutput(t, runP12(t, spec, probe+" rlimit-lock unused", nil), "getrlimit", "before", "setrlimit", "prlimit64", "getrlimit-after", "after")
 	mutationEffect(t, "L-RLIMIT-CORE-LOCK", "errno", !strings.Contains(output, "setrlimit=1\n") || !strings.Contains(output, "prlimit64=1\n"))
 	mutationEffect(t, "L-RLIMIT-CORE-LOCK", "limit", !strings.Contains(output, fmt.Sprintf("after=%d:%d\n", want, want)))
 	// Shell and util-linux exercise the real callers in addition to raw syscall probes.
@@ -267,7 +373,7 @@ func legSyncErrno(t *testing.T, spec Spec, syncfs bool) {
 	if !strings.Contains(string(control), field+"=ok\n") {
 		t.Fatalf("SETUP: sync control: %s", control)
 	}
-	output := requireProbeOutput(t, runP12(t, spec, probe+" "+strings.Join(args, " "), nil))
+	output := requireProbeOutput(t, runP12(t, spec, probe+" "+strings.Join(args, " "), nil), field)
 	mutationEffect(t, name, "errno", !strings.Contains(output, field+"=1\n"))
 }
 func legListen(t *testing.T, spec Spec) {
@@ -277,7 +383,7 @@ func legListen(t *testing.T, spec Spec) {
 	if !strings.Contains(string(control), "listen=ok") {
 		t.Fatalf("SETUP: listen control %s", control)
 	}
-	output := requireProbeOutput(t, runP12(t, spec, probe+" listen unused", nil))
+	output := requireProbeOutput(t, runP12(t, spec, probe+" listen unused", nil), "socket", "socket>listen")
 	mutationEffect(t, "L-LISTEN", "errno", !strings.Contains(output, "listen=1\n"))
 }
 func legSockdiag(t *testing.T, spec Spec) {
@@ -295,7 +401,7 @@ func legSockdiag(t *testing.T, spec Spec) {
 	if !strings.Contains(string(control), "socket=ok") {
 		t.Fatalf("SETUP: sockdiag control %s", control)
 	}
-	output := requireProbeOutput(t, runP12(t, spec, probe+" socket-tuple 16 3 4", nil))
+	output := requireProbeOutput(t, runP12(t, spec, probe+" socket-tuple 16 3 4", nil), "socket")
 	mutationEffect(t, "L-SOCKDIAG", "errno", !strings.Contains(output, "socket=1\n"))
 }
 func legSocketpair(t *testing.T, spec Spec) {
@@ -307,7 +413,7 @@ func legSocketpair(t *testing.T, spec Spec) {
 		if !strings.Contains(string(control), "socketpair=ok") {
 			t.Fatal("SETUP: socketpair control")
 		}
-		output := requireProbeOutput(t, runP12(t, spec, probe+args, nil))
+		output := requireProbeOutput(t, runP12(t, spec, probe+args, nil), "socketpair")
 		want := "socketpair=ok\n"
 		if kind == 2 {
 			want = "socketpair=1\n"
@@ -339,7 +445,7 @@ func legNamespaceCalls(t *testing.T, spec Spec) {
 		if err != nil || !strings.Contains(string(control), "clone=ok\n") {
 			t.Fatalf("SETUP: clone %#x control: %v: %s", item.flags, err, control)
 		}
-		output := requireProbeOutput(t, runP12(t, spec, fmt.Sprintf("%s clone-ns %d", probe, item.flags), nil))
+		output := requireProbeOutput(t, runP12(t, spec, fmt.Sprintf("%s clone-ns %d", probe, item.flags), nil), "clone", "clone>wait")
 		if strings.Contains(output, "clone=ok\n") {
 			cloneAllowed = true
 		} else if !strings.Contains(output, "clone=1\n") {
@@ -350,7 +456,7 @@ func legNamespaceCalls(t *testing.T, spec Spec) {
 	if err != nil || !strings.Contains(string(control), "setns=ok\n") {
 		t.Fatalf("SETUP: setns control: %v: %s", err, control)
 	}
-	output := requireProbeOutput(t, runP12(t, spec, probe+" setns unused", nil))
+	output := requireProbeOutput(t, runP12(t, spec, probe+" setns unused", nil), "open", "setns")
 	if !strings.Contains(output, "setns=1\n") {
 		t.Errorf("setns(0) not EPERM: %s", output)
 	}
@@ -360,7 +466,7 @@ func legNamespaceCalls(t *testing.T, spec Spec) {
 func legCeiling(t *testing.T, spec Spec) {
 	probe := buildProbe(t)
 	p12Control(t, spec)
-	output := requireProbeOutput(t, runP12(t, spec, probe+" raw 472", nil))
+	output := requireProbeOutput(t, runP12(t, spec, probe+" raw 472", nil), "raw")
 	if !strings.Contains(output, "raw=38\n") {
 		t.Errorf("unknown syscall not ENOSYS: %s", output)
 	}
@@ -393,7 +499,7 @@ func legDatagram(t *testing.T, spec Spec, abstract bool) {
 	if string(data[:n]) != "canary" {
 		t.Fatalf("SETUP: no unjailed datagram: %s", control)
 	}
-	output := requireProbeOutput(t, runP12(t, spec, probe+" dgram-send "+path, nil))
+	output := requireProbeOutput(t, runP12(t, spec, probe+" dgram-send "+path, nil), "socketpair", "socketpair>sendto")
 	n, _, err = unix.Recvfrom(fd, data[:], 0)
 	if err != nil && err != unix.EAGAIN {
 		t.Fatalf("SETUP: receiver %v", err)
@@ -423,7 +529,7 @@ func legSignal(t *testing.T, spec Spec) {
 		t.Fatalf("SETUP: signal control did not terminate: %s", out)
 	}
 	target, done := victim()
-	output := requireProbeOutput(t, runP12(t, spec, probe+" signal "+strconv.Itoa(target.Process.Pid), nil))
+	output := requireProbeOutput(t, runP12(t, spec, probe+" signal "+strconv.Itoa(target.Process.Pid), nil), "kill")
 	delivered := false
 	select {
 	case <-done:
@@ -446,7 +552,7 @@ func legSysV(t *testing.T, spec Spec) {
 	}
 	id := shmCreate(t)
 	defer shmRemove(id)
-	output := requireProbeOutput(t, runP12(t, spec, probe+" shm-rmid "+strconv.Itoa(id), nil))
+	output := requireProbeOutput(t, runP12(t, spec, probe+" shm-rmid "+strconv.Itoa(id), nil), "shmctl")
 	mutationEffect(t, "L-IPC-SYSV", "removed", !shmExists(id))
 	if !strings.Contains(output, "shmctl=22\n") && !strings.Contains(output, "shmctl=ok\n") {
 		t.Errorf("SysV errno: %s", output)
@@ -497,7 +603,13 @@ func legScheduler(t *testing.T, spec Spec) {
 	victim := startSleeper(t)
 	pid := victim.Process.Pid
 	before := readScheduler(t, pid)
-	output := requireProbeOutput(t, runP12(t, spec, probe+" scheduler "+strconv.Itoa(pid)+"; "+strings.ReplaceAll(callers(strconv.Itoa(pid)), " && ", "; "), nil))
+	output := requireProbeOutput(t, runP12(t, spec, probe+" scheduler "+strconv.Itoa(pid), nil), "prlimit", "nice", "ioprio", "policy", "affinity", "schedattr", "state")
+	for _, caller := range strings.Split(callers(strconv.Itoa(pid)), " && ") {
+		result := runP12(t, spec, caller, nil)
+		if result.setupErr != nil || result.exit != 0 && result.exit != 1 {
+			t.Fatalf("SETUP: scheduler caller: %+v", result)
+		}
+	}
 	mutationEffect(t, "L-SCHED", "retuned", before != readScheduler(t, pid))
 	if !strings.Contains(output, "=1\n") && !strings.Contains(output, "=ok\n") {
 		t.Errorf("scheduler errno: %s", output)
@@ -527,7 +639,7 @@ func legIOUring(t *testing.T, spec Spec) {
 	}
 	mutationSetup(t, unix.Removexattr(path, "user.sshgate_uring"))
 	spec.Net = false
-	output := requireProbeOutput(t, runP12(t, spec, probe+" uring "+path+" "+port, nil))
+	output := requireProbeOutput(t, runP12(t, spec, probe+" uring "+path+" "+port, nil), "uring-complete", "io_uring_setup", "io_uring_setup>eventfd", "eventfd>io_uring_register", "io_uring_register>sq-map", "sq-map>sqes-map")
 	listener.SetDeadline(time.Now().Add(100 * time.Millisecond))
 	connection, err = listener.Accept()
 	delivered := err == nil
@@ -590,7 +702,7 @@ func legKeyring(t *testing.T, spec Spec) {
 		}
 		reset()
 		before = snapshot()
-		output := requireProbeOutput(t, runP12(t, spec, probe+" "+strings.Join(args, " "), nil))
+		output := requireProbeOutput(t, runP12(t, spec, probe+" "+strings.Join(args, " "), nil), "keyring")
 		changed = changed || !bytes.Equal(before, snapshot())
 		badErrno = badErrno || !strings.Contains(output, "keyring=1\n")
 	}
@@ -622,7 +734,7 @@ func legInet(t *testing.T, spec Spec, grant bool) {
 			t.Fatal("SETUP: inet control")
 		}
 		spec.Net = grant
-		output := requireProbeOutput(t, runP12(t, spec, probe+" "+operation+" "+port, nil))
+		output := requireProbeOutput(t, runP12(t, spec, probe+" "+operation+" "+port, nil), "socket", "socket>connect")
 		listener.SetDeadline(time.Now().Add(100 * time.Millisecond))
 		conn, err = listener.Accept()
 		connected := err == nil
@@ -668,7 +780,7 @@ func legSocketSweep(t *testing.T, spec Spec, grant bool) {
 	if grant {
 		mode = "grant"
 	}
-	output := requireProbeOutput(t, runP12(t, spec, probe+" socket-sweep "+mode, nil))
+	output := requireProbeOutput(t, runP12(t, spec, probe+" socket-sweep "+mode, nil), "attempts")
 	var attempts, denied int
 	if _, err := fmt.Sscanf(strings.TrimSpace(output), "attempts=%d denied=%d", &attempts, &denied); err != nil || attempts < 20000 {
 		t.Fatalf("SETUP: incomplete socket sweep: %s", output)
@@ -697,7 +809,10 @@ func legSSFallback(t *testing.T, spec Spec) {
 		t.Fatal("SETUP: ss did not show control listener")
 	}
 	result := runP12(t, spec, command, nil)
-	output := requireProbeOutput(t, result)
+	if result.setupErr != nil || result.exit != 0 || result.stdout == "" {
+		t.Fatalf("SETUP: ss control: %+v", result)
+	}
+	output := result.stdout
 	if result.exit != 0 || strings.Count(strings.TrimSpace(output), "\n") != bytes.Count(bytes.TrimSpace(control), []byte("\n")) {
 		t.Errorf("ss procfs fallback lost listener: %+v", result)
 	}
@@ -723,7 +838,7 @@ func legUnixConnect(t *testing.T, spec Spec, abstract bool) {
 	if !strings.Contains(string(control), "connect=ok") {
 		t.Fatal("SETUP: unix control")
 	}
-	output := requireProbeOutput(t, runP12(t, spec, probe+" unix-connect "+path, nil))
+	output := requireProbeOutput(t, runP12(t, spec, probe+" unix-connect "+path, nil), "socket", "socket>connect")
 	listener.SetDeadline(time.Now().Add(100 * time.Millisecond))
 	conn, err = listener.Accept()
 	connected := err == nil
@@ -742,12 +857,15 @@ func legIoctlFilter(t *testing.T, spec Spec) {
 	for _, request := range requests {
 		// Both processes create a regular tmpfs file in their own /dev/shm view.
 		control := exec.Command(probe, "ioctl-scratch", fmt.Sprint(request))
-		output, _ := control.CombinedOutput()
+		var diagnostic bytes.Buffer
+		control.Stderr = &diagnostic
+		output, controlErr := control.Output()
+		requireProbeOutput(t, jailResult{exit: exitCodeOf(controlErr), stdout: string(output), stderr: diagnostic.String()}, "open", "ioctl")
 		if !strings.Contains(string(output), "open=ok\n") || !strings.Contains(string(output), "ioctl=25\n") && !strings.Contains(string(output), "ioctl=95\n") {
 			t.Fatalf("SETUP: scratch ioctl control %#x: %s", request, output)
 		}
 		result := runP12(t, spec, fmt.Sprintf("%s ioctl-scratch %d", probe, request), nil)
-		text := requireProbeOutput(t, result)
+		text := requireProbeOutput(t, result, "open", "ioctl")
 		if !strings.Contains(text, "open=ok\n") {
 			t.Fatalf("SETUP: scratch ioctl target not opened: %s", text)
 		}
@@ -761,12 +879,16 @@ func legIoctlFilter(t *testing.T, spec Spec) {
 	defer tty.Close()
 	control := exec.Command(probe, "tiocsti", "unused")
 	control.Stdin = tty
-	output, _ := control.CombinedOutput()
+	var diagnostic bytes.Buffer
+	control.Stderr = &diagnostic
+	output, controlErr := control.Output()
+	requireProbeOutput(t, jailResult{exit: exitCodeOf(controlErr), stdout: string(output), stderr: diagnostic.String()}, "tiocsti")
 	if !strings.Contains(string(output), "tiocsti=ok\n") && !strings.Contains(string(output), "tiocsti=5\n") && !strings.Contains(string(output), "tiocsti=1\n") {
 		t.Fatalf("SETUP: isolated pty ioctl control: %s", output)
 	}
 	result := runP12(t, spec, probe+" tiocsti unused", func(j *Jailed) { j.Cmd.Stdin = tty })
-	bad = bad || !strings.Contains(requireProbeOutput(t, result), "tiocsti=1\n")
+	text := requireProbeOutput(t, result, "tiocsti")
+	bad = bad || !strings.Contains(text, "tiocsti=1\n")
 	mutationEffect(t, "L-IOCTL", "errno", bad)
 }
 func legMetadataErrno(t *testing.T, spec Spec) {
@@ -793,7 +915,7 @@ func legMetadataErrno(t *testing.T, spec Spec) {
 		mutationSetup(t, os.WriteFile(path, []byte("canary"), 0600))
 		before, err := os.Stat(path)
 		mutationSetup(t, err)
-		output := requireProbeOutput(t, runP12(t, spec, probe+" metadata-errno "+path, nil))
+		output := requireProbeOutput(t, runP12(t, spec, probe+" metadata-errno "+path, nil), "open", "fchmod", "chmod", "chown", "setxattr", "utimensat")
 		for _, op := range []string{"fchmod", "chmod", "chown", "setxattr", "utimensat"} {
 			badErrno = badErrno || !strings.Contains(output, op+"=1\n")
 		}

@@ -197,10 +197,8 @@ func legMqueueErrno(t *testing.T, spec Spec) {
 	name, file := queueFixture(t)
 	probe := buildProbe(t)
 	result := runP12(t, spec, probe+" mq-errno "+name, func(j *Jailed) { j.Cmd.Stdin = file })
-	if result.setupErr != nil {
-		t.Fatalf("SETUP: %+v", result)
-	}
-	denied := strings.Contains(result.stdout, "mq_open=1\n") && strings.Contains(result.stdout, "mq_timedreceive=1\n")
+	output := requireProbeOutput(t, result, "mq_open", "mq_timedreceive")
+	denied := strings.Contains(output, "mq_open=1\n") && strings.Contains(result.stdout, "mq_timedreceive=1\n")
 	mutated := strings.Contains(result.stdout, "mq_open=2\n") && strings.Contains(result.stdout, "mq_timedreceive=ok\n")
 	if !denied && !mutated {
 		t.Fatalf("SETUP: unexpected MQ result %+v", result)
@@ -208,14 +206,16 @@ func legMqueueErrno(t *testing.T, spec Spec) {
 	mutationEffect(t, "L-MQUEUE-ERRNO", "mq-errno", mutated)
 }
 func legMqueueCover(t *testing.T, spec Spec) {
-	name, _ := queueFixture(t)
 	entries, err := readMountInfo()
 	mutationSetup(t, err)
 	count := 0
+	drained := false
 	for _, entry := range entries {
 		if entry.fstype != "mqueue" {
 			continue
 		}
+		// Each alias of the queue filesystem needs a fresh message.
+		name, _ := queueFixture(t)
 		path := filepath.Join(entry.point, name)
 		before, err := os.ReadFile(path)
 		mutationSetup(t, err)
@@ -223,78 +223,128 @@ func legMqueueCover(t *testing.T, spec Spec) {
 			t.Fatalf("SETUP: queue not populated: %s", before)
 		}
 		result := runP12(t, spec, buildProbe(t)+" mq-drain "+path, nil)
-		if result.setupErr != nil {
-			t.Fatalf("SETUP: %+v", result)
-		}
-		if !strings.Contains(result.stdout, "open=2\n") && !strings.Contains(result.stdout, "mq_timedreceive=ok\n") {
-			t.Errorf("unexpected queue result: %+v", result)
+		output := requireProbeOutput(t, result, "open", "open>mq_timedreceive")
+		if !strings.Contains(output, "open=2\n") && !strings.Contains(result.stdout, "mq_timedreceive=ok\n") {
+			t.Fatalf("SETUP: unexpected queue result: %+v", result)
 		}
 		after, err := os.ReadFile(path)
 		mutationSetup(t, err)
-		mutationEffect(t, "L-MQUEUE", "queue-drained", !bytes.Equal(before, after))
+		pathDrained := !bytes.Equal(before, after)
+		if count > 0 && pathDrained != drained {
+			t.Fatal("SETUP: inconsistent drain observations across mqueue mounts")
+		}
+		drained = pathDrained
 		count++
 	}
 	if count == 0 {
 		t.Fatal("SETUP: no mqueue mount")
 	}
+	mutationEffect(t, "L-MQUEUE", "queue-drained", drained)
 }
 
 func legWriteSweep(t *testing.T, spec Spec, submount bool) {
 	directory := writeSweepFixture(t, submount)
-	seed := func() {
-		mutationSetup(t, os.RemoveAll(directory))
-		mutationSetup(t, os.Mkdir(directory, 0700))
-		for _, name := range []string{"file", "remove", "move"} {
-			mutationSetup(t, os.WriteFile(filepath.Join(directory, name), []byte("canary"), 0600))
-		}
-		mutationSetup(t, os.Mkdir(filepath.Join(directory, "empty"), 0700))
-	}
+	seed := func() { seedWriteSweep(t, directory) }
 	seed()
 	probe := buildProbe(t)
 	control, err := exec.Command(probe, "write-sweep", directory).CombinedOutput()
 	mutationSetup(t, err)
-	operations := []string{"write", "append", "open-trunc", "open-rdonly-trunc", "truncate-path", "unlink", "rmdir", "mkdir", "symlink", "link", "rename", "mkfifo"}
+	operations := writeSweepOperations
 	for _, name := range operations {
 		if !strings.Contains(string(control), name+"=ok\n") {
 			t.Fatalf("SETUP: control %s", control)
 		}
 	}
+	for name, want := range map[string]string{"write": "changed", "append": "canarychanged", "open-trunc": "changed", "open-rdonly-trunc": "", "truncate-path": ""} {
+		data, err := os.ReadFile(filepath.Join(directory, name))
+		mutationSetup(t, err)
+		if string(data) != want {
+			t.Fatalf("SETUP: %s control content %q, want %q", name, data, want)
+		}
+	}
 	seed()
 	result := runP12(t, spec, probe+" write-sweep "+directory, nil)
-	if result.setupErr != nil {
-		t.Fatalf("SETUP: %+v", result)
-	}
+	output := requireProbeOutput(t, result, operations...)
 	leg := "L-WRITE-ROOT"
 	if submount {
 		leg = "L-WRITE-SUBMOUNT"
 	}
 	for _, name := range operations {
-		if strings.Contains(result.stdout, name+"=ok\n") {
+		if jailmut.On("P-RO") && !jailmut.On("P-LL-FS") && (name == "write" || name == "append" || name == "open-trunc") && !strings.Contains(output, name+"=13\n") {
+			t.Fatalf("SETUP: Landlock write denial invariant failed for %s: %s", name, output)
+		}
+		if strings.Contains(output, name+"=ok\n") {
 			continue
 		}
 		want := "30"
 		if jailmut.On("P-RO") {
 			want = "13"
 		}
-		if !strings.Contains(result.stdout, name+"="+want+"\n") {
-			t.Errorf("%s expected errno %s: %+v", name, want, result)
+		if !strings.Contains(output, name+"="+want+"\n") {
+			t.Fatalf("SETUP: %s expected errno %s: %+v", name, want, result)
 		}
 	}
-	changed := false
-	entries, err := os.ReadDir(directory)
-	mutationSetup(t, err)
-	changed = len(entries) != 4
-	for _, name := range []string{"remove", "move"} {
-		data, err := os.ReadFile(filepath.Join(directory, name))
-		changed = changed || err != nil || string(data) != "canary"
-	}
-	data, err := os.ReadFile(filepath.Join(directory, "file"))
-	mutationSetup(t, err)
-	truncated := len(data) == 0
-	changed = changed || (string(data) != "canary" && !truncated)
-	mutationEffect(t, leg, "write", changed)
+	writeChanged, truncated := observeWriteSweep(t, directory)
+	mutationEffect(t, leg, "write", writeChanged)
 	mutationEffect(t, leg, "truncate", truncated)
+}
 
+var writeSweepOperations = []string{"write", "append", "open-trunc", "open-rdonly-trunc", "truncate-path", "unlink", "rmdir", "mkdir", "symlink", "link", "rename", "mkfifo"}
+var writeSweepFiles = []string{"write", "append", "open-trunc", "open-rdonly-trunc", "truncate-path", "file", "remove", "move"}
+
+func seedWriteSweep(t *testing.T, directory string) {
+	t.Helper()
+	mutationSetup(t, os.RemoveAll(directory))
+	mutationSetup(t, os.Mkdir(directory, 0700))
+	for _, name := range writeSweepFiles {
+		mutationSetup(t, os.WriteFile(filepath.Join(directory, name), []byte("canary"), 0600))
+	}
+	mutationSetup(t, os.Mkdir(filepath.Join(directory, "empty"), 0700))
+}
+
+func observeWriteSweep(t *testing.T, directory string) (writeChanged, truncated bool) {
+	t.Helper()
+	for _, name := range writeSweepFiles {
+		data, err := os.ReadFile(filepath.Join(directory, name))
+		if err != nil && !os.IsNotExist(err) {
+			mutationSetup(t, err)
+		}
+		changed := err != nil || string(data) != "canary"
+		if name == "open-rdonly-trunc" || name == "truncate-path" {
+			truncated = truncated || changed
+		} else {
+			writeChanged = writeChanged || changed
+		}
+	}
+	for _, name := range []string{"made", "symlink", "link", "moved", "fifo"} {
+		_, err := os.Lstat(filepath.Join(directory, name))
+		if err != nil && !os.IsNotExist(err) {
+			mutationSetup(t, err)
+		}
+		writeChanged = writeChanged || err == nil
+	}
+	_, err := os.Stat(filepath.Join(directory, "empty"))
+	if err != nil && !os.IsNotExist(err) {
+		mutationSetup(t, err)
+	}
+	return writeChanged || os.IsNotExist(err), truncated
+}
+
+func TestPhase1WriteSweepObservationsIndependent(t *testing.T) {
+	directory := filepath.Join(t.TempDir(), "sweep")
+	for _, operation := range []string{"write", "append", "open-trunc"} {
+		t.Run(operation, func(t *testing.T) {
+			seedWriteSweep(t, directory)
+			mutationSetup(t, os.WriteFile(filepath.Join(directory, operation), []byte("changed"), 0600))
+			for _, name := range []string{"open-rdonly-trunc", "truncate-path"} {
+				mutationSetup(t, os.Truncate(filepath.Join(directory, name), 0))
+			}
+			writeChanged, truncated := observeWriteSweep(t, directory)
+			if !writeChanged || !truncated {
+				t.Fatalf("write=%t truncate=%t: truncation hid %s", writeChanged, truncated, operation)
+			}
+		})
+	}
 }
 
 func writeSweepFixture(t *testing.T, submount bool) string {

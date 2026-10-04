@@ -195,7 +195,7 @@ define jail-runner
 	grep -qE '^FAIL' "$$log" && fail=1; \
 	grep -qE -- '--- SKIP|SKIP rung|no tests to run' "$$log" && fail=1; \
 	if [ "$${SSHGATE_JAIL_CI:-}" = 1 ]; then grep -q 'CONTROL-SKIPPED' "$$log" && fail=1; fi; \
-	for t in TestJailMatrix TestJailMatrixP12 TestJailMatrixP14 TestJailMatrixP15 TestJailMatrixP15c TestJailMatrixCovers TestJailMatrixCredentials TestJailMatrixCatalogue TestJailMatrixWrite TestJailMatrixSyscallSweep TestDetectUsernsCountUsedUpDenies TestExecWithRedactionConfinedNamespace TestExecWithRedactionConfineLifecycle TestExecWithRedactionConfinedEROFS TestExecWithRedactionConfineFailClosed TestExecWithRedactionConfineClosesInheritedFDs TestRunReadJailedRealEffect TestGateBinaryJailedRead TestRunReadJailSetupFailureDenies; do \
+	for t in TestJailMatrix TestJailMatrixP12 TestJailMatrixPhase1 TestJailMatrixP14 TestJailMatrixP15 TestJailMatrixP15c TestJailMatrixCovers TestJailMatrixCredentials TestJailMatrixCatalogue TestJailMatrixWrite TestJailMatrixSyscallSweep TestDetectUsernsCountUsedUpDenies TestExecWithRedactionConfinedNamespace TestExecWithRedactionConfineLifecycle TestExecWithRedactionConfinedEROFS TestExecWithRedactionConfineFailClosed TestExecWithRedactionConfineClosesInheritedFDs TestRunReadJailedRealEffect TestGateBinaryJailedRead TestRunReadJailSetupFailureDenies; do \
 		grep -qE -- "^--- PASS: $$t( |$$)" "$$log" || { echo "test-jail: no PASS line for $$t"; fail=1; }; \
 	done; \
 	[ $$fail = 0 ] || { echo "test-jail: FAILED"; exit 1; }; \

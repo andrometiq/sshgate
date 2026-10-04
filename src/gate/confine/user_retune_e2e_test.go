@@ -26,6 +26,49 @@ type disposableIdentity struct {
 }
 
 func legUserScheduler(t *testing.T, abi int) {
+	runDisposableIdentity(t, "L-SCHED-USER", []string{"retuned"}, func(phase, probe string, uid uint32) {
+		victim := startSleeper(t)
+		before := readScheduler(t, victim.Process.Pid)
+		commands := []string{probe + " prio-user unused", probe + " ioprio-user unused"}
+		callers := []string{fmt.Sprintf("renice -n 19 -u %d", uid), fmt.Sprintf("ionice -c3 -u %d", uid)}
+		if phase == "control" {
+			for _, command := range append(commands, callers...) {
+				output, err := exec.Command("/bin/sh", "-c", command).CombinedOutput()
+				if err != nil {
+					t.Fatalf("SETUP: USER control %q: %v: %s", command, err, output)
+				}
+			}
+			after := readScheduler(t, victim.Process.Pid)
+			if before.nice == after.nice || before.io == after.io {
+				t.Fatal("SETUP: USER control did not retune victim")
+			}
+			return
+		}
+		changed := false
+		for _, spec := range hostPIDSpecs(abi) {
+			for i, command := range commands {
+				field := []string{"prio-user", "ioprio-user"}[i]
+				output := requireProbeOutput(t, runP12(t, spec, command, nil), field)
+				if output != field+"=1\n" {
+					t.Fatalf("SETUP: USER retune expected EPERM: %s", output)
+				}
+			}
+			for _, command := range callers {
+				result := runP12(t, spec, command, nil)
+				if result.setupErr != nil || result.exit != 1 || !strings.Contains(strings.ToLower(result.stderr), "operation not permitted") {
+					t.Fatalf("SETUP: USER caller expected EPERM: %+v", result)
+				}
+			}
+			after := readScheduler(t, victim.Process.Pid)
+			changed = changed || before.nice != after.nice || before.io != after.io
+		}
+
+		mutationEffect(t, "L-SCHED-USER", "retuned", changed)
+	})
+}
+
+func runDisposableIdentity(t *testing.T, legName string, markerCandidates []string, child func(phase, probe string, uid uint32)) {
+	t.Helper()
 	if phase := os.Getenv("SSHGATE_TEST_USER_RETUNE_PHASE"); phase != "" {
 		uid, err := strconv.ParseUint(os.Getenv("SSHGATE_TEST_USER_RETUNE_UID"), 10, 32)
 		mutationSetup(t, err)
@@ -50,29 +93,8 @@ func legUserScheduler(t *testing.T, abi int) {
 			t.Fatal("SETUP: fixture identity does not name this child")
 		}
 		probe := os.Getenv("SSHGATE_TEST_USER_RETUNE_PROBE")
-		victim := startSleeper(t)
-		before := readScheduler(t, victim.Process.Pid)
-		command := fmt.Sprintf("%s prio-user unused; %s ioprio-user unused; renice -n 19 -u %d; ionice -c3 -u %d", probe, probe, uid, uid)
-		if phase == "control" {
-			output, err := exec.Command("/bin/sh", "-c", command).CombinedOutput()
-			mutationSetup(t, err)
-			after := readScheduler(t, victim.Process.Pid)
-			if before.nice == after.nice || before.io == after.io {
-				t.Fatalf("SETUP: USER control did not retune victim: %s", output)
-			}
-			return
-		}
-		changed := false
-		for _, spec := range hostPIDSpecs(abi) {
-			output := requireProbeOutput(t, runP12(t, spec, command, nil))
-			after := readScheduler(t, victim.Process.Pid)
-			changed = changed || before.nice != after.nice || before.io != after.io
-			// USER calls can retune the victim and still fail on the same-uid shim.
-			if !strings.Contains(output, "prio-user=1\n") || !strings.Contains(output, "ioprio-user=1\n") {
-				t.Errorf("USER retune expected EPERM: %s", output)
-			}
-		}
-		mutationEffect(t, "L-SCHED-USER", "retuned", changed)
+
+		child(phase, probe, uint32(uid))
 		return
 	}
 	if os.Geteuid() != 0 || os.Getenv("SSHGATE_JAIL_CI") != "1" {
@@ -121,6 +143,7 @@ func legUserScheduler(t *testing.T, abi int) {
 	for _, phase := range []string{"control", "jailed"} {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 		command := exec.CommandContext(ctx, runner, "-test.v", "-test.run=^"+strings.ReplaceAll(t.Name(), "/", "$/^")+"$")
+		command.Dir = directory
 		command.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: uid, Gid: gid, Groups: []uint32{}}}
 		command.Env = append(os.Environ(), "SSHGATE_TEST_USER_RETUNE_PHASE="+phase, "SSHGATE_TEST_USER_RETUNE_UID="+strconv.Itoa(int(uid)), "SSHGATE_TEST_USER_RETUNE_PROBE="+probe)
 		output, err := command.CombinedOutput()
@@ -135,9 +158,9 @@ func legUserScheduler(t *testing.T, abi int) {
 		convert.Stdin = bytes.NewReader(output)
 		stream, convertErr := convert.Output()
 		mutationSetup(t, convertErr)
-		leg := harness.Leg{Name: "L-SCHED-USER", Names: map[string]string{"native": t.Name(), "abi1": t.Name()}}
-		for _, marker := range []string{"errno", "retuned"} {
-			if bytes.Contains(output, []byte("MUTATION-EFFECT L-SCHED-USER "+marker)) {
+		leg := harness.Leg{Name: legName, Names: map[string]string{"native": t.Name(), "abi1": t.Name()}}
+		for _, marker := range markerCandidates {
+			if bytes.Contains(output, []byte("MUTATION-EFFECT "+legName+" "+marker)) {
 				leg.Markers = append(leg.Markers, "MUTATION-EFFECT "+marker)
 			}
 		}
@@ -145,7 +168,7 @@ func legUserScheduler(t *testing.T, abi int) {
 			t.Fatalf("SETUP: disposable USER fixture: %v: %s", err, output)
 		}
 		for _, marker := range leg.Markers {
-			mutationEffect(t, "L-SCHED-USER", strings.TrimPrefix(marker, "MUTATION-EFFECT "), true)
+			mutationEffect(t, legName, strings.TrimPrefix(marker, "MUTATION-EFFECT "), true)
 		}
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/unix"
@@ -41,13 +42,39 @@ func init() {
 	case "read":
 		coverRead(args[0])
 	case "jail-proc":
-		if len(args) != 2 || (args[0] != "shim" && args[0] != "gate") {
+		if len(args) < 2 || len(args) > 3 || (args[0] != "shim" && args[0] != "gate") {
 			os.Exit(2)
 		}
 		pid, err := shimAncestor()
 		if err != nil {
 			report("ancestor", err)
 			break
+		}
+		if len(args) == 3 {
+			if args[2] != "wait-nocaps" {
+				os.Exit(2)
+			}
+			deadline := time.Now().Add(2 * time.Second)
+			for {
+				status, readErr := os.ReadFile(fmt.Sprintf("/proc/%d/status", pid))
+				if readErr != nil {
+					fmt.Fprintln(os.Stderr, "SETUP: shim status:", readErr)
+					os.Exit(2)
+				}
+				ready, parseErr := shimCapabilitiesZero(string(status))
+				if parseErr != nil {
+					fmt.Fprintln(os.Stderr, "SETUP: shim status:", parseErr)
+					os.Exit(2)
+				}
+				if ready {
+					break
+				}
+				if time.Now().After(deadline) {
+					fmt.Fprintln(os.Stderr, "SETUP: shim capabilities did not clear within 2s")
+					os.Exit(2)
+				}
+				time.Sleep(5 * time.Millisecond)
+			}
 		}
 		if args[0] == "gate" {
 			pid, err = processParent(pid)
@@ -117,4 +144,31 @@ func shimAncestor() (int, error) {
 		}
 	}
 	return 0, fmt.Errorf("shim ancestor not found")
+}
+
+func shimCapabilitiesZero(status string) (bool, error) {
+	seen := make(map[string]bool)
+	zero := true
+	for _, line := range strings.Split(status, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		switch fields[0] {
+		case "CapPrm:", "CapEff:", "CapAmb:":
+			if len(fields) != 2 || seen[fields[0]] {
+				return false, fmt.Errorf("malformed capability field %q", line)
+			}
+			value, err := strconv.ParseUint(fields[1], 16, 64)
+			if err != nil {
+				return false, err
+			}
+			seen[fields[0]] = true
+			zero = zero && value == 0
+		}
+	}
+	if len(seen) != 3 {
+		return false, fmt.Errorf("missing shim capability field")
+	}
+	return zero, nil
 }

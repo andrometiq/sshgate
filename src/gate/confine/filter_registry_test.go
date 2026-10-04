@@ -1,6 +1,8 @@
 package confine
 
 import (
+	"os"
+	"strings"
 	"testing"
 
 	"golang.org/x/sys/unix"
@@ -49,6 +51,9 @@ func p15Registry() []prot {
 		p := &result[i]
 		if p.ID == "P-SC-SETPRIORITY" || p.ID == "P-SC-IOPRIO_SET" {
 			p.MutationSets[0].Legs = append(p.MutationSets[0].Legs, userRetuneLeg())
+		}
+		if p.ID == "P-SC-SCHED_SETPARAM" {
+			p.MutationSets[0].Legs = append(p.MutationSets[0].Legs, setparamRetuneLeg())
 		}
 		switch p.ID {
 		case "P-SC-PROCESS_MRELEASE":
@@ -115,7 +120,14 @@ func p15Registry() []prot {
 				markers = append(markers, "MUTATION-EFFECT limit")
 			}
 			p.MutationSets[0].Legs = append(p.MutationSets[0].Legs, p15Leg("L-RLIMIT-CORE-LOCK", markers...))
-			crash := p15Leg("L-CRASH-NO-HELPER", "MUTATION-EFFECT helper-record")
+			crash := p15Leg("L-CRASH-LOWER-PIPE")
+			pattern, err := os.ReadFile("/proc/sys/kernel/core_pattern")
+			if err != nil {
+				panic(err)
+			}
+			if strings.HasPrefix(strings.TrimSpace(string(pattern)), "|") {
+				crash.Markers = []string{"MUTATION-EFFECT helper-record"}
+			}
 			crash.CIOnly = true
 			p.MutationSets[0].Legs = append(p.MutationSets[0].Legs, crash)
 		case "P-SC-SYNC":
@@ -178,9 +190,11 @@ func TestRegistryCIOnlyControls(t *testing.T) {
 		"L-SOCK-SWEEP":       false,
 		"L-SOCK-SWEEP-GRANT": false,
 		"L-CRASH-NO-HELPER":  false,
+		"L-CRASH-LOWER-PIPE": false,
+		"L-RL-NPROC":         false,
 		"L-SCHED-USER":       false,
 	}
-	for _, protection := range p15Registry() {
+	for _, protection := range registry {
 		for _, set := range protection.MutationSets {
 			nonCI, _ := harness.Select(set, true, false)
 			ci, omitted := harness.Select(set, true, true)

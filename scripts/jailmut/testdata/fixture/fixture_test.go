@@ -28,6 +28,9 @@ func TestFixture(t *testing.T) {
 					t.Skip("fixture skipped")
 				}
 				t.Errorf("MUTATION-EFFECT L-RED write")
+				if mode == "marker-setup" {
+					t.Fatal("SETUP: required invariant failed after expected marker")
+				}
 				if mode == "extra" {
 					t.Errorf("MUTATION-EFFECT L-RED extra")
 				}

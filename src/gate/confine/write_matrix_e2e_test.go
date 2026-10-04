@@ -27,8 +27,15 @@ func TestJailMatrixWrite(t *testing.T) {
 				bad := false
 				for _, submount := range []bool{false, true} {
 					directory := writeSweepFixture(t, submount)
-					mutationSetup(t, os.WriteFile(filepath.Join(directory, "file"), []byte("canary"), 0600))
-					output := requireProbeOutput(t, runP12(t, spec, probe+" write-sweep "+directory, nil))
+					seedWriteSweep(t, directory)
+					output := requireProbeOutput(t, runP12(t, spec, probe+" write-sweep "+directory, nil), writeSweepOperations...)
+					if jailmut.On("P-RO") && !jailmut.On("P-LL-FS") {
+						for _, op := range []string{"write", "append", "open-trunc"} {
+							if !strings.Contains(output, op+"=13\n") {
+								t.Fatalf("SETUP: Landlock write denial invariant failed for %s: %s", op, output)
+							}
+						}
+					}
 					for _, op := range []string{"write", "append", "open-trunc", "open-rdonly-trunc", "truncate-path"} {
 						bad = bad || !strings.Contains(output, op+"=30\n")
 					}
@@ -128,7 +135,7 @@ func legMetadataMount(t *testing.T, spec Spec, submount bool) map[string]bool {
 	}
 	seed()
 	before = readMetadata(t, path)
-	output := requireProbeOutput(t, runP12(t, spec, probe+" metadata-mount "+path, nil))
+	output := requireProbeOutput(t, runP12(t, spec, probe+" metadata-mount "+path, nil), operations...)
 	want := "1"
 	fullEffect := jailmut.On("P-SC-META") && jailmut.On("P-RO") && jailmut.On("P-SELFCHECK-MOUNTS")
 	if jailmut.On("P-SC-META") {

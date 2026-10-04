@@ -34,7 +34,7 @@ func setupMounts(spec Spec) (mountFacts, error) {
 		if name, errno := spec.inject(); name == stage.name {
 			err = errno
 		}
-		if err != nil {
+		if err != nil && !ignoreMountStageFailure(stage.name) {
 			return facts, &SetupError{Stage: stage.name, Errno: errnoOf(err)}
 		}
 	}
@@ -46,6 +46,9 @@ func remountRootReadOnly() error {
 	if jailmut.On("P-RO") {
 		flags &^= unix.MOUNT_ATTR_RDONLY
 	}
+	if jailmut.On("P-NODEV") {
+		flags &^= unix.MOUNT_ATTR_NODEV
+	}
 	if jailmut.On("P-NOSUID") {
 		flags &^= unix.MOUNT_ATTR_NOSUID
 	}
@@ -53,6 +56,9 @@ func remountRootReadOnly() error {
 }
 
 func bindDevNodes() error {
+	if jailmut.On("P-DEV-SIX") {
+		return nil
+	}
 	for _, node := range devNodes {
 		path := "/dev/" + node
 		var stat unix.Stat_t
@@ -77,5 +83,29 @@ func bindDevNodes() error {
 }
 
 func mountTmpfs(dir string) error {
-	return unix.Mount("tmpfs", dir, "tmpfs", unix.MS_NOSUID|unix.MS_NODEV|unix.MS_NOEXEC, fmt.Sprintf("mode=1777,size=%d", tmpfsSizeBytes))
+	size := tmpfsSizeBytes
+	if jailmut.On("P-SCRATCH-SIZE") {
+		size *= 2
+	}
+	flags := uintptr(unix.MS_NOSUID | unix.MS_NODEV | unix.MS_NOEXEC)
+	if jailmut.On("P-SCRATCH-FLAGS") {
+		flags = 0
+	}
+	return unix.Mount("tmpfs", dir, "tmpfs", flags, fmt.Sprintf("mode=1777,size=%d", size))
+}
+
+func ignoreMountStageFailure(stage string) bool {
+	switch stage {
+	case "private":
+		return jailmut.On("P-FAULT-private")
+	case "setattr":
+		return jailmut.On("P-FAULT-setattr")
+	case "devnodes":
+		return jailmut.On("P-FAULT-devnodes")
+	case "covers":
+		return jailmut.On("P-FAULT-covers")
+	case "scratch":
+		return jailmut.On("P-FAULT-scratch")
+	}
+	return false
 }

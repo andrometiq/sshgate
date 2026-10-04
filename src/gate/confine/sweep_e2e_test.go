@@ -18,13 +18,14 @@ func TestJailMatrixSyscallSweep(t *testing.T) {
 		t.Run(cfg.name, func(t *testing.T) {
 			t.Run("L-SC-SWEEP", func(t *testing.T) {
 				probe := buildProbe(t)
-				var args []string
+				var args, expected []string
 				for _, row := range syscallTable {
 					if row.action == "deny" || row.action == "enosys" {
 						args = append(args, fmt.Sprintf("%s:%d", row.name, row.nr))
+						expected = append(expected, row.name)
 					}
 				}
-				output := requireProbeOutput(t, runP12(t, Spec{Profile: ProfileROv1, ForceABI: cfg.abi, Net: true}, probe+" sc-sweep "+strings.Join(args, " "), nil))
+				output := requireProbeOutputMode(t, runP12(t, Spec{Profile: ProfileROv1, ForceABI: cfg.abi, Net: true}, probe+" sc-sweep "+strings.Join(args, " "), nil), probeExitObservations, expected...)
 				for _, row := range syscallTable {
 					if row.action != "deny" && row.action != "enosys" {
 						continue

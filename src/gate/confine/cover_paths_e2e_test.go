@@ -82,24 +82,33 @@ func legShimProc(t *testing.T, spec Spec) {
 		return
 	}
 	// The unjailed shell and its readlink child have the same uid and capability set.
-	output, err := exec.Command("/bin/sh", "-c", "readlink /proc/$$/exe; readlink /proc/$$/cwd").CombinedOutput()
+	output, err := exec.Command("/bin/sh", "-c", "readlink /proc/$$/exe && readlink /proc/$$/cwd").CombinedOutput()
 	if err != nil || len(strings.Split(strings.TrimSpace(string(output)), "\n")) != 2 {
 		t.Fatalf("SETUP: dumpable parent control: %v %s", err, output)
-	}
-	var commands []string
-	for _, link := range []string{"exe", "cwd", "root", "maps"} {
-		commands = append(commands, coverQuote(coverProbe())+" jail-proc shim "+link)
 	}
 	if jailmut.On("P-LL-REQUIRED") {
 		spec.ForceABI = ForceNoLandlock
 	}
-	result, _ := coverResult(t, spec, strings.Join(commands, "; "), nil)
-	if !jailmut.On("P-LL-REQUIRED") {
-		// Without Landlock the gate's Facts check rejects the report (ABI 0)
-		// after the command ran; the four probe results below still judge it.
-		coverRan(t, result)
+	var results strings.Builder
+	for _, link := range []string{"exe", "cwd", "root", "maps"} {
+		command := coverQuote(coverProbe()) + " jail-proc shim " + link
+		if jailmut.On("SHIM-NOCAPS") {
+			command += " wait-nocaps"
+		}
+		result, _ := coverResult(t, spec, command, nil)
+		if !jailmut.On("P-LL-REQUIRED") {
+			coverRan(t, result)
+		} else {
+			// The intentional no-Landlock mutation makes the parent reject ABI 0 facts.
+			result.setupErr = nil
+		}
+		expected := []string{"target", "readlink"}
+		if link == "maps" {
+			expected = []string{"target", "open", "open>read", "read>bytes"}
+		}
+		results.WriteString(requireProbeOutputMode(t, result, probeExitAnyFailure, expected...))
 	}
-	lines := strings.Split(result.stdout, "\n")
+	lines := strings.Split(results.String(), "\n")
 	denied, readable := 0, 0
 	for _, line := range lines {
 		if line == "readlink=13" || line == "open=13" {
@@ -110,11 +119,11 @@ func legShimProc(t *testing.T, spec Spec) {
 		}
 	}
 	if denied+readable != 4 {
-		t.Fatalf("SETUP: proc target/errno failure: %+v", result)
+		t.Fatalf("SETUP: proc target/errno failure: %s", results.String())
 	}
 	mutationEffect(t, "L-SHIM-PROC", "shim-proc", readable == 4)
 	if readable != 0 && readable != 4 {
-		t.Errorf("inconsistent shim exposure: %+v", result)
+		t.Errorf("inconsistent shim exposure: %s", results.String())
 	}
 }
 func legCoverWalkDenied(t *testing.T, spec Spec) {

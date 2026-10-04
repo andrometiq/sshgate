@@ -137,6 +137,35 @@ func hostPIDProbe(op string, args []string) bool {
 			_, _, e = unix.Syscall(unix.SYS_IOCTL, uintptr(fds[0]), request, uintptr(unsafe.Pointer(&owner.pid)))
 			report("ioctl", errnoOrNil(e))
 		}
+	case "retune-one":
+		handler, pid := args[0], int(number(args[1]))
+		var err error
+		switch handler {
+		case "param":
+			priority := int32(1)
+			_, _, e := unix.Syscall(unix.SYS_SCHED_SETPARAM, uintptr(pid), uintptr(unsafe.Pointer(&priority)), 0)
+			err = errnoOrNil(e)
+		case "nice":
+			err = unix.Setpriority(unix.PRIO_PROCESS, pid, 19)
+		case "ioprio":
+			_, _, e := unix.Syscall(unix.SYS_IOPRIO_SET, 1, uintptr(pid), 3<<13)
+			err = errnoOrNil(e)
+		case "policy":
+			var priority int32
+			_, _, e := unix.Syscall(unix.SYS_SCHED_SETSCHEDULER, uintptr(pid), 3, uintptr(unsafe.Pointer(&priority)))
+			err = errnoOrNil(e)
+		case "schedattr":
+			err = unix.SchedSetAttr(pid, &unix.SchedAttr{Policy: 3, Nice: 19}, 0)
+		case "affinity":
+			var mask unix.CPUSet
+			mask.Set(int(number(args[2])))
+			err = unix.SchedSetaffinity(pid, &mask)
+		case "prlimit":
+			err = unix.Prlimit(pid, unix.RLIMIT_NOFILE, &unix.Rlimit{Cur: 7, Max: 7}, nil)
+		default:
+			panic("unknown retune handler")
+		}
+		report("retune", err)
 	case "retune-errno":
 		pid := number(args[0])
 		var limit unix.Rlimit

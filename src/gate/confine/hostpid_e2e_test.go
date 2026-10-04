@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"testing"
 	"time"
+	"unsafe"
 )
 
 // Each native leg also exercises forced ABI 5. Keeping the repetitions inside
@@ -41,9 +42,16 @@ func TestJailMatrixP15c(t *testing.T) {
 			})
 			t.Run("L-SIGNAL-OWN-GROUP", func(t *testing.T) {
 				for _, spec := range hostPIDSpecs(cfg.abi) {
-					result := runP12(t, spec, "trap '' USR1; kill -USR1 0; kill -0 $$; timeout 1 sleep 5; test $? -eq 124", nil)
-					if result.setupErr != nil || result.exit != 0 {
-						t.Fatalf("own-group controls: %+v", result)
+					for _, command := range []string{"trap '' USR1 && kill -USR1 0", "kill -0 $$", "timeout 1 sleep 5"} {
+						start := time.Now()
+						result := runJailedTimeout(t, spec, command, 4*time.Second)
+						wantExit := 0
+						if command == "timeout 1 sleep 5" {
+							wantExit = 124
+						}
+						if result.setupErr != nil || result.exit != wantExit || result.stderr != "" || time.Since(start) > 4*time.Second {
+							t.Fatalf("SETUP: own-group control %q: %+v elapsed=%s", command, result, time.Since(start))
+						}
 					}
 				}
 			})
@@ -59,10 +67,18 @@ func TestJailMatrixP15c(t *testing.T) {
 				t.Log("MUTATE-OMITTED(ci-only): L-SCHED-USER")
 			}
 			t.Run("L-RETUNE", func(t *testing.T) { hostRetuneEffect(t, cfg.abi) })
+			if os.Geteuid() == 0 && os.Getenv("SSHGATE_JAIL_CI") == "1" {
+				t.Run("L-RETUNE-SETPARAM", func(t *testing.T) { hostRetuneSetparam(t, cfg.abi) })
+			} else if os.Geteuid() != 0 {
+				t.Log("MUTATE-OMITTED(root): L-RETUNE-SETPARAM")
+			} else {
+				t.Log("MUTATE-OMITTED(ci-only): L-RETUNE-SETPARAM")
+			}
+
 			t.Run("L-SESSION", func(t *testing.T) {
 				changed := false
 				for _, spec := range hostPIDSpecs(cfg.abi) {
-					out := requireProbeOutput(t, runP12(t, spec, "exec "+buildProbe(t)+" session 0", nil))
+					out := requireProbeOutput(t, runP12(t, spec, "exec "+buildProbe(t)+" session 0", nil), "session")
 					var pid, sid, group int
 					if _, err := fmt.Sscanf(out, "session=%d:%d:%d", &pid, &sid, &group); err != nil {
 						t.Fatal("SETUP:", out)
@@ -95,7 +111,7 @@ func hostSignalEffect(t *testing.T, specs []Spec, leg string) {
 			victim := exec.Command("sleep", "30")
 			mutationSetup(t, victim.Start())
 			result := runP12(t, spec, fmt.Sprintf("%s signal-one %d %d", probe, nr, victim.Process.Pid), nil)
-			out := requireProbeOutput(t, result)
+			out := requireProbeOutput(t, result, "signal")
 			done := make(chan error, 1)
 			go func() { done <- victim.Wait() }()
 			select {
@@ -145,7 +161,7 @@ func hostAsyncEffect(t *testing.T, specs []Spec, leg string) {
 			command := probe + " async-owner " + strconv.Itoa(victim.Process.Pid)
 			var out string
 			if confined {
-				out = requireProbeOutput(t, runP12(t, spec, command, nil))
+				out = requireProbeOutput(t, runP12(t, spec, command, nil), "owner")
 				badErrno = badErrno || !strings.Contains(out, "owner=1\n")
 			} else {
 				data, err := exec.Command("/bin/sh", "-c", command).CombinedOutput()
@@ -170,7 +186,7 @@ func hostAsyncEffect(t *testing.T, specs []Spec, leg string) {
 				delivered = delivered || got
 			}
 		}
-		out := requireProbeOutput(t, runP12(t, spec, probe+" async-errno "+strconv.Itoa(os.Getpid()), nil))
+		out := requireProbeOutput(t, runP12(t, spec, probe+" async-errno "+strconv.Itoa(os.Getpid()), nil), append(strings.Fields(strings.Repeat("setown ", 5)+strings.Repeat("ioctl ", 3)), "setown_ex", "clear", "setsig")...)
 		badErrno = badErrno || strings.Count(out, "setown=1\n") != 5 || !strings.Contains(out, "setown_ex=1\n") || strings.Count(out, "ioctl=1\n") != 3
 		if !strings.Contains(out, "clear=ok\n") || !strings.Contains(out, "setsig=ok\n") {
 			t.Fatalf("async zero-owner/setsig controls: %s", out)
@@ -231,35 +247,184 @@ func startRetuneVictim(t *testing.T) *exec.Cmd {
 	return victim
 }
 
+func initializeRetuneVictim(t *testing.T, victim *exec.Cmd, targetCPU int) schedulerState {
+	t.Helper()
+	pid := victim.Process.Pid
+	mutationSetup(t, unix.Setpriority(unix.PRIO_PROCESS, pid, 18))
+	_, _, errno := unix.Syscall(unix.SYS_IOPRIO_SET, 1, uintptr(pid), 2<<13|4)
+	if errno != 0 {
+		t.Fatalf("SETUP: initial ioprio: %v", errno)
+	}
+	var available, pinned unix.CPUSet
+	mutationSetup(t, unix.SchedGetaffinity(0, &available))
+	for cpu := 0; cpu < 1024; cpu++ {
+		if cpu != targetCPU && available.IsSet(cpu) {
+			pinned.Set(cpu)
+			break
+		}
+	}
+	if pinned.Count() != 1 {
+		t.Fatal("SETUP: retune affinity requires at least two available CPUs")
+	}
+	mutationSetup(t, unix.SchedSetaffinity(pid, &pinned))
+	limit := unix.Rlimit{Cur: 64, Max: 64}
+	mutationSetup(t, unix.Prlimit(pid, unix.RLIMIT_NOFILE, &limit, nil))
+	var priority int32
+	_, _, errno = unix.Syscall(unix.SYS_SCHED_SETSCHEDULER, uintptr(pid), 0, uintptr(unsafe.Pointer(&priority)))
+	if errno != 0 {
+		t.Fatalf("SETUP: initial scheduler policy: %v", errno)
+	}
+	initial := readScheduler(t, pid)
+	if initial.nice != 2 || initial.io != 2<<13|4 || initial.policy != 0 || initial.nofile != 64 || initial.affinity != pinned {
+		t.Fatalf("SETUP: retune victim initial state: %+v", initial)
+	}
+	return initial
+}
+
+func retuneFieldChanged(handler string, before, after schedulerState) bool {
+	switch handler {
+	case "nice":
+		return before.nice != after.nice
+	case "ioprio":
+		return before.io != after.io
+	case "policy", "schedattr":
+		return before.policy != after.policy
+	case "affinity":
+		return before.affinity != after.affinity
+	case "prlimit":
+		return before.nofile != after.nofile
+	default:
+		panic("unknown retune handler: " + handler)
+	}
+}
+
 func hostRetuneEffect(t *testing.T, abi int) {
 	probe := buildProbe(t)
 	changed, badErrno := false, false
-	control := startRetuneVictim(t)
-	initial := readScheduler(t, control.Process.Pid)
-	output, err := exec.Command(probe, "scheduler", strconv.Itoa(control.Process.Pid)).CombinedOutput()
-	if err != nil || initial == readScheduler(t, control.Process.Pid) {
-		t.Fatalf("SETUP: retune control: %v %s", err, output)
+	var available unix.CPUSet
+	mutationSetup(t, unix.SchedGetaffinity(0, &available))
+	if available.Count() < 2 {
+		t.Fatal("SETUP: retune affinity requires at least two available CPUs")
+	}
+	targetCPU := 0
+	for !available.IsSet(targetCPU) {
+		targetCPU++
+	}
+	for _, handler := range []string{"nice", "ioprio", "policy", "schedattr", "affinity", "prlimit"} {
+		command := func(pid int) string { return fmt.Sprintf("%s retune-one %s %d %d", probe, handler, pid, targetCPU) }
+		control := startRetuneVictim(t)
+		initial := initializeRetuneVictim(t, control, targetCPU)
+		output, err := exec.Command("/bin/sh", "-c", command(control.Process.Pid)).CombinedOutput()
+		if err != nil || string(output) != "retune=ok\n" || !retuneFieldChanged(handler, initial, readScheduler(t, control.Process.Pid)) {
+			t.Fatalf("SETUP: %s control did not change its field: %v %s", handler, err, output)
+		}
+		for _, spec := range hostPIDSpecs(abi) {
+			victim := startRetuneVictim(t)
+			before := initializeRetuneVictim(t, victim, targetCPU)
+			out := requireProbeOutput(t, runP12(t, spec, command(victim.Process.Pid), nil), "retune")
+			badErrno = badErrno || out != "retune=1\n"
+			changed = before != readScheduler(t, victim.Process.Pid) || changed
+		}
 	}
 	for _, spec := range hostPIDSpecs(abi) {
 		victim := startRetuneVictim(t)
-		before := readScheduler(t, victim.Process.Pid)
-		out := requireProbeOutput(t, runP12(t, spec, probe+" retune-errno "+strconv.Itoa(victim.Process.Pid), nil))
+		expected := append([]string{"query"}, strings.Fields(strings.Repeat("retune ", 54))...)
+		out := requireProbeOutput(t, runP12(t, spec, probe+" retune-errno "+strconv.Itoa(victim.Process.Pid), nil), expected...)
 		badErrno = badErrno || strings.Count(out, "retune=1\n") != 54
 		if !strings.Contains(out, "query=ok\n") {
-			t.Fatalf("prlimit query control: %s", out)
+			t.Fatalf("SETUP: prlimit query control: %s", out)
 		}
-		out = requireProbeOutput(t, runP12(t, spec, probe+" scheduler "+strconv.Itoa(victim.Process.Pid), nil))
-		changed = changed || before != readScheduler(t, victim.Process.Pid)
-		// PGRP zero reaches the confined session only; PROCESS zero covers self.
-		for _, command := range []string{probe + " scheduler 0", probe + " raw 141 1 0 19", probe + " raw 251 2 0 24576"} {
-			out = requireProbeOutput(t, runP12(t, spec, command, nil))
+		for _, item := range []struct {
+			command string
+			fields  []string
+		}{
+			{probe + " scheduler 0", []string{"prlimit", "nice", "ioprio", "policy", "affinity", "schedattr", "state"}},
+			{probe + " raw 141 1 0 19", []string{"raw"}},
+			{probe + " raw 251 2 0 24576", []string{"raw"}},
+		} {
+			out := requireProbeOutput(t, runP12(t, spec, item.command, nil), item.fields...)
 			if strings.Contains(out, "=1\n") {
-				t.Fatalf("self/group retune control: %s", out)
+				t.Fatalf("SETUP: self/group retune control: %s", out)
 			}
 		}
 	}
 	mutationEffect(t, "L-RETUNE", "errno", badErrno)
 	mutationEffect(t, "L-RETUNE", "retuned", changed)
+}
+
+func readRealtimePriority(t *testing.T, pid int) int32 {
+	t.Helper()
+	var priority int32
+	_, _, errno := unix.Syscall(unix.SYS_SCHED_GETPARAM, uintptr(pid), uintptr(unsafe.Pointer(&priority)), 0)
+	if errno != 0 {
+		t.Fatalf("SETUP: observe realtime priority: %v", errno)
+	}
+	return priority
+}
+
+func hostRetuneSetparam(t *testing.T, abi int) {
+	if os.Geteuid() != 0 || os.Getenv("SSHGATE_JAIL_CI") != "1" {
+		t.Fatal("SETUP: realtime retune requires root disposable CI")
+	}
+	probe := buildProbe(t)
+	victim := func() *exec.Cmd {
+		command := startRetuneVictim(t)
+		priority := int32(2)
+		_, _, errno := unix.Syscall(unix.SYS_SCHED_SETSCHEDULER, uintptr(command.Process.Pid), 2, uintptr(unsafe.Pointer(&priority)))
+		if errno != 0 {
+			t.Fatalf("SETUP: prepare SCHED_RR victim (requires CAP_SYS_NICE): %v", errno)
+		}
+		if readScheduler(t, command.Process.Pid).policy != 2 || readRealtimePriority(t, command.Process.Pid) != 2 {
+			t.Fatal("SETUP: realtime victim not SCHED_RR priority 2")
+		}
+		return command
+	}
+	control := victim()
+	output, err := exec.Command(probe, "retune-one", "param", strconv.Itoa(control.Process.Pid)).CombinedOutput()
+	if err != nil || string(output) != "retune=ok\n" || readRealtimePriority(t, control.Process.Pid) != 1 {
+		t.Fatalf("SETUP: sched_setparam control did not lower priority 2 to 1: %v %s", err, output)
+	}
+	changed, badErrno := false, false
+	for _, spec := range hostPIDSpecs(abi) {
+		target := victim()
+		out := requireProbeOutput(t, runP12(t, spec, fmt.Sprintf("%s retune-one param %d", probe, target.Process.Pid), nil), "retune")
+		priority := readRealtimePriority(t, target.Process.Pid)
+		if priority != 1 && priority != 2 {
+			t.Fatalf("SETUP: unexpected realtime priority %d", priority)
+		}
+		if readScheduler(t, target.Process.Pid).policy != 2 {
+			t.Fatal("SETUP: sched_setparam unexpectedly changed policy")
+		}
+		changed = priority == 1 || changed
+		badErrno = out != "retune=1\n" || badErrno
+	}
+	mutationEffect(t, "L-RETUNE-SETPARAM", "errno", badErrno)
+	mutationEffect(t, "L-RETUNE-SETPARAM", "retuned", changed)
+}
+
+func TestRetuneFieldIsolation(t *testing.T) {
+	baseline := schedulerState{}
+	for _, handler := range []string{"nice", "ioprio", "policy", "schedattr", "affinity", "prlimit"} {
+		after := baseline
+		switch handler {
+		case "nice":
+			after.nice = 1
+		case "ioprio":
+			after.io = 1
+		case "policy", "schedattr":
+			after.policy = 3
+		case "affinity":
+			after.affinity.Set(0)
+		case "prlimit":
+			after.nofile = 7
+		}
+		for _, other := range []string{"nice", "ioprio", "policy", "schedattr", "affinity", "prlimit"} {
+			want := handler == other || (handler == "policy" || handler == "schedattr") && (other == "policy" || other == "schedattr")
+			if retuneFieldChanged(other, baseline, after) != want {
+				t.Fatalf("%s observation counted %s change", other, handler)
+			}
+		}
+	}
 }
 
 func hostLifecycle(t *testing.T, abi int) {
@@ -419,7 +584,7 @@ func hostMrelease(t *testing.T, abi int) {
 		if before == 0 {
 			t.Fatal("SETUP: target has no resident pages")
 		}
-		output := requireProbeOutput(t, runP12(t, spec, probe+" mrelease "+strconv.Itoa(target), nil))
+		output := requireProbeOutput(t, runP12(t, spec, probe+" mrelease "+strconv.Itoa(target), nil), "mrelease")
 		badErrno = badErrno || !strings.Contains(output, "mrelease=1\n")
 		changed = changed || residentPages(t, target) < before
 	}

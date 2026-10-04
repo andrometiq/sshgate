@@ -16,6 +16,12 @@ func userRetuneLeg() harness.Leg {
 	leg.CIOnly = true
 	return leg
 }
+func setparamRetuneLeg() harness.Leg {
+	leg := hostPIDLeg("L-RETUNE-SETPARAM", "MUTATION-EFFECT errno", "MUTATION-EFFECT retuned")
+	leg.Root, leg.CIOnly = true, true
+	return leg
+}
+
 func asyncScopeMutationSet() harness.MutationSet {
 	return harness.MutationSet{IDs: []string{"P-SC-ASYNC-OWNER", "P-LL-SCOPE-SIGNAL"}, Legs: []harness.Leg{hostPIDLeg("L-ASYNC-SCOPE", "MUTATION-EFFECT errno", "MUTATION-EFFECT signal")}}
 }
@@ -40,7 +46,7 @@ func hostPIDRegistry() []prot {
 	}
 	for i := range result {
 		if result[i].ID == "P-SC-RETUNE" {
-			result[i].MutationSets[0].Legs = append(result[i].MutationSets[0].Legs, userRetuneLeg())
+			result[i].MutationSets[0].Legs = append(result[i].MutationSets[0].Legs, userRetuneLeg(), setparamRetuneLeg())
 		}
 		if result[i].ID == "P-SC-SIGNAL" {
 			result[i].Class = "multi"
@@ -152,4 +158,38 @@ func TestHostPIDFilters(t *testing.T) {
 			}
 		})
 	})
+}
+
+func TestRegistryRealtimeRetuneCoverage(t *testing.T) {
+	for _, id := range []string{"P-SC-SCHED_SETPARAM", "P-SC-RETUNE"} {
+		found := false
+		for _, protection := range registry {
+			if protection.ID != id {
+				continue
+			}
+			for _, set := range protection.MutationSets {
+				if len(set.IDs) != 1 || set.IDs[0] != id {
+					continue
+				}
+				for _, leg := range set.Legs {
+					if leg.Name != "L-RETUNE-SETPARAM" {
+						continue
+					}
+					found = true
+					if !leg.Root || !leg.CIOnly {
+						t.Errorf("%s realtime fixture must be root+CI-only", id)
+					}
+					for _, abi := range []string{"native", "abi1"} {
+						markers := leg.ExpectedMarkers(abi)
+						if len(markers) != 2 || markers[0] != "MUTATION-EFFECT errno" || markers[1] != "MUTATION-EFFECT retuned" {
+							t.Errorf("%s %s missing realtime effect/errno markers: %v", id, abi, markers)
+						}
+					}
+				}
+			}
+		}
+		if !found {
+			t.Errorf("%s lacks realtime effect fixture", id)
+		}
+	}
 }
