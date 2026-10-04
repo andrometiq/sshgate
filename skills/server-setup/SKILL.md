@@ -1,6 +1,6 @@
 ---
 name: server-setup
-description: This skill should be used when the user asks to bring a fresh or newly-provisioned server up to a working, hardened state through SSHGate — phrases like "set up nginx on web-1", "configure the new box", "harden staging", "create a deploy user on prod", "set up a systemd service for the app", "configure the firewall on host-gcp", "set the timezone and NTP", or "get the new server ready for the app". Teaches a discover-first method: read the whole current state, plan the ENTIRE write set, get ONE approval (run_batch tap or a scoped standing grant), then verify each stage — with hard stop-points for lockout-risking and irreversible steps.
+description: This skill should be used when the user asks to bring a fresh or newly-provisioned server up to a working, hardened state through SSHGate — phrases like "set up nginx on web-1", "configure the new box", "harden staging", "create a deploy user on prod", "set up a systemd service for the app", "configure the firewall on host-gcp", "set the timezone and NTP", or "get the new server ready for the app". Teaches a discover-first method — read the whole current state, plan the ENTIRE write set, get ONE approval (run_batch tap or a scoped standing grant), then verify each stage — with hard stop-points for lockout-risking and irreversible steps.
 ---
 
 # Server setup with SSHGate
@@ -11,8 +11,10 @@ and half-configures the machine across a dozen interruptions. The cure is a
 **method**: discover the whole picture with free reads, design the *complete*
 write set on paper, get **one** approval, then verify. This skill teaches that
 method. For the gate mechanics it leans on — read/write classification, the
-tap cost model, standing grants, denial/timeout handling, exit codes — see the
-`debugging-remote-servers` skill; this one does not re-teach them.
+tap cost model, standing grants, denial/timeout handling, exit codes, the read
+jail — see the `debugging-remote-servers` skill; this one does not re-teach
+them. One consequence of the read jail matters here: discovery reads cannot
+change the box, so every change, however small, belongs in the write batch.
 
 The tool surface is the same eleven tools. Setup lives almost entirely in
 `sshgate.run` (reads, to discover and verify) and `sshgate.run_batch` (the one
@@ -60,7 +62,10 @@ user isn't pinged):
   rules), or fold ONE `ufw status verbose` into the approved write batch
   (Phase 3) instead of running it standalone. Critical to know before you touch
   it (see the lockout stop-point).
-- **Timezone / clock:** `timedatectl`.
+- **Timezone / clock:** `readlink /etc/localtime` and `date`, plus
+  `systemctl is-active systemd-timesyncd` (or `chronyd`) for time sync.
+  (`timedatectl` is a read, but it asks a daemon over D-Bus, which fails
+  inside the read jail.)
 - **What's installed:** `command -v <tool>` for the specific packages the task
   needs, rather than listing everything.
 
@@ -86,19 +91,20 @@ into one ordered list. A typical bring-up covers:
 - **systemd units:** unit file, `daemon-reload`, enable, start.
 
 Order matters because `run_batch` runs the list top-to-bottom and, for a batch
-containing writes, **stops on the first failure by default** — so put
+containing writes, **stops at the first write that fails** by default — so put
 validations before the thing they gate (e.g. `nginx -t` before
 `systemctl reload nginx`), and put the firewall's allow-SSH rule before enabling
-the firewall.
+the firewall. A failing *read* in the batch does not stop it unless you set
+`stop_on_error: true` explicitly, so don't rely on a read as a gate; validators
+like `nginx -t` and `sshd -t` are writes and do stop it.
 
 **Idempotency — make every step re-runnable.** A setup batch may be run twice
 (a denial, a partial failure, a re-provision). Check-before-create so re-runs
 are clean, not errors:
 
-- Users: `id deploy >/dev/null 2>&1 || useradd -m -s /bin/bash deploy` — but
-  note the `||` compound (and the `useradd`) make this a write (fine, it's in the
-  batch); the `>/dev/null 2>&1` redirect alone would not — prefer tools that are
-  natively idempotent where possible.
+- Users: `id deploy >/dev/null 2>&1 || useradd -m -s /bin/bash deploy`. This
+  line is a write because of `useradd` (fine, it is in the batch). Prefer
+  tools that are idempotent on their own where possible.
 - Directories: `mkdir -p` (already idempotent), `install -d -o deploy -g deploy -m 0750 /srv/app`.
 - Config: write drop-in files (`/etc/ssh/sshd_config.d/…`, a fresh unit file)
   rather than editing shared files in place; overwriting a drop-in is idempotent.
@@ -152,7 +158,7 @@ succeeding means the box is correctly configured:
   stop-point) before trusting the rest.
 - Service up: `systemctl status <unit>` and `systemctl is-enabled <unit>`.
 - Listening: `ss -tlnp` — the service is actually bound to its port.
-- Timezone: `timedatectl`.
+- Timezone: `readlink /etc/localtime` (points at the new zone) and `date`.
 
 If a stage failed, diagnose with reads and plan a corrective batch — don't
 resubmit the whole original batch blindly.
@@ -197,50 +203,62 @@ User: "Set up web-1 for the app — a `deploy` user, firewall for HTTP/HTTPS,
 timezone Asia/Kolkata, and a systemd service for the app that's already at
 `/srv/app`."
 
-1. **Discover:** `sshgate.list_servers` (web-1 registered, `read_only` false).
-   Reads: `cat /etc/os-release` (Ubuntu 24.04), `ss -tlnp` (sshd on 22, nothing
-   else), `getent passwd deploy` (absent), `command -v ufw` (present),
-   `cat /etc/ufw/ufw.conf` (`ENABLED=no` → inactive; `ufw status` itself is a
-   write, so read the file), `timedatectl` (UTC), `ls -la /srv/app` (exists,
-   root-owned).
+1. **Discover:** `sshgate.list_servers` (web-1 registered, no `read_only`
+   flag). Reads: `cat /etc/os-release` (Ubuntu 24.04), `ss -tlnp` (sshd on 22,
+   nothing else), `getent passwd deploy` (absent), `command -v ufw` (present),
+   `cat /etc/ufw/ufw.conf` (`ENABLED=no`, so inactive; `ufw status` itself is
+   a write, so read the file), `readlink /etc/localtime` (UTC),
+   `ls -la /srv/app` (exists, root-owned, only the app's own files).
 2. **Plan** the full ordered write set and show it:
 
    ```
    Planned setup on web-1 (one approval, ordered — firewall allows SSH FIRST):
      1. id deploy >/dev/null 2>&1 || useradd -m -s /bin/bash deploy
      2. install -d -o deploy -g deploy -m 0750 /srv/app/releases
-     3. chown -R deploy:deploy /srv/app
+     3. chown -R deploy:deploy /srv/app        # recursive: only the app tree
      4. timedatectl set-timezone Asia/Kolkata
-     5. ufw allow 22/tcp                      # SSH FIRST — avoid lockout
+     5. ufw allow 22/tcp                       # SSH FIRST — avoid lockout
      6. ufw allow 80/tcp
      7. ufw allow 443/tcp
      8. ufw --force enable                     # only after SSH is allowed
-     9. cat > /etc/systemd/system/app.service <<'EOF'   # write the unit inline
-          [Unit]
-          After=network.target
-          [Service]
-          User=deploy
-          ExecStart=/srv/app/bin/app
-          [Install]
-          WantedBy=multi-user.target
-        EOF
+     9. (write the unit file; the exact command is below)
     10. systemctl daemon-reload
     11. systemctl enable --now app.service
     12. ufw status verbose                     # firewall check rides the batch (it's a write)
    ```
 
-   Flag the lockout risk explicitly: "Step 5 allows SSH before step 8 enables
-   the firewall — that ordering is what keeps us from being locked out. Reply
-   'go' to approve all in one tap." (The unit file is written inline at step 9 —
-   its content reaches the box only through the command string; nothing is
-   pre-staged in /tmp.)
+   Step 9 is one command string. It carries the file content inline, with real
+   newlines and the closing `EOF` at the start of its line (an indented `EOF`
+   would never end a `<<'EOF'` heredoc):
+
+   ```
+   cat > /etc/systemd/system/app.service <<'EOF'
+   [Unit]
+   After=network.target
+   [Service]
+   User=deploy
+   ExecStart=/srv/app/bin/app
+   [Install]
+   WantedBy=multi-user.target
+   EOF
+   ```
+
+   (In the actual `run_batch` call, that string starts at `cat` and every line
+   after it begins at column 0; the indentation here is only Markdown.)
+
+   Flag the risks explicitly: "Step 5 allows SSH before step 8 enables the
+   firewall; that order is what keeps us from being locked out. Step 3 changes
+   ownership recursively, but only under `/srv/app`, which holds just the app.
+   Reply 'go' to approve all in one tap." The unit file's content reaches the
+   box only through the command string; nothing is staged on the box first.
 3. **Approve once:** on "go", `sshgate.run_batch` with those 12 commands
-   (`stop_on_error` default true — aborts if any step fails). One Telegram tap —
-   the firewall check (step 12) rides it, since `ufw status verbose` is a write
-   and can't be a free read afterward.
+   (`stop_on_error` defaults to true, so the batch stops at the first failing
+   write). One Telegram tap. The firewall check (step 12) rides it, since
+   `ufw status verbose` is a write and can't be a free read afterward.
 4. **Verify:** `sshgate.run web-1 "id deploy"`, `"systemctl status app.service"`,
-   `"ss -tlnp"` (app bound), `"timedatectl"` — all reads. Firewall state was
-   confirmed in-batch at step 12 (SSH still allowed). Report each back.
+   `"ss -tlnp"` (app bound), `"readlink /etc/localtime"`, all reads. Firewall
+   state was confirmed in the batch at step 12 (SSH still allowed). Report each
+   back.
 
 One discover pass → one plan → one approval → one verify pass. That's the
 method: the machine is configured in a single deliberate step, not drifted into

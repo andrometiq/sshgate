@@ -8,14 +8,47 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 Dates are intentionally omitted where a release has not yet been tagged and
 published; entries are ordered newest-first by version.
 
-## [Unreleased]
+## [0.1.5]
 
-The V1 public-release polish. Focus: lead with the threat model, cut the
-daily-driver tap tax, close the remaining forced-command gap, and make the
-repo page trustworthy (CI + honest docs).
+The kernel read jail (phase 1 of work item #22), plus public-release polish:
+lead with the threat model, cut the daily-driver tap tax, close the remaining
+forced-command gap, and make the repo page trustworthy (CI and honest docs). This
+is a code line, not a tagged release, and not the v0.2 milestone: v0.2 is cut
+only when its release gates pass (see `docs/ROADMAP.md`).
 
 ### Added
 
+- **Kernel read jail (`ro-v1`)** — on a host with unprivileged user namespaces
+  (able to mount) and Landlock, the gate runs every command the classifier calls
+  a read inside a jail: its own user, mount and IPC namespaces (the host PID
+  namespace is kept), a read-only view of the host (host `/tmp` and `/var/tmp`
+  stay visible, read-only), a private 64 MiB `/dev/shm` as the only scratch
+  space, Landlock, and a seccomp filter that rules on every syscall. A read
+  there cannot write files or file metadata on the host, reach a local daemon
+  over a Unix socket, or signal or trace other processes. The jail checks itself
+  before the command runs and refuses the read (exit 77) if setup or any check
+  fails; it never falls back to running the read unconfined. Reads keep TCP/UDP
+  network access. A fixed allowlist of `systemctl`/`docker` read verbs runs
+  outside the jail, shell-free, because it needs the daemon sockets. Signed
+  writes and the admin verbs run exactly as before. A host without both user
+  namespaces and Landlock runs reads unconfined, as before.
+- **`gate doctor`** — run on the host, it reports whether reads there are
+  jailed, unconfined or denied. `gate doctor --pin` writes a `jail-floor` file
+  holding `full`, after which the gate refuses reads (exit 77) rather than run
+  them unconfined if the jail becomes unavailable. Residual gaps are listed in
+  `docs/THREAT-MODEL.md`.
+- **Exact exit status** — when the jailed worker's status is known, the gate
+  returns the command's real exit code (or 128 + signal), also after a
+  cancellation or when the client went away. When that status is unavailable it
+  returns 143 if the read was cancelled, and otherwise the jail shim's own
+  status. The audit record keeps the process status apart from output delivery
+  (dropped bytes, delivery and cleanup errors).
+- **Jail proof suite** — `make test-jail` runs the jail's acceptance matrix (CI
+  workflow `jail`), and `make test-jail-mutate MUTATE=<ids>` proves each of the
+  jail's 195 protections is load-bearing by removing it and requiring a named
+  test to catch the change.
+- **Build plan** — `docs/BUILD-PLAN.md` lists the work that comes next, in
+  order.
 - **`ping` tool** — a read-class single-server reachability probe (a
   short-timeout `SSHGATE_OK` check against one named server). No approval, no
   signer, and cheaper than `status` because it does not fan out across every
@@ -33,14 +66,15 @@ repo page trustworthy (CI + honest docs).
   binary) continues to run as a separate workflow.
 - **`docs/THREAT-MODEL.md`** — an honest one-page threat model: what SSHGate
   enforces and where, what the classifier is and is **not**, what each tier
-  buys, and the residuals it does **not** protect against. The README now leads
-  with it.
+  buys, and the residuals it does **not** protect against. The README points
+  to it before install.
 
 ### Changed
 
-- **README restructured** to lead with the threat model and positioning, then
-  what it is, then install, then the tool surface, then architecture — and to
-  state plainly that the signature plus the OpenSSH forced command is the
+- **README rewritten** for a first-time reader: what SSHGate is and why, a
+  read-only quick start, how it works, and what it does and does not protect
+  (linking the threat model), then install, tiers, tools and the read jail. It
+  states plainly that the signature plus the OpenSSH forced command is the
   security boundary, while the read/write classifier only *routes*.
 - **Read-batch default is now continue-on-error** — a read-only `run_batch` no
   longer aborts the rest of a diagnostic sweep when one read fails. Write
@@ -79,6 +113,14 @@ repo page trustworthy (CI + honest docs).
   lines, via an ssh-line veto with an anti-spoof body-prefix check.
 
 ### Security
+
+- **Two classifier bypasses closed** — `sed --i` (GNU sed reads any prefix of
+  `--in-place`) and git configuration passed through the environment
+  (`GIT_CONFIG_PARAMETERS` or `GIT_CONFIG_COUNT`/`KEY_n`/`VALUE_n`, which can
+  make `git status` or `git diff` run a command) were classified as reads. Both
+  are now writes. A leading assignment of any `GIT_*` or `LD_*` variable, or of
+  `SSH_ASKPASS`, `EDITOR`, `VISUAL`, `SYSTEMD_PAGER` or `SYSTEMD_EDITOR`, now
+  makes the command a write.
 
 - **`restrict` forced-command hardening** — the OpenSSH forced-command option
   template now leads with `restrict` (OpenSSH ≥ 7.2), in addition to the explicit

@@ -5,10 +5,10 @@ allowed-tools: mcp__sshgate__run
 ---
 
 The user invoked `/sshgate:run <alias> <command...>`. This is the
-explicit entry point for the `sshgate.run` MCP tool. In ordinary use,
-the user types something like "run df -h on prod-db" and Claude calls
-the tool directly — this slash command is the scriptable / belt-and-
-suspenders form.
+explicit entry point for the `run` MCP tool (`mcp__sshgate__run`). In
+ordinary use, the user types something like "run df -h on prod-db" and
+Claude calls the tool directly — this slash command is the scriptable
+form.
 
 Parse the arguments:
 - `alias` — first positional. Must match `[a-z][a-z0-9-]{0,30}`.
@@ -26,9 +26,20 @@ Alias must match [a-z][a-z0-9-]{0,30}.
 
 Call `mcp__sshgate__run` with `{ "alias": "<alias>", "command": "<command>" }`.
 
+The tool also accepts optional inputs this slash command does not set on
+its own. Use them only when the user asks:
+- `max_output_bytes` — per-call cap on each of stdout and stderr. The
+  default is 262144 (256 KiB); `0` means no cap. A capped stream ends with
+  `[...truncated <dropped> of <total> bytes]`.
+- `reveal` + `reason` — run this one command with output redaction turned
+  off, so raw secret values reach the agent. It always needs its own
+  Telegram approval (even for a read) and `reason` must be non-empty; the
+  approver sees it.
+
 The tool classifies the command (the result carries a top-level `kind`
 field, `"read"` or `"write"`):
-- Read → executes immediately, no approval.
+- Read → executes immediately, no approval. On a host that supports it,
+  the gate runs the read inside the kernel read jail.
 - Write → requests approval via the signer; the user gets a Telegram
   prompt. The classification happens before the tap, so you cannot read
   `kind` until the tool returns — if the command is plainly a write
@@ -46,27 +57,32 @@ stderr:
 ```
 
 Omit empty stdout/stderr sections. If `exit_code` is non-zero, lead
-with that. If the tool itself errors, surface the error verbatim — do
-not re-interpret it.
+with that. If the result carries a `denial` object, show its `summary`
+and `how_to` steps. If the tool itself errors, surface the error
+verbatim — do not re-interpret it.
 
-## Tool-level errors (write path)
+## Refusals (the `denial` object)
 
-Unlike `run_batch`, `sshgate.run` does NOT return a structured
-`Denied` result — every non-success returns a plain tool error whose
-message already carries the remediation. Surface it verbatim; the
-common write-path cases are:
+When the command did not run and someone must act, the result carries a
+`denial` object: `verdict_class` (a stable name such as
+`read_only_server`, `approval_denied`, `approval_timeout`,
+`signer_unreachable`, `signer_permission`, `bad_signature`,
+`missing_signature`, `read_jail_unavailable`), a one-line `summary`,
+`required_action`, `retryable`, and `how_to` (ordered steps). Refusals
+before the command reaches the server also come back as a tool error
+whose text already carries the remediation. Surface it; do not
+re-interpret it. The common cases:
 
 - **Read-only server.** A write aimed at a server registered read-only
   (Tier 1, no signer pubkey on the host) is REFUSED before any signing
   or Telegram tap — the tool returns `server "<alias>" is registered
-  read-only — writes are denied at the gate …`. Do NOT retry. Provisioning
-  is human-only: a person runs `/sshgate:setup` to add a signer (if none yet),
-  then de-provisions the server by hand and re-adds it — on the host, swap
-  SSHGate's forced `command="..."` line back to `sshgate pubkey`'s plain line,
-  drop the alias from the registry (`~/.config/sshgate/servers.json`), then
-  `sshgate add <alias> <user@host>` (without `--read-only`) to bring it up as
-  signed-write. A Tier-1 gate has no signer pubkey, so `/sshgate:revoke` can't
-  run on a read-only host. No phone tap was spent.
+  read-only — writes are denied at the gate …`. Do NOT retry. Changing
+  a server's tier is human-only: a person runs `/sshgate:setup` to add a
+  signer (if none yet), then de-provisions the server by hand and re-adds
+  it without `--read-only`. `sshgate revoke <alias>` (the human CLI) prints
+  the exact steps; it changes nothing itself. `/sshgate:revoke` cannot run
+  on a read-only host because its gate has no signer pubkey. No phone tap
+  was spent.
 - **Signer not in group (permission).** `signer socket … is present but
   not accessible (permission denied) — your shell/session is not yet in
   the sshgatesigner group`. This is NOT a dead daemon. The user must log
@@ -76,37 +92,46 @@ common write-path cases are:
   is live, then retry.
 - **Signer unreachable.** Two shapes, already disambiguated in the
   message: `no signer configured (Tier-1 read-only)` → a human runs
-  `/sshgate:setup`, then re-tiers each read-only server by hand (strip its
-  forced `command="..."` line back to `sshgate pubkey`'s plain line on the host,
-  drop the alias from the registry, then `sshgate add <alias> <user@host>` — a
-  Tier-1 gate has no signer pubkey, so `/sshgate:revoke` can't run on it); or `signer socket …
-  is present but not accepting connections` → a real Tier-2 daemon
-  problem, check `systemctl status sshgate-signer-telegram` and
-  `journalctl -u sshgate-signer-telegram -n 50`.
+  `/sshgate:setup`, then re-tiers each read-only server by hand as above;
+  or `signer socket … is present but not accepting connections` → a real
+  Tier-2 daemon problem, check `systemctl status sshgate-signer-telegram`
+  and `journalctl -u sshgate-signer-telegram -n 50`.
 - **Denied / timed out.** The user tapped Deny, or no tap landed in the
   approval window. Do NOT re-submit a denial; for a timeout, offer to
   re-run so a fresh prompt is sent.
 - **Unknown alias.** Surface verbatim; suggest `/sshgate:status` or
-  `sshgate.list_servers` to see what is registered.
+  the `list_servers` tool to see what is registered.
 
 ## Recognizing gate exit codes
 
-Two exit codes come from the gate itself (not the remote command) and have
-specific meanings — call them out instead of treating them as a generic
-command failure:
+Some exit codes come from the gate itself, not the remote command. Call
+them out instead of treating them as a generic command failure:
 
-- **77 — gate denied the write.** No signer pubkey is configured on the
-  remote (read-only / Tier 1), or the write arrived without a signature.
-  Check `/sshgate:status`; if the signer is `not configured`, the server is
-  read-only — a human runs `/sshgate:setup` to add a signer (if none yet),
-  then re-tiers the server by hand — on the host, swap the forced `command="..."`
-  line back to `sshgate pubkey`'s plain line, drop the alias from the registry,
-  then `sshgate add <alias> <user@host>` (without `--read-only`) to push the new
-  `gate.pub`. A Tier-1 gate has no signer pubkey, so `/sshgate:revoke` can't run
-  on it. Re-run the command after the re-add.
+- **77 on a read — read jail unavailable.** The gate refused to run the
+  read because it could not confirm or set up the host's kernel read jail.
+  The command did not run. stderr contains `gate: read jail unavailable`
+  and the result's `denial.verdict_class` is `read_jail_unavailable`.
+  This happens when the operator pinned a `jail-floor` and the host no
+  longer supports the jail, when the `jail-floor` file is damaged, when
+  the host probe fails for an unexplained reason, or when jail setup
+  fails. Do NOT retry and do NOT tell the user to add a signer: reads
+  are refused the same way until the host is fixed. Ask a human to
+  run `~/.sshgate-gate/gate doctor` on the host (from their own shell);
+  it reports the jail level and why reads are refused.
+- **77 on a write — gate denied the write.** No signer pubkey is
+  configured on the remote (read-only / Tier 1), or the write arrived
+  without a signature. Check `/sshgate:status`: a `read_only` server or a
+  signer that is `not configured` means a human must add a signer (if none
+  yet) and re-tier the server by hand, as above. Re-run the command after
+  the re-add.
 - **65 — signature rejected.** The signature was present but invalid or
   expired — usually clock skew between laptop and remote, or a stale approval.
-  Retry the command; if it persists, check the clocks on both ends.
+  Retry the command once; if it persists, check the clocks on both ends.
+- **70 — gate configuration error.** The gate could not read its signer
+  pubkey file, or the file has an insecure mode. A human must fix the file
+  on the host.
+
+Any other exit code is the remote command's own exit status.
 
 Do not run a follow-up command on your own. Stop after one
 invocation.

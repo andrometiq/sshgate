@@ -1,0 +1,95 @@
+name: jail
+
+# The kernel-jail acceptance matrix (confine package, #22). This is the ONLY job
+# that exercises the ro-v1 read jail (unprivileged user namespace + mounts +
+# Landlock), so it must never be "green by skip": it first PROBES that an
+# unprivileged userns can be created and can mount, and then fails if
+# `make test-jail` skipped any jail leg anyway. The hermetic unit job lives in
+# tests.yml; this one is separate because it needs userns, Landlock and the e2e build.
+#
+# ubuntu-latest ships the AppArmor unprivileged-userns restriction on by default
+# (kernel.apparmor_restrict_unprivileged_userns=1), which would block the jail's
+# mounts. We turn it off for the runner so the primary wall is actually tested;
+# on a host that genuinely lacks userns the probe fails and the job stops before
+# claiming a pass.
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  jail:
+    runs-on: ubuntu-latest
+    env:
+      SSHGATE_JAIL_CI: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go (pinned toolchain from go.mod)
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+          check-latest: false
+
+      - name: Verify jail status capture under dash and bash
+        run: |
+          make selftest-testjail SHELL=/bin/dash
+          make selftest-testjail SHELL=/bin/bash
+
+      - name: Install jail-test tooling (chattr/lsattr, setfattr/getfattr)
+        run: |
+          sudo apt-get update && sudo apt-get install -y e2fsprogs attr fuse3 libfuse3-dev
+          sudo modprobe fuse
+          test -c /dev/fuse
+
+      - name: Allow unprivileged user namespaces on the runner
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          sudo sysctl -w kernel.unprivileged_userns_clone=1 || true
+
+      - name: Give the crash legs a file core pattern
+        run: |
+          # ubuntu-latest pipes cores to apport; the non-root crash legs need a
+          # filename-only pattern and a non-zero hard core limit to observe the core.
+          sudo systemctl stop apport.service || true
+          sudo sysctl -w kernel.core_pattern=core
+          test "$(ulimit -H -c)" != 0
+
+      - name: Probe unprivileged userns + mount
+        id: probe
+        run: |
+          set -o pipefail
+          if unshare --user --map-root-user --mount --pid --fork \
+               sh -c 'mount --make-rprivate / && echo PROBE_OK' | grep -q PROBE_OK; then
+            echo "userns=yes" >> "$GITHUB_OUTPUT"
+            echo "unprivileged userns + mount available"
+          else
+            echo "userns=no" >> "$GITHUB_OUTPUT"
+            echo "::error::unprivileged userns probe FAILED; the read jail cannot be exercised on this runner"
+            exit 1
+          fi
+
+      - name: make test-jail
+        run: |
+          set -o pipefail
+          make test-jail 2>&1 | tee jail.log
+
+      - name: Fail if any jail leg was skipped despite an available userns
+        if: steps.probe.outputs.userns == 'yes'
+        run: |
+          # The userns probe passed and the runner has Landlock + the jail tooling,
+          # so NOTHING should skip: a skipped jail leg (the patterns below include
+          # older rung markers), or any in-leg t.Skip (chattr/xattr/sleep
+          # unavailable), means the wall was not tested.
+          if grep -qE -- '--- SKIP|SKIP rung1|SKIP rung2' jail.log; then
+            echo "::error::make test-jail SKIPPED a leg despite userns+Landlock+tooling being present — the wall was not fully tested"
+            grep -nE -- '--- SKIP|SKIP rung1|SKIP rung2' jail.log || true
+            exit 1
+          fi
+          echo "all jail legs ran (nothing skipped)"

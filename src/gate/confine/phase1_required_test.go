@@ -1,0 +1,246 @@
+package confine
+
+import (
+	"reflect"
+	"sort"
+	"strings"
+	"testing"
+)
+
+// Reviewed Phase-1 matrix IDs (§10.5, with §25.6 and §26 amendments).
+// Literal syscall rows are expanded here independently of the filter tables.
+// P-CLONE-PID and P-SHIM-PID1 were retired by §25.6. Gate, Lane-2 and
+// MCP protections and P-DUMPABLE belong to later build phases.
+func TestPhase1RequiredIDs(t *testing.T) {
+	want := strings.Fields(`
+P-BACKING
+P-CAPS
+P-CLONE-IPC
+P-CLONE-MNT
+P-CLONE-USER
+P-COVERS
+P-CWD
+P-DEV-SIX
+P-FAULT-caps
+P-FAULT-cmdread
+P-FAULT-covers
+P-FAULT-cwd
+P-FAULT-devnodes
+P-FAULT-exec
+P-FAULT-fds
+P-FAULT-landlock
+P-FAULT-mounts
+P-FAULT-nnp
+P-FAULT-private
+P-FAULT-rlimits
+P-FAULT-scratch
+P-FAULT-seccomp
+P-FAULT-selfcheck
+P-FAULT-session
+P-FAULT-setattr
+P-FAULT-spec
+P-FDS
+P-LL-FS
+P-LL-IOCTL-DEV
+P-LL-REFER
+P-LL-REQUIRED
+P-LL-RESOLVE-UNIX
+P-LL-SCOPE-ABSTRACT
+P-LL-SCOPE-SIGNAL
+P-LL-TRUNCATE
+P-MQ
+P-NNP
+P-NODEV
+P-NOSUID
+P-NSVERIFY
+P-PRIVATE
+P-REACH
+P-RL-CORE
+P-RL-FSIZE
+P-RL-NPROC
+P-RO
+P-SC-ADD_KEY
+P-SC-ADJTIMEX
+P-SC-AFS_SYSCALL
+P-SC-ARCH
+P-SC-ASYNC-OWNER
+P-SC-BPF
+P-SC-CEILING
+P-SC-CHMOD
+P-SC-CHOWN
+P-SC-CLOCK_ADJTIME
+P-SC-CLOCK_SETTIME
+P-SC-CLONE
+P-SC-CLONE-MASK
+P-SC-CLONE3
+P-SC-CREATE_MODULE
+P-SC-DELETE_MODULE
+P-SC-EPOLL_CTL_OLD
+P-SC-EPOLL_WAIT_OLD
+P-SC-FCHMOD
+P-SC-FCHMODAT
+P-SC-FCHMODAT2
+P-SC-FCHOWN
+P-SC-FCHOWNAT
+P-SC-FCNTL
+P-SC-FILE_SETATTR
+P-SC-FINIT_MODULE
+P-SC-FLOCK
+P-SC-FREMOVEXATTR
+P-SC-FSCONFIG
+P-SC-FSETXATTR
+P-SC-FSMOUNT
+P-SC-FSOPEN
+P-SC-FSPICK
+P-SC-FUTIMESAT
+P-SC-GETPMSG
+P-SC-GET_KERNEL_SYMS
+P-SC-INET-PROTO
+P-SC-INIT_MODULE
+P-SC-IOCTL
+P-SC-IOCTL-FSCRYPT-ADD
+P-SC-IOCTL-FSCRYPT-REMOVE
+P-SC-IOCTL-FSCRYPT-REMOVE-ALL
+P-SC-IOCTL-TIOCLINUX
+P-SC-IOCTL-TIOCSTI
+P-SC-IOPRIO_SET
+P-SC-IO_URING_ENTER
+P-SC-IO_URING_REGISTER
+P-SC-IO_URING_SETUP
+P-SC-KEXEC_FILE_LOAD
+P-SC-KEXEC_LOAD
+P-SC-KEYCTL
+P-SC-KILL
+P-SC-LCHOWN
+P-SC-LISTEN
+P-SC-LOOKUP_DCOOKIE
+P-SC-LREMOVEXATTR
+P-SC-LSETXATTR
+P-SC-META
+P-SC-MIGRATE_PAGES
+P-SC-MOUNT
+P-SC-MOUNT_SETATTR
+P-SC-MOVE_MOUNT
+P-SC-MOVE_PAGES
+P-SC-MQ_GETSETATTR
+P-SC-MQ_NOTIFY
+P-SC-MQ_OPEN
+P-SC-MQ_TIMEDRECEIVE
+P-SC-MQ_TIMEDSEND
+P-SC-MQ_UNLINK
+P-SC-NET
+P-SC-NETLINK-PROTO
+P-SC-NFSSERVCTL
+P-SC-OPEN_BY_HANDLE_AT
+P-SC-OPEN_TREE
+P-SC-OPEN_TREE_ATTR
+P-SC-PERF_EVENT_OPEN
+P-SC-PERSONALITY
+P-SC-PIDFD_GETFD
+P-SC-PIDFD_SEND_SIGNAL
+P-SC-PIVOT_ROOT
+P-SC-PRLIMIT64
+P-SC-PROCESS-MRELEASE
+P-SC-PROCESS_MRELEASE
+P-SC-PROCESS_VM_READV
+P-SC-PROCESS_VM_WRITEV
+P-SC-PTRACE
+P-SC-PUTPMSG
+P-SC-QUERY_MODULE
+P-SC-REBOOT
+P-SC-REMOVEXATTR
+P-SC-REMOVEXATTRAT
+P-SC-REQUEST_KEY
+P-SC-RETUNE
+P-SC-RLIMIT-CORE
+P-SC-RT_SIGQUEUEINFO
+P-SC-RT_TGSIGQUEUEINFO
+P-SC-SCHED_SETAFFINITY
+P-SC-SCHED_SETATTR
+P-SC-SCHED_SETPARAM
+P-SC-SCHED_SETSCHEDULER
+P-SC-SECURITY
+P-SC-SETNS
+P-SC-SETPRIORITY
+P-SC-SETRLIMIT
+P-SC-SETTIMEOFDAY
+P-SC-SETXATTR
+P-SC-SETXATTRAT
+P-SC-SIGNAL
+P-SC-SOCK-FAM
+P-SC-SOCK-TYPE
+P-SC-SOCKDIAG
+P-SC-SOCKET
+P-SC-SOCKETPAIR
+P-SC-SOCKPAIR
+P-SC-SWAPOFF
+P-SC-SWAPON
+P-SC-SYNC
+P-SC-SYNCFS
+P-SC-TGKILL
+P-SC-TKILL
+P-SC-TOTAL
+P-SC-TSYNC
+P-SC-TUXCALL
+P-SC-UMOUNT2
+P-SC-UNSHARE
+P-SC-UNSHARE-MASK
+P-SC-USELIB
+P-SC-USERFAULTFD
+P-SC-UTIME
+P-SC-UTIMENSAT
+P-SC-UTIMES
+P-SC-VSERVER
+P-SC-X32
+P-SC-_SYSCTL
+P-SCRATCH-FLAGS
+P-SCRATCH-SIZE
+P-SELFCHECK-CREDS
+P-SELFCHECK-LL
+P-SELFCHECK-MOUNTS
+P-SELFCHECK-REACH
+P-SESSION
+P-SHIM-SEAL
+P-SPEC
+P-STATUS
+P-SUBREAPER
+`)
+	var got []string
+	for _, protection := range registry {
+		id := protection.ID
+		if !strings.HasPrefix(id, "P-") || strings.HasPrefix(id, "P-G-") || strings.HasPrefix(id, "P-L2-") || strings.HasPrefix(id, "P-M-") || id == "P-DUMPABLE" {
+			continue
+		}
+		got = append(got, id)
+	}
+	sort.Strings(got)
+	sort.Strings(want)
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("Phase-1 protection IDs differ from independent matrix: got %v; want %v", got, want)
+	}
+}
+
+func TestPhase1FIFOProof(t *testing.T) {
+	for _, protection := range registry {
+		if protection.ID != "P-LL-FS" {
+			continue
+		}
+		for _, set := range protection.MutationSets {
+			if len(set.IDs) != 1 || set.IDs[0] != "P-LL-FS" {
+				continue
+			}
+			for _, leg := range set.Legs {
+				if leg.Name != "L-FIFO-WRITE" {
+					continue
+				}
+				for _, abi := range []string{"native", "abi1"} {
+					if leg.Names[abi] != "TestJailMatrixWrite/"+abi+"/L-FIFO-WRITE" || !reflect.DeepEqual(leg.ExpectedMarkers(abi), []string{"MUTATION-EFFECT delivered"}) {
+						t.Fatalf("FIFO single-wall proof missing at %s: %+v", abi, leg)
+					}
+				}
+				return
+			}
+		}
+	}
+	t.Fatal("missing single-wall FIFO proof for P-LL-FS")
+}

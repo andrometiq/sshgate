@@ -55,7 +55,9 @@ write and authorize it:
 3. **The Telegram domain** — the operator's phone. Telegram authenticates the
    approver at the protocol level: the signer only honors a callback whose
    `from.id` matches the single allowlisted operator id, and the agent has no
-   Telegram identity tied to that id and no path to obtain one.
+   Telegram identity tied to that id and no path to obtain one. (With the hosted
+   signer, Tier 3, this role is played by operators who sign in to its web UI
+   with TOTP or WebAuthn.)
 
 The separation is what makes "approver ≠ runner" real. If the signing key lived
 in the same domain as the agent, the agent could forge its own approvals and the
@@ -95,17 +97,32 @@ the registered servers.
 ### What the gate does per command
 
 1. **Classify** the command as read or write (see *Read/write classification*).
-2. If **read**, execute it directly and return output (streamed through the
-   inline secret redactor; see below).
+2. If **read**, run it without asking anyone: inside the kernel read jail on a
+   host that supports it (see *Read confinement*), otherwise unconfined as
+   before, and stream the output back through the inline secret redactor (see
+   below).
 3. If **write**, require a valid signature: the command must arrive wrapped in an
    `SSHGATE_SIG` envelope that verifies against the signing public key deployed
    to the host. A valid, unexpired signature whose payload matches the command
    is executed; anything else is denied.
 
-The gate stores no mutable configuration. Its classifier is compiled in, and its
-only trust anchor is the deployed signing public key (`gate.pub`). On a
-read-only host no public key is deployed at all, so writes can never be
-authorized there regardless of what the client sends.
+The gate is stateless between commands and keeps no mutable state of its own
+beyond its append-only audit log. Its classifier is compiled in. It reads a few
+static files from its own directory (`~/.sshgate-gate/`), which only a human
+with shell access (or an approved signed write) can change:
+
+- `gate.pub` — the signing public key, the gate's trust anchor. On a read-only
+  host it is absent, so writes can never be authorized there regardless of
+  what the client sends.
+- `jail-floor` (optional) — makes the gate refuse reads rather than run them
+  unconfined when the read jail is unavailable.
+- `audit-level` and `audit-path` (optional) — how much the gate's audit log
+  records and where it is written (default: all commands with output metadata,
+  in `audit.log` in the gate directory).
+- `xfer-box.key` and `xfer-id.key` — the host's keys for encrypted
+  box-to-box `transfer`, present once transfer is set up for the host.
+
+None of these locations can be overridden from the environment.
 
 ### Signed-write wire format
 
@@ -157,15 +174,69 @@ flags.
 The classifier is a heuristic that reasons about `/bin/sh` syntax and about each
 allowlisted tool's write/exec-capable flags. Because reads are ultimately handed
 to a shell, this is an inherent arms race: an obscure flag or a shell-parsing
-mismatch can let a command the classifier deemed "read" do more than read. The
-default-deny structure holds — unknown binaries are always writes — but per-tool
-flag enumeration cannot be proven complete against every tool on every server.
+mismatch can let a command the classifier deemed "read" try to do more than
+read. The default-deny structure holds — unknown binaries are always writes —
+but per-tool flag enumeration cannot be proven complete against every tool on
+every server.
 
-The durable fix is structural: execute reads from a parsed `argv` directly
-(`execve`, no intervening shell) so the classifier's view of the command is
-exactly the view that executes, eliminating the entire shell-parse-mismatch
-class. This is a tracked roadmap item (the argv-exec classifier fix). Until then
-the fail-closed posture and a standing regression corpus are the mitigation.
+SSHGate's answer is not a better parser but a wall behind it: the kernel read
+jail below limits what a misjudged read can do on hosts that support it. The
+fail-closed posture and a standing regression corpus remain the mitigation on
+hosts without the jail.
+
+---
+
+## Read confinement (the kernel read jail)
+
+Every command the classifier calls a read, signed or not, runs inside a kernel
+jail with one profile, `ro-v1` (`src/gate/confine/`), when the host has both
+unprivileged user namespaces that can mount and Landlock. The gate re-executes
+itself to build the jail, and the jailed worker then runs `/bin/sh` with the
+command. Inside the jail the command has:
+
+- its own user, mount and IPC namespaces, but the host's PID namespace (so `ps`
+  and `top` still show host processes);
+- a read-only, `nodev`, `nosuid` view of the whole host filesystem, including
+  `/proc`, `/tmp` and `/var/tmp`; mounts whose filesystem type is not on a
+  reviewed read-safe list (FUSE, network filesystems, `overlay`, unknown types)
+  are hidden behind empty covers where the jail can place one;
+- a private 64 MiB `/dev/shm` as its only writable space (`TMPDIR` points
+  there), discarded at exit;
+- no capabilities (when SSHGate runs as root, the read keeps only
+  `CAP_DAC_READ_SEARCH`, inside its own user namespace, so root can still read
+  files across permission bits; `open_by_handle_at` is denied), `no_new_privs`,
+  Landlock, and a seccomp filter that rules on every syscall (unknown syscalls
+  get `ENOSYS`).
+
+The jail checks the state it built before the command starts and refuses the
+read if any check fails. A jailed read cannot change host files or file
+metadata, reach local daemons over Unix sockets, or signal, trace or re-tune
+other processes. **It keeps TCP/UDP network access**, including to localhost;
+making network a per-host and per-read permission is the next build step
+([BUILD-PLAN.md](BUILD-PLAN.md) work item 1).
+
+On a host without the jail, reads run unconfined as they did before the jail,
+and the audit log labels them `unconfined`. The operator can run
+`~/.sshgate-gate/gate doctor` on the host to see which case applies, and
+`gate doctor --pin` to write `jail-floor`; with that pin the gate refuses
+(exit 77, `read jail unavailable`) any read it cannot jail. A probe that fails for
+an unexplained reason, or a jail that fails to build for a read, also refuses
+that read; the gate never falls back to running it unconfined.
+
+Three things deliberately stay outside the jail: a fixed allowlist of
+`systemctl` and `docker` read verbs that need a daemon socket (run shell-free,
+from a fixed path, with allowlisted flags and a closed environment); signed
+writes; and the admin verbs (`SSHGATE_REVOKE`, `SSHGATE_UPDATE`,
+`SSHGATE_XFER_*`). A jail problem never blocks a signed write or an admin verb.
+
+For a jailed read the gate returns the command's real exit code or signal when
+the worker's status is known, also when the read was cancelled or the client went
+away. If the status is unavailable (for example the read was cancelled before the
+jail reported it), the gate returns 143 on cancellation and otherwise the jail
+shim's status. The audit record keeps
+process status, output delivery and cleanup outcome as separate fields. The
+accepted residual risks of the jail are listed in
+[THREAT-MODEL.md](THREAT-MODEL.md) §"The kernel read jail".
 
 ---
 
@@ -237,7 +308,8 @@ the full reasoning, see [approval-architecture.md](approval-architecture.md).
 - **Tier 1 — read-only.** The gate is deployed to each remote, but **no** signing
   public key is uploaded. Reads work; every write is denied at the gate. No
   Telegram bot, no signer daemon, no `sudo` required. This is the fastest install
-  and the natural starting point.
+  and the natural starting point. Here the classifier is the only thing deciding
+  what runs, so the read jail matters most on Tier-1 hosts.
 
 - **Tier 2 — local Telegram signer (signed-write).** A signer daemon runs on the
   operator's machine under a dedicated Unix user, holding the master signing key
@@ -247,12 +319,12 @@ the full reasoning, see [approval-architecture.md](approval-architecture.md).
 
 - **Tier 3 — hosted signer (separate machine).** The intended deployment runs
   the signer on a separate host the agent cannot reach, giving the hard boundary
-  against a privileged laptop-side agent after its policy-authority and release
-  gates close. The current source foundation includes the hosted web UI,
+  against a privileged laptop-side agent once its policy-authority work and
+  release gates close. The repository's foundation includes the hosted web UI,
   TOTP/WebAuthn, N-of-M approval, and centralized audit, but it is not yet a
   release-ready boundary. Hosted Telegram remains deferred. This tier is the
   recommended future investment where a hard guarantee is required; its open
-  release work is tracked on the roadmap.
+  release work is tracked in [ROADMAP.md](ROADMAP.md).
 
 ---
 
@@ -269,6 +341,9 @@ the full reasoning, see [approval-architecture.md](approval-architecture.md).
 - Command output is redacted of secret-shaped strings before it reaches the
   agent (reads and writes alike; only an approved secret-reveal bypasses it).
 - A bounded signature validity window caps the lifetime of any approved write.
+- On a host with the read jail, a command that runs as a read cannot change host
+  files, reach Unix-socket daemons, or touch other processes, even if the
+  classifier misjudged it.
 
 **Not protected (be honest about it):**
 
@@ -278,7 +353,11 @@ the full reasoning, see [approval-architecture.md](approval-architecture.md).
   naïve injection, not a wall against a determined privileged adversary. After
   its release gates close, use the hosted signer (Tier 3) when a hard guarantee
   is required.
-- The read/write classifier is a fail-closed heuristic over shell syntax; until
-  the argv-exec structural fix lands, obscure tool flags or shell-parsing
-  mismatches remain a residual risk on the read path, mitigated by default-deny
-  and a regression corpus.
+- The read/write classifier is a fail-closed heuristic over shell syntax;
+  obscure tool flags or shell-parsing mismatches remain a residual risk on the
+  read path. On a host with the read jail the damage is bounded by the jail; on
+  a host without it, only default-deny and the regression corpus stand in the way.
+- Reads keep network access, inside the jail too: a read can send data out or ask
+  a local TCP service to change state. Reads can also see anything the SSH user
+  can read. See [THREAT-MODEL.md](THREAT-MODEL.md) for the jail's full residual
+  list.

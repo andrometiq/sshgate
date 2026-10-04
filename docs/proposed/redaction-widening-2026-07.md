@@ -1,18 +1,24 @@
-# Redaction widening — default-deny output redactor (P1-B)
+# Redaction widening — default-deny output redactor
 
-Status: **built and merged to `main`** (merge `8833ce3`; the ROADMAP marks it
-SHIPPED 2026-07-03). Synthesized 2026-07-03 from two independent,
-empirically-grounded proposals (anchored-rules-maximalist vs default-deny-engine);
-every load-bearing choice below is backed by a measured run, not intuition.
+> **Status: BUILT** (merged 2026-07-03; first included in v0.1.3). Where the code lives:
+> `src/redact/scanner_generic.go` (`scanGenericRuns`, `passesSecretGate` and helpers),
+> `src/redact/scanner.go` (`findMatches` wiring and the `Rule.Entropy` check),
+> `src/redact/rules/sshgate/rules.go` (the widened and new rules),
+> `src/redact/spec_acceptance_test.go` (the acceptance cases). Sections 4 and 5 are kept as a
+> record of the follow-through; their edits are done.
+
+This design was synthesized on 2026-07-03 from two independent, empirically grounded
+proposals (anchored-rules-maximalist vs default-deny-engine); every load-bearing
+choice below is backed by a measured run, not intuition.
 
 ## Problem
 
-The output redactor is allowlist-of-shapes: 32 named-format rules. A production
-multi-server run demonstrated real secrets passing raw into agent context, the
+The output redactor was allowlist-of-shapes: 32 named-format rules. A real-world
+multi-server session showed real secrets passing raw into agent context, the
 MCP live log, and the approval display: JSON-quoted keys (`"botToken": "…"`),
 camelCase keys (`authToken:`), `*_API_HASH`/`*_SESSION` names, Telegram bot
 tokens, fine-grained GitHub PATs, and unknown-named high-entropy values. The
-operator ratified a default-deny mandate: redact anything that looks like a
+maintainers adopted a default-deny mandate: redact anything that looks like a
 secret, preferring false positives over misses, in the default mode, across all
 four sinks (agent output, MCP live log, approval-message display, signer/gate
 audit command-strings). All four sinks compile `redactrules.Combined()`, so the
@@ -43,7 +49,7 @@ rejected: it silently deactivates on keyword-free buffers (an unknown-named
 secret in output that never says "key/token/secret" would leak), which defeats
 the default-deny mandate — and still measured −53% on keyword-dense output.
 
-## 1. Engine changes (`src/redact/scanner.go`)
+## 1. Engine changes (`src/redact/scanner.go`, `src/redact/scanner_generic.go`)
 
 ### 1a. `Rule.Entropy` consulted in `findMatches`
 
@@ -93,7 +99,7 @@ return dedupMatches(out)
 const (
     genericEntropyRuleID = "sshgate-generic-high-entropy"
     telegramTokenRuleID  = "sshgate-telegram-bot-token"
-    genericMinLen        = 32  // spec floor; the tuning knob for a future FP/miss report
+    genericMinLen        = 32  // the floor; the tuning knob for a future FP/miss report
     genericEntropy       = 3.5
 )
 
@@ -106,8 +112,8 @@ const (
 //     EITHER a whole all-digit run OR the trailing 6-10-digit suffix of a
 //     longer run — the latter covers the glued URL form
 //     `api.telegram.org/bot<id>:<body>/…`, which NO word-boundary regex can
-//     match (no \b inside "bot123…"; the operator spec's own regex misses
-//     it too). Span = id + ':' + body; MatchStart = id start so the
+//     match (no \b inside "bot123…"; a plain token regex misses it
+//     too). Span = id + ':' + body; MatchStart = id start so the
 //     writer's straddler retention keeps the anchor.
 //   generic: run NOT starting "_Z" (Itanium-mangled C++ symbols), edge-
 //     trimmed of '-' and '_', trimmed length >= genericMinLen, passing
@@ -121,10 +127,9 @@ const (
 func scanGenericRuns(buf []byte) []match
 ```
 
-Implementation notes (from the adversarial critique; the reference harness
-implementation is directionally right but must NOT be copied blind):
+Implementation notes (from the design critique):
 - `has3Class` must early-exit on mask==7; `sshLineContext` must be
-  allocation-free (reuse `indexFoldASCII` from rules.go — the reference's
+  allocation-free (reuse `indexFoldASCII` from rules.go — a naive
   `strings.ToLower(string(…))` allocates twice per candidate).
 - `shannonEntropy` runs LAST in the gate (cheapest-first: length →
   3-class → ssh-line → entropy).
@@ -152,11 +157,6 @@ Interplay (inherited, verify in tests, no writer changes):
   defence-in-depth elsewhere); pin it with a forgery-only-Writer test rather
   than assuming pass-through.
 
-Reference implementation: the default-deny proposal's harness contains a
-worked `scanGenericRuns` + gate whose behavior produced the empirical tables
-below — port it, don't reinvent (scratchpad `harness*` dirs; see also the
-anchored proposal's `final-diff.patch` for test-file conventions).
-
 ## 2. Rule changes (`src/redact/rules/sshgate/rules.go`)
 
 ### 2a. REPLACE `sshgate-sensitive-assignment` regex (same ID, same SecretGroup 1 / MinLen 4 / MaxLen 0)
@@ -175,7 +175,7 @@ contain `token`/`secret` substrings).
 The five deltas, each empirically motivated:
 1. `["']?` around the name → JSON `"botToken": "…"` and Python-dict
    `'botToken': '…'` (the closing quote before `:` was the single blocker for
-   5 of 8 spec JSON cases).
+   5 of the 8 JSON acceptance cases).
 2. camelCase branch: whitelisted-prefix × stem with no separator →
    `botToken:`, `authToken:`, `apiKey:`. A prefix WHITELIST, not `[a-z]+`, so
    `possession:` / `expression:` can never match.
@@ -186,7 +186,7 @@ The five deltas, each empirically motivated:
    current rule crosses newlines, so names-only output
    (`grep -oE '^[A-Za-z_]+=' .env` → `A_API_KEY=\nB_API_KEY=`) redacts the
    NEXT LINE'S NAME as a value today. Both proposals found this
-   independently; the spec's names-only fixture is unmeetable without it.
+   independently; the names-only acceptance case cannot pass without it.
    Trade: YAML block-scalar (`password:\n  value`) is no longer caught —
    documented miss, the bug fix outweighs.
 5. `PWD`/`PASS` strict branch, `$`-exclusion in the unquoted value class, and
@@ -218,7 +218,7 @@ Accepted, test-pinned over-redaction: `DESKTOP_SESSION=gnome` loses its value
   collapses overlap).
 - github-fine-pat needs its OWN keyword: `ghp_` is not a substring of
   `github_pat_` — widening the existing rule can never fire (verified
-  prefilter blocker). Real tokens are 93 chars; `{20,}` per operator spec.
+  prefilter blocker). Real tokens are 93 chars; `{20,}` leaves a wide margin.
 - zoho: exact structural shape; hex body must NOT be entropy-gated (hex is
   2-class and caps at 4.0 bits/byte).
 - `sshgate-url-userinfo-password` covers the `user:pass@host` form of
@@ -267,8 +267,8 @@ names); per-file fixed salts per existing convention.
    - telegram: pos `digits(10)+":AA"+b64url(33)` bare AND glued
      `…/bot<token>/sendMessage` (fires via the digit-SUFFIX peel — assert
      marker present + full `<id>:<body>` absent, do NOT assert RuleID);
-     neg `epoch(10)+":"+hex(36)` (A-pin miss — deliberate; the operator
-     spec's literal regex FPs here).
+     neg `epoch(10)+":"+hex(36)` (A-pin miss — deliberate; a looser literal
+     regex false-positives here).
    - generic: pos `mixed-3class(40)` bare AND a long 3-class PATH segment
      `/tmp/AbcDef…40/data.txt` (documented-bias row — path segments that
      look like tokens DO redact, see §6); negs: full `git log --oneline`
@@ -279,8 +279,8 @@ names); per-file fixed salts per existing convention.
      active — intended); ringMax test with a >64 KiB benign prefix followed
      by a tail-reaching generic run (pins `MatchStart = Start`; a wrong
      MatchStart swallows the benign prefix into the marker).
-3. **New `src/redact/spec_acceptance_test.go`** mirroring the operator spec's
-   acceptance list: multi-line `.env` cat (named values + one unknown-named
+3. **New `src/redact/spec_acceptance_test.go`** covering the acceptance cases:
+   multi-line `.env` cat (named values + one unknown-named
    high-entropy value all redacted; comments, names, `DEBUG=true` survive);
    jq-style JSON doc with `botToken`/`api_key`/nested `auth.token`;
    `grep -oE '^[A-Za-z_]+='` names-only output byte-identical; `git remote -v`
@@ -304,47 +304,24 @@ names); per-file fixed salts per existing convention.
    keeps meaning "a genuinely benign command is unchanged", and add the
    companion documented-bias golden (§2 generic pos path row) pinning that
    token-shaped path segments redact.
-6. **Cross-sink check**: one telegram-shaped row in `livelog_redact_test.go`.
-7. **Bench**: `BenchmarkScannerNoMatch` / `Throughput` / `Chunked` before vs
+7. **Cross-sink check**: one telegram-shaped row in `livelog_redact_test.go`.
+8. **Bench**: `BenchmarkScannerNoMatch` / `Throughput` / `Chunked` before vs
    after, recorded in the commit message. Acceptance: NoMatch ≤ +10%;
    keyword-dense/Throughput ≤ +35% (measured expectation: +2–8% and ≤ +33%,
    median ≈ +19%).
 
-## 4. Doc edits
+## 4. Doc edits (done)
 
-1. `docs/redaction-architecture.md`: modes §(:55-56) — standard now includes
-   the bounded generic net (3-class + ssh-line veto + entropy ≥ 3.5, ≥ 32
-   chars); strike ":108 no free-floating entropy" absolute; ":110" exclusions
-   → unguarded gitleaks entropy rules stay excluded, the bounded net shipped
-   2026-07 after a live missed-secret report; ":204" step 3 no longer
-   "(thorough mode only)"; Rule struct comment ":89"; dated changelog entry.
-2. `docs/FUTURE.md`: thorough-mode entry — promotion condition (:133a) FIRED
-   2026-07-02; standard got the bounded net + live `Rule.Entropy`; thorough's
-   remaining scope = decode depth 3 + looser gates (1/2-class candidates,
-   lower floors). Limitation #8 softened (hex-shaped custom secrets remain
-   invisible unless name-anchored).
-3. `src/redact/rules/gitleaks/PROVENANCE.md`: exclusions stand; note the
-   criterion is now "entropy without the three-guard gate"; cross-ref the
-   native net.
-4. `docs/ROADMAP.md`: mark the P1-B "default-deny output-value redaction" item
-   SHIPPED with date + one-liner; leave a residual note (bare hex / <32-char
-   tokens) and cross-ref the Aho-Corasick perf item.
+`docs/redaction-architecture.md` (standard mode now includes the bounded generic net; changelog
+entry), `docs/FUTURE.md` (the thorough-mode promotion condition fired; thorough keeps decode depth
+and looser gates), `src/redact/rules/gitleaks/PROVENANCE.md` (exclusion criterion restated) and
+`docs/ROADMAP.md` (item marked shipped, with the residuals below).
 
-## 5. Build order (verify gate after each phase: `go build ./... && go vet ./... && go test -race ./...`)
+## 5. Build order (done)
 
-1. **Engine**: `passesSecretGate` + helpers + `Rule.Entropy` consult +
-   `scanGenericRuns` + step-3 wiring, with unit tests (gate table, stitch
-   table, generic table, dedup interplay, nil-rules contract) — TDD.
-2. **Rules**: 2a/2b/2c/2d + goldens + dual-polarity extensions. Expect
-   existing-fixture fallout (writer/scanner corpora may contain qualifying
-   runs) — resolve each as either a legitimate new redaction (update
-   expectation, justify in the diff) or a real FP (fix the gate/thresholds).
-3. **Acceptance + sweeps + livelog row + bench before/after.**
-4. **Docs.**
-5. Whole-suite verify, `make preflight`, PII audit, push, local deploy
-   (MCP + signer restart), then the live-host acceptance run per the operator
-   spec (gate redeploy on the target box is an open operational step — see
-   below).
+Engine first (gate, helpers, `Rule.Entropy`, `scanGenericRuns`, with unit tests), then the rule
+changes and goldens, then acceptance, streaming sweeps, the live-log row and the before/after
+benchmarks, then docs. Each phase passed `go build ./... && go vet ./... && go test -race ./...`.
 
 ## 6. Deliberate trades (operator-visible, test-pinned)
 
@@ -358,7 +335,7 @@ names); per-file fixed salts per existing convention.
 - `DESKTOP_SESSION`-class over-redaction accepted (2 lines per env dump).
 - Random base64**url** blobs ≥ 32 (3-class, no `+`/`/`) redact —
   redact-on-doubt by mandate; `reveal=true` is the operator escape hatch.
-  CAVEAT (security review F3): the generic net's run alphabet is
+  CAVEAT: the generic net's run alphabet is
   `[A-Za-z0-9_-]` (base64url), so standard-base64 `+`/`/`/`=` bytes SPLIT a
   run — a `base64 <file>` dump (coreutils emits std-base64) is therefore NOT
   reliably covered: a short std-base64 blob may pass whole, a long one is
@@ -383,8 +360,7 @@ names); per-file fixed salts per existing convention.
   the keyword-free common case pays +2–10% (two independent measurements:
   +2–8% and +8–10% on a noisier box — hold the ≤ +10% gate). The
   Aho-Corasick roadmap item is the structural fix.
-- Sink (a) lags on live servers until each remote gate binary is replaced.
-  (At writing time `SSHGATE_UPDATE` was an unimplemented stub and the only
-  path was `revoke_server` → re-paste pubkey → `sshgate add`; the signed
-  `update_gate` verb has since shipped in v0.1.3 and is the redeploy
-  mechanism.)
+- The gate-side sinks change on a server only when its gate binary is
+  replaced. (At writing time the only path was `revoke_server` → re-paste
+  pubkey → `sshgate add`; the signed `update_gate` verb, shipped in v0.1.3,
+  is now the redeploy mechanism.)

@@ -18,7 +18,10 @@
 //	70 — EX_SOFTWARE: pubkey file unreadable, corrupt, or has insecure
 //	     mode; also a SSHGATE_UPDATE filesystem/replace failure (old gate
 //	     left intact)
-//	77 — EX_NOPERM: write command without a verified SSHGATE_SIG prefix
+//	77 — EX_NOPERM: write command without a verified SSHGATE_SIG prefix;
+//	     also a read refused because the host's read jail cannot be trusted
+//	     (probe error, rung below the pinned jail-floor, damaged floor) or
+//	     could not be set up; stderr then says "read jail unavailable"
 //
 // Exit codes from the executed inner command are passed through
 // directly (so /bin/sh -c 'exit 42' makes gate exit 42).
@@ -34,6 +37,7 @@ import (
 	"context"
 	"crypto/rand"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -44,6 +48,7 @@ import (
 
 	"github.com/karthikeyan5/sshgate/src/classify"
 	"github.com/karthikeyan5/sshgate/src/gate"
+	"github.com/karthikeyan5/sshgate/src/gate/confine"
 	"github.com/karthikeyan5/sshgate/src/hostkey"
 	"github.com/karthikeyan5/sshgate/src/redact"
 	redactrules "github.com/karthikeyan5/sshgate/src/redact/rules"
@@ -73,9 +78,10 @@ var redactRules []redact.Rule
 const (
 	exitOK        = 0
 	exitGeneric   = 1
-	exitDataErr   = 65 // EX_DATAERR
-	exitSoftware  = 70 // EX_SOFTWARE
-	exitNoPermVal = 77 // EX_NOPERM
+	exitDataErr   = 65  // EX_DATAERR
+	exitSoftware  = 70  // EX_SOFTWARE
+	exitNoPermVal = 77  // EX_NOPERM
+	exitCancelled = 143 // 128+SIGTERM: cancelled before an admin verb ran
 )
 
 func main() {
@@ -88,6 +94,20 @@ func main() {
 	// human-only key-generation entry point; see genkeys.go. run() stays
 	// byte-for-byte the SSH_ORIGINAL_COMMAND path and is left unchanged.
 	if len(os.Args) > 1 {
+		// Internal re-exec sentinels for the kernel jail (confine). These are
+		// dispatched BEFORE runLocalSubcommand and run(): they are the gate
+		// re-execing ITSELF to establish the jail, not an operator subcommand and
+		// not an SSH command. They only ever ADD restrictions, so a local caller
+		// gains nothing, and the forced-command path never reaches them (it passes
+		// no argv; the client's command lands in SSH_ORIGINAL_COMMAND).
+		switch os.Args[1] {
+		case confine.SentinelShim:
+			os.Exit(confine.RunShim(os.Args[2:]))
+		case confine.SentinelWorker:
+			os.Exit(confine.RunWorker(os.Args[2:]))
+		case confine.SentinelProbe:
+			os.Exit(confine.RunProbe(os.Args[2:]))
+		}
 		os.Exit(runLocalSubcommand(os.Args[1:]))
 	}
 	os.Exit(run())
@@ -95,6 +115,25 @@ func main() {
 
 // run is the testable entry point; main exits on its return value.
 func run() int {
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer stop()
+	stopPipe := gate.CatchSIGPIPE()
+	defer stopPipe()
+	sessionContext = ctx
+	sessionDestination, sessionDeliveryError = "", ""
+	var destinationErr error
+	sessionDestination, destinationErr = gate.ClientOutputDestination(os.Stdout, os.Stderr)
+	if destinationErr != nil {
+		sessionDeliveryError = destinationErr.Error()
+	}
+	defer func() {
+		if sessionSink != nil {
+			sessionSink.Finish()
+			_ = sessionSink.Close()
+		}
+		sessionSink, sessionContext, sessionDestination, sessionDeliveryError = nil, nil, "", ""
+	}()
+
 	// Per-process redactor state: fresh 32-byte salt + compiled-in
 	// ruleset. Failures here are fatal — we cannot serve traffic
 	// without a fresh salt for HMAC marker keys.
@@ -164,7 +203,7 @@ func run() int {
 		kind := classify.Classify(raw)
 		if kind == classify.KindRead {
 			// Tier-1 read-only: unsigned read, never revealed.
-			return execAndAudit(audit, raw, "read", "unsigned", false)
+			return execRead(audit, raw, "unsigned", false)
 		}
 		// KindWrite or KindUnknown (empty/whitespace already handled
 		// upstream — anything else unknown falls through as write).
@@ -213,6 +252,9 @@ func run() int {
 	// Administrative commands. Only valid when signed.
 	if signed {
 		if innerCmd == "SSHGATE_REVOKE" {
+			if restoreDefaultTermination(ctx) {
+				return exitCancelled
+			}
 			// A verified admin verb runs no /bin/sh child, so there is no
 			// output metadata — record it as a signed write with the actual
 			// exit code. doRevoke owns the teardown + its own exit code.
@@ -226,12 +268,18 @@ func run() int {
 			// from the gate's OWN stdin, refuses on any hash mismatch, and
 			// atomically replaces this binary. It ALWAYS returns — never falls
 			// through to classify/exec.
+			if restoreDefaultTermination(ctx) {
+				return exitCancelled
+			}
 			return handleUpdate(audit, innerCmd)
 		}
 		if strings.HasPrefix(innerCmd, xferwire.VerbPrefix) {
 			// Signed box→box transfer leg. Dispatched here, BEFORE classify/exec,
 			// so a SSHGATE_XFER_* line is NEVER handed to /bin/sh. handleXfer
 			// ALWAYS returns — like handleUpdate it never falls through.
+			if restoreDefaultTermination(ctx) {
+				return exitCancelled
+			}
 			return handleXfer(audit, innerCmd)
 		}
 	}
@@ -246,7 +294,7 @@ func run() int {
 		if signed {
 			status = "signed"
 		}
-		return execAndAudit(audit, innerCmd, "read", status, reveal)
+		return execRead(audit, innerCmd, status, reveal)
 	case classify.KindWrite, classify.KindUnknown:
 		// Fail-safe: unknown is treated as write (classify.Classify
 		// already returns KindWrite for the truly-unknown cases; an
@@ -257,13 +305,30 @@ func run() int {
 			auditNoExec(audit, innerCmd, "write", "denied", exitNoPermVal)
 			return exitNoPermVal
 		}
-		return execAndAudit(audit, innerCmd, "write", "signed", reveal)
+		return execAndAudit(audit, innerCmd, "write", "signed", reveal, execPlan{})
 	default:
 		logf("unexpected classification: %v", kind)
 		auditNoExec(audit, innerCmd, "write", "denied", exitGeneric)
 		return exitGeneric
 	}
 }
+
+// restoreDefaultTermination gives the signed admin verbs back the default
+// SIGTERM/SIGINT disposition: they block on the client's stdin or a source file
+// and never consume the session context, so a caught signal would not end them.
+// Reset, unlike stop, leaves the context live for the client sink and logf. A
+// signal that arrived before the reset has already cancelled the context; it
+// is re-raised as SIGTERM and true is returned so the verb does not run.
+func restoreDefaultTermination(ctx context.Context) bool {
+	signal.Reset(syscall.SIGTERM, syscall.SIGINT)
+	if ctx.Err() == nil {
+		return false
+	}
+	_ = syscall.Kill(os.Getpid(), syscall.SIGTERM)
+	return true
+}
+
+var executeCommand = gate.ExecWithRedaction
 
 // execChild runs cmd under a signal-aware context. SIGTERM/SIGINT
 // received by gate are propagated to the child process group via
@@ -274,31 +339,59 @@ func run() int {
 // authorised raw (un-redacted) output. reveal can only be true on the
 // signed path (see run()); it is never set for an unsigned read.
 //
+// plan selects how the child runs: Lane-2 argv (shell-free), the read jail,
+// or the zero plan's plain /bin/sh -c (signed writes, rung-3 reads).
+//
 // It returns the gate exit code AND the ExecResult (output metadata) so
 // the caller can feed the Tier-6a audit log. captureLimit (>0 only at the
 // audit all+full level) makes the executor tee a capped copy of the
 // output into the result. On an exec start-failure (exit<0) the gate exit
-// code is normalised to exitGeneric (1).
-func execChild(cmd string, reveal bool, captureLimit int) (int, gate.ExecResult) {
-	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
-	defer cancel()
+// code is normalised to exitGeneric (1) — except for a jailed read, where
+// exit<0 means the jail never reached the command (scratch dir, build, start
+// or setup failure): that is a deny, jailDenied is true and the code is 77, so
+// it can never pass for a command that ran and exited 1.
+func execChild(cmd string, reveal bool, captureLimit int, plan execPlan) (rc int, res gate.ExecResult, jailDenied bool) {
+	ctx := sessionContext
+	if ctx == nil {
+		var cancel context.CancelFunc
+		ctx, cancel = signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+		defer cancel()
+	}
+	if plan.confine != nil && sessionContext != nil {
+		if err := ensureClientSink(); err != nil {
+			return exitNoPermVal, gate.ExecResult{ExitCode: -1, Transport: gate.TransportMetadata{DeliveryError: err.Error(), OutputDestination: sessionDestination}}, true
+		}
+	}
 	// Resolve the redaction ruleset lazily via auditRules() — only this
 	// execute path (and the command-string audit redaction) needs it; a
 	// deny/verify-fail/probe path that never reaches here pays nothing.
 	rules := auditRules()
-	res, err := gate.ExecWithRedaction(ctx, cmd, gate.ExecOpts{
+	opts := gate.ExecOpts{
 		SessionSalt:  sessionSalt,
 		Rules:        rules,
 		Reveal:       reveal,
 		CaptureLimit: captureLimit,
-	})
+		ClientSink:   sessionSink,
+	}
+	var err error
+	switch {
+	case plan.argv != nil:
+		res, err = gate.ExecArgvWithRedaction(ctx, plan.argv, lane2Env, opts)
+	default:
+		opts.Confine = plan.confine
+		res, err = executeCommand(ctx, cmd, opts)
+	}
 	if err != nil {
 		logf("%v", err)
 	}
 	if res.ExitCode < 0 {
-		return exitGeneric, res
+		if plan.confine != nil {
+			logf("read jail unavailable: the jail could not be set up; the read did not run")
+			return exitNoPermVal, res, true
+		}
+		return exitGeneric, res, false
 	}
-	return res.ExitCode, res
+	return res.ExitCode, res, false
 }
 
 // auditRulesOnce + cachedAuditRules MEMOIZE the production ruleset compile so
@@ -374,7 +467,7 @@ func newAuditLogger() *gate.AuditLogger {
 // code. It is the single exec+audit chokepoint for reads and signed
 // writes. The audit write is fail-open inside Record — a logging failure
 // never affects the returned exit code.
-func execAndAudit(audit *gate.AuditLogger, cmd, classification, approval string, reveal bool) int {
+func execAndAudit(audit *gate.AuditLogger, cmd, classification, approval string, reveal bool, plan execPlan) int {
 	// Only buffer output when the audit level actually wants raw output
 	// (all+full). At every other level captureLimit stays 0 and the
 	// executor streams without buffering — zero added cost on the hot path.
@@ -390,8 +483,13 @@ func execAndAudit(audit *gate.AuditLogger, cmd, classification, approval string,
 	if audit != nil && audit.Level() >= gate.AuditAllFull && !reveal {
 		captureLimit = auditFullCaptureLimit
 	}
-	rc, res := execChild(cmd, reveal, captureLimit)
-	audit.Record(gate.AuditRecord{
+	rc, res, jailDenied := execChild(cmd, reveal, captureLimit, plan)
+	if jailDenied {
+		// Nothing ran: record a denial with no output metadata and no rung.
+		auditNoExec(audit, cmd, classification, "denied", rc, res.Transport)
+		return rc
+	}
+	record := gate.AuditRecord{
 		TS: time.Now().UTC().Unix(),
 		// Redact a secret embedded in the command STRING before persisting it
 		// to the system-of-record. The redactor already scrubs output; the
@@ -400,6 +498,7 @@ func execAndAudit(audit *gate.AuditLogger, cmd, classification, approval string,
 		Classification: classification,
 		ApprovalStatus: approval,
 		ExitCode:       rc,
+		CleanupError:   res.CleanupError,
 		Meta: &gate.AuditMeta{
 			StdoutBytes: res.StdoutBytes,
 			StderrBytes: res.StderrBytes,
@@ -416,16 +515,53 @@ func execAndAudit(audit *gate.AuditLogger, cmd, classification, approval string,
 		// so all+meta provably cannot leak raw output either.
 		Stdout: res.Stdout,
 		Stderr: res.Stderr,
-	})
+		Rung:   plan.rung,
+	}
+	if res.Transport.CleanupError == "" {
+		res.Transport.CleanupError = res.CleanupError
+	}
+	if plan.confine == nil && !res.Transport.WorkerStatus.Known && res.Transport.WorkerStatus.Unavailable == "" {
+		res.Transport.WorkerStatus.Unavailable = "not confined"
+	}
+	record.SetTransport(finishTransport(res.Transport))
+	audit.Record(record)
 	return rc
+}
+
+// execPlan says how execChild runs a command. The zero value is today's plain
+// /bin/sh -c (the signed-write path). A read sets exactly one of argv (Lane 2,
+// shell-free) or confine (the jail; nil on a rung-3 host), plus its audit rung.
+type execPlan struct {
+	argv    []string
+	confine *confine.Spec
+	rung    string
+}
+
+// execRead runs a command the classifier called a read, on the Tier-1 and
+// signed read paths alike. An exact Lane-2 daemon read runs shell-free and
+// unjailed; everything else runs in the read jail the host supports. If the
+// jail rung cannot be trusted (probe error, live rung below the pinned floor,
+// damaged floor) the read is denied — it never falls back to unconfined.
+// Reveal only switches off output redaction; a revealed read is still jailed.
+func execRead(audit *gate.AuditLogger, cmd, approval string, reveal bool) int {
+	if argv, ok := lane2Argv(cmd); ok {
+		return execAndAudit(audit, cmd, "read", approval, reveal, execPlan{argv: argv, rung: "lane2"})
+	}
+	spec, deny := resolveReadConfine()
+	if deny != "" {
+		logf("read jail unavailable: %s", deny)
+		auditNoExec(audit, cmd, "read", "denied", exitNoPermVal)
+		return exitNoPermVal
+	}
+	return execAndAudit(audit, cmd, "read", approval, reveal, execPlan{confine: spec, rung: rungLabel(spec)})
 }
 
 // auditNoExec records a Tier-6a line for a command that ran NO /bin/sh
 // child: a rejection (approval="denied", exit is the deny code) or a
 // signed admin verb handled internally (approval="signed"). Meta is nil
 // because there is no output metadata. The write is fail-open.
-func auditNoExec(audit *gate.AuditLogger, cmd, classification, approval string, exit int) {
-	audit.Record(gate.AuditRecord{
+func auditNoExec(audit *gate.AuditLogger, cmd, classification, approval string, exit int, outcome ...gate.TransportMetadata) {
+	record := gate.AuditRecord{
 		TS: time.Now().UTC().Unix(),
 		// Redact a secret embedded in the command string even on the no-exec
 		// (denial / admin-verb) path — a denied command can still carry a
@@ -435,7 +571,16 @@ func auditNoExec(audit *gate.AuditLogger, cmd, classification, approval string, 
 		ApprovalStatus: approval,
 		ExitCode:       exit,
 		Meta:           nil,
-	})
+	}
+	transport := gate.TransportMetadata{WorkerStatus: confine.WorkerStatus{Unavailable: "not executed"}}
+	if len(outcome) != 0 {
+		transport = outcome[0]
+	}
+	if !transport.WorkerStatus.Known && transport.WorkerStatus.Unavailable == "" {
+		transport.WorkerStatus.Unavailable = "not executed"
+	}
+	record.SetTransport(finishTransport(transport))
+	audit.Record(record)
 }
 
 // gateDirFn resolves the gate install directory and the absolute path
@@ -524,5 +669,54 @@ func logf(format string, args ...any) {
 	// Unwrap-friendly sentinels render through %v as expected. Keep
 	// only one final newline.
 	msg = strings.TrimRight(msg, "\n")
-	fmt.Fprintf(os.Stderr, "gate: %s\n", msg)
+	var destination io.Writer = os.Stderr
+	if sessionContext != nil {
+		if err := ensureClientSink(); err != nil {
+			return
+		}
+		destination = sessionSink.Stderr()
+	}
+	fmt.Fprintf(destination, "gate: %s\n", msg)
+}
+
+// These are invocation-scoped, like sessionSalt; run is not called concurrently.
+var sessionContext context.Context
+var sessionSink *gate.ClientSink
+var sessionDestination string
+var sessionDeliveryError string
+
+func ensureClientSink() error {
+	if sessionSink != nil {
+		return nil
+	}
+	sink, err := gate.NewClientSink(sessionContext, os.Stdout, os.Stderr)
+	if err != nil {
+		sessionDeliveryError = err.Error()
+		return err
+	}
+	sessionSink = sink
+	return nil
+}
+
+func finishTransport(process gate.TransportMetadata) gate.TransportMetadata {
+	if sessionSink != nil {
+		delivery := sessionSink.Finish()
+		process.Abandoned, process.DroppedBytes = delivery.Abandoned, delivery.DroppedBytes
+		if delivery.DeliveryError != "" && process.DeliveryError != delivery.DeliveryError {
+			if process.DeliveryError != "" {
+				process.DeliveryError += ";"
+			}
+			process.DeliveryError += delivery.DeliveryError
+		}
+		process.OutputDestination = delivery.OutputDestination
+	} else if process.OutputDestination == "" {
+		process.OutputDestination = sessionDestination
+	}
+	if sessionDeliveryError != "" && process.DeliveryError != sessionDeliveryError {
+		if process.DeliveryError != "" {
+			process.DeliveryError += ";"
+		}
+		process.DeliveryError += sessionDeliveryError
+	}
+	return process
 }

@@ -50,6 +50,30 @@ There is no signer, so a write can only be refused — never approved.
 The gate's purpose in this mode is therefore: **no state mutation may
 happen without a signature.** Reads are deliberately allowed.
 
+### What the rig does not test: the kernel read jail
+
+Since v0.1.5 the gate runs reads inside a kernel jail on hosts with
+unprivileged user namespaces and Landlock (`src/gate/confine`). **The rig
+does not exercise that jail.** Under Docker's default seccomp profile the
+container cannot create user namespaces, so the gate's probe finds no jail
+and runs reads unconfined, exactly as described above. The rig therefore
+tests the **classifier**: whether anything it calls a read can write. That
+is the protection that matters on hosts without the jail.
+
+If your Docker setup does let containers create user namespaces, the gate
+may jail reads. Then a write that the classifier missed is stopped by the
+jail instead, and shows up as `executed` with no change rather than as a
+`BYPASS`, so the rig would under-report classifier holes. A read the jail
+refuses (exit `77` with `gate: read jail unavailable`) is not counted as
+`denied` either, because the rig matches only the "no signing key
+configured" line. The jail has its own proofs: `make test-jail`,
+`make test-jail-mutate` and `make test-fidelity-smoke` (see
+`docs/E2E-TEST-STRATEGY.md`).
+
+The rig builds the gate from source (`go build ./src/gate/cmd/sshgate-gate`
+into `bin/gate-redteam-linux-amd64`), not from the committed
+`dist/gate/` binary.
+
 ### The angles the rig hunts
 
 | # | Angle | How the rig detects it |
@@ -183,11 +207,27 @@ gate-redteam campaign --iterations 5  # reuses it too
 gate-redteam down                     # full teardown (compose down -v + remove keys + state)
 ```
 
-`up` persists connection state to `./.gate-redteam-state.json` (gitignored)
-and keeps the dedicated SSH key under a STABLE dir `./.gate-redteam/keys/`
-(not a temp dir that would get cleaned up). `down` is **idempotent** —
+`up` persists connection state to `./.gate-redteam-state-<port>.json`
+(gitignored) and keeps the dedicated SSH key under a STABLE dir
+`./.gate-redteam/<port>/` (not a temp dir that would get cleaned up). The
+port is the host SSH port, 2222 by default. `down` is **idempotent** —
 safe to run when nothing is up. Use `--state PATH` on any of these to use
-a non-default state file (e.g. to run two targets at once).
+a non-default state file.
+
+### Several rigs at once
+
+Each rig instance is selected by its host SSH port: `--port N` or the
+environment variable `SSHGATE_REDTEAM_PORT` (default 2222); `--instance
+NAME` / `SSHGATE_REDTEAM_INSTANCE` is only a label. The compose project,
+container name (`sshgate-redteam-<port>`), state file, key dir and default
+report file are all derived from the port, so instances never collide:
+
+```sh
+SSHGATE_REDTEAM_PORT=2222 gate-redteam up
+SSHGATE_REDTEAM_PORT=2223 gate-redteam up
+```
+
+`gate-redteam --help` lists every flag.
 
 If no healthy standing target exists, `test`/`batch`/`campaign` fall back
 to today's **ephemeral** boot-and-teardown automatically.
@@ -208,8 +248,8 @@ quoted command if you override it: `gate-redteam test --state s.json "ls"`.)
 gate-redteam campaign                       # one pass over the corpus
 gate-redteam campaign --iterations 50       # 50 passes
 gate-redteam campaign --duration 2h         # run for two hours
-gate-redteam campaign --fuzz 200 --seed 7   # 200 fuzzer mutants per pass
-gate-redteam campaign --report run.jsonl    # append-only JSONL (default ./gate-redteam-report.jsonl)
+gate-redteam campaign --fuzz 200 --seed 7   # 200 fuzzer mutants per pass (default 50)
+gate-redteam campaign --report run.jsonl    # append-only JSONL (default ./gate-redteam-report-<port>.jsonl)
 ```
 
 Every verdict is appended to the JSONL report (one object per line) and a
@@ -258,7 +298,9 @@ Field semantics:
 
 - **`gate_decision`** — `denied` means exit `77` **and** the gate's
   "no signing key configured" stderr line (both required, so a bare
-  exit 77 from an inner tool isn't mistaken for a denial). `executed`
+  exit 77 from an inner tool isn't mistaken for a denial). A read the
+  kernel jail refused (exit 77, "read jail unavailable") is therefore
+  reported as `executed`; it never counts as a bypass. `executed`
   means the gate let the inner command run under `sh -c` (whatever its
   exit). `error` means a transport/gate failure — **never** a bypass,
   surfaced for investigation.
@@ -330,7 +372,9 @@ happens. `gate-redteam down` when finished.
 
 The built-in corpus (see `corpus.go`) spans every write/exec primitive in
 the threat model. Notably it pins **every read-only-gate classifier hole
-that was fixed**, so a campaign dynamically re-proves the fixes hold:
+that was fixed**, so a campaign dynamically re-proves the fixes hold
+(it does not target the kernel read jail; see "What the rig does not test"
+above):
 
 - the first-batch holes: newline separator, bundled `sed -i`,
   double-quoted command substitution (`fixed-hole/*`);
@@ -382,14 +426,17 @@ and `sort` which spills temp files), `TestTripwire_FiresOnOutOfBandWrite`
 (catches a direct out-of-band write to `/etc`), and
 `TestTripwire_FiresOnExpandedWatchSet` (catches out-of-band writes to the
 EXPANDED watch set: `/config/.ssh/authorized_keys`, a `/config` home
-file, `/tmp`, and a runtime `/etc/ssh/sshd_config.d` drop-in). Run them
-with `go test ./internal/redteam/ -run Tripwire`.
+file, `/tmp`, and a runtime `/etc/ssh/sshd_config.d` drop-in). They carry
+the `integration` build tag, so run them with
+`go test -tags=integration ./internal/redteam/ -run Tripwire` (Docker
+required; `make test-integration` runs them too).
 
 ---
 
-## Last live run against the post-fix gate
+## Last recorded live run (mid-2026, before the kernel read jail)
 
-A single-pass campaign (`--iterations 1 --fuzz 0`, 138 corpus candidates —
+This is a historical record from before v0.1.5 added the read jail;
+the corpus has grown since, so today's counts differ. A single-pass campaign (`--iterations 1 --fuzz 0`, 138 corpus candidates —
 now incl. the 10 `freeform-location` rows) against the current gate, with
 the EXPANDED watch set live: **0 bypasses**, 116 denied, 22 executed
 (all genuine reads — none changed the filesystem and none tripped the

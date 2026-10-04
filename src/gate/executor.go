@@ -7,11 +7,13 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
 
+	"github.com/karthikeyan5/sshgate/src/gate/confine"
 	"github.com/karthikeyan5/sshgate/src/redact"
 )
 
@@ -45,6 +47,15 @@ type ExecOpts struct {
 	// the gate never pays the buffering cost. The cap bounds memory for a
 	// huge command (we keep the head; a truncation marker is appended).
 	CaptureLimit int
+	// Confine, when non-nil, runs the command inside the kernel jail the Spec
+	// describes (the ro-v1 profile) instead of a plain
+	// /bin/sh -c. A nil Confine is byte-for-byte today's path (rung 3 / unset):
+	// the gate passes nil on an unconfined host so this field is purely additive.
+	// The jail only ADDS restrictions; stdout/stderr/stdin/redaction wiring below
+	// is identical either way.
+	Confine *confine.Spec
+	// ClientSink is shared with the entrypoint for diagnostics after execution.
+	ClientSink *ClientSink
 }
 
 // ExecResult is the widened return of ExecWithRedaction. It carries the
@@ -66,11 +77,16 @@ type ExecOpts struct {
 // child's 0..255 code, 128+signum when signalled, or -1 if the process
 // never started.
 type ExecResult struct {
-	ExitCode    int
-	StdoutBytes int64
-	StderrBytes int64
-	Lines       int64
-	Duration    time.Duration
+	Transport TransportMetadata
+	Cancelled bool
+	Jail      *confine.Facts
+	ExitCode  int
+	// CleanupError reports post-execution cleanup failure without changing ExitCode.
+	CleanupError string
+	StdoutBytes  int64
+	StderrBytes  int64
+	Lines        int64
+	Duration     time.Duration
 	// Stdout/Stderr hold a (capped) copy of the bytes that reached the
 	// SSH stream, populated ONLY when ExecOpts.CaptureLimit > 0 (the
 	// audit `all+full` path). Empty otherwise.
@@ -96,7 +112,13 @@ type countingWriter struct {
 }
 
 func (c *countingWriter) Write(p []byte) (int, error) {
-	n, err := c.dst.Write(p)
+	n, err := 0, error(nil)
+	delivery, tracked := c.dst.(interface{ WriteDelivered([]byte) (int, error) })
+	if tracked {
+		n, err = delivery.WriteDelivered(p)
+	} else {
+		n, err = c.dst.Write(p)
+	}
 	if n > 0 {
 		c.bytes.Add(int64(n))
 		var nl int64
@@ -114,6 +136,9 @@ func (c *countingWriter) Write(p []byte) (int, error) {
 			c.cap = append(c.cap, p[:room]...)
 		}
 	}
+	if tracked && err == nil {
+		return len(p), nil
+	}
 	return n, err
 }
 
@@ -128,6 +153,10 @@ func (c *countingWriter) captured() string {
 		s += "\n[SSHGATE_AUDIT_TRUNCATED]"
 	}
 	return s
+}
+
+var confinedCommand = func(spec *confine.Spec, ctx context.Context, command string) (*confine.Jailed, error) {
+	return spec.Command(ctx, command)
 }
 
 // ExecWithRedaction runs cmd via "/bin/sh -c <cmd>", streaming the child's
@@ -165,11 +194,84 @@ func (c *countingWriter) captured() string {
 // spawn subprocesses (e.g. pipelines) that would otherwise be reparented to
 // PID 1 and outlive cancellation.
 func ExecWithRedaction(ctx context.Context, cmd string, opts ExecOpts) (res ExecResult, err error) {
+	if opts.Confine != nil {
+		owned := opts.ClientSink == nil
+		if owned {
+			opts.ClientSink, err = NewClientSink(ctx, os.Stdout, os.Stderr)
+			if err != nil {
+				return ExecResult{ExitCode: -1}, fmt.Errorf("exec: client sink: %w", err)
+			}
+		}
+		defer func() {
+			var delivery TransportMetadata
+			if owned {
+				delivery = opts.ClientSink.Finish()
+				_ = opts.ClientSink.Close()
+			} else {
+				delivery = opts.ClientSink.Snapshot()
+			}
+			if res.Transport.WorkerStatus.Unavailable == "" && !res.Transport.WorkerStatus.Known {
+				res.Transport.WorkerStatus.Unavailable = "not executed"
+			}
+			res.Transport = withDelivery(res.Transport, delivery)
+		}()
+	}
+
 	if strings.TrimSpace(cmd) == "" {
 		return ExecResult{ExitCode: -1}, errors.New("exec: empty command")
 	}
-	c := exec.CommandContext(ctx, "/bin/sh", "-c", cmd)
+	// Select the command: a confined Spec re-execs the gate into the jail (it
+	// sets Path/Args/ExtraFiles AND SysProcAttr, including Setpgid); a nil Spec
+	// is today's /bin/sh path. SysProcAttr is therefore set EXACTLY ONCE — the
+	// unconditional Setpgid assignment that used to live further down is folded
+	// into the else branch so it can never clobber the jail's clone flags.
+	var c *exec.Cmd
+	var jailed *confine.Jailed
+	if opts.Confine != nil {
+		var cerr error
+		jailed, cerr = confinedCommand(opts.Confine, ctx, cmd)
+		if cerr != nil {
+			return ExecResult{ExitCode: -1}, fmt.Errorf("exec: build jail: %w", cerr)
+		}
+		c = jailed.Cmd
+	} else {
+		c = exec.CommandContext(ctx, "/bin/sh", "-c", cmd)
+		c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	}
 
+	return runRedacted(ctx, c, jailed, "/bin/sh", opts)
+}
+
+// ExecArgvWithRedaction runs argv directly — no shell, no jail — with exactly
+// env as the child's environment, through the same stdout/stderr redaction,
+// counting, /dev/null stdin and process-group plumbing as ExecWithRedaction.
+// It is the shell-free exec for the gate's Lane-2 daemon-read allowlist: argv[0]
+// must be an absolute path (never a $PATH lookup), and a nil env yields an EMPTY
+// environment, never the gate's inherited one. opts.Confine must be nil — this
+// door is unjailed by design. Return values follow ExecWithRedaction.
+func ExecArgvWithRedaction(ctx context.Context, argv, env []string, opts ExecOpts) (ExecResult, error) {
+	if len(argv) == 0 || !filepath.IsAbs(argv[0]) {
+		return ExecResult{ExitCode: -1}, errors.New("exec: argv[0] must be an absolute path")
+	}
+	if opts.Confine != nil {
+		return ExecResult{ExitCode: -1}, errors.New("exec: argv exec is never confined")
+	}
+	c := exec.CommandContext(ctx, argv[0], argv[1:]...)
+	c.Env = append([]string{}, env...) // non-nil: os/exec inherits the gate's env only for a nil Env
+	c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	return runRedacted(ctx, c, nil, argv[0], opts)
+}
+
+// runRedacted is the shared tail of both exec entry points: it wires the
+// redacting/counting writers and /dev/null stdin onto c, runs it, and maps the
+// outcome to an ExecResult. jailed is non-nil only for a confined command; what
+// names the program in a start-failure error.
+func runRedacted(ctx context.Context, c *exec.Cmd, jailed *confine.Jailed, what string, opts ExecOpts) (res ExecResult, err error) {
+	if jailed != nil {
+		return runConfined(ctx, c, jailed, opts)
+	}
+	stopSIGPIPE := CatchSIGPIPE()
+	defer stopSIGPIPE()
 	// Counting writers sit BELOW any redactor so the tally is the
 	// post-redaction byte/line count that actually reaches the SSH
 	// stream (see ExecResult). One per stream, never shared. CaptureLimit
@@ -215,25 +317,20 @@ func ExecWithRedaction(ctx context.Context, cmd string, opts ExecOpts) (res Exec
 	// structurally — independent of whether the classifier happens to flag a
 	// given program-from-stdin form.
 	c.Stdin = nil
-	// Run the child in its own process group so ctx cancellation kills
-	// the whole tree (the shell plus anything it spawned).
-	c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	// When ctx is cancelled, send SIGKILL to the whole process group.
-	// exec.CommandContext by default only signals the direct child;
-	// override Cancel so we get the group.
 	c.Cancel = func() error {
 		if c.Process == nil {
 			return os.ErrProcessDone
 		}
-		// Negative PID targets the process group.
 		return syscall.Kill(-c.Process.Pid, syscall.SIGKILL)
 	}
 
 	start := time.Now()
 	if err := c.Start(); err != nil {
-		return ExecResult{ExitCode: -1, Duration: time.Since(start)}, fmt.Errorf("exec: start /bin/sh: %w", err)
+		// Nil-Confine path stays byte-identical to the pre-jail executor.
+		return ExecResult{ExitCode: -1, Duration: time.Since(start)}, fmt.Errorf("exec: start %s: %w", what, err)
 	}
 	waitErr := c.Wait()
+
 	// Flush the redact.Writer instances after the child exits so any
 	// bytes still held inside the safe-prefix tail (or inside a
 	// not-yet-completed PEM accumulator) reach the SSH stream — and the
@@ -258,9 +355,9 @@ func ExecWithRedaction(ctx context.Context, cmd string, opts ExecOpts) (res Exec
 		StderrBytes: errCount.bytes.Load(),
 		Lines:       outCount.lines.Load(),
 		Duration:    dur,
-		Stdout:      outCount.captured(),
-		Stderr:      errCount.captured(),
 	}
+
+	res.Stdout, res.Stderr = outCount.captured(), errCount.captured()
 
 	if waitErr == nil {
 		res.ExitCode = 0

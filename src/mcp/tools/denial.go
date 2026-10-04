@@ -19,16 +19,17 @@ type Denial struct {
 // verdict_class values (closed, stable enum). Each maps 1:1 from a refusal
 // branch in run.go / run_batch.go.
 const (
-	VerdictReadOnlyServer     = "read_only_server"
-	VerdictNoSignerConfigured = "no_signer_configured"
-	VerdictApprovalDenied     = "approval_denied"
-	VerdictApprovalTimeout    = "approval_timeout"
-	VerdictSignerUnreachable  = "signer_unreachable"
-	VerdictSignerPermission   = "signer_permission"
-	VerdictUnknown            = "verdict_unknown"
-	VerdictBadSignature       = "bad_signature"
-	VerdictMissingSignature   = "missing_signature"
-	VerdictRevealNeedsReason  = "reveal_needs_reason"
+	VerdictReadOnlyServer      = "read_only_server"
+	VerdictNoSignerConfigured  = "no_signer_configured"
+	VerdictApprovalDenied      = "approval_denied"
+	VerdictApprovalTimeout     = "approval_timeout"
+	VerdictSignerUnreachable   = "signer_unreachable"
+	VerdictSignerPermission    = "signer_permission"
+	VerdictUnknown             = "verdict_unknown"
+	VerdictBadSignature        = "bad_signature"
+	VerdictMissingSignature    = "missing_signature"
+	VerdictRevealNeedsReason   = "reveal_needs_reason"
+	VerdictReadJailUnavailable = "read_jail_unavailable"
 )
 
 // required_action values (closed enum). A Denial carries exactly one.
@@ -155,6 +156,17 @@ func newDenial(class string) *Denial {
 			Retryable:      false,
 			HowTo: []string{
 				"Resubmit run with reveal=true and a non-empty reason explaining why the raw secret must be exposed.",
+			},
+		}
+	case VerdictReadJailUnavailable:
+		return &Denial{
+			VerdictClass:   VerdictReadJailUnavailable,
+			Summary:        "The gate refused to run the read: it could not confirm or set up the host's kernel read jail, so the command did not run.",
+			RequiredAction: ActionEscalateToHuman,
+			Retryable:      false,
+			HowTo: []string{
+				"Ask a human to run `~/.sshgate-gate/gate doctor` on the host; it reports the jail level and why it is unavailable.",
+				"Do NOT auto-retry: the gate refuses every read the same way until the host is fixed.",
 			},
 		}
 	default:

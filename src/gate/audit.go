@@ -5,6 +5,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/karthikeyan5/sshgate/src/gate/confine"
+	"golang.org/x/sys/unix"
 )
 
 // ── Tier 6a: gate-side authoritative audit log ──────────────────────────
@@ -196,6 +199,15 @@ type AuditRecord struct {
 	// ExitCode is the gate's exit code for the command (the child's code,
 	// or the deny code on a rejection).
 	ExitCode int `json:"exit_code"`
+	// CleanupError records post-execution cleanup failure; ExitCode stays unchanged.
+	CleanupError      string               `json:"cleanup_error,omitempty"`
+	Abandoned         bool                 `json:"abandoned"`
+	DroppedBytes      int64                `json:"dropped_bytes"`
+	SourceTruncated   string               `json:"source_truncated,omitempty"`
+	SourceBytesRead   int64                `json:"source_bytes_read"`
+	DeliveryError     string               `json:"delivery_error,omitempty"`
+	OutputDestination string               `json:"output_destination,omitempty"`
+	WorkerStatus      confine.WorkerStatus `json:"worker_status"`
 	// Meta is output metadata (bytes/lines/duration). nil for rejections
 	// that never executed a child.
 	Meta *AuditMeta `json:"meta,omitempty"`
@@ -207,10 +219,23 @@ type AuditRecord struct {
 	// all+full. Reveal's accepted exposure is the agent + transcript + approval
 	// chat, not this on-disk record.
 	Revealed bool `json:"revealed,omitempty"`
+	// Rung is the kernel-confinement tier a READ ran under: "full" | "landlock"
+	// | "unconfined" | "lane2" (the shell-free daemon-read allowlist). Empty
+	// (omitted) on records that ran no read child — denials, admin verbs and
+	// signed writes — so those records are unchanged.
+	Rung string `json:"rung,omitempty"`
 	// Stdout/Stderr hold raw output, serialised ONLY at AuditAllFull — and
 	// never for a revealed command (see Revealed).
 	Stdout string `json:"stdout,omitempty"`
 	Stderr string `json:"stderr,omitempty"`
+}
+
+// SetTransport adds the finalized delivery and lifecycle outcome to this record.
+func (r *AuditRecord) SetTransport(m TransportMetadata) {
+	r.Abandoned, r.DroppedBytes = m.Abandoned, m.DroppedBytes
+	r.SourceTruncated, r.SourceBytesRead = m.SourceTruncated, m.SourceBytesRead
+	r.DeliveryError, r.OutputDestination = m.DeliveryError, m.OutputDestination
+	r.CleanupError, r.WorkerStatus = m.CleanupError, m.WorkerStatus
 }
 
 // AuditLogger is the gate-side authoritative logger. It is configured
@@ -290,11 +315,18 @@ func (a *AuditLogger) Record(r AuditRecord) {
 	// all+full, so it must not be group- or world-readable. Open failures
 	// (e.g. an append-only dir the gate user truly cannot write, or a full
 	// disk) are swallowed.
-	f, err := os.OpenFile(a.path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	f, err := os.OpenFile(a.path, os.O_APPEND|os.O_CREATE|os.O_WRONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0o600)
 	if err != nil {
 		return // fail-open
 	}
 	defer f.Close()
+	info, err := f.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		return
+	}
+	if err := unix.SetNonblock(int(f.Fd()), false); err != nil {
+		return
+	}
 	if _, err := f.Write(b); err != nil {
 		return // fail-open
 	}

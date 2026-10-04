@@ -51,6 +51,26 @@ var dangerousEnvVars = map[string]bool{
 	"XDG_CACHE_HOME":  true,
 	"XDG_STATE_HOME":  true,
 	"XDG_RUNTIME_DIR": true,
+	// Command-running hooks read from the environment by git and by the
+	// pagers/editors read tools may spawn.
+	"GIT_ASKPASS":       true,
+	"SSH_ASKPASS":       true,
+	"GIT_PROXY_COMMAND": true,
+	"GIT_DIR":           true,
+	"GIT_WORK_TREE":     true,
+	"EDITOR":            true,
+	"VISUAL":            true,
+	"SYSTEMD_PAGER":     true,
+	"SYSTEMD_EDITOR":    true,
+}
+
+// isDangerousEnvVar reports whether a leading KEY=VAL assignment makes the
+// command a write. Every GIT_* key is included: git reads dozens of them, and
+// GIT_CONFIG_PARAMETERS / GIT_CONFIG_COUNT inject config that runs commands
+// (core.fsmonitor, diff.external), while GIT_TRACE* write to any file. Every
+// LD_* key steers the dynamic loader.
+func isDangerousEnvVar(key string) bool {
+	return dangerousEnvVars[key] || strings.HasPrefix(key, "GIT_") || strings.HasPrefix(key, "LD_")
 }
 
 // envRule classifies `env` invocations. `env` is READ iff it is invoked
@@ -84,7 +104,7 @@ func envRule(args []string) Kind {
 		// KEY=VAL assignment: deny dangerous keys, otherwise skip.
 		if isAssignment(a) {
 			key := a[:strings.IndexByte(a, '=')]
-			if dangerousEnvVars[key] {
+			if isDangerousEnvVar(key) {
 				return KindWrite
 			}
 			continue
@@ -109,7 +129,7 @@ func classifyWrapped(tokens []string) Kind {
 	i := 0
 	for i < len(tokens) && isAssignment(tokens[i]) {
 		key := tokens[i][:strings.IndexByte(tokens[i], '=')]
-		if dangerousEnvVars[key] {
+		if isDangerousEnvVar(key) {
 			return KindWrite
 		}
 		i++

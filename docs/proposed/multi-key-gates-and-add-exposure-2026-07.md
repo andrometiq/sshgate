@@ -1,13 +1,17 @@
-# Multi-key gates + provisioning exposure window (owner direction, 2026-07)
+# Multi-key gates + provisioning exposure window (direction, 2026-07)
 
-**Status: captured direction — NOT scheduled, NOT designed, NOT to be built yet.**
-This document records the owner's verbatim-intent direction (2026-07-03) for two
-related provisioning features, plus one decision that **rejects and supersedes**
-the old roadmap item #17 ("in-place Tier-1 → Tier-2 upgrade"). When this work is
-picked up, it goes through the full pipeline (research → design proposals →
-adversarial critique → build); nothing here is a spec yet. Sections marked
-*[design note]* are implementation observations added at capture time, kept
-separate from the owner's points.
+> **Status: OPEN PROPOSAL, not scheduled.** A captured direction, not a design: nothing here is
+> built, and [BUILD-PLAN.md](../BUILD-PLAN.md) does not schedule it. It is #17 in
+> [ROADMAP.md](../ROADMAP.md). Related scheduled work: BUILD-PLAN work item 4 (the hosted signer
+> as a remote MCP server) maps each MCP client's identity to SSH principals (through
+> OpenSSH certificates) and to approval records; whoever picks up Feature A below must reconcile it with that design first.
+
+This document records the maintainers' direction (2026-07-03) for two related
+provisioning features, plus one decision that **rejects and supersedes** the old
+roadmap item #17 ("in-place Tier-1 → Tier-2 upgrade"). When this work is picked
+up, it goes through research, design proposals, critique and only then a build;
+nothing here is a spec yet. Sections marked *[design note]* are implementation
+observations added at capture time, kept separate from the requirements.
 
 ---
 
@@ -15,7 +19,7 @@ separate from the owner's points.
 
 The previously-planned "in-place Tier-1 → Tier-2 upgrade" is **rejected**.
 
-Rationale (owner's): any upgrade path that lets the CLI flip a read-only gate to
+Rationale: any upgrade path that lets the CLI flip a read-only gate to
 writable without a signed operation is a path **the agent can emulate** — the
 CLI runs on the same machine, as the same user, with the same dedicated key the
 agent's MCP uses. If the gate would accept an unsigned "now accept writes"
@@ -34,7 +38,7 @@ gate.** This is the whole motivation: each agent gets its **own private key**
 and deploys its **own public key**; no agent has to trust another agent's key.
 A shared key makes the trust story complicated — per-agent keys keep it clean.
 
-Owner's points, verbatim intent:
+Requirements:
 
 - **Version-aware `sshgate add`.** When `add` runs against a host that already
   has a gate installed, it must compare gate versions and take a call:
@@ -50,8 +54,8 @@ Owner's points, verbatim intent:
   mechanism and report back.
 - **Per-key tier.** For a given gate/key: if a signer public key is present for
   it → signed-write; if there is no key for that particular gate → read-only.
-- **Possible layout sketch** (owner's, if multiple gates): per-user folders
-  under the remote `~/.sshgate`-style directory, keyed by a unique username.
+- **Possible layout sketch** (if multiple gates): per-user folders
+  under the remote gate directory (today `~/.sshgate-gate/`), keyed by a unique username.
   Needs a deduplication story: what happens when two people or two agents with
   the same name try to install their own gate — how to detect and resolve.
 - **Signer topology — open.** Both shapes must be considered: a **single
@@ -61,7 +65,7 @@ Owner's points, verbatim intent:
   anyway, so that decision naturally sits with them.
 
 *[design note]* The version comparison interacts with the verified release
-channel (update-verb spec §11): "upgrade if lower" must not become a downgrade
+channel ([sshgate-update-verb-2026-07.md](sshgate-update-verb-2026-07.md) §11): "upgrade if lower" must not become a downgrade
 or unverified-binary vector — the artifact `add` pushes should be the published,
 CI-verified gate, and version claims read from a remote gate are unauthenticated
 input. To resolve in design.
@@ -78,7 +82,7 @@ eventually rewrites it into the forced-command line) leaves an **ungated plain
 key line live on the server** for the whole gap between the paste and the
 rewrite.
 
-Owner's desired flow — invert the order and make the gap milliseconds:
+Desired flow — invert the order and make the gap milliseconds:
 
 1. The operator runs `sshgate add` **first**. It advises the operator what to
    do next.
@@ -91,7 +95,7 @@ Owner's desired flow — invert the order and make the gap milliseconds:
 4. The exposure window shrinks to the slim gap between "line saved" and "next
    retry connects" — milliseconds to seconds.
 
-Constraints and options the owner named:
+Constraints and options:
 
 - **Absolute-security path must remain available:** the operator can copy the
   gate over and install everything entirely by hand, eliminating even that
@@ -104,17 +108,17 @@ Constraints and options the owner named:
   under low threat, the fast-retry flow's few seconds are acceptable; for a
   sensitive host, use the manual path. Both are legitimate; the operator picks.
 
-## 3b. Feature B follow-up — captured options (owner, 2026-07-04)
+## 3b. Feature B follow-up — captured options (2026-07-04)
 
-Further directions the owner named for the same exposure window, from weakest
+Further directions for the same exposure window, from weakest
 to strongest. These are **captured options, not decisions** — pick per the
 trade-offs when this is designed properly.
 
-- **B2 — combined one-liner (available today, docs-only).**
+- **B2 — combined one-liner (possible today; not yet in the install docs).**
   `sshgate pubkey | ssh <admin>@<host> 'cat >> ~/.ssh/authorized_keys' && sshgate add <alias> <admin>@<host>`
   — the plain-key window shrinks to the gap between the append landing and
-  `add`'s rewrite, typically sub-second. No code change; document it as the
-  recommended manual flow.
+  `add`'s rewrite, typically sub-second. No code change needed; the install
+  docs would have to recommend it.
 
 - **B3 — self-contained provisioning command, runnable from any admin
   machine.** `sshgate` emits a single copy-pasteable command that **embeds its
@@ -150,8 +154,7 @@ trade-offs when this is designed properly.
 
 ## 4. Status
 
-- Nothing here is scheduled. The owner will decide after the open design
+- Nothing here is scheduled. The maintainers decide after the open design
   questions (single vs multiple gates, signer topology, dedup, retry strategy,
-  and now which of B2–B5 to build) are worked out and presented.
-- Roadmap entry #17 now points here; the old in-place-upgrade wording is
-  retired.
+  and which of B2–B5 to build) are worked out.
+- ROADMAP #17 points here; it no longer describes an in-place tier upgrade.

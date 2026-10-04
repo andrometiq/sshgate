@@ -185,6 +185,39 @@ func TestRun_WriteGateDeny77_Annotated(t *testing.T) {
 	}
 }
 
+// TestRun_GateReadJailDeny77 asserts that a 77 the gate gives because the
+// host's read jail is unavailable is reported as that — on a signed reveal read
+// and on an unsigned read — never as a missing signature with re-tier advice.
+func TestRun_GateReadJailDeny77(t *testing.T) {
+	t.Parallel()
+	const gateErr = "gate: read jail unavailable: jail probe failed (EAGAIN); refusing to run the read unconfined\n"
+	r := newRegistryWith(t, "h1", registry.Entry{Host: "1.2.3.4", Port: 22, User: "u", AddedAt: time.Now()})
+
+	sign := &fakeSign{signed: []signpkg.Signed{{Cmd: "cat /etc/app.env", Sig: "SSHGATE_SIG:a:b"}}}
+	runner := &tools.Runner{Servers: r, Sign: sign, SSH: &fakeSSH{exit: 77, stderr: []byte(gateErr)}}
+	out, err := runner.Run(context.Background(), tools.RunInput{Alias: "h1", Command: "cat /etc/app.env", Reveal: true, Reason: "check the value"})
+	if err == nil || !strings.Contains(err.Error(), "read jail") || strings.Contains(err.Error(), "/sshgate:setup") {
+		t.Errorf("reveal err = %v; want the read-jail refusal, not the missing-signature remediation", err)
+	}
+	if out.Denial == nil || out.Denial.VerdictClass != tools.VerdictReadJailUnavailable || out.Denial.Retryable {
+		t.Errorf("reveal Denial = %+v; want read_jail_unavailable, not retryable", out.Denial)
+	}
+
+	runner = &tools.Runner{Servers: r, Sign: &fakeSign{}, SSH: &fakeSSH{exit: 77, stderr: []byte(gateErr)}}
+	out, err = runner.Run(context.Background(), tools.RunInput{Alias: "h1", Command: "cat /etc/hostname"})
+	if err != nil || out.ExitCode != 77 || out.Denial == nil || out.Denial.VerdictClass != tools.VerdictReadJailUnavailable {
+		t.Errorf("read = %+v, %v; want exit 77 with a read_jail_unavailable Denial", out, err)
+	}
+
+	// A plain 77 without the gate's line is still the missing-signature deny.
+	sign = &fakeSign{signed: []signpkg.Signed{{Cmd: "cat /etc/app.env", Sig: "SSHGATE_SIG:a:b"}}}
+	runner = &tools.Runner{Servers: r, Sign: sign, SSH: &fakeSSH{exit: 77}}
+	out, _ = runner.Run(context.Background(), tools.RunInput{Alias: "h1", Command: "cat /etc/app.env", Reveal: true, Reason: "check the value"})
+	if out.Denial == nil || out.Denial.VerdictClass != tools.VerdictMissingSignature {
+		t.Errorf("plain 77 Denial = %+v; want missing_signature", out.Denial)
+	}
+}
+
 // TestRun_WriteGateDeny65_Annotated asserts exit 65 (bad/expired sig) is
 // annotated with the clock-skew/retry remediation.
 func TestRun_WriteGateDeny65_Annotated(t *testing.T) {

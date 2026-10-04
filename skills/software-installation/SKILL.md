@@ -12,8 +12,8 @@ install, install as one ordered batch, verify it actually landed.** Every
 step is shaped for the gate — reads run free, writes cost one human tap.
 
 For the gate mechanics themselves — read-vs-write classification, the
-cost shape, standing grants, denial/timeout handling, exit codes 77/65 —
-see the **debugging-remote-servers** skill. This skill assumes those and
+cost shape, standing grants, denial/timeout handling, exit codes 77/65, the
+read jail — see the **debugging-remote-servers** skill. This skill assumes those and
 focuses on the install *method*. It applies to **Tier-2 (signed-write)**
 servers; a **Tier-1 read-only** server refuses every install locally before
 any tap (see that skill's read-only section) — surface it and stop.
@@ -26,25 +26,27 @@ install unverified.
 
 ## Step 1 — Preflight, entirely with reads (free, no tap)
 
-Before proposing a single write, answer these with `sshgate.run` reads. Each
-is one simple command per call — don't chain them with `&&`/`;` (that would
-classify the whole thing as a write). Send them as separate calls:
+Before proposing a single write, answer these with `sshgate.run` reads, one
+simple command per call. (A chain of reads is still a read, but a single
+unrecognised segment turns the whole chain into a write.)
 
 - **`sshgate.list_servers`** — confirm the alias is registered and read its
   `read_only` tier. If it's Tier-1, stop here: installs are writes and will be
   refused before any tap.
-- **Already installed?** — `which <bin>` / `command -v <bin>` (both READs). Note
-  `<bin> --version` is only classified a read for the common interpreters
-  (python/node/perl/ruby); for anything else the fail-closed gate calls it a
-  WRITE. Get the version from a read where you can, or put the `--version` check
-  **inside the install batch** (first or last entry — covered by the same tap).
-  If it's already at the wanted version, say so and stop — don't reinstall for
-  no reason.
+- **Already installed?** — `command -v <bin>` / `which <bin>` (both reads).
+  A version flag is a read only for tools on the classifier's read list
+  (`node --version`, `python3 --version`, `curl --version`, `docker version`).
+  For most servers and daemons it is a write: `nginx -v`, `psql --version`,
+  `git --version`, `docker --version`. Use `command -v` to check presence, and
+  put a version check that is a write **inside the install batch** (first or
+  last entry, covered by the same tap). If it's already at the wanted version,
+  say so and stop — don't reinstall for no reason.
 - **What distro / package manager?** — `cat /etc/os-release`. This decides
   `apt` (Debian/Ubuntu) vs `dnf`/`yum` (RHEL/Fedora) vs `apk` (Alpine) vs
   `pacman`. Never assume.
-- **Service manager?** — `systemctl --version` (almost always systemd). Tells
-  you the enable/start verbs for step 3.
+- **Service manager?** — `cat /proc/1/comm` prints `systemd` on a systemd
+  host (almost all of them). Tells you the enable/start verbs for step 3.
+  (`systemctl --version` is classified a write.)
 - **Disk headroom?** — `df -h /` and `df -h /var`. A package cache or a big
   container image needs room; a full disk is the most common silent failure.
 - **Conflicts?** — is an older/rival package present, is the target port
@@ -91,39 +93,39 @@ Assemble every write the install needs into a single, correctly-ordered
 **Show the user the exact batch before you send it** — a fenced block, the
 real commands, in order — exactly as the debugging skill's fix pattern shows.
 Then call `sshgate.run_batch`. Leave `stop_on_error` at its default (a batch
-with writes stops on the first failure) so a failed `apt update` doesn't march
-on into a broken `install`.
+with writes stops at the first failing write) so a failed `apt update`
+doesn't march on into a broken `install`.
 
 ```
 Planned install on staging — Docker via the official apt repo
 (one Telegram approval covers all 8):
 
   1. install -m 0755 -d /etc/apt/keyrings
-  2. curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
-       -o /etc/apt/keyrings/docker.asc          # -o writes the file (a write)
+  2. curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
   3. chmod a+r /etc/apt/keyrings/docker.asc
-  4. cat > /etc/apt/sources.list.d/docker.list <<'EOF'
-       deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc] \
-         https://download.docker.com/linux/ubuntu <codename> stable
-       EOF
+  4. echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu <codename> stable" > /etc/apt/sources.list.d/docker.list
   5. apt update
   6. apt install -y docker-ce docker-ce-cli containerd.io
   7. systemctl enable --now docker
   8. docker --version                            # batched verify (rides same tap)
 
 Approving on your phone runs them in order, stopping if any step fails.
-Reply "go" or tell me to adjust. The key and repo-list content reaches the box
-only through these commands — nothing is pre-staged in /tmp.
+Reply "go" or tell me to adjust.
 ```
+
+Fill in `<codename>` from `VERSION_CODENAME` in `/etc/os-release`, and use
+`arch=arm64` on an `aarch64` box (`uname -m`). Each step is one line: the
+key and the repo line reach the box only through these commands, and nothing
+is staged on the box beforehand.
 
 ## Step 3 — Verify with reads (free) — never declare success blind
 
 An approved batch is not a landed install. Confirm with reads:
 
-- **Version** — `<bin> --version` shows the expected version, but note it's a
-  free read only for the common interpreters (python/node/perl/ruby); for any
-  other binary the gate classifies `--version` a **write**, so fold that check
-  into the install batch (last entry) rather than running it standalone here.
+- **Version** — when the tool's version flag is a read (`node --version`,
+  `docker version`), run it here. When it is a write (`psql --version`,
+  `nginx -v`), it should already have run as the last entry of the install
+  batch.
 - **Service active** — `systemctl is-active <unit>` / `systemctl status <unit>`.
 - **Port listening** — `ss -tlnp | grep :<port>`.
 - **Logs clean** — `journalctl -u <unit> -n 40 --no-pager` — no crash loop.
@@ -216,7 +218,7 @@ fold a destructive step silently into an install batch.
 2. Source decision: distro `postgresql` is 14; user wants 16 → use the
    **official PGDG apt repo** (vendor-repo path). Say so.
 3. Show the batch: fetch the PGDG key (`curl -o`) + write the repo list inline
-   (`cat > … <<'EOF'`), `apt update`, `apt install -y postgresql-16`,
+   (`echo "deb …" > /etc/apt/sources.list.d/pgdg.list`), `apt update`, `apt install -y postgresql-16`,
    `systemctl enable --now postgresql`, and `psql --version` as the final entry
    (the version check is a write for `psql`, so it rides the batch). Wait for "go".
 4. `sshgate.run_batch` → one tap covers all of it, including the version check.

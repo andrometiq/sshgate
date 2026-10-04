@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -271,4 +272,82 @@ func mustReadFile(t *testing.T, path string) string {
 		t.Fatalf("read %s: %v", path, err)
 	}
 	return string(b)
+}
+
+// TestAuditRungOmitEmpty pins the additive rung field: absent from records that
+// ran no read child (so their shape is unchanged), present when a read set it.
+func TestAuditRungOmitEmpty(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "audit.log")
+	l := gate.NewAuditLogger(gate.AuditAllMeta, path)
+	l.Record(makeRecord("deny", "write", "denied", 77, nil))
+	read := makeRecord("cat /etc/hostname", "read", "unsigned", 0, &gate.AuditMeta{})
+	read.Rung = "full"
+	l.Record(read)
+	recs := readRecords(t, path)
+	if len(recs) != 2 {
+		t.Fatalf("got %d records, want 2", len(recs))
+	}
+	if _, ok := recs[0]["rung"]; ok {
+		t.Errorf("record without a rung serialised one: %v", recs[0])
+	}
+	if recs[1]["rung"] != "full" {
+		t.Errorf("rung = %v, want full", recs[1]["rung"])
+	}
+}
+
+func TestAuditCleanupErrorKeepsExitStatus(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "audit.log")
+	logger := gate.NewAuditLogger(gate.AuditAllMeta, path)
+	logger.Record(gate.AuditRecord{Classification: "read", ApprovalStatus: "unsigned", ExitCode: 23, CleanupError: "descendant cleanup exceeded deadline"})
+	records := readRecords(t, path)
+	if len(records) != 1 || records[0]["exit_code"] != float64(23) || records[0]["cleanup_error"] != "descendant cleanup exceeded deadline" {
+		t.Fatalf("cleanup audit: %#v", records)
+	}
+}
+
+func TestAuditRefusesNonRegularDestinations(t *testing.T) {
+	for _, kind := range []string{"fifo-no-reader", "fifo-reader", "symlink", "device"} {
+		t.Run(kind, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "audit")
+			switch kind {
+			case "fifo-no-reader", "fifo-reader":
+				if err := syscall.Mkfifo(path, 0600); err != nil {
+					t.Fatal(err)
+				}
+				if kind == "fifo-reader" {
+					fd, err := syscall.Open(path, syscall.O_RDONLY|syscall.O_NONBLOCK, 0)
+					if err != nil {
+						t.Fatal(err)
+					}
+					defer syscall.Close(fd)
+				}
+			case "symlink":
+				target := filepath.Join(dir, "target")
+				if err := os.WriteFile(target, []byte("untouched"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(target, path); err != nil {
+					t.Fatal(err)
+				}
+				defer func() {
+					if got := mustReadFile(t, target); got != "untouched" {
+						t.Fatalf("symlink target changed: %q", got)
+					}
+				}()
+			case "device":
+				path = "/dev/null"
+			}
+			done := make(chan struct{})
+			go func() {
+				gate.NewAuditLogger(gate.AuditAllMeta, path).Record(makeRecord("true", "read", "unsigned", 0, nil))
+				close(done)
+			}()
+			select {
+			case <-done:
+			case <-time.After(time.Second):
+				t.Fatal("audit destination blocked")
+			}
+		})
+	}
 }

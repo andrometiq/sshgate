@@ -1,8 +1,18 @@
 # Secret-redaction research
 
 Survey of the state-of-the-art for redacting secrets/keys from output streams
-before they reach a downstream consumer (an agent, an LLM, a logger). No
-SSHGate-specific recommendations; this is a landscape scan.
+before they reach a downstream consumer (an agent, an LLM, a logger).
+
+> **Dated research.** This survey was written in mid-2026, before SSHGate's
+> redactor was built. Tool features, vendor offerings, issue states and
+> benchmark numbers below are as reported then and may have changed since.
+> Most of the document is a general landscape scan. Two parts apply it to
+> SSHGate's own case: "Recommendation (industry-consensus reading)" and
+> "Recommendations for an SSH-output redactor" at the end. The design that
+> came out of it, and what is actually built, is in
+> [`redaction-architecture.md`](redaction-architecture.md). Example tokens
+> such as `[REDACTED:abc123de]` here are generic; SSHGate's real marker is
+> `[SSHGATE_REDACTED key=<8hex>]`.
 
 ## Summary
 
@@ -13,23 +23,25 @@ SSHGate-specific recommendations; this is a landscape scan.
 4. GitHub secret scanning (managed) — 200+ partner-registered patterns, push protection.
 5. GitGuardian / ggshield (commercial + OSS CLI) — 500+ secret types, post-validation rules.
 6. AWS CodeGuru Secrets Detector — ML-based semantic analysis over code + config.
-   Honourable mentions: **Betterleaks** (BPE-token-efficiency replacement for entropy, by
-   Gitleaks's original author Zachary Rice) and **Nosey Parker** (Praetorian, ML-augmented).
+
+Honourable mentions: **Betterleaks** (BPE-token-efficiency replacement for entropy, by
+Gitleaks's original author) and **Nosey Parker** (Praetorian, ML-augmented).
 
 **Top 4 streaming-redaction / LLM-input scrubbing tools**
 1. Microsoft Presidio (+ PII Shield proxy) — pluggable analyzer/anonymizer/deanonymizer.
 2. LLM Guard (Protect AI) — 15 input + 20 output scanners; the `Secrets` scanner wraps detect-secrets.
 3. LiteLLM `hide-secrets` guardrail — proxy-mode; wraps detect-secrets too.
 4. Datadog Sensitive Data Scanner (Observability Pipelines) — stream-based, PCRE rules, 90+ OOTB patterns.
-   HashiCorp Vault audit-log HMAC-SHA256 hashing is the canonical reference for
-   "log the request but hide the secret while keeping correlation."
+
+HashiCorp Vault audit-log HMAC-SHA256 hashing is the canonical reference for
+"log the request but hide the secret while keeping correlation."
 
 **Best-practice mechanisms found**
 - **Hybrid detection**: regex for known formats + entropy (or BPE token-efficiency) for unknown high-randomness strings + keyword pre-filters + (optional) live verification.
 - **Streaming with overlap window**: process input in chunks but keep a `maxMatchLen` sliding overlap so multi-chunk secrets aren't split. Gitleaks shipped `StreamDetectReader` (PR #1760) precisely for this; `replacestream`/`stream-snitch` use the same idiom.
 - **HMAC-SHA256 with per-session salt** as the redaction map: the same plaintext → same token *within a session*, but **never reversible** and not correlatable across sessions. This is what Vault audit devices do by default.
 - **Pseudonymisation with restorable mapping** when the consumer needs the real value back (Presidio, prompt-sentinel, LiteLLM): replace with `<SECRET_1>` placeholder, hold the mapping in a session-scoped store, restore on the way out.
-- **Defence in depth**: redaction at the proxy plus content-policy at the model boundary. Both Anthropic (Claude Code issue #29434) and Microsoft (PII Shield) explicitly recommend redacting *before* the LLM ever sees the bytes.
+- **Defence in depth**: redaction at the proxy plus content-policy at the model boundary. At the time of the survey, both an open Claude Code issue (#29434) and Microsoft (PII Shield) pointed to redacting *before* the LLM ever sees the bytes.
 
 **Notable evasions / known failure modes**
 - **Base64 / hex / URL-encoded secrets** bypass nearly all entropy-based scanners because the encoded form has different randomness signature. Betterleaks adds recursive decoding; almost nothing else does.
@@ -208,7 +220,7 @@ the emerging standard (Presidio, LLM Guard, LiteLLM, PII Shield).
   config formats.
 - **Source**: <https://aws.amazon.com/blogs/aws/codeguru-reviewer-secrets-detector-identify-hardcoded-secrets/>.
 
-### Honourable mention: Betterleaks (Zachary Rice, 2026)
+### Honourable mention: Betterleaks (2026)
 
 - Built by the original author of Gitleaks. Same TOML rule model, but replaces
   Shannon entropy with **BPE token-efficiency** scoring using the `cl100k_base`
@@ -422,7 +434,9 @@ practice 4KB overlap covers everything that isn't a multi-MB blob.
   passwords-list). For high-entropy secrets it's fine, for low-entropy ones
   (e.g. short common passwords) it's a privacy leak.
 - **Verdict**: acceptable for high-entropy secrets *only*. Inferior to HMAC for
-  the general case because the attacker doesn't need a key.
+  the general case because the attacker doesn't need a key. (SSHGate's marker
+  is also truncated to 32 bits, but it is a keyed HMAC: guessing a plaintext
+  needs the per-session salt, which never leaves the gate process.)
 
 **Format-preserving encryption (FPE)**
 - **Pros**: output looks like input — preserves downstream schema validation,
@@ -466,7 +480,8 @@ is the operator who originally typed `ssh remote env`:
   the one it saw two commands ago?" — within-session correlation only.
 
 The consensus primitive is **HMAC-SHA256 with a per-session salt, output as a
-short stable token like `[REDACTED:abc123de]`**. This is essentially the
+short stable token like `[REDACTED:abc123de]`** (SSHGate's form is
+`[SSHGATE_REDACTED key=abc123de]`). This is essentially the
 Vault audit-log model. It gives within-session correlation, no cross-session
 linkability, no reversibility, and tiny overhead.
 
@@ -504,7 +519,9 @@ the redaction-tool space.
 
 ## LLM/agent-context-window redaction
 
-- **Anthropic** (Claude Code): no first-party redaction feature today. Open
+As of the survey (mid-2026):
+
+- **Anthropic** (Claude Code): no first-party redaction feature at the time. Open
   issue #29434 explicitly asks for "Mechanism to redact secrets/PII from the
   context window." Public docs recommend client-side scrubbing (Nightfall,
   Presidio) before content enters context. Enterprise plans offer Zero Data
@@ -559,7 +576,10 @@ secret scanner over every inbound prompt and every tool result.
 
 ## Recommendations for an SSH-output redactor
 
-Based on the survey, an SSH-output redactor *should*:
+Based on the survey, an SSH-output redactor *should* do the following. These
+recommendations fed SSHGate's design; see
+[`redaction-architecture.md`](redaction-architecture.md) for what was decided
+and what is built.
 
 1. **Layer detection**: regex over a curated rule set (gitleaks's TOML rule
    base or detect-secrets's plugin set is the obvious starting library) +
@@ -570,11 +590,13 @@ Based on the survey, an SSH-output redactor *should*:
    (~4KB covers PEM blocks; pad to taste). Don't buffer the whole command
    output. Gitleaks's `StreamDetectReader` is the reference implementation.
 3. **Redact via HMAC-SHA256 with a per-session salt**, output as a short
-   stable token (e.g. `[REDACTED:abc123de]`). This is the Vault model. It
+   stable token (e.g. `[REDACTED:abc123de]`; SSHGate uses
+   `[SSHGATE_REDACTED key=abc123de]`). This is the Vault model. It
    preserves within-session correlation without leaking across sessions and
    is non-reversible.
 4. **Never** ship a "log raw" mode that disables redaction (Vault's docs are
-   emphatic; it's a footgun).
+   emphatic; it's a footgun). (SSHGate has no such mode. Its one bypass is a
+   per-command secret reveal that a human approves each time.)
 5. **Stay opinionated about what you do NOT do**: don't try format-preserving
    encryption (overkill, reversible-by-design), don't try ML semantic analysis
    in the hot path (latency), don't try restoration mapping (the agent is the

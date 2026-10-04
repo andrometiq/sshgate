@@ -10,10 +10,10 @@ SSHGate lets an agent SSH into Linux servers. Reads run freely. Writes need one
 Telegram-button approval from the operator.
 
 A small Go binary (`gate`) sits between OpenSSH and shell exec on each remote server. A local
-daemon (`signer-telegram`, running as a separate Unix user) holds the master Ed25519 signing
-key and asks the operator to approve writes via Telegram. The MCP server (`sshgate-mcp`)
-exposes the agent tools below. Provisioning a server is a human-only `sshgate` CLI, kept off
-the agent surface so the agent can't expand its own reach.
+daemon (`sshgate-signer-telegram`, running as the separate `sshgatesigner` Unix user) holds
+the master Ed25519 signing key and asks the operator to approve writes via Telegram. The MCP
+server (`sshgate-mcp`) exposes the agent tools below. Provisioning a server is a human-only
+`sshgate` CLI, kept off the agent surface so the agent can't expand its own reach.
 
 ## Agent tool surface (exactly eleven tools)
 
@@ -95,6 +95,16 @@ have them check the host's `/var/log/auth.log` and that the key line was pasted 
   signer pubkey (Tier-1): check `status`; with no signer, the user runs `/sshgate:setup` and
   re-tiers as above (a bare re-add of a registered alias is refused). **65** = bad or expired
   signature, usually clock skew or a stale approval: retry once.
+- **Read jail.** On hosts with unprivileged user namespaces and Landlock, reads run in a
+  kernel jail: they cannot change host files, reach Unix-socket daemons (a few fixed
+  `systemctl`/`docker` read verbs run outside the jail) or touch other processes. They see
+  the host's `/tmp` and `/var/tmp` read-only; their only writable space is a private
+  `/dev/shm` (`TMPDIR` points there), so a tool that insists on writing to `/tmp` fails.
+  The network, including localhost TCP services, is still open to reads. Other hosts run
+  reads unconfined, classifier-only, unless the operator pinned a jail floor. A read denied
+  with 77 and `read jail unavailable` means the host's jail could not be confirmed or set
+  up (or is required by that pin and missing), so nothing ran: don't retry; a human runs
+  `~/.sshgate-gate/gate doctor` on the host. Details: `docs/THREAT-MODEL.md`.
 - `transfer` failing with `src/dest server not registered for transfer`: that endpoint has no
   transfer key on the signer. The user runs `sshgate xfer-register <alias>`, then you retry.
 
@@ -109,6 +119,15 @@ have them check the host's `/var/log/auth.log` and that the key line was pasted 
 - `configured:false` / "not configured" is the NORMAL Tier-1 state, not a fault. Writes wait
   until `/sshgate:setup` adds a signer.
 
+## What to build next
+
+- Read `docs/BUILD-PLAN.md` before starting any development work. It is the committed build
+  order: work items and their steps run top to bottom, and each step has its own acceptance.
+- Take the first step that is not `done` and whose dependencies are done. Don't start work that
+  is not in the plan; unscheduled ideas live in `docs/ROADMAP.md`.
+- When a step lands, set its status to `done` in the same commit. A change to the order or
+  scope of a step is made in the plan, in the same commit, with the reason in the message.
+
 ## Developing SSHGate
 
 - The main session plans, dispatches and verifies, and is accountable for the result. Models
@@ -118,9 +137,13 @@ have them check the host's `/var/log/auth.log` and that the key line was pasted 
 - Verify, never rubber-stamp: read the diffs, run build, vet and tests yourself, and confirm
   green before calling a unit done. The bar is "it works end to end", not "work was dispatched".
 - Checks: `make vet`, `make test` (`go test -race ./...`); `make preflight` before any push;
-  `make e2e` (needs Docker) before a release.
-- This repo is public. Operator notes, per-server inventories and design reviews stay in the
-  gitignored `local-workspace/` or `local-notes/`, never in a tracked file.
+  `make e2e` (needs Docker) before a release. A change to the read jail or the gate's read
+  path also needs `make test-jail`, `make test-jail-root` (root, disposable host) and
+  `make test-jail-mutate MUTATE=<protection IDs>`. `docs/TESTING.md` has every target and
+  what it needs.
+- This repo is public. Operator notes, per-server inventories and design reviews never go
+  in a tracked file; keep them in a gitignored local directory (`local-workspace/` and
+  `local-notes/` are ignored for this).
 
 ## Layout
 
@@ -131,10 +154,8 @@ have them check the host's `/var/log/auth.log` and that the key line was pasted 
 - `commands/`, `skills/`, `.claude-plugin/`: plugin slash commands, skills and manifest.
 - `dist/gate/`: the committed, hash-published gate binary, the release trust anchor. Only
   `make release-gate` writes it; `make verify-dist` checks it. Never edit it by hand.
-- `docs/`: design, threat model and testing docs. `docs/ROADMAP.md` is the canonical roadmap;
-  `docs/proposed/` holds dated proposals.
+- `docs/`: design, threat model and testing docs. `docs/BUILD-PLAN.md` is the committed build
+  order; `docs/ROADMAP.md` holds release status and unscheduled ideas; `docs/proposed/` holds
+  dated design proposals and records, some built and some still open; check a file's status
+  line and `docs/BUILD-PLAN.md` before treating it as current.
 - `packaging/mcpb/`, `scripts/`, `tests/`: MCPB bundle sources, install scripts, integration tests.
-- `WORKLOG.md` (local, gitignored): append-only work log; read its header, last five headings,
-  then the last entry.
-- `local-notes/archive/YYYY-MM-DD/` (gitignored): verbatim copies of what housekeeping cut.
-  Search it; never load it.

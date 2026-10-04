@@ -3,7 +3,7 @@
   "name": "io.github.karthikeyan5/sshgate",
   "description": "SSHGate MCP client half; reads free, writes need approval. Needs signer daemon + gate (INSTALL.md).",
   "title": "SSHGate",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "websiteUrl": "https://github.com/karthikeyan5/SSHGate",
   "repository": {
     "url": "https://github.com/karthikeyan5/SSHGate",
@@ -12,8 +12,8 @@
   "packages": [
     {
       "registryType": "mcpb",
-      "identifier": "https://github.com/karthikeyan5/SSHGate/releases/download/v0.1.4/sshgate-mcp.mcpb",
-      "version": "0.1.4",
+      "identifier": "https://github.com/karthikeyan5/SSHGate/releases/download/v0.1.5/sshgate-mcp.mcpb",
+      "version": "0.1.5",
       "fileSha256": "0000000000000000000000000000000000000000000000000000000000000000",
       "transport": {
         "type": "stdio"

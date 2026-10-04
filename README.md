@@ -1,347 +1,405 @@
 # SSHGate
 
-[![tests](https://github.com/karthikeyan5/SSHGate/actions/workflows/tests.yml/badge.svg)](https://github.com/karthikeyan5/SSHGate/actions/workflows/tests.yml)
+[![tests](https://github.com/andrometiq/sshgate/actions/workflows/tests.yml/badge.svg)](https://github.com/andrometiq/sshgate/actions/workflows/tests.yml)
 
-A Claude Code plugin that lets a coding agent SSH into your Linux servers — where **every write needs your fingerprint on the phone, reads are safe-listed, and the server itself enforces it, not the client.** Reads run freely. Writes need one tap on your phone.
+**Let your AI coding agent diagnose and fix your Linux servers over SSH, without giving it a shell.**
+Read commands run straight away. Every write waits for one tap on your phone, and each server
+refuses any write you did not approve.
 
-> **Start with the threat model.** Read [`docs/THREAT-MODEL.md`](docs/THREAT-MODEL.md) first — one honest page on what SSHGate actually enforces, what it only *routes*, and what it does **not** stop. If you are going to attack the design, that page is where to aim.
+SSHGate is a Claude Code plugin and a plain MCP server, so it also works with Codex, Gemini CLI,
+Cursor and other MCP clients.
 
----
+When an agent needs to look at a server today, you have two bad options:
 
-## The boundary — what actually enforces
+- **Be the relay.** You SSH in, run the command, paste the output back, and wait for the next
+  one. One diagnosis takes twenty round trips.
+- **Hand over a shell.** Fast, until the agent runs `rm -rf` on the wrong path, a hallucinated
+  `systemctl stop`, or a command injected by something it read.
 
-The security boundary is the **Ed25519 signature plus the OpenSSH forced command, checked on each remote server.** The read/write classifier only *routes*; it is **not the wall.**
+SSHGate removes the relay without handing over the shell:
 
-- SSHGate's dedicated key is pinned on every remote to a forced command (`restrict,command="~/.sshgate-gate/gate"`, plus `no-pty,no-port-forwarding,no-X11-forwarding,no-agent-forwarding`; `restrict` also denies `~/.ssh/rc` execution and any future OpenSSH capability). **OpenSSH enforces this server-side**: that key can only ever invoke the gate — never a shell or an arbitrary program.
-- A **write** runs only if it carries a valid Ed25519 signature the gate verifies against the signing pubkey deployed on that host. No pubkey on the host (read-only / Tier 1) ⇒ no write can be signed ⇒ the gate refuses it locally, before any approval channel is even consulted.
-- The signature carries a **bounded validity window** and a **per-host binding** (the target's TOFU-pinned host-key fingerprint), so an approved write cannot be replayed indefinitely or against a different host.
+- **Reads run at once.** `df -h`, `journalctl -u nginx`, `ss -tlnp` go straight through and the
+  output comes back to the agent. "What's eating disk on prod-db?" becomes one chat turn.
+- **Writes need your tap.** A restart, an install or a config edit shows up on your phone as the
+  exact commands, with Approve and Deny. Several writes can share one tap.
+- **The server enforces it, not the agent.** SSHGate's SSH key can only start the `gate` program
+  on each server (an OpenSSH forced command). The gate runs a write only if it carries an Ed25519
+  signature made after your tap, valid for a short window and for that one host. The agent never
+  holds the signing key.
+- **Reads are jailed by the kernel.** On hosts that support it, reads run in a kernel jail that
+  cannot write to the host's files, reach local daemons over Unix sockets, or signal other
+  processes, even if a write were mistaken for a read.
 
-That chain — forced command + signature verification + host binding — holds independently on each remote and does **not** depend on the agent, the laptop, or Telegram behaving. The classifier decides only *whether a command needs a signature*; if it ever misjudges a write as a read, that command runs without approval — which is exactly why the classifier is documented honestly rather than sold as a wall. The full, honest treatment (enforced-where table, what the classifier is and is not, per-tier guarantees, and the residuals SSHGate does **not** stop) is in [`docs/THREAT-MODEL.md`](docs/THREAT-MODEL.md).
+Start read-only: no phone, no sudo, about two minutes. Add phone approvals when you want writes.
 
----
+## Try it: read-only in about two minutes
 
-## The problem
+You need Go 1.25 or newer, Claude Code, and a Linux (x86-64) server you can already SSH into.
 
-When an AI agent needs to diagnose a remote server, the workflow today is a relay. The human SSHes in, runs a command, pastes the output back into the chat. The agent reads it, asks for the next command. The human SSHes again. Twenty round-trips later, the agent has a guess at what's wrong. The agent could have done this in seconds on its own.
+```sh
+git clone https://github.com/andrometiq/sshgate ~/src/SSHGate
+cd ~/src/SSHGate && make install-local                   # builds sshgate and sshgate-mcp into ~/go/bin
+echo 'export PATH="$HOME/go/bin:$PATH"' >> ~/.zprofile   # bash: ~/.bash_profile. Then open a new login shell.
+```
 
-The reason it doesn't is that full SSH access for an agent is dangerous. `rm -rf` on the wrong path, an accidental `truncate`, a supply-chain compromise of the agent's runtime, a hallucinated `systemctl stop` — any of these on a production server is a bad day. The human stays in the loop not to be useful, but to be a gate.
-
-The right shape is a gate that doesn't waste the human's time. Diagnostics flow through automatically. Anything that mutates state pauses for an explicit human "yes."
-
----
-
-## SSHGate solves this
-
-SSHGate puts a small binary on every remote server that classifies each incoming command and enforces the gate:
+Start Claude Code from that new shell and type these two commands yourself (an agent cannot run them):
 
 ```
-read command              → execute
-write command + signature → verify → execute
-write command, no sig     → deny
+/plugin marketplace add ~/src/SSHGate
+/plugin install sshgate@sshgate
 ```
 
-Three lines of logic. The signing key is held by a separate Unix user the agent cannot read from, and it only signs after you tap "approve" on Telegram. The agent never holds the key. The human never types another shell command.
+Quit and relaunch Claude Code (the MCP server only starts on a fresh launch), then register a server:
+
+```sh
+sshgate pubkey     # prints SSHGate's key line: add it to ~/.ssh/authorized_keys on the server
+sshgate add web1 ubuntu@web1.example.com --read-only
+```
+
+Now ask the agent: *"Why is web1 slow? Check load, memory and disk."*
+
+Prefer to be walked through it? Paste this into Claude Code and the agent guides you, including
+the optional phone-approval setup:
+
+```
+follow https://github.com/andrometiq/sshgate/blob/main/INSTALL.md to install sshgate
+```
+
+---
+
+## How it works
+
+```
+ LAPTOP                               EACH SERVER
+
+ agent                                OpenSSH: SSHGate's key can only start the gate
+   │ tool call                          │
+   ▼                                    ▼
+ sshgate-mcp ──────── SSH ──────────► gate
+   │                                    ├─ read ─────────────────► run (jailed if supported)
+   │ writes: get a signature first      ├─ write + valid signature ► run
+   ▼                                    └─ write, no signature ───► refuse
+ signer (own Unix user, holds the key)
+   │  ▲
+   ▼  │ Approve / Deny
+ your phone (Telegram)
+```
+
+1. The agent calls an SSHGate tool, for example `run(alias="web1", command="df -h")`.
+2. **A read** goes straight over SSH. On the server, OpenSSH can only start the gate. The gate
+   checks the command, runs it (inside the kernel jail where the host supports it), passes the
+   output through a secret redactor, and sends it back.
+3. **A write** goes to the signer first. The signer runs as a separate Unix user, so the agent
+   cannot read its key. It sends the commands to your phone. Only after you tap Approve does it
+   sign each command, binding the signature to that server's host key and a short validity
+   window.
+4. The signed command goes over SSH. The gate verifies the signature against the public key
+   installed on that server, then runs it. A missing, expired, wrong-host or forged signature is
+   refused.
+
+Deciding "read or write" is the classifier's job, and it fails closed: a command counts as a read
+only when every part of it is a known read; anything it does not recognise, any redirect such as
+`>`, or any write segment makes the whole command a write. The classifier only routes. The wall is
+the forced command plus the signature check on each server, which does not depend on the agent,
+the laptop or Telegram behaving.
+
+## What it protects, and what it does not
+
+SSHGate protects your servers from an agent that makes a mistake, misreads its task, or is steered
+by something it read. It does that with one hard boundary and softer layers around it:
+
+- **Hard boundary:** no write runs on a server without a valid signature from your approval. This
+  holds on each server on its own.
+- **Bounded reads:** on a jail-capable host, a read cannot change the host's files, reach local
+  daemons over Unix sockets, or signal other processes.
+- **Secrets in output** are redacted before they reach the agent.
+
+What it does **not** do, stated plainly (details in the threat model):
+
+- **The classifier can be wrong.** If it ever judges a write to be a read, that command runs
+  without approval. On a jail-capable host the jail limits what such a command can do; on other
+  hosts, the classifier is the only thing in the way.
+- **Reads can use the network.** Jailed reads keep TCP and UDP access, including to services on
+  localhost. A read can send data out or talk to a local TCP service.
+- **Reads can see what the SSH user can see.** The jail stops writes, not reads. Anything the
+  server's SSH user can read, the agent can read, apart from what the redactor catches.
+- **The local signer is a safety rail, not a wall, against a privileged agent.** If the agent can
+  get root on your laptop (for example through `sudo`), it can read the signing key. A signer on a
+  separate machine (Tier 3) is meant to close this; it is not release-ready yet.
+
+Read **[docs/THREAT-MODEL.md](docs/THREAT-MODEL.md)** before you rely on SSHGate. It is the honest
+account of what is enforced where, what each tier buys, and the residual risks. If you want to
+attack the design, start there.
 
 ---
 
 ## Install
 
-SSHGate is a Claude Code plugin. Anthropic-marketplace publication is on the roadmap; until then, install from a local clone.
+There are three ways in; all of them build from a clone (there are no published releases yet).
 
-> **Launch Claude Code normally with `claude`.** SSHGate does NOT require `--dangerously-load-development-channels`. That flag is for plugins that stream channel notifications INTO Claude's context. SSHGate only uses standard MCP tool calls; its approvals flow OUT to your phone via Telegram, not into the conversation.
+- **Agent-guided:** paste the `follow …/INSTALL.md` line above into Claude Code.
+  [INSTALL.md](INSTALL.md) is the script it follows. You will still type the `/plugin` commands
+  and relaunch Claude Code yourself, because an agent cannot.
+- **By hand:** [docs/install-step-by-step.md](docs/install-step-by-step.md) has copy-paste shell
+  blocks for each tier, the Telegram bot setup and troubleshooting.
+- **Any MCP client:** after `make install-local`, point your client at `sshgate-mcp`:
 
-**Agent-guided install.** In any Claude Code session, paste:
-
-```
-follow https://github.com/karthikeyan5/SSHGate/blob/main/INSTALL.md to install sshgate
-```
-
-The agent walks you through it: it hands you the clone/build/PATH commands to run in your terminal, tells you which steps only you can perform (the `/plugin` commands and the quit-and-relaunch), and then drives `/sshgate:setup`. Tier 2's signer setup is a **single interactive pass** — `/sshgate:setup` prompts for your Telegram user-id and bot token in the same run; there is no hand-editing of a config file and no second pass.
-
-> **YOU run the plugin commands — not the agent.** Registering and installing the plugin are interactive commands an agent cannot issue. In the Claude Code UI, *you personally* type `/plugin marketplace add <clone>`, then `/plugin install sshgate@sshgate`, and then **quit and relaunch Claude Code**. (`sshgate@sshgate` parses as `<plugin-name>@<marketplace-name>` — both come from `.claude-plugin/marketplace.json`; run `/plugin` first to confirm the marketplace id before installing.) The relaunch is mandatory: `/reload-plugins` activates the slash commands, but the new plugin's stdio MCP server (`sshgate-mcp`) only spawns on a fresh Claude Code start.
-
-You'll be asked for sudo (Tier 2 only) and a Telegram bot token (Tier 2 only). Realistic time to a working install: **~2 minutes for Tier 1**, **~10 minutes for Tier 2** (the extra time is creating the Telegram bot and the sudo-backed signer user).
-
-**Manual install.** Clone the repo, run `make install-local` to put the binaries on your `$PATH`, persist `~/go/bin` to your LOGIN profile, add the plugin (`/plugin marketplace add <clone>` then `/plugin install sshgate@sshgate`), **fully quit and relaunch Claude Code** (not `/reload-plugins` — the stdio MCP server only spawns on a fresh start), confirm `/mcp` lists `sshgate` connected, then run `/sshgate:setup`. The canonical step-by-step — with the exact PATH/relaunch sequence and copy-paste shell blocks for each tier — lives in one place: [`docs/install-step-by-step.md`](docs/install-step-by-step.md).
-
-`/sshgate:setup` walks you through Tier 1 first (read-only), and offers the Tier 2 upgrade in the same flow when you're ready. It probes on-disk state on every run, so re-running it is safe.
-
-Requirements: Go 1.25+; Linux with systemd (Tier 2 only — Tier 1 needs no systemd), sudo (Tier 2 only), `jq` (Tier 2 only — `/sshgate:setup` uses it to enumerate registered servers), a Telegram account (Tier 2 only). Remote servers must be reachable over SSH and run Linux.
-
-macOS: cross-compile only for now; a native install path is a future release. See [the install guide](docs/install-step-by-step.md#macos-users) for status.
-
----
-
-## Use with any MCP client
-
-SSHGate's agent half is a plain **stdio MCP server** (`sshgate-mcp`), so it works
-beyond Claude Code — OpenAI Codex, Cursor, Gemini CLI, or any client that takes
-an `mcpServers` config. Build the binary first (`make install-local` puts
-`sshgate-mcp` on your `$PATH`), then:
-
-**Generic `mcpServers` snippet** (same shape as [`.mcp.json`](.mcp.json)):
-
-```json
-{
-  "mcpServers": {
-    "sshgate": {
-      "command": "sshgate-mcp",
-      "env": { "SSHGATE_SIGNER_SOCK": "/run/sshgatesigner/sock" }
+  ```json
+  {
+    "mcpServers": {
+      "sshgate": {
+        "command": "sshgate-mcp",
+        "env": { "SSHGATE_SIGNER_SOCK": "/run/sshgatesigner/sock" }
+      }
     }
   }
-}
-```
+  ```
 
-**OpenAI Codex** reads the plugin manifests natively — two commands:
+  Codex can also install the plugin directly (`codex plugin marketplace add andrometiq/sshgate`,
+  then `codex plugin add sshgate@sshgate`), and Gemini CLI reads the root `gemini-extension.json`.
+  Per-client details, including a Cursor deeplink, are in
+  [docs/install-generic-mcp.md](docs/install-generic-mcp.md). Without the signer, any client gets
+  read-only operation.
 
-```sh
-codex plugin marketplace add karthikeyan5/SSHGate
-codex plugin add sshgate@sshgate
-```
+In Claude Code, `/sshgate:setup` checks what is already installed and walks you through the next
+tier. It is safe to re-run.
 
-**Cursor** — an "Add to Cursor" deeplink, and **Gemini CLI** —
-`gemini extensions install https://github.com/karthikeyan5/SSHGate` (SSHGate
-carries a root `gemini-extension.json`). Exact commands, the deeplink, and the
-per-client details are in **[docs/install-generic-mcp.md](docs/install-generic-mcp.md)**.
+**Requirements**
 
-> **Same boundary applies everywhere.** Reads run free, but **writes need the
-> signer daemon + a provisioned gate** — set those up per [`INSTALL.md`](INSTALL.md).
-> The MCP server alone gives read-only operation; that is by design, not a bug.
+- Laptop: Go 1.25 or newer (the build may download the pinned Go toolchain on first run). Linux
+  for the Tier 2 signer, which also needs systemd, sudo and `jq`. macOS can build the agent side;
+  a native signer install is not available yet
+  ([details](docs/install-step-by-step.md#macos-users)).
+- Phone: a Telegram account (Tier 2 only).
+- Servers: Linux on x86-64, reachable over SSH, OpenSSH 7.2 or newer. For the kernel read jail,
+  see [the jail section](#the-kernel-read-jail) below.
 
----
+Realistic time: about 2 minutes for Tier 1, about 10 minutes for Tier 2 (creating the Telegram bot
+and the signer user).
 
-## Three tiers of setup
+## Tiers
 
-`/sshgate:setup` is tiered and idempotent. Start with the lightest tier that
-meets your needs. Moving an existing alias from Tier 1 to Tier 2 is deliberately
-human-only: install the local signer, then manually de-provision and re-add that
-alias with the staged signing public key.
+Start with the lightest tier that does the job.
 
-**Tier 1 — Read-only.** gate is deployed to every remote, but no signing key is uploaded. Reads work; writes are denied at the gate. No Telegram bot, no signer daemon, no sudo. Fastest install. Recommended for the first run while you decide whether you want write access at all.
+| Tier | Writes | What you set up |
+|------|--------|-----------------|
+| **1 — Read-only** | Refused by the gate on the server | Nothing beyond the install. No signer, no Telegram, no sudo. |
+| **2 — Local Telegram signer** | Run after one phone tap | A signer daemon under its own Unix user (`sshgatesigner`), a systemd unit, and your own Telegram bot. The daily-driver setup. |
+| **3 — Hosted signer** | Run after approval in a web UI | `sshgate-signer-server` on a separate machine, with TOTP/WebAuthn sign-in and N-of-M approval policy. A foundation only: not release-ready. |
 
-**Tier 2 — Local Telegram signer.** The local signed-write install. Master keypair under the `sshgatesigner` system user, signer-telegram systemd unit, dedicated Telegram bot for approvals. Writes require a phone tap. This is the default for daily use.
+A Tier 1 server has no signing public key installed, so every write is refused on the server
+before any approval is asked for. Moving an existing server from Tier 1 to Tier 2 is deliberately
+manual: install the signer, de-provision the server (`sshgate revoke <alias>` prints the exact
+steps), then `sshgate add` it again without `--read-only`. Tier 3 status and deployment
+requirements: [src/signer-server/README.md](src/signer-server/README.md). How approval authority
+differs by tier: [docs/approval-architecture.md](docs/approval-architecture.md).
 
-**Tier 3 — Hosted server.** The hosted `sshgate-signer-server` foundation runs
-the signing key on a separate system, with an embedded approval UI,
-TOTP/WebAuthn auth, N-of-M/deny-veto policy, SQLite state, and append-only audit.
-The signer-telegram backend interface is the swap point; gate, the MCP, and the
-slash commands stay the same. The remaining policy-authority work and release
-gates are tracked in the [roadmap](docs/ROADMAP.md); do not treat the current
-foundation as a cut v0.2 release. See [the hosted signer
-guide](src/signer-server/README.md) for DNS/TLS and deployment requirements.
+## What the agent can do
 
-**Approval authority across the three install tiers:** see [docs/approval-architecture.md](docs/approval-architecture.md).
+The MCP server gives the agent exactly eleven tools:
 
----
+| Tool | What it does | Approval |
+|------|--------------|----------|
+| `run` | Run one command on a server | Writes: one tap |
+| `run_batch` | Run several commands in order | All writes in the batch share one tap |
+| `list_servers` | List registered servers and each one's tier | None |
+| `status` | Signer health and reachability of every server | None |
+| `ping` | Cheap reachability check of one server | None |
+| `revoke_server` | Remove the gate and SSHGate's key from a server | One tap |
+| `request_grant` | Ask for a standing grant: matching writes auto-sign for up to 24 hours | One tap to grant |
+| `revoke_grant` | Drop a server's standing grant | None |
+| `list_grants` | Show the grants the signer holds | None |
+| `update_gate` | Replace a server's gate binary with the verified build | One tap, on a distinct banner |
+| `transfer` | Move a secret file between two servers, end-to-end encrypted, so the agent never sees it | One tap (Tier 2 only) |
 
-## The tool surface — components
+Adding a server is **not** an agent tool. Provisioning uses the human-only `sshgate` CLI
+(`sshgate pubkey`, `sshgate add`), so the agent can never widen its own reach. Standing grants,
+gate updates, secret reveals and transfers each get their own approval banner, and a standing
+grant never auto-signs a gate update, a reveal or a transfer.
 
-**gate** (`sshgate-gate`) — the remote-side Go binary: a ~500-line `main` dispatching into ~1.9k lines of gate library code (executor, signature verification, audit, keystore) plus a ~2k-line compiled-in classifier. Lives at `~/.sshgate-gate/gate` on each server you register. OpenSSH calls it via `command="..."` forcing in `authorized_keys`, so every connection on the SSHGate key routes through it. gate classifies the command, verifies the `SSHGATE_SIG:` prefix if present, and runs or denies. The classifier is compiled in; gate stores no config.
+Claude Code also gets slash commands: `/sshgate:setup`, `/sshgate:status`, `/sshgate:run`,
+`/sshgate:run_batch` and `/sshgate:revoke`. Tool details: [docs/design.md](docs/design.md).
 
-**signer-telegram** (`sshgate-signer-telegram`) — the local approval daemon on your laptop. Runs as a separate Unix user (`sshgatesigner`) so Claude — running as you — cannot read its key file, ptrace its process, or read its Telegram bot token. When a write arrives, signer-telegram DMs you on a dedicated Telegram bot with the command list and Approve/Deny buttons; it signs only after your tap, and only if Telegram's `from.id` matches the allowlisted user.
+### Examples
 
-**MCP server** (`sshgate-mcp`) — the Claude Code plugin half. Exposes exactly eleven MCP tools: `run`, `run_batch`, `list_servers`, `status`, `ping`, `revoke_server`, `request_grant`, `revoke_grant`, `list_grants`, `update_gate`, and `transfer`. Reads SSH directly; writes go to signer-telegram first for approval, then SSH the signed command across. (`ping` is a READ-class single-server reachability probe — a short-timeout SSHGATE_OK check against one named server, no approval and no signer, so it costs neither a Telegram tap nor a fan-out across every server. `request_grant`/`revoke_grant` manage *standing grants* — a human-approved window in which matching writes auto-sign without a tap each; the agent can only request a grant, never create one. `list_grants` is a read-only query of the grants the signer currently holds — no approval — used to reconcile true grant state after a `request_grant` whose approval may have timed out. `update_gate` requests a *signed, in-place update of the gate binary* on an already-registered server: the agent supplies only the alias, the MCP hashes the operator's locally-staged gate binary, and the operator must approve a distinct "GATE BINARY UPDATE" Telegram banner bound to that exact SHA-256 before it runs — fail-closed, signed, audited, never auto-signed by a standing grant, and it onboards no new server so it can't expand the agent's reach. `transfer` moves a secret file between two registered servers end-to-end encrypted through the gate under one human approval — the agent supplies only aliases + absolute paths, the MCP relays only ciphertext, so the plaintext never reaches the agent or any log; a standing grant can never auto-sign it and Tier-1 servers are refused before any tap; transfers require the local Tier-2 Telegram signer — the hosted Tier-3 signer does not support them yet and fails closed.) Provisioning a server is *not* among these tools — see **gate** above and the `sshgate` CLI below; it is deliberately human-only.
+**Read, no approval.** *"What's eating disk on prod-db?"* The agent runs `df -h`, then
+`du -sh /var/log/*`, then `find /var -size +100M`. All are reads, so they run immediately and no
+phone notification is sent.
 
-**sshgate CLI** (`sshgate`) — the human-only provisioning tool, installed to `~/go/bin/sshgate` by `make install-local`. Onboarding a new server is the control plane (it defines which machines the agent can reach), so it is kept off the agent/MCP surface entirely: the agent can never expand its own reach by adding a machine. `sshgate pubkey` prints SSHGate's dedicated public-key line; you paste it into the target's `~/.ssh/authorized_keys` by hand; `sshgate add <alias> <user@host> [--read-only]` then connects with that key, installs the gate, and rewrites the pasted line into the locked forced-command entry.
-
----
-
-## What you get
-
-- Ask Claude to debug a server in plain English. Reads stream back instantly with no approval friction. "What's eating disk on prod-db" becomes one chat turn instead of fifteen.
-- Restart services, install packages, edit configs with one tap on your phone. Your laptop and your phone are the two trust domains; the agent is neither.
-- Bulk-approve a sequence of writes in one tap. Claude queues `apt update && apt install nginx && systemctl enable nginx && systemctl start nginx` as a single approval. Each command is still individually signed for audit; the "bulk" is purely the UI.
-- Register a new server with the human-only `sshgate` CLI: `sshgate pubkey` prints the key line to paste into the target's `authorized_keys`, then `sshgate add prod-db ubuntu@prod-db.example.com` installs gate, locks that pasted line down to the restricted `authorized_keys` entry, and verifies end-to-end with a probe. The agent never runs this — provisioning stays in human hands so the agent can only operate within boundaries you set.
-- Your master signing key never sits in the same trust domain as the agent. The agent can request signatures; it cannot produce them. On the same machine this is a safety rail, not a hard wall — an agent that can escalate privileges on the host (e.g. has `sudo`) could read the signing key directly and bypass approval. After the hosted policy-authority and release gates close, run the signer on a separate machine (the hosted-signer tier) for a guarantee that holds against a privileged rogue agent. See [docs/approval-architecture.md](docs/approval-architecture.md).
-
----
-
-## Usage examples
-
-**Read — no approval.**
-
-> "What's eating disk on prod-db?"
-
-Claude calls `sshgate.run("prod-db", "df -h")`, then `du -sh /var/log/*`, then `find /var -size +100M`. All three are reads. They stream back into chat with no Telegram pings. Claude surfaces the culprit.
-
-**Single write — one tap.**
-
-> "Restart nginx on prod-db."
-
-Claude calls `sshgate.run("prod-db", "systemctl restart nginx")`. Your phone buzzes with:
+**Write, one tap.** *"Restart nginx on prod-db."* The agent calls
+`run(alias="prod-db", command="systemctl restart nginx")` and your phone shows:
 
 ```
-SSHGate approval — prod-db
+🔐 SSHGate approval — prod-db
+
+1 command queued:
 1. systemctl restart nginx
 
-[Approve]   [Deny]
+Request ID: …
+Expires in …
+
+[✓ Approve all]   [✗ Deny]
 ```
 
-Tap approve. The command runs. Claude reports the result.
-
-**Bulk write — one tap for four commands.**
-
-> "Update the nginx config and restart it."
-
-Claude calls `sshgate.run_batch("prod-db", [...])` with four commands. Your phone buzzes once:
-
-```
-SSHGate approval — prod-db
-4 commands queued:
-1. cat > /etc/nginx/sites-available/app.conf <<'EOF' ...
-2. nginx -t
-3. systemctl reload nginx
-4. systemctl status nginx
-
-[Approve all]   [Deny]
-```
-
-Tap approve. All four run in order. If any fails, the rest stop.
+**Several writes, one tap.** *"Update the nginx config and reload it."* The agent sends the config
+write, `nginx -t`, `systemctl reload nginx` and `systemctl status nginx` as one `run_batch`. You
+get one approval card listing all of them. Each command is still signed on its own, and if a write
+fails the rest stop.
 
 ---
 
-## What SSHGate is NOT
+## The kernel read jail
 
-- Not a replacement for SSH. It sits on top of SSH.
-- Not a configuration management tool (Ansible, Chef, Puppet). It runs the commands you (or the agent) write; it does not own desired state.
-- Not a full access proxy (Teleport, StrongDM). No session recording, no MFA at the SSH layer, no SSO, no per-user RBAC.
-- Not a secret manager. It gates commands, not credentials.
-- Not a multi-operator approval system in v1. One operator, one phone, one Telegram DM. Multi-operator is a v2 feature.
+New in 0.1.5. On a host that supports it, the gate runs every command the classifier calls a read
+inside a kernel jail (profile `ro-v1`):
 
----
+- the command gets its own user, mount and IPC namespaces (it shares the host's PID namespace);
+- the host filesystem is mounted read-only; host `/tmp` and `/var/tmp` stay visible, read-only;
+- the only writable places are `/dev/null` and a private 64 MiB `/dev/shm`, which `TMPDIR` points
+  at and which is thrown away when the read ends;
+- Landlock and a seccomp filter that rules on every system call block file and metadata writes,
+  Unix-socket connections to local daemons, and signalling or tracing other processes;
+- the jail checks itself before the command starts, and refuses the read if any check fails.
 
-## Status
+**Which hosts get it.** The host needs unprivileged user namespaces that can mount, and Landlock
+(Linux 5.13 or newer, with Landlock enabled). On a host without both, reads run unconfined, guarded
+by the classifier only, as they did before 0.1.5. Some distributions, such as Ubuntu 24.04,
+restrict unprivileged user namespaces through AppArmor; on those, reads run unconfined until root
+lifts that restriction or gives the gate an AppArmor profile that allows it.
 
-The provisioning CLI (`sshgate pubkey` / `sshgate add`) and the full eleven-tool agent MCP surface (`run`, `run_batch`, `list_servers`, `status`, `ping`, `revoke_server`, `request_grant`, `revoke_grant`, `list_grants`, `update_gate`, `transfer`) are shipped. The local paths work: Tier 1 read-only (gate deployed, writes denied locally) and Tier 2 signed-write (local Telegram signer, one phone tap per approval). Inline secret redaction of command output is live (see *Secret redaction* below). The test suites — a race-enabled unit suite plus a Docker-backed integration suite — run locally via `make test` / `make test-integration` (`make preflight` is the pre-push gate); CI runs the race-enabled unit suite on every push/PR (the `tests` workflow, badged above), and `verify-gate` reproducibly rebuilds and checks the committed gate binary.
+**Check a host.** Log in to the server yourself (not through SSHGate) as the user SSHGate was
+installed for, and run:
 
-The hosted Tier-3 reference implementation and deployment tooling are present,
-but the v0.2 policy-authority and release gates are still open. It is not yet a
-release-ready separate-machine boundary. TLS/DNS, backups, and secret
-distribution remain operator responsibilities. Hosted standing grants, secret
-reveal, and box-to-box transfer continue to fail closed and use the local
-Telegram signer instead.
+```sh
+~/.sshgate-gate/gate doctor          # human-readable; add --json for JSON
+```
 
-- Architecture and threat model: [`docs/THREAT-MODEL.md`](docs/THREAT-MODEL.md) (start here), then [`docs/design.md`](docs/design.md)
-- Roadmap and deferred work: [`docs/ROADMAP.md`](docs/ROADMAP.md)
-- Release history: [`CHANGELOG.md`](CHANGELOG.md)
+The `reads:` line says what happens to reads on that host: `jailed:full`, `unconfined`, or
+`denied: <reason>`.
 
----
+**Refuse unjailed reads.** `~/.sshgate-gate/gate doctor --pin` records `full` in a `jail-floor`
+file next to the gate. From then on, if the jail ever becomes unavailable on that host, the gate
+refuses reads (exit 77, "read jail unavailable") instead of running them unconfined. A jail that
+fails to set up, or a capability check that fails for an unexplained reason, is always refused;
+the gate never quietly falls back to an unconfined read on a host that supports the jail.
+
+**What runs outside the jail.** A short, fixed list of `systemctl` and `docker` read commands
+(such as `systemctl status` and `docker ps`) needs the daemons' Unix sockets, so it runs outside
+the jail without a shell, with an allowlist of flags. Signed writes and the gate's own admin
+commands run exactly as before, and a jail problem never blocks them.
+
+**What it does not stop.** Jailed reads keep network access, and some narrow residual effects
+remain. Both are listed in [docs/THREAT-MODEL.md](docs/THREAT-MODEL.md). A per-server network
+permission is planned in [docs/BUILD-PLAN.md](docs/BUILD-PLAN.md).
 
 ## Secret redaction
 
-Every command's output — reads and writes alike — streams through an inline
-redactor in the gate before it reaches the agent. A detected secret is replaced
-in place with the marker
+All command output, reads and writes alike, passes through a redactor in the gate before it
+reaches the agent. A detected secret is replaced in place with
 
 ```
 [SSHGATE_REDACTED key=<8hex>]
 ```
 
-where `<8hex>` is a per-session HMAC of the secret: the same secret gets the
-same key within a session (the agent can recognise "same value as before"
-without learning it), and keys do not correlate across sessions. The redactor
-deliberately errs toward **over**-redaction — high-entropy base64 blobs, private-key
-PEM blocks, and values assigned to `*_KEY=`-style names are redacted; public
-certificates, CSRs, and SSH public-key bodies are deliberately *not* over-redacted
-(a type check on completed PEM blocks and an ssh-line veto keep `cat server.crt`
-and `cat authorized_keys` readable). When the raw value is genuinely needed,
-request a reveal: `run(alias, command, reveal=true, reason="…")` runs that one
-command un-redacted. A reveal is single-command only, takes its own distinct
-Telegram approval, and is never auto-signed by a standing grant.
+where `<8hex>` is a per-session keyed hash: the same secret gets the same marker within a session,
+so the agent can tell "same value as before" without learning it, and markers do not match across
+sessions. The redactor errs toward redacting too much: private-key PEM blocks, high-entropy blobs
+and values assigned to names such as `*_KEY=` are hidden, while certificates, CSRs and SSH public
+keys stay readable. When the agent genuinely needs a raw value it can ask for a reveal:
+`run(alias, command, reveal=true, reason="…")` runs that one command unredacted after its own,
+clearly marked approval. A standing grant never covers a reveal. Design and limits:
+[docs/redaction-architecture.md](docs/redaction-architecture.md).
 
-Full design: [`docs/redaction-architecture.md`](docs/redaction-architecture.md).
+## Approving a gate update
 
----
+`update_gate(alias)` replaces a server's gate binary in place with one signed approval, instead of
+a full re-provision. The agent supplies only the alias. The MCP hashes the gate binary staged on
+your laptop, the approval banner shows that exact SHA-256, and the gate re-hashes what it receives
+and refuses a mismatch. So what is installed is what you approved.
 
-## Architecture
+That alone does not prove that what you approved is the real, audited gate: the staged binary sits
+in your user's home, where a compromised agent could swap it. The check against that lives off the
+machine:
 
-Full diagram, trust-domain breakdown, wire protocol, and threat model: [`docs/design.md`](docs/design.md). For the condensed, honest one-pager, start with [`docs/THREAT-MODEL.md`](docs/THREAT-MODEL.md).
+- Every gate build is committed at [`dist/gate/sshgate-gate-linux-amd64`](dist/gate/) with its
+  `.sha256`, versioned by [`VERSION`](VERSION).
+- The `verify-gate` CI workflow rebuilds the gate from source with the pinned toolchain on every
+  push and pull request, and fails unless the hash matches the committed one.
 
-Short version: three trust domains — your user (runs Claude + the MCP, holds the SSH client key), the `sshgatesigner` user (runs signer-telegram, holds the master signing key + bot token), and Telegram (authenticates your phone). Each remote server runs gate as the only thing the SSHGate SSH key can invoke, enforced by OpenSSH's `command=` forcing. Reads pass; writes need a fresh Ed25519 signature from signer-telegram, which signer-telegram only produces after a verified phone tap.
+### Before you tap Approve on a GATE BINARY UPDATE banner
 
-## Security testing — the gate red-team rig
+1. Note the target alias and the `New gate SHA-256: <64 hex>` line from the banner.
+2. On a **separate trusted device** (your phone's browser, not the machine running the agent),
+   open this repository on github.com.
+3. Check that the latest commit on `main` has a green `verify-gate` check.
+4. Open `dist/gate/sshgate-gate-linux-amd64.sha256` on `main` and compare **all 64 hex
+   characters** with the banner. A prefix match is not enough.
+5. Treat the banner's `Build:` line as unverified context: it is built by the MCP and not signed.
+   Only the hash counts. A hash that matches an older commit's `.sha256` but not `main`'s is a
+   downgrade; approve that only if you started the downgrade on purpose.
+6. Approve only if the full hash matches and CI is green. Otherwise deny and investigate: a
+   mismatch means the staged binary is not the audited gate. Treat it as a compromise signal, not
+   something to retry.
 
-The gate's read-only classifier is the security backbone (a write that
-misclassifies as a read runs unsigned). `gate-redteam` is a standing,
-disposable harness that fires an adversarial corpus + fuzzer at the **real
-gate** in a throwaway container and reports, per command, whether a write
-slipped through — with an in-container write tripwire that catches a
-mutation **anywhere**, by any mechanism. Bring it up once, fire many
-commands, tear it down:
-
-```sh
-go build -o bin/gate-redteam ./cmd/gate-redteam
-./bin/gate-redteam up && ./bin/gate-redteam campaign --iterations 1 && ./bin/gate-redteam down
-```
-
-Full threat model, verdict schema, and agent-operator prompt:
-[`internal/redteam/README.md`](internal/redteam/README.md).
-
----
-
-## Verified release channel — approving a gate update
-
-`sshgate.update_gate(<alias>)` replaces a server's gate binary in place with a
-single signed Telegram tap, instead of a full re-provision. The agent supplies
-only the alias; the MCP hashes the operator's locally-staged gate binary and the
-approval banner commits to that exact SHA-256, so the installed bytes can never
-differ from what was approved (the gate re-hashes and refuses on mismatch).
-
-That guarantees *what is installed == what was approved*. It does **not** by
-itself guarantee *what was approved == the real, audited gate* — the staged
-binary lives in the agent user's own home, so a compromised agent could swap its
-bytes before they are hashed. The **verified release channel** closes that by
-moving the trust anchor **off the machine**:
-
-- Every gate build is committed to this repo at
-  [`dist/gate/sshgate-gate-linux-amd64`](dist/gate/) alongside its published
-  `.sha256`, versioned by the top-level [`VERSION`](VERSION) file.
-- The `verify-gate` CI check reproducibly rebuilds the gate from source on every
-  push/PR with the pinned toolchain and **fails unless** the freshly-built hash
-  matches the committed one. A green tick certifies the committed binary is
-  exactly what the audited source produces — you cannot change the gate's code
-  without also re-committing (and re-publishing the hash of) the built binary.
-- Before approving, the operator cross-checks the banner hash against the
-  published hash on a **separate trusted device** (github.com). Swapped staging
-  bytes then match nothing published and are denied.
-
-### Approver runbook — do this on your phone before tapping ✓ Approve
-
-When the **⚠️ GATE BINARY UPDATE** banner arrives:
-
-1. Read from the banner: the target `<alias>`, the `New gate SHA-256: <64hex>`,
-   and the `Build:` line.
-2. On a **separate trusted device** (your phone browser, or a different machine —
-   **not** the box running the agent), open this repo on **github.com**.
-3. Confirm the commit shows a **green `verify-gate` tick** — proof the committed
-   binary reproducibly builds from the audited source.
-4. Open `dist/gate/sshgate-gate-linux-amd64.sha256` **at the default-branch HEAD**
-   (`main`) and read the published hash. HEAD is the right default: it is the
-   current audited gate. Looking up an *older* version's hash is a deliberate
-   **downgrade** path — do it only when *you* initiated the downgrade and know
-   why, never as the routine lookup.
-5. Compare the published hash to `New gate SHA-256` in the banner — the **full 64
-   hex characters**, not a prefix (a prefix collision is cheap). They must be
-   identical.
-6. Treat the banner's `Build:` line as **untrusted context, not proof** — it is
-   MCP-constructed, unsigned, and spoofable. The **only** trusted field is the
-   hash. A banner whose hash matches only an *older* commit's `.sha256` and not
-   HEAD's is a downgrade signal a spoofed version line cannot hide.
-7. **Only if** the full hash matches HEAD's published hash **and** CI is green
-   **and** the version is what you expect → tap **Approve**. Otherwise tap
-   **Deny** and investigate: a mismatch means the staged binary is **not** the
-   audited gate — treat it as a compromise signal, not a retry.
-
-### Dev override — `$SSHGATE_GATE_BIN`
-
-`$SSHGATE_GATE_BIN` points the MCP at an arbitrary local gate binary for
-development. Such a build is **by definition** not the published artifact, so its
-banner hash will **not** match any published `.sha256`. That mismatch is
-**expected on a dev box**. On a **production** server a hash mismatch must
-**never** be approved — it is the compromise signal the runbook step 7 describes.
+`$SSHGATE_GATE_BIN` points the MCP at a different local gate binary for development. Such a build
+never matches a published hash, which is expected on a development box. On a production server,
+never approve a mismatch.
 
 ---
+
+## Testing and verification
+
+- `make test`: race-enabled unit tests. CI runs it with `go vet` on every push and pull request
+  (the `tests` badge above).
+- `make test-integration`: Docker-backed integration tests. `make preflight` is the pre-push check.
+- `make test-jail`: the read jail's acceptance matrix. It needs a host with unprivileged user
+  namespaces and Landlock, and fails rather than skips when they are missing. CI runs it as the
+  `jail` workflow.
+- `make test-jail-mutate MUTATE=<ids>`: removes one jail protection at a time (195 in total) and
+  requires a named test to catch each removal, proving each protection is load-bearing.
+- `verify-gate` (CI) and `make verify-dist`: check that the committed gate binary is exactly what
+  the source builds.
+- **Red-team rig:** `gate-redteam` fires an adversarial corpus and a fuzzer at the real gate in a
+  throwaway container and reports any write that got through, using an in-container tripwire that
+  catches a change made by any means. See [internal/redteam/README.md](internal/redteam/README.md).
+
+The full guide, including which tests need root or a disposable host, is
+[docs/TESTING.md](docs/TESTING.md).
+
+## Project status
+
+The code line is **v0.1.5**. There are no tagged releases yet; install from a clone of `main`.
+
+- **Working today:** Tier 1 (read-only) and Tier 2 (local Telegram signer), the eleven agent tools,
+  human-only provisioning, standing grants, secret redaction and reveal, verified gate updates,
+  encrypted server-to-server transfer, and the kernel read jail on supporting hosts.
+- **Not ready:** the hosted Tier 3 signer is present as source and deployment tooling, but it is
+  not a release-ready separate-machine boundary. Hosted grants, reveals and transfers fail closed;
+  use the local signer for those.
+- **v0.2** is a milestone that has not been cut; its release gates are still open.
+
+What gets built next, in order: [docs/BUILD-PLAN.md](docs/BUILD-PLAN.md). Release status and
+unscheduled ideas: [docs/ROADMAP.md](docs/ROADMAP.md). History: [CHANGELOG.md](CHANGELOG.md).
+Architecture, trust domains and wire protocol: [docs/design.md](docs/design.md).
+
+## What SSHGate is not
+
+- Not a replacement for SSH. It sits on top of OpenSSH.
+- Not configuration management (Ansible, Chef, Puppet). It runs the commands you or the agent
+  write; it does not own desired state.
+- Not an access proxy (Teleport, StrongDM). No session recording, no SSO, no per-user access
+  control.
+- Not a secret manager. It gates commands, not credentials.
+- Not multi-operator on the local signer: one operator, one phone, one Telegram chat. Multi-person
+  approval exists only in the not-yet-ready hosted tier.
+
+## Contributing and security
+
+- Found a way to run a write without approval, escape the read jail, or read the signing key?
+  Please report it privately: see [SECURITY.md](SECURITY.md).
+- Working on the code (by hand or with an agent): read [AGENTS.md](AGENTS.md) for the repo's
+  rules and checks, and [docs/TESTING.md](docs/TESTING.md). Run `make preflight` before you push.
 
 ## License
 
-MIT — see `LICENSE`.
+MIT. See [LICENSE](LICENSE).

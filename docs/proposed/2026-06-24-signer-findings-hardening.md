@@ -1,14 +1,22 @@
-# Signer/MCP hardening — 6 findings from the 2026-06-23 migration test run
+# Signer/MCP hardening: six findings from a multi-server test run
 
-Status: **built and merged to `main`** (merge `01b3ceb`; the two design forks were owner-ratified 2026-06-24). Kept as the design record for the F1–F6 fixes.
+> **Status: BUILT** (merged 2026-06-24, before the first versioned release line; part of the
+> v0.1.3 baseline and every later version). This file is the design record for fixes F1–F6.
+> Where the code lives today:
+> `src/sigwire/protocol.go` (`ProtoVersion`), `src/sigwire/timeouts.go` (`ResponseWriteGrace`),
+> `pkg/signerkit/socket.go` and `pkg/signerkit/daemon.go` (the signer daemon: write-grace,
+> request-id echo, `list_grants` kind), `src/mcp/sign/client.go` and `src/mcp/sign/grant_client.go`
+> (`ErrVerdictUnknown`, request-id handling), `src/mcp/tools/list_grants.go`,
+> `src/redact/scrub.go` (`RedactString`), `src/signer/backend/telegram.go` (redacted approval
+> messages). File names below that predate the move of the daemon into `pkg/signerkit/` refer to
+> the same code there.
 
-Source: a migration test run surfaced 6 findings (F1–F6). Each was code-grounded against the real
-tree by a parallel investigation (one investigator per finding + a protocol cartographer). This spec
-records the confirmed verdicts, the locked design decisions, and the build sequencing.
+A multi-server test run on 2026-06-23 surfaced six findings (F1–F6). Each was checked against the
+code. This record keeps the confirmed verdicts and the design decisions.
 
 ## The unifying root cause
 
-The multi-hour opacity of the 2026-06-23 outage traces to **one thing**: the daemon emits error
+The multi-hour difficulty diagnosing the 2026-06-23 failure traces to **one thing**: the daemon emits error
 responses with an **empty `request_id`** (`respondError(conn, "", …)`), which the MCP client masked as
 an opaque `request_id "" != r_…`. Two fixes kill that masking at both ends:
 - **F3** — the client surfaces `resp.Error` when `request_id==""` (already done for `Sign`; mirror to
@@ -32,7 +40,7 @@ an opaque `request_id "" != r_…`. Two fixes kill that masking at both ends:
 
 | Fork | Decision |
 |------|----------|
-| **F2** grant re-query | **Add an 8th MCP tool `list_grants`** (the owner ratified an 8-tool surface; update CLAUDE.md/AGENTS.md + the MCP server-instructions). Read-only, no approval. |
+| **F2** grant re-query | **Add an MCP tool `list_grants`** (read-only, no approval). It is one of the eleven tools today. |
 | **F5** gate forensic audit | **Redact command strings everywhere, including the gate-side `audit.log`.** Never persist a secret; operator sees a correlatable marker. |
 | **F1** fail-safe direction | **Strict**: a lost verdict = possible-deny → stop, do NOT auto-retry, surface to the human. Matches "if denied, don't resubmit." |
 | **F4** live-log vocabulary | Full `auth_mode: "human" \| "grant:<id>"` (the agent already gets its own grant_id from `request_grant`). Add a first-class `auth_mode` to the signer audit too (decouple from the `approved_by` prefix). |
@@ -66,7 +74,7 @@ Fix:
 4. Daemon audit: record `denied-undelivered` / `timeout-undelivered` (mirror the existing
    `approved-undelivered`) so the asymmetry is logged for ALL verdicts.
 
-### F2 — Phantom-live grant [HIGH] — 8th tool
+### F2 — Phantom-live grant [HIGH] — new `list_grants` tool
 `request_grant` stores the grant LIVE under lock **before** the response write; a write failure leaves
 a live standing grant the agent believes failed (no grant_id/expiry/scope). No verb to learn true
 state.
@@ -74,15 +82,15 @@ state.
 Fix: new **read-only** socket kind `list_grants` (no backend, no approval, like `revoke_grant`):
 RLock `d.grants`, filter live (`expiry > now`), optional alias filter, return
 `[]{alias, scope, commands, grant_id, expiry_unix}`. Mirror in `grant_client.ListGrants`, a new
-`tools/list_grants.go` (`Runner.ListGrants`), register the 8th tool in `server.go` (read-only), extend
+`tools/list_grants.go` (`Runner.ListGrants`), register the tool in `server.go` (read-only), extend
 the `SignClient` interface. Old daemon → `unsupported kind` → MCP surfaces gracefully ("daemon too old
-to list grants"). Do **not** persist grants (in-memory-only is deliberate). Idempotent re-request is
-**deferred**. Docs: CLAUDE.md / AGENTS.md / MCP server-instructions go from 7 → 8 tools.
+to list grants"). Do **not** persist grants (in-memory-only is deliberate). An idempotent re-request
+(asking for the same grant twice returns the live one) was **not built** and is not scheduled.
 
 ### F3 — grant_client masks `resp.Error` [MED] — 16 LOC
 Mirror the merged `client.go` 2b carve-out into `RequestGrant` and `RevokeGrant`: an
 `if resp.RequestID=="" && resp.Status=="error"` block surfacing `resp.Error` **before** the strict id
-compare. Built in Group 1 alongside F6 (same files).
+compare.
 
 ### F4 — Audit auth-mode [LOW, downgraded] — socket-response field, gate untouched
 The signer already distinguishes human vs grant (`approved_by="grant:<id>"` vs the approver name,
@@ -93,7 +101,7 @@ Fix:
 - **Part A (bug):** fix the `livelog.go` `Approved` comment.
 - **Part B:** add `auth_mode` (`omitempty`) to the `signResponse` socket struct (client uses plain
   `json.Unmarshal` → backward-compatible). Derive from `result.ApprovedBy` (`grant:` prefix → that
-  value; else approved → `"human"`; else empty) via a shared `authModeFromApprovedBy` helper. Thread
+  value; else approved → `"human"`; else empty) via a shared helper (`authMode` in `pkg/signerkit/daemon.go`). Thread
   through `client.go` (return a `SignResult{Signed, AuthMode}`), `run.go` (`RunOutput.AuthMode`),
   `server.go` → `livelog.Entry.AuthMode` (run + run_batch).
 - **Part B4:** first-class `auth_mode` on the signer `AuditEvent` (set via the same helper).
@@ -111,17 +119,17 @@ shipped):
 - MCP live-log run + run_batch (new per-process salt + `Combined()` on `Server`);
 - signer `audit()` (new per-process salt + `Combined()` on `Daemon`);
 - Telegram approval **and** grant-approval message (`formatApprovalMessage` /
-  `formatGrantApprovalMessage`) — **shipped 2026-06-24, the 4th sink** (the owner's decision, same date).
+  `formatGrantApprovalMessage`), the fourth sink, shipped the same day.
   Redaction is **secret-only**: only the matched secret substring is replaced by the per-session marker,
   the command SHAPE stays visible, so the human approver still sees WHAT runs (and that a secret is
   present) — just not the literal secret, which therefore never reaches Telegram's servers. It is
   **display-only**: the signed/executed command is the RAW request command, untouched (the format
   functions only read `req.Commands`). The backend reuses the SAME per-process salt + already-compiled
-  `Combined()` slice as the `Daemon` (wired once in `cmd/sshgate-signer-telegram/main.go`); a backend
+  `Combined()` slice as the `Daemon` (wired once in `src/signer/cmd/sshgate-signer-telegram/main.go`); a backend
   with no ruleset wired (nil) renders verbatim via `RedactString`'s nil-rules fast-path.
-Documented residual gap (NOT closed here): `mysql -p<secret>` (password-as-CLI-flag) has no covering
-rule — a ruleset concern, separate ticket. Pin it with an XFAIL test so it isn't silently assumed
-fixed.
+Documented residual gap (still open): `mysql -p<secret>` (password as a CLI flag) has no covering
+rule. `TestRedactStringMysqlFlagGapXFAIL` in `src/redact/scrub_test.go` pins it so it is not
+silently assumed fixed.
 
 ### F6 — Wire/protocol version stamp [MED] — lenient peek, daemon-first
 A naive version field **re-creates the outage**: an old daemon's `DisallowUnknownFields` rejects the
@@ -144,16 +152,8 @@ Fix:
 
 ---
 
-## Build sequencing (files overlap → sequential, one branch)
+## Build order
 
-1. **Group 1 — Diagnosability: F3 + F6** (`grant_client.go`, `daemon.go` peek, `client.go`,
-   `sigwire/protocol.go`). Delivers "never debug a blind skew again."
-2. **Group 2 — HIGH races: F1 + F2** (`socket.go`, `daemon.go`, `client.go`, `grant_client.go`,
-   new `tools/list_grants.go`, `server.go`, docs).
-3. **Group 3 — Forensics: F4 + F5** (`livelog.go`, `server.go`, `run.go`, `daemon.go`,
-   `signer/audit.go`, `redact/scrub.go`, gate `main.go`, `telegram.go`).
-
-After each group: orchestrator runs `make vet && go test -race ./... && make build`, reviews the diff,
-runs spec + quality review, commits. After all three: triple-lens review (correctness +
-spec-conformance + security) over the full diff, fix real findings, final `make preflight`, then merge
-`--no-ff` into local `main`. **No push** (batched per owner direction).
+The fixes shared files, so they were built in three groups on one branch: diagnosability (F3, F6),
+then the two races (F1, F2), then forensics (F4, F5). Each group passed `make vet`,
+`go test -race ./...` and a review before the next started.

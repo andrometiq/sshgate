@@ -107,7 +107,7 @@ func classifySegmentExplain(seg string) (Kind, Reason) {
 	i := 0
 	for i < len(tokens) && isAssignment(tokens[i]) {
 		key := tokens[i][:strings.IndexByte(tokens[i], '=')]
-		if dangerousEnvVars[key] {
+		if isDangerousEnvVar(key) {
 			return KindWrite, Reason{Trigger: "env-var", Head: key}
 		}
 		i++
