@@ -9,7 +9,7 @@ import (
 	"testing"
 )
 
-var legCases = proofCases()
+var legCases = append(append(append(proofCases(), proofCasesM1()...), proofCasesM2()...), proofCasesM3()...)
 
 func proofCases() []harness.Case {
 	var cases []harness.Case
