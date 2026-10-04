@@ -113,7 +113,7 @@ Tell the user to run these in their terminal:
 
 > "1. Clone SSHGate (any directory works; `~/src` is used here) and build it:
 >
->        mkdir -p ~/src && cd ~/src && git clone https://github.com/andrometiq/sshgate
+>        mkdir -p ~/src && cd ~/src && git clone https://github.com/andrometiq/sshgate SSHGate
 >        cd ~/src/SSHGate && make install-local
 >
 > 2. Add `~/go/bin` to your PATH in your **login** profile, not only `~/.bashrc` or `~/.zshrc`:

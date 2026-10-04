@@ -18,7 +18,7 @@ The MCP server is a Go binary. There are no tagged releases and no prebuilt
 binaries yet (the code line is v0.1.5), so build from a clone:
 
 ```sh
-git clone https://github.com/andrometiq/sshgate
+git clone https://github.com/andrometiq/sshgate SSHGate
 cd SSHGate
 make install-local     # puts sshgate-mcp (+ sshgate, sshgate-signer-telegram) on your $PATH via `go install`
 ```

@@ -73,7 +73,8 @@ hosts run reads classifier-only, as before. What Phase 1 built:
   recorded as an unmet fact inside the jail, not refused, and stays visible, read-only. Strict
   runs that refuse such a read arrive with P2.1. The command's working directory is re-resolved
   inside the final view.
-- **Credentials and filters.** Every capability is dropped, `no_new_privs` is set, Landlock is
+- **Credentials and filters.** Every capability is dropped (root SSH keeps only
+  `CAP_DAC_READ_SEARCH`, inside the read's own user namespace), `no_new_privs` is set, Landlock is
   required, and seccomp runs a total syscall table whose default is `ENOSYS`, with allowlists
   for `socket`, `socketpair`, `fcntl` and `flock`, named `ioctl` blocks, and a locked
   `RLIMIT_CORE`.

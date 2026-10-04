@@ -21,7 +21,7 @@ The server listens on private HTTP. A reverse proxy must provide the stable publ
 Prerequisites: Linux with systemd, Go, OpenSSL, a public DNS name, and an HTTPS reverse proxy configuration ready for that name.
 
 ```bash
-git clone https://github.com/andrometiq/sshgate.git
+git clone https://github.com/andrometiq/sshgate.git SSHGate
 cd SSHGate/src/signer-server
 sudo env \
   SIGNER_SERVER_RP_ID=signer.example.com \

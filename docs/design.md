@@ -202,8 +202,11 @@ command. Inside the jail the command has:
   are hidden behind empty covers where the jail can place one;
 - a private 64 MiB `/dev/shm` as its only writable space (`TMPDIR` points
   there), discarded at exit;
-- no capabilities, `no_new_privs`, Landlock, and a seccomp filter that rules on
-  every syscall (unknown syscalls get `ENOSYS`).
+- no capabilities (when SSHGate runs as root, the read keeps only
+  `CAP_DAC_READ_SEARCH`, inside its own user namespace, so root can still read
+  files across permission bits; `open_by_handle_at` is denied), `no_new_privs`,
+  Landlock, and a seccomp filter that rules on every syscall (unknown syscalls
+  get `ENOSYS`).
 
 The jail checks the state it built before the command starts and refuses the
 read if any check fails. A jailed read cannot change host files or file
@@ -226,8 +229,11 @@ from a fixed path, with allowlisted flags and a closed environment); signed
 writes; and the admin verbs (`SSHGATE_REVOKE`, `SSHGATE_UPDATE`,
 `SSHGATE_XFER_*`). A jail problem never blocks a signed write or an admin verb.
 
-For a jailed read the gate returns the command's real exit code or signal, also
-when the read was cancelled or the client went away; the audit record keeps
+For a jailed read the gate returns the command's real exit code or signal when
+the worker's status is known, also when the read was cancelled or the client went
+away. If the status is unavailable (for example the read was cancelled before the
+jail reported it), the gate returns 143 on cancellation and otherwise the jail
+shim's status. The audit record keeps
 process status, output delivery and cleanup outcome as separate fields. The
 accepted residual risks of the jail are listed in
 [THREAT-MODEL.md](THREAT-MODEL.md) §"The kernel read jail".

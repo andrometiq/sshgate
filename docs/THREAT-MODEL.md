@@ -206,6 +206,12 @@ item 1; others are outside what a read jail can promise.
   server behind it (a FUSE daemon, an NFS server) sees the read and may act on
   some requests that the read-only flags do not stop. Phase 1 does not record this
   gap in the audit log.
+- **Something outside the read can expose a hidden mount while it runs.** The
+  covers are placed when the read starts. If another process — another user,
+  root, an approved write, or the same account used outside SSHGate — renames a
+  directory out from under a cover while the read runs, the mount below it
+  becomes reachable from the read. The agent's own unsigned reads cannot do this
+  (they are jailed read-only).
 - **Reading a named pipe consumes its data.** A jailed read cannot write into an
   existing host FIFO, but it can open one it is allowed to read and drain the data
   another process wrote into it. That read is destructive: the intended reader
@@ -214,9 +220,13 @@ item 1; others are outside what a read jail can promise.
   locks) on files it can read. They block a writer that wants an exclusive lock
   for as long as the read runs, and reads have no gate-side time limit.
 - **Crashes, core dumps and kernel logs.** A crashing read can write lines to the
-  kernel log and journal. Core dumps to a file or pipe handler are suppressed, but
-  on kernel 6.17 or newer a host whose `core_pattern` sends cores to a socket
-  handler receives the read's full memory dump outside the jail.
+  kernel log and journal. Core files are never written (the filesystem is
+  read-only). A pipe `core_pattern` handler (systemd-coredump, apport) is skipped
+  only when the read inherits a hard core limit of at least 1, which the jail
+  then lowers to 1; if the gate inherits a hard limit of 0, the kernel still runs
+  the pipe handler and it receives the read's memory dump outside the jail. On
+  kernel 6.17 or newer, a `core_pattern` that sends cores to a socket handler
+  also receives the dump.
 - **Process lifecycle.** Cleanup of a read's child processes is best effort with a
   five-second deadline. If the gate is killed, a read forks faster than cleanup
   can follow, or cleanup fails, jailed descendants can keep running. They stay
