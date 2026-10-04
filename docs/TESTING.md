@@ -692,9 +692,11 @@ and `TestDistGateHasNoMutationBuild` checks the committed one.
 
   `JAIL_BASELINE` is written only when every invocation and proof check passed,
   with a `.status` companion; the importer rejects plain verbose logs. The union
-  passes only if every registered set was red in at least one lane where its legs
-  ran, every manifest case completed (or is an accepted residual), and no
-  omission is left.
+  passes only if every registered leg has its expected outcome in every lane
+  where it is eligible, every protection is red at each ABI in at least one of
+  its sets, every manifest case completed (or is an accepted residual), and no
+  omission is left. A single lane's `NOT-RUN` lines are expected: some sets stay
+  green on purpose because another protection still blocks the effect.
 
 Notes on specific legs:
 
