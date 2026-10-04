@@ -8,13 +8,37 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 Dates are intentionally omitted where a release has not yet been tagged and
 published; entries are ordered newest-first by version.
 
-## [Unreleased]
+## [0.1.5]
 
-The V1 public-release polish. Focus: lead with the threat model, cut the
-daily-driver tap tax, close the remaining forced-command gap, and make the
-repo page trustworthy (CI + honest docs).
+The kernel read jail (phase 1 of #22), plus the V1 public-release polish: lead
+with the threat model, cut the daily-driver tap tax, close the remaining
+forced-command gap, and make the repo page trustworthy (CI + honest docs). This
+is a code line, not the v0.2 release: v0.2 is cut only when its release gates
+pass (see `docs/ROADMAP.md`).
 
 ### Added
+
+- **Kernel read jail (`ro-v1`)** — on a host with unprivileged user namespaces
+  and Landlock, the gate runs every command the classifier calls a read inside
+  a jail: its own user, mount and IPC namespaces, a read-only view of the host
+  with throwaway scratch space, Landlock, and a seccomp filter that rules on
+  every syscall. A read there cannot write files or file metadata on the host,
+  reach a local daemon over a Unix socket, or signal or trace other processes.
+  The jail checks itself before the command runs and refuses the read if any
+  check fails; it never falls back to running the read unconfined on a host
+  that supports it. Reads keep TCP/UDP network access. Signed writes and the
+  admin verbs run exactly as before. `gate doctor` reports whether a host gets
+  the jail. A host without Landlock (or without unprivileged user namespaces)
+  runs reads unconfined, as before; pin `jail-floor` to `full` in the gate dir
+  to refuse reads there instead. Residual gaps are listed in
+  `docs/THREAT-MODEL.md`.
+- **Exact read exit status** — a jailed read returns the command's real exit
+  code or signal, even when it was cancelled or the client went away, and the
+  audit record keeps process status and output delivery apart.
+- **Jail proof suite** — `make test-jail` runs the jail's acceptance matrix, and
+  `make test-jail-mutate` proves each of the jail's 195 protections is load-
+  bearing by removing it and requiring a named test to catch the change.
+- **Build plan** — `docs/BUILD-PLAN.md` defines the work that comes next.
 
 - **`ping` tool** — a read-class single-server reachability probe (a
   short-timeout `SSHGATE_OK` check against one named server). No approval, no

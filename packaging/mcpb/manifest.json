@@ -2,7 +2,7 @@
   "manifest_version": "0.3",
   "name": "sshgate",
   "display_name": "SSHGate",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Agent SSH to your Linux servers: reads run free, writes need a human Telegram tap.",
   "long_description": "SSHGate is a security gate for AI-agent SSH access. This bundle installs ONLY the MCP client half (sshgate-mcp). It is not a complete install on its own: writes require the local SSHGate signer daemon (which holds the signing key under a dedicated Unix user and asks for a Telegram approval), and every target server must first be provisioned with the SSHGate gate binary + a forced-command SSH key line. Do the one-time signer + per-server gate setup from INSTALL.md before expecting writes to work; reads work as soon as at least one server is registered. The security boundary is the Ed25519 signature checked by the on-host gate under an OpenSSH forced command — the read/write classifier only routes.",
   "author": {

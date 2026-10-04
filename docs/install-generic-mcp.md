@@ -27,13 +27,13 @@ make install-local     # puts sshgate-mcp (+ sshgate, sshgate-signer-telegram) o
 make sure that is on your `PATH`. Confirm:
 
 ```sh
-sshgate-mcp --version   # e.g. sshgate-mcp v0.1.4
+sshgate-mcp --version   # e.g. sshgate-mcp v0.1.5
 ```
 
 Once a release is tagged you can instead `go install` a pinned version directly:
 
 ```sh
-go install github.com/karthikeyan5/sshgate/src/mcp/cmd/sshgate-mcp@v0.1.4
+go install github.com/karthikeyan5/sshgate/src/mcp/cmd/sshgate-mcp@v0.1.5
 ```
 
 > Note: a plain `go install` applies no build flags, so a binary installed this

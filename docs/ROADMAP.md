@@ -16,7 +16,7 @@ For the security model these items extend, see [design.md](design.md) and
 
 ## Release status & versioning
 
-**SSHGate is pre-1.0 on purpose.** The current code line is **v0.1.4**. Version
+**SSHGate is pre-1.0 on purpose.** The current code line is **v0.1.5**. Version
 `1.0` is deliberately reserved for the point where SSHGate is a fully stable,
 productized tool that anyone can drop into production and rely on continuously —
 the bar is "as unremarkable to run in production as the OS itself," not "it works
