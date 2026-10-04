@@ -44,9 +44,9 @@ posture ("the classifier only routes; it is not a proof").
 
 **#22 status:** the kernel-jail core and its wiring into the gate's read paths
 have landed, unreleased. On hosts with unprivileged user namespaces or Landlock,
-reads now run in a kernel jail (network side effects not yet contained; other
-hosts stay classifier-only). The owner has approved the reframe: the jail is the
-read-only wall and replaces the argv-exec read path; the doc rewrite follows.
+unsigned reads now run in a kernel jail with no network (TCP/UDP sockets denied)
+until the pin's network permission lands; other hosts stay classifier-only. The
+owner has approved the reframe: the jail is the read-only wall and replaces the argv-exec read path; the doc rewrite follows.
 
 **Scope ruling (owner, 2026-07-11, from the feature-table review):** v0.2 keeps its
 declared scope — the shipped baseline, the ordered v0.2 queue, and #22 — and is **not

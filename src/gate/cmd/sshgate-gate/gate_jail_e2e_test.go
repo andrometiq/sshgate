@@ -4,12 +4,17 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"errors"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/karthikeyan5/sshgate/src/classify"
 	"github.com/karthikeyan5/sshgate/src/gate/confine"
@@ -84,5 +89,72 @@ func TestGateBinaryJailedRead(t *testing.T) {
 	recs := auditRecords(t, dir)
 	if len(recs) != 1 || recs[0]["classification"] != "read" || recs[0]["approval_status"] != "unsigned" || recs[0]["rung"] != rung.String() {
 		t.Errorf("audit = %v, want one unsigned read at rung %s", recs, rung)
+	}
+
+	// A test-owned cat on PATH lets the existing syscall probe exercise a
+	// classifier-approved read through the production forced-command path.
+	probe := filepath.Join(dir, "cat")
+	build = exec.Command("go", "build", "-trimpath", "-o", probe, "../../confine/testdata/probe")
+	build.Env = append(os.Environ(), "CGO_ENABLED=0")
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build INET probe: %v\n%s", err, out)
+	}
+	for _, network := range []string{"tcp4", "tcp6"} {
+		t.Run(network, func(t *testing.T) {
+			address, operation := "127.0.0.1:0", "dial-inet"
+			if network == "tcp6" {
+				address, operation = "[::1]:0", "dial-inet6"
+			}
+			listener, err := net.Listen(network, address)
+			if err != nil {
+				if network == "tcp6" {
+					t.Skipf("IPv6 loopback unavailable: %v", err)
+				}
+				t.Fatal(err)
+			}
+			defer listener.Close()
+			tcpListener := listener.(*net.TCPListener)
+			port := strconv.Itoa(tcpListener.Addr().(*net.TCPAddr).Port)
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			control, err := exec.CommandContext(ctx, probe, operation, port).CombinedOutput()
+			if err != nil || string(control) != "socket=ok\nconnect=ok\n" {
+				t.Fatalf("unjailed connect: %v, output=%q", err, control)
+			}
+			if err := tcpListener.SetDeadline(time.Now().Add(time.Second)); err != nil {
+				t.Fatal(err)
+			}
+			connection, err := listener.Accept()
+			if err != nil {
+				t.Fatalf("accept unjailed control: %v", err)
+			}
+			connection.Close()
+
+			command := "cat " + operation + " " + port
+			if kind := classify.Classify(command); kind != classify.KindRead {
+				t.Fatalf("precondition: INET command classified %v", kind)
+			}
+			gate := exec.CommandContext(ctx, bin)
+			gate.Env = append(os.Environ(), "PATH="+dir+":"+os.Getenv("PATH"), "SSH_ORIGINAL_COMMAND="+command)
+			var stdout, stderr bytes.Buffer
+			gate.Stdout, gate.Stderr = &stdout, &stderr
+			err = gate.Run()
+			var exitError *exec.ExitError
+			if !errors.As(err, &exitError) || exitError.ExitCode() != 1 || stdout.String() != "socket=1\n" {
+				t.Errorf("jailed connect: %v, stdout=%q stderr=%q; want socket EPERM and exit 1", err, stdout.String(), stderr.String())
+			}
+			if err := tcpListener.SetDeadline(time.Now().Add(100 * time.Millisecond)); err != nil {
+				t.Fatal(err)
+			}
+			connection, err = listener.Accept()
+			if err == nil {
+				connection.Close()
+				t.Fatal("listener accepted a jailed connection")
+			}
+			var networkError net.Error
+			if !errors.As(err, &networkError) || !networkError.Timeout() {
+				t.Fatalf("accept jailed connection: %v; want timeout", err)
+			}
+		})
 	}
 }

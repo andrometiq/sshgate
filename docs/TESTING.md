@@ -38,6 +38,13 @@ go test -race ./src/gate/confine/testdata/probe
 go test -tags=jail_e2e ./src/gate/confine -run '^TestJailMatrixP15/(native|abi1)/L-IOURING$' -count=20
 ```
 
+`TestGateBinaryJailedRead` also checks that unsigned reads in the jail have no
+network (TCP/UDP sockets denied) until the pin's network permission lands. The
+real gate binary runs the existing INET probe against IPv4 and, when available,
+IPv6 loopback listeners: socket creation reports EPERM and neither listener
+accepts a connection. Unjailed controls connect to the same listeners. The
+filter's deny/grant legs remain registered under `P-SC-NET`.
+
 Host-PID lifecycle cleanup is best effort, independent of confinement. The shim
 and gate have one reaping owner each, use pidfds to kill children, and retry
 failed enumeration for up to five seconds. Hosts without procfs `children`

@@ -116,11 +116,9 @@ runs without approval — which is why the classifier is discussed honestly belo
   inside a kernel jail. There it cannot write any file or file metadata outside
   its own throwaway scratch space (two narrow exceptions are listed below), cannot connect to a local daemon over a Unix
   socket, and cannot signal or trace other processes (in the Landlock-only jail,
-  blocking signals needs Landlock ABI 6 or newer). What it does **not** cover
-  yet:
-  - **Network side effects are not contained.** The jail still allows internet
-    sockets, so a misjudged read can still send data or trigger a remote action
-    over the network, including against daemons listening on localhost TCP ports.
+  blocking signals needs Landlock ABI 6 or newer). Unsigned reads in the jail have
+  no network (TCP/UDP sockets denied), including localhost, until the pin's network
+  permission lands. What it does **not** cover yet:
   - **Two narrow write paths remain on some hosts.** In the full jail on a host
     without Landlock, a read can still write into a named pipe (FIFO) that
     already exists on the host, reaching whatever process reads it; with root

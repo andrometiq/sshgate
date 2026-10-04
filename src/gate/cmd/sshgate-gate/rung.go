@@ -62,8 +62,8 @@ func confineSpecFor(rep confine.Report, floor confine.Rung) (*confine.Spec, stri
 	}
 	switch rep.Rung {
 	case confine.Rung1Full:
-		// Inet stays allowed in this phase; the classifier still stands in front.
-		return &confine.Spec{Profile: confine.ProfileROv1, Net: true}, ""
+		// Unsigned reads have no network until P2.1 reads the pin.
+		return &confine.Spec{Profile: confine.ProfileROv1, Net: false}, ""
 	case confine.Rung3Unconfined:
 		return nil, ""
 	default:
