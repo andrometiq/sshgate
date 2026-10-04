@@ -6,10 +6,8 @@ import (
 	"golang.org/x/sys/unix"
 	"os"
 	"os/exec"
-	"os/signal"
 	"runtime"
 	"strconv"
-	"syscall"
 	"time"
 	"unsafe"
 )
@@ -88,15 +86,6 @@ func hostPIDProbe(op string, args []string) bool {
 		defer unix.Close(fd)
 		_, _, e := unix.Syscall(448, uintptr(fd), 0, 0)
 		report("mrelease", errnoOrNil(e))
-	case "async-victim":
-		signals := make(chan os.Signal, 1)
-		signal.Notify(signals, syscall.SIGIO)
-		fmt.Println("READY")
-		select {
-		case <-signals:
-			fmt.Println("SIGIO")
-		case <-time.After(10 * time.Second):
-		}
 	case "async-owner":
 		pid := number(args[0])
 		var fds [2]int
@@ -219,7 +208,11 @@ func hostPIDProbe(op string, args []string) bool {
 		if err != nil {
 			panic(err)
 		}
-		fmt.Printf("session=%d:%d:%d\n", os.Getpid(), sid, unix.Getpgrp())
+		pid := os.Getpid()
+		if len(args) > 0 && args[0] != "0" {
+			pid = int(number(args[0]))
+		}
+		fmt.Printf("session=%d:%d:%d\n", pid, sid, unix.Getpgrp())
 	default:
 		return false
 	}

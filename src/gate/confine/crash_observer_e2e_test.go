@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -105,5 +106,86 @@ func TestPhase1CrashWrapper(t *testing.T) {
 	output, err := command.CombinedOutput()
 	if err != nil || !strings.Contains(string(output), "PASS") {
 		t.Fatalf("wrapped child: %v: %s", err, output)
+	}
+}
+
+func TestM2CoreRecordWindow(t *testing.T) {
+	good := "{\"pid\":42,\"signal\":11,\"bytes\":123}\n"
+	sentinel := "{\"pid\":43,\"signal\":11,\"bytes\":123}\n"
+	for _, row := range []struct {
+		name, data    string
+		found, failed bool
+	}{
+		{"present", good + sentinel, true, false},
+		{"absent", sentinel, false, false},
+		{"empty", "", false, true},
+		{"target failure", "{\"pid\":42,\"signal\":11,\"bytes\":1,\"error\":\"read failed\"}\n" + sentinel, false, true},
+		{"partial", good + strings.TrimSuffix(sentinel, "\n"), false, true},
+		{"missing sentinel", good, false, true},
+		{"wrong target signal", strings.Replace(good, "11", "9", 1) + sentinel, false, true},
+		{"duplicate", good + good + sentinel, false, true},
+		{"malformed", "garbage\n" + sentinel, false, true},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			records, err := m2CoreRecords([]byte(row.data), 42, 43)
+			if (err != nil) != row.failed || (len(records) > 0) != row.found {
+				t.Fatalf("records=%v err=%v", records, err)
+			}
+		})
+	}
+}
+
+func TestM2CoreFileWindow(t *testing.T) {
+	directory := t.TempDir()
+	observer := &m2CoreObserver{directory: directory, pattern: "core.%P.%p"}
+	observer.Start(t)
+	mark := observer.Mark()
+	if observer.Since(mark).Conclusive {
+		t.Fatal("unsealed window accepted")
+	}
+	observer.target = 42
+	observer.output = "pid=2\nhostpid=42\n"
+	if err := observer.Seal(ProducerSync{Complete: true, Kind: "worker-reaped"}); err != nil {
+		t.Fatal(err)
+	}
+	result := observer.Since(mark)
+	if !result.Conclusive || len(result.Records) != 0 {
+		t.Fatalf("empty window: %+v", result)
+	}
+	header := make([]byte, 18)
+	copy(header, []byte{0x7f, 'E', 'L', 'F'})
+	header[16] = 4
+	if err := os.WriteFile(filepath.Join(directory, "core.42.2"), header, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if len(observer.Since(mark).Records) != 0 {
+		t.Fatal("sealed snapshot changed")
+	}
+	mark = observer.Mark()
+	observer.target = 42
+	if err := observer.Seal(ProducerSync{Complete: true, Kind: "worker-reaped"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(observer.Since(mark).Records) != 1 {
+		t.Fatal("core not recorded")
+	}
+	if err := observer.Stop(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestM2CrashControlWaitStatus(t *testing.T) {
+	command := exec.Command("/bin/sh", "-c", "kill -TERM $$")
+	if err := command.Run(); err == nil {
+		t.Fatal("signal control unexpectedly succeeded")
+	}
+	if err := m2CrashControlStatus(command.ProcessState, syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	if err := m2CrashControlStatus(command.ProcessState, syscall.SIGSEGV); err == nil {
+		t.Fatal("accepted wrong signal")
+	}
+	if err := m2CrashControlStatus(nil, syscall.SIGTERM); err == nil {
+		t.Fatal("accepted unavailable status")
 	}
 }

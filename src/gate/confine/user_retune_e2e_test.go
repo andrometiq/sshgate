@@ -22,14 +22,16 @@ import (
 // The USER operations below are only reachable in a child with a newly-created,
 // dedicated uid. Namespace isolation alone is not a USER-operation boundary.
 type disposableIdentity struct {
-	UID    uint32
-	Parent int
+	UID           uint32
+	Parent        int
+	ControlPassed bool
 }
 
 func legUserScheduler(t *testing.T, abi int) {
 	runDisposableIdentity(t, "L-SCHED-USER", []string{"retuned"}, func(phase, probe string, uid uint32) {
-		victim := startSleeper(t)
-		before := readScheduler(t, victim.Process.Pid)
+		victim := newUserRetuneVictim(t)
+
+		before := readScheduler(t, victim.command.Process.Pid)
 		commands := []string{probe + " prio-user unused", probe + " ioprio-user unused"}
 		callers := []string{fmt.Sprintf("renice -n 19 -u %d", uid), fmt.Sprintf("ionice -c3 -u %d", uid)}
 		if phase == "control" {
@@ -39,38 +41,48 @@ func legUserScheduler(t *testing.T, abi int) {
 					t.Fatalf("SETUP: USER control %q: %v: %s", command, err, output)
 				}
 			}
-			after := readScheduler(t, victim.Process.Pid)
+			after := readScheduler(t, victim.command.Process.Pid)
 			if before.nice == after.nice || before.io == after.io {
 				t.Fatal("SETUP: USER control did not retune victim")
 			}
 			return
 		}
+		p := newProof(t, "L-SCHED-USER")
+		p.Control("retune", ControlResult{Valid: true, Detail: "root-owned identity certifies successful separate USER control"})
+		p.ObserveWith("victim", victim)
 		changed := false
+		var results []JailedResult
 		for _, spec := range hostPIDSpecs(abi) {
 			for i, command := range commands {
 				field := []string{"prio-user", "ioprio-user"}[i]
-				output := requireProbeOutput(t, runP12(t, spec, command, nil), field)
-				if output != field+"=1\n" {
-					t.Fatalf("SETUP: USER retune expected EPERM: %s", output)
-				}
+				results = append(results, runJailed(t, p, spec, RunPlan{Mode: Execute, Ops: []ProofOp{{Name: field, Command: command, Outcomes: []OpOutcome{{Stdout: field + "=1\n", Exit: 1}}}}}))
 			}
-			for _, command := range callers {
-				result := runP12(t, spec, command, nil)
-				if result.setupErr != nil || result.exit != 1 || !strings.Contains(strings.ToLower(result.stderr), "operation not permitted") {
-					t.Fatalf("SETUP: USER caller expected EPERM: %+v", result)
-				}
+			for i, command := range callers {
+				expectedError := []string{fmt.Sprintf("renice: failed to set priority for %d (user ID): Operation not permitted\n", uid), "ionice: ioprio_set failed: Operation not permitted\n"}[i]
+				results = append(results, runJailed(t, p, spec, RunPlan{Mode: Execute, Ops: []ProofOp{{Name: "exec", Command: "LC_ALL=C " + command, Validate: func(stdout, stderr string, exit int) error {
+					if stdout != "" || exit != 1 || stderr != expectedError {
+						return fmt.Errorf("USER caller expected EPERM: stdout=%q stderr=%q exit=%d", stdout, stderr, exit)
+					}
+					return nil
+				}}}}))
 			}
-			after := readScheduler(t, victim.Process.Pid)
+			after := readScheduler(t, victim.command.Process.Pid)
 			changed = changed || before.nice != after.nice || before.io != after.io
 		}
-
+		p.Jailed("retune", results...)
+		mutationSetup(t, victim.Seal(ProducerSync{Complete: true, Kind: "framed-op-ended"}))
+		p.Observed("retune", Observation{Conclusive: true, Sealed: true, Valid: true, Detail: "live victim scheduler queried after every complete retune batch"})
 		mutationEffect(t, "L-SCHED-USER", "retuned", changed)
+		p.Finish()
 	})
 }
 
 func runDisposableIdentity(t *testing.T, legName string, markerCandidates []string, child func(phase, probe string, uid uint32)) {
 	t.Helper()
 	if phase := os.Getenv("SSHGATE_TEST_USER_RETUNE_PHASE"); phase != "" {
+		if phase != "control" && phase != "jailed" {
+			t.Fatal("SETUP: unknown disposable child phase")
+		}
 		uid, err := strconv.ParseUint(os.Getenv("SSHGATE_TEST_USER_RETUNE_UID"), 10, 32)
 		mutationSetup(t, err)
 		if uid == 0 || uint32(os.Getuid()) != uint32(uid) {
@@ -90,7 +102,7 @@ func runDisposableIdentity(t *testing.T, legName string, markerCandidates []stri
 		}
 		var identity disposableIdentity
 		mutationSetup(t, json.NewDecoder(identityFile).Decode(&identity))
-		if identity.UID != uint32(uid) || identity.Parent != os.Getppid() {
+		if identity.UID != uint32(uid) || identity.Parent != os.Getppid() || phase == "jailed" && !identity.ControlPassed {
 			t.Fatal("SETUP: fixture identity does not name this child")
 		}
 		probe := os.Getenv("SSHGATE_TEST_USER_RETUNE_PROBE")
@@ -153,6 +165,9 @@ func runDisposableIdentity(t *testing.T, legName string, markerCandidates []stri
 			if err != nil {
 				t.Fatalf("SETUP: disposable USER control: %v: %s", err, output)
 			}
+			identityJSON, err := json.Marshal(disposableIdentity{UID: uid, Parent: os.Getpid(), ControlPassed: true})
+			mutationSetup(t, err)
+			mutationSetup(t, os.WriteFile(filepath.Join(directory, "identity"), identityJSON, 0444))
 			continue
 		}
 		convert := exec.Command("go", "tool", "test2json", "-p", "fixture")
@@ -160,10 +175,18 @@ func runDisposableIdentity(t *testing.T, legName string, markerCandidates []stri
 		stream, convertErr := convert.Output()
 		mutationSetup(t, convertErr)
 		leg := harness.Leg{Name: legName, Names: map[string]string{"native": t.Name(), "abi1": t.Name()}}
-		for _, marker := range markerCandidates {
-			if bytes.Contains(output, []byte("MUTATION-EFFECT "+legName+" "+marker)) {
-				leg.Markers = append(leg.Markers, "MUTATION-EFFECT "+marker)
+		proofLine, record, parseErr := parseDisposableProof(output, legName)
+		mutationSetup(t, parseErr)
+		for _, marker := range record.Markers {
+			kind, name, _ := strings.Cut(marker, ":")
+			allowed := false
+			for _, candidate := range markerCandidates {
+				allowed = allowed || kind == "EFFECT" && name == candidate
 			}
+			if !allowed {
+				t.Fatalf("SETUP: unexpected disposable child marker %q", marker)
+			}
+			leg.Markers = append(leg.Markers, "MUTATION-"+kind+" "+name)
 		}
 		if legName == "L-RL-NPROC" {
 			leg.Markers = nil
@@ -178,18 +201,39 @@ func runDisposableIdentity(t *testing.T, legName string, markerCandidates []stri
 		if err := harness.Judge(bytes.NewReader(stream), "", exitCodeOf(err), []harness.Leg{leg}, abi); err != nil {
 			t.Fatalf("SETUP: disposable USER fixture: %v: %s", err, output)
 		}
-		if legName == "L-RL-NPROC" {
-			// The child owns the complete proof under the disposable identity. The
-			// parent's own PASS remains conditional on fixture teardown succeeding.
-			for _, line := range strings.Split(string(output), "\n") {
-				if index := strings.Index(line, "PROOF-COMPLETE "+legName+" "); index >= 0 {
-					t.Log(line[index:])
-				}
-			}
-			continue
+		if record.ABI != abi {
+			t.Fatal("SETUP: wrong disposable child ABI")
 		}
-		for _, marker := range leg.Markers {
-			mutationEffect(t, legName, strings.TrimPrefix(marker, "MUTATION-EFFECT "), true)
+		found := false
+		for _, c := range legCases {
+			if c.Name == legName {
+				mutationSetup(t, harness.CheckProof(c, record, true, true))
+				found = true
+			}
+		}
+		if !found {
+			t.Fatal("SETUP: undeclared disposable child proof")
+		}
+		t.Log(proofLine)
+	}
+}
+
+func parseDisposableProof(output []byte, legName string) (string, harness.ProofRecord, error) {
+	var proofLine string
+	for _, line := range strings.Split(string(output), "\n") {
+		if index := strings.Index(line, "PROOF-"); index >= 0 {
+			if proofLine != "" {
+				return "", harness.ProofRecord{}, fmt.Errorf("duplicate disposable child proof")
+			}
+			proofLine = line[index:]
 		}
 	}
+	record, err := harness.ParseProof(proofLine)
+	if err != nil {
+		return "", record, err
+	}
+	if record.Outcome != "COMPLETE" || record.Leg != legName {
+		return "", record, fmt.Errorf("wrong disposable child proof")
+	}
+	return proofLine, record, nil
 }
