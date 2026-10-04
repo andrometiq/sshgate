@@ -140,12 +140,40 @@ func TestExecWithRedactionConfineLifecycle(t *testing.T) {
 
 func TestExecWithRedactionConfinedOutputCounts(t *testing.T) {
 	requireUserns(t)
-	opts := ExecOpts{Confine: &confine.Spec{Profile: confine.ProfileROv1, Net: true}, CaptureLimit: 4096, Rules: rules.Combined()}
+	// Unterminated tails written to the test's own stdout would swallow the
+	// "--- PASS" line that go test -json needs, so the client streams are files.
+	stdout, err := os.CreateTemp(t.TempDir(), "stdout")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stdout.Close()
+	stderr, err := os.CreateTemp(t.TempDir(), "stderr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stderr.Close()
+	sink, err := NewClientSink(context.Background(), stdout, stderr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts := ExecOpts{Confine: &confine.Spec{Profile: confine.ProfileROv1, Net: true}, CaptureLimit: 4096, Rules: rules.Combined(), ClientSink: sink}
 	result, err := ExecWithRedaction(context.Background(), "printf 'one\\ntwo\\nAKIA1234567890ABCDEF'; printf 'err-tail' >&2", opts)
+	sink.Finish()
+	if closeErr := sink.Close(); closeErr != nil {
+		t.Fatalf("client sink close: %v", closeErr)
+	}
 	if err != nil || result.ExitCode != 0 || result.CleanupError != "" {
 		t.Fatalf("normal confined read: %+v %v", result, err)
 	}
 	if !strings.HasPrefix(result.Stdout, "one\ntwo\n") || strings.Contains(result.Stdout, "AKIA1234567890ABCDEF") || len(result.Stdout) <= 8 || result.Stderr != "err-tail" || result.Lines != 2 || result.StdoutBytes != int64(len(result.Stdout)) || result.StderrBytes != 8 {
 		t.Fatalf("confined output/counts: %+v", result)
+	}
+	for _, stream := range []struct {
+		file *os.File
+		want string
+	}{{stdout, result.Stdout}, {stderr, result.Stderr}} {
+		if delivered, err := os.ReadFile(stream.file.Name()); err != nil || string(delivered) != stream.want {
+			t.Fatalf("client received %q, counted %q: %v", delivered, stream.want, err)
+		}
 	}
 }

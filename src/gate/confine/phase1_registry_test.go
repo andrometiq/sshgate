@@ -3,7 +3,6 @@ package confine
 import (
 	"github.com/karthikeyan5/sshgate/src/gate/confine/jailmut/harness"
 	"os"
-	"strings"
 )
 
 func phase1Leg(name string, markers ...string) harness.Leg {
@@ -53,23 +52,17 @@ func phase1Registry() []prot {
 		partial.Markers = []string{"MUTATION-EFFECT tty-exclusive"}
 	}
 	add("P-NODEV", "remountRootReadOnly NODEV", one("P-NODEV", phase1Leg("L-DEV-OPEN", "MUTATION-ABORT selfcheck")), harness.MutationSet{IDs: []string{"P-NODEV", "P-SELFCHECK-MOUNTS"}, Legs: []harness.Leg{opened, partial}}, harness.MutationSet{IDs: []string{"P-NODEV", "P-SELFCHECK-MOUNTS", "P-LL-IOCTL-DEV"}, Legs: []harness.Leg{opened, tty}})
-	pattern, err := os.ReadFile("/proc/sys/kernel/core_pattern")
-	if err != nil {
-		panic(err)
-	}
-	corePattern := strings.TrimSpace(string(pattern))
 	for i := range result {
 		if result[i].ID == "P-RL-CORE" {
-			normal := p15Leg("L-CRASH-NO-HELPER")
-			normal.CIOnly = true
-			if strings.HasPrefix(corePattern, "|") {
+			// Root CI installs the owned pipe collector over any host pattern, which
+			// records the crash; non-root CI runs the provisioned file pattern, where
+			// the read-only jail alone still stops the core file.
+			normal := crashLeg("L-CRASH-NO-HELPER")
+			if os.Geteuid() == 0 {
 				normal.Markers = []string{"MUTATION-EFFECT helper-record"}
 			}
 			result[i].MutationSets[0].Legs = append(result[i].MutationSets[0].Legs, normal)
-			if !strings.HasPrefix(corePattern, "@") {
-				normal.Markers = []string{"MUTATION-EFFECT helper-record"}
-				result[i].MutationSets = append(result[i].MutationSets, harness.MutationSet{IDs: []string{"P-RL-CORE", "P-RO", "P-SELFCHECK-MOUNTS", "P-LL-FS"}, Legs: []harness.Leg{normal}})
-			}
+			result[i].MutationSets = append(result[i].MutationSets, harness.MutationSet{IDs: []string{"P-RL-CORE", "P-RO", "P-SELFCHECK-MOUNTS", "P-LL-FS"}, Legs: []harness.Leg{crashLeg("L-CRASH-NO-HELPER", "MUTATION-EFFECT helper-record")}})
 		}
 		if result[i].ID == "P-LL-IOCTL-DEV" {
 			result[i].MutationSets[0].Legs = append(result[i].MutationSets[0].Legs, phase1Leg("L-TTY-STATE"))

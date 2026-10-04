@@ -605,7 +605,7 @@ func coverProofRun(t *testing.T, p *proof, spec Spec, command string, afterReady
 	abort := spec.Strict && ((jailmut.On("P-COVERS") && !jailmut.On("P-SELFCHECK-MOUNTS")) ||
 		(p.caseDef.Name == "L-COVER-CWD" && jailmut.On("P-CWD") && !jailmut.On("P-SELFCHECK-MOUNTS")) ||
 		(p.caseDef.Name == "L-COVER-STACKED" && (jailmut.On("P-REACH") || jailmut.On("REACH-R3")) && !jailmut.On("P-SELFCHECK-REACH")) ||
-		(p.caseDef.Name == "L-SELFCHECK-MOUNTS" && jailmut.On("P-PRIVATE") && !jailmut.On("P-SELFCHECK-MOUNTS")))
+		(p.caseDef.Name == "L-SELFCHECK-MOUNTS" && (jailmut.On("P-PRIVATE") || jailmut.On("P-RO") || jailmut.On("P-NOSUID")) && !jailmut.On("P-SELFCHECK-MOUNTS")))
 	if abort {
 		return runJailed(t, p, spec, RunPlan{Mode: SetupAbort, Command: command, Stage: "selfcheck", Errno: 0}), Facts{}
 	}

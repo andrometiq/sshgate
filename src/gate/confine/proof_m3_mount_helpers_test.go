@@ -15,17 +15,32 @@ import (
 )
 
 func mountProbePlan(command string, values []string, fields ...string) RunPlan {
+	return mountProbePlanWith(command, values, nil, fields...)
+}
+
+// mountProbePlanWith also accepts precondition reports (an open or a flag read the
+// probe needs before its operations); each must be reported exactly once as ok.
+func mountProbePlanWith(command string, values, preconditions []string, fields ...string) RunPlan {
 	return RunPlan{Mode: Execute, Ops: []ProofOp{{Name: "probe", Command: command, Validate: func(stdout, stderr string, exit int) error {
 		result := jailResult{stdout: stdout, stderr: stderr, exit: exit}
-		if err := validateProbeOutput(result, fields, probeExitMixed); err != nil {
+		if err := validateProbeOutput(result, append(append([]string(nil), preconditions...), fields...), probeExitMixed); err != nil {
 			return err
 		}
-		allowed := map[string]bool{}
+		allowed, isPrecondition := map[string]bool{}, map[string]bool{}
 		for _, field := range fields {
 			allowed[field] = true
 		}
+		for _, field := range preconditions {
+			isPrecondition[field] = true
+		}
 		for _, line := range strings.Split(strings.TrimSuffix(stdout, "\n"), "\n") {
 			field, value, _ := strings.Cut(line, "=")
+			if isPrecondition[field] {
+				if value != "ok" {
+					return fmt.Errorf("failed precondition %q", line)
+				}
+				continue
+			}
 			validValue := false
 			for _, want := range values {
 				validValue = validValue || value == want
@@ -217,6 +232,23 @@ func TestM3MountProbeOutcomes(t *testing.T) {
 	}{{"write=30\n", 1, true}, {"write=5\n", 1, false}, {"write=30\nextra=30\n", 1, false}, {"write=30\n", 0, false}, {"", 1, false}} {
 		if err := validate(test.report, "", test.exit); (err == nil) != test.valid {
 			t.Fatalf("report=%q exit=%d valid=%t: %v", test.report, test.exit, test.valid, err)
+		}
+	}
+	validate = mountProbePlanWith("probe", []string{"1"}, []string{"open", "getflags"}, "chmod", "setflags").Ops[0].Validate
+	for _, test := range []struct {
+		report string
+		exit   int
+		valid  bool
+	}{
+		{"open=ok\nchmod=1\ngetflags=ok\nsetflags=1\n", 3, true},
+		{"open=ok\nchmod=1\ngetflags=1\n", 1, false},
+		{"open=1\n", 1, false},
+		{"chmod=1\nsetflags=1\n", 1, false},
+		{"open=ok\nopen=ok\nchmod=1\ngetflags=ok\nsetflags=1\n", 3, false},
+		{"open=ok\nchmod=1\ngetflags=ok\nsetflags=1\nextra=1\n", 3, false},
+	} {
+		if err := validate(test.report, "", test.exit); (err == nil) != test.valid {
+			t.Fatalf("preconditions report=%q exit=%d valid=%t: %v", test.report, test.exit, test.valid, err)
 		}
 	}
 }

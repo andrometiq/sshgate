@@ -374,14 +374,21 @@ type m2LifecycleObserver struct {
 func (o *m2LifecycleObserver) Start(*testing.T)   { o.pids = map[int]bool{} }
 func (o *m2LifecycleObserver) Mark() ObserverMark { o.sealed = false; return 0 }
 func (o *m2LifecycleObserver) Healthy() error     { return o.err }
+
+// capture walks every task: a multithreaded parent (the Go shim) lists each child
+// under the thread that forked it, not under its main thread.
 func (o *m2LifecycleObserver) capture(t *testing.T, pid int) {
-	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/task/%d/children", pid, pid))
+	tasks, err := os.ReadDir(fmt.Sprintf("/proc/%d/task", pid))
 	mutationSetup(t, err)
-	for _, field := range strings.Fields(string(data)) {
-		child, err := strconv.Atoi(field)
+	for _, task := range tasks {
+		data, err := os.ReadFile(fmt.Sprintf("/proc/%d/task/%s/children", pid, task.Name()))
 		mutationSetup(t, err)
-		o.pids[child] = true
-		o.capture(t, child)
+		for _, field := range strings.Fields(string(data)) {
+			child, err := strconv.Atoi(field)
+			mutationSetup(t, err)
+			o.pids[child] = true
+			o.capture(t, child)
+		}
 	}
 }
 func (o *m2LifecycleObserver) addReport(t *testing.T, report string) {

@@ -278,7 +278,8 @@ func bypassCorpus() []bypassRow {
 		{
 			name: "tree_bundled_output", tool: "tree",
 			build: func(t *testing.T, dir, target string) (string, string) {
-				return fmt.Sprintf("tree -no %s /etc", target), ""
+				// A test-owned directory: listing /etc exits 2 on hosts with unreadable subdirectories.
+				return fmt.Sprintf("tree -no %s %s", target, dir), ""
 			},
 		},
 		// --- MAJOR: curl -O (remote-name) writes basename(url) into the cwd. cwd is

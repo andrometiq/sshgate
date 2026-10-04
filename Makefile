@@ -179,6 +179,9 @@ test:
 # FAILS on any `--- SKIP`/`SKIP rung` as well as on any FAIL. -count=1: the go
 # test cache does not track host jail facts, so a cached replay proves nothing.
 # Each invocation owns its status file; a later pass cannot erase an earlier failure.
+# The confine run also includes the untagged unit-proof tests (filter and syscall
+# tables, spec/status protocol, catalogue units): the case manifest checked below
+# requires their PROOF lines in every lane.
 define jail-runner
 	tmp=$$(mktemp -d) || { echo "test-jail: mktemp failed" >&2; exit 1; }; \
 	[ -n "$$tmp" ] && [ -d "$$tmp" ] || { echo "test-jail: invalid mktemp directory" >&2; exit 1; }; \
@@ -194,13 +197,13 @@ define jail-runner
 		tee -a "$$log" < "$$invlog" || fail=1; \
 		cat "$$invjson" >> "$$json" || fail=1; \
 	}; \
-	run_jail go test -json -race -count=1 -tags=jail_e2e ./src/gate/confine/ -v -run 'TestJailMatrix|TestPhase1Tables|TestDetectUsernsCountUsedUpDenies'; \
+	run_jail go test -json -race -count=1 -tags=jail_e2e ./src/gate/confine/ -v -run 'TestJailMatrix|TestPhase1Tables|TestDetectUsernsCountUsedUpDenies|TestFilterTables|TestHostPIDFilters|TestSyscallRowDecisions|TestStrictSpecDecode|TestStatusMutation|TestCatalogueControls|TestCatalogueRouting'; \
 	run_jail go test -json -race -count=1 -v -run 'TestExecWithRedactionConfine' ./src/gate/; \
 	run_jail go test -json -race -count=1 -tags=jail_e2e -v -run 'TestRunReadJailedRealEffect|TestGateBinaryJailedRead|TestRunReadJailSetupFailureDenies' ./src/gate/cmd/sshgate-gate/; \
 	grep -qE '^FAIL' "$$log" && fail=1; \
 	grep -qE -- '--- SKIP|SKIP rung|no tests to run' "$$log" && fail=1; \
 	if [ "$${SSHGATE_JAIL_CI:-}" = 1 ]; then grep -q 'CONTROL-SKIPPED' "$$log" && fail=1; fi; \
-	for t in TestPhase1Tables TestJailMatrix TestJailMatrixP12 TestJailMatrixPhase1 TestJailMatrixP14 TestJailMatrixP15 TestJailMatrixP15c TestJailMatrixCovers TestJailMatrixCredentials TestJailMatrixCatalogue TestJailMatrixWrite TestJailMatrixSyscallSweep TestDetectUsernsCountUsedUpDenies TestExecWithRedactionConfinedNamespace TestExecWithRedactionConfineLifecycle TestExecWithRedactionConfinedEROFS TestExecWithRedactionConfineFailClosed TestExecWithRedactionConfineClosesInheritedFDs TestRunReadJailedRealEffect TestGateBinaryJailedRead TestRunReadJailSetupFailureDenies; do \
+	for t in TestPhase1Tables TestFilterTables TestHostPIDFilters TestSyscallRowDecisions TestStrictSpecDecode TestStatusMutation TestCatalogueControls TestCatalogueRouting TestJailMatrix TestJailMatrixP12 TestJailMatrixPhase1 TestJailMatrixP14 TestJailMatrixP15 TestJailMatrixP15c TestJailMatrixCovers TestJailMatrixCredentials TestJailMatrixCatalogue TestJailMatrixWrite TestJailMatrixSyscallSweep TestDetectUsernsCountUsedUpDenies TestExecWithRedactionConfinedNamespace TestExecWithRedactionConfineLifecycle TestExecWithRedactionConfinedEROFS TestExecWithRedactionConfineFailClosed TestExecWithRedactionConfineClosesInheritedFDs TestRunReadJailedRealEffect TestGateBinaryJailedRead TestRunReadJailSetupFailureDenies; do \
 		grep -qE -- "^--- PASS: $$t( |$$)" "$$log" || { echo "test-jail: no PASS line for $$t"; fail=1; }; \
 	done; \
 	printf '%s\n' "$$fail" > "$$json.status"; \

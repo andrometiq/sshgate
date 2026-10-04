@@ -11,9 +11,12 @@ func proofCasesM3() []harness.Case {
 	}
 	add("U-SpecRejectsUnknownProfile", "Unit", "", []string{"control:decision"})
 	add("U-StatusProtocol", "Unit", "", []string{"control:decision"}, "EFFECT:status")
-	for _, stage := range []string{"nsverify", "spec", "cmdread", "mounts", "nnp", "caps", "rlimits", "landlock", "seccomp", "tsync", "fds", "cwd", "selfcheck", "session", "exec"} {
+	for _, stage := range []string{"nsverify", "spec", "cmdread", "mounts", "nnp", "caps", "rlimits", "landlock", "seccomp", "tsync", "fds", "cwd", "selfcheck", "session"} {
 		add("L-FAULT-"+stage, "Abort", SetupAbort, []string{"control:intact", "jailed:attempt"}, "EFFECT:reached-exec").Modes = []string{Execute}
 	}
+	// A removed exec guard cannot run the command (execve already failed); it only
+	// hides the failure behind the success report.
+	add("L-FAULT-exec", "Abort", SetupAbort, []string{"control:intact", "jailed:attempt"}, "EFFECT:reached-exec").Modes = []string{Execute, SilentExecFailure}
 	add("L-INJECT-ERRNO", "Abort", SetupAbort, []string{"control:intact", "jailed:attempt"}, "EFFECT:reached-exec").Modes = []string{Execute}
 	add("L-LL-REQUIRED", "Abort", SetupAbort, []string{"control:intact", "jailed:attempt"}, "ABORT:selfcheck").Modes = []string{Execute}
 	for _, namespace := range []string{"user", "mnt", "pid", "ipc"} {

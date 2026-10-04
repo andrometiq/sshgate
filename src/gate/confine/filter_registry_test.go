@@ -1,8 +1,6 @@
 package confine
 
 import (
-	"os"
-	"strings"
 	"testing"
 
 	"golang.org/x/sys/unix"
@@ -15,6 +13,19 @@ func p15Unit(test, name string) harness.Leg {
 }
 func p15Leg(name string, markers ...string) harness.Leg {
 	return harness.Leg{Name: name, Package: "./src/gate/confine", Names: map[string]string{"native": "TestJailMatrixP15/native/" + name, "abi1": "TestJailMatrixP15/abi1/" + name}, Markers: markers}
+}
+
+// crashLeg carries the crash case's lane flags and omissions from its case table.
+func crashLeg(name string, markers ...string) harness.Leg {
+	leg := p15Leg(name, markers...)
+	for _, c := range proofCasesM2() {
+		if c.Name == name {
+			leg.Root, leg.CIOnly = c.Root, c.CIOnly
+			leg.Omissions = append([]string(nil), c.Omissions...)
+			return leg
+		}
+	}
+	panic("crash leg missing from the M2 case table: " + name)
 }
 func p15Registry() []prot {
 	var result []prot
@@ -120,16 +131,9 @@ func p15Registry() []prot {
 				markers = append(markers, "MUTATION-EFFECT limit")
 			}
 			p.MutationSets[0].Legs = append(p.MutationSets[0].Legs, p15Leg("L-RLIMIT-CORE-LOCK", markers...))
-			crash := p15Leg("L-CRASH-LOWER-PIPE")
-			pattern, err := os.ReadFile("/proc/sys/kernel/core_pattern")
-			if err != nil {
-				panic(err)
-			}
-			if strings.HasPrefix(strings.TrimSpace(string(pattern)), "|") {
-				crash.Markers = []string{"MUTATION-EFFECT helper-record"}
-			}
-			crash.CIOnly = true
-			p.MutationSets[0].Legs = append(p.MutationSets[0].Legs, crash)
+			// Root CI replaces the host core_pattern with the test-owned pipe collector,
+			// so the expectation does not depend on the original pattern.
+			p.MutationSets[0].Legs = append(p.MutationSets[0].Legs, crashLeg("L-CRASH-LOWER-PIPE", "MUTATION-EFFECT helper-record"))
 		case "P-SC-SYNC":
 			p.MutationSets[0].Legs = append(p.MutationSets[0].Legs, p15Leg("L-SC-SYNC-ERRNO", "MUTATION-EFFECT errno"))
 		case "P-SC-SYNCFS":

@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"strings"
 	"testing"
@@ -32,9 +33,11 @@ func startM1Holder(t *testing.T, program string, arguments ...string) *m1Holder 
 	holder.output.ready = make(chan struct{})
 	holder.command.Stdout = &holder.output
 	holder.command.Stderr = &holder.diagnostic
-	var err error
-	holder.input, err = holder.command.StdinPipe()
+	// The test owns both pipe ends: Wait closes a StdinPipe writer itself, which
+	// races the release write's own Close once the fixture exits.
+	reader, writer, err := os.Pipe()
 	mutationSetup(t, err)
+	holder.command.Stdin, holder.input = reader, writer
 	go func() { holder.done <- holder.command.Run() }()
 	t.Cleanup(func() {
 		holder.cancel()
@@ -43,6 +46,7 @@ func startM1Holder(t *testing.T, program string, arguments ...string) *m1Holder 
 			holder.err = <-holder.done
 			holder.joined = true
 		}
+		reader.Close()
 	})
 	select {
 	case <-holder.output.ready:

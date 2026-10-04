@@ -140,11 +140,16 @@ func legMetadataMount(t *testing.T, p *proof, spec Spec, submount bool) (map[str
 	before := readMetadata(t, path)
 	control := mountControl(t, exec.Command(probe, "metadata-mount", path), 0)
 	operations := []string{"chmod", "chown", "setxattr", "removexattr", "utimensat", "setflags"}
-	var controlWant strings.Builder
+	// The probe reports its preconditions too: the open fd, and the flag read setflags needs.
+	preconditions := []string{"open", "getflags"}
+	controlWant := "open=ok\n"
 	for _, name := range operations {
-		fmt.Fprintf(&controlWant, "%s=ok\n", name)
+		if name == "setflags" {
+			controlWant += "getflags=ok\n"
+		}
+		controlWant += name + "=ok\n"
 	}
-	if string(control) != controlWant.String() {
+	if string(control) != controlWant {
 		t.Fatalf("SETUP: incomplete metadata control: %q", control)
 	}
 	for _, op := range operations {
@@ -170,7 +175,7 @@ func legMetadataMount(t *testing.T, p *proof, spec Spec, submount bool) (map[str
 			values = []string{"ok"}
 		}
 	}
-	result := runJailed(t, p, spec, mountProbePlan(probe+" metadata-mount "+path, values, operations...))
+	result := runJailed(t, p, spec, mountProbePlanWith(probe+" metadata-mount "+path, values, preconditions, operations...))
 	output := result.stdout
 	want := "1"
 	fullEffect := jailmut.On("P-SC-META") && jailmut.On("P-RO") && jailmut.On("P-SELFCHECK-MOUNTS")

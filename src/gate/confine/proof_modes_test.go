@@ -30,6 +30,31 @@ func TestProofSetupAbortRequiresExactEvidence(t *testing.T) {
 		})
 	}
 }
+func TestProofSilentExecFailureRequiresExactEvidence(t *testing.T) {
+	good := JailedResult{jailResult: jailResult{exit: ExitSetupFailed}, Worker: WorkerStatus{Known: true, Exited: true, Code: ExitSetupFailed}}
+	for _, tc := range []struct {
+		name   string
+		change func(*JailedResult)
+		valid  bool
+	}{
+		{"exact", func(*JailedResult) {}, true},
+		{"reported-failure", func(r *JailedResult) { r.setupErr = &SetupError{Stage: "exec", Errno: syscall.ENOENT} }, false},
+		{"command-output", func(r *JailedResult) { r.stdout = "COMMAND_RAN" }, false},
+		{"diagnostic", func(r *JailedResult) { r.stderr = "sh: not found\n" }, false},
+		{"command-exit", func(r *JailedResult) { r.Worker.Code = 0 }, false},
+		{"worker-signal", func(r *JailedResult) { r.Worker = WorkerStatus{Known: true, Signal: syscall.SIGKILL} }, false},
+		{"worker-unknown", func(r *JailedResult) { r.Worker = WorkerStatus{Unavailable: "no W record"} }, false},
+		{"shim-exit", func(r *JailedResult) { r.exit = 0 }, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			result := good
+			tc.change(&result)
+			if err := validateSilentExecFailure(result); (err == nil) != tc.valid {
+				t.Fatalf("valid=%t err=%v", tc.valid, err)
+			}
+		})
+	}
+}
 func TestProofCancellationUsesDeliveredSignalAndWorkerPrecedence(t *testing.T) {
 	for _, tc := range []struct {
 		name      string

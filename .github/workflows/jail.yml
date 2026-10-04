@@ -53,6 +53,14 @@ jobs:
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
           sudo sysctl -w kernel.unprivileged_userns_clone=1 || true
 
+      - name: Give the crash legs a file core pattern
+        run: |
+          # ubuntu-latest pipes cores to apport; the non-root crash legs need a
+          # filename-only pattern and a non-zero hard core limit to observe the core.
+          sudo systemctl stop apport.service || true
+          sudo sysctl -w kernel.core_pattern=core
+          test "$(ulimit -H -c)" != 0
+
       - name: Probe unprivileged userns + mount
         id: probe
         run: |

@@ -65,9 +65,8 @@ func completeRegistry() []prot {
 		for j := range protection.MutationSets {
 			set := &protection.MutationSets[j]
 			if set.Name() == "P-RO,P-SELFCHECK-MOUNTS,P-LL-FS" {
-				crash := p15Leg("L-CRASH-NO-HELPER")
-				crash.CIOnly = true
-				set.Legs = append(set.Legs, crash)
+				// Green: the jail's own core limit is intact in this set.
+				set.Legs = append(set.Legs, crashLeg("L-CRASH-NO-HELPER"))
 			}
 		}
 		if protection.ID == "P-SC-SYNC" {

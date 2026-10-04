@@ -144,6 +144,9 @@ func hardeningControl(t *testing.T, p *proof, spec Spec) {
 	p.Control("intact", ControlResult{Valid: true, Jailed: &result})
 }
 func hardeningAbortPlan(stage string, errno syscall.Errno, removed bool) RunPlan {
+	if removed && stage == "exec" {
+		return RunPlan{Mode: SilentExecFailure, Command: "printf COMMAND_RAN"}
+	}
 	if removed {
 		return RunPlan{Mode: Execute, Ops: []ProofOp{{Name: "attempt", Command: "printf COMMAND_RAN", Outcomes: []OpOutcome{{Stdout: "COMMAND_RAN"}}}}}
 	}
@@ -166,7 +169,7 @@ func legFault(t *testing.T, spec Spec, stage string) {
 	}
 	plan := hardeningAbortPlan(stage, errno, jailmut.On(id))
 	p.Jailed("attempt", runJailed(t, p, spec, plan))
-	mutationEffect(t, "L-FAULT-"+stage, "reached-exec", plan.Mode == Execute)
+	mutationEffect(t, "L-FAULT-"+stage, "reached-exec", plan.Mode != SetupAbort)
 	p.Finish()
 }
 func legNamespace(t *testing.T, spec Spec, namespace string) {

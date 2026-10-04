@@ -174,7 +174,7 @@ func catalogueFile(t *testing.T, spec Spec, row bypassRow) {
 	}
 	p.Control("effect", ControlResult{Valid: true, Detail: "unjailed command changed the sink"})
 	command, target, before = prepare()
-	result := catalogueRun(t, p, spec, command, control)
+	result := catalogueRun(t, p, spec, command, target, control)
 	p.Jailed("command", result)
 	mutationEffect(t, p.caseDef.Name, "file", catalogueChanged(t, target, before))
 	p.Observed("effect", Observation{Valid: true, Sealed: result.validated, Conclusive: true, Detail: "sink snapshot after framed command completion"})
@@ -237,7 +237,7 @@ func catalogueNetworkAttempt(t *testing.T, spec Spec, kind string) {
 	mutationSetup(t, os.WriteFile(sink, seed, 0644))
 	p.Control("effect", ControlResult{Valid: true, Detail: "unjailed request and file sink verified"})
 	beforeRequests := requests.Load()
-	result := catalogueRun(t, p, spec, command, control)
+	result := catalogueRun(t, p, spec, command, sink, control)
 	p.Jailed("command", result)
 	// Close joins active handlers before reading the immutable request counters.
 	listener.Close()
@@ -310,7 +310,7 @@ func catalogueMount(t *testing.T, spec Spec, longOptions bool) {
 	}
 	mutationSetup(t, unix.Unmount(point, 0))
 	p.Control("effect", ControlResult{Valid: true, Detail: "unjailed mount appeared in mountinfo"})
-	result := catalogueRun(t, p, spec, command, control)
+	result := catalogueRun(t, p, spec, command, point, control)
 	p.Jailed("command", result)
 	if mounted() {
 		unix.Unmount(point, unix.MNT_DETACH)
@@ -375,7 +375,7 @@ func catalogueSysctl(t *testing.T, spec Spec, system bool) {
 	}
 	mutationSetup(t, os.WriteFile("/proc/sys/kernel/domainname", original, 0644))
 	p.Control("effect", ControlResult{Valid: true, Detail: "unjailed sysctl changed namespace-local domainname; restored before attempt"})
-	result := catalogueRun(t, p, spec, command, control)
+	result := catalogueRun(t, p, spec, command, "", control)
 	p.Jailed("command", result)
 	if result.exit == 0 {
 		unexpected(t, "catalogue sysctl write accepted: %+v", result)

@@ -27,6 +27,10 @@ const (
 	ExpectedSignal = "ExpectedSignal"
 	Interactive    = "Interactive"
 	Cancelled      = "Cancelled"
+
+	// SilentExecFailure (mutation-only): the worker sent its success report, its
+	// execve then failed and it exited ExitSetupFailed without the F record.
+	SilentExecFailure = "SilentExecFailure"
 )
 
 type OpOutcome struct {
@@ -181,7 +185,7 @@ func runJailed(t *testing.T, p *proof, spec Spec, plan RunPlan) JailedResult {
 	if p == nil || p.finished || !modeAllowed(p, plan.Mode) {
 		t.Fatalf("SETUP: undeclared execution mode %s", plan.Mode)
 	}
-	if (plan.Mode == LaunchFailure || plan.Mode == ControlledHang) && !proofMutationBuild {
+	if (plan.Mode == LaunchFailure || plan.Mode == ControlledHang || plan.Mode == SilentExecFailure) && !proofMutationBuild {
 		t.Fatal("SETUP: mutation-only completion mode")
 	}
 	if plan.AcceptFactsABI0 && (!proofMutationBuild || !p.caseDef.AcceptFactsABI0 || !jailmut.On("P-LL-REQUIRED")) {
@@ -367,6 +371,10 @@ func runJailed(t *testing.T, p *proof, spec Spec, plan RunPlan) JailedResult {
 		if err := validateSetupAbort(result, plan); err != nil {
 			t.Fatalf("SETUP: %v", err)
 		}
+	case SilentExecFailure:
+		if err := validateSilentExecFailure(result); err != nil {
+			t.Fatalf("SETUP: %v", err)
+		}
 	case ExpectedSignal:
 		if err := validateExpectedSignal(result, plan); err != nil {
 			t.Fatalf("SETUP: %v", err)
@@ -431,6 +439,16 @@ func validateSetupAbort(result JailedResult, plan RunPlan) error {
 	var setup *SetupError
 	if !errors.As(result.setupErr, &setup) || setup.Stage != plan.Stage || setup.Errno != plan.Errno || result.exit != ExitSetupFailed || result.stdout != "" {
 		return fmt.Errorf("wrong setup abort: %+v", result)
+	}
+	return nil
+}
+
+// validateSilentExecFailure accepts only an accepted success report followed by
+// the worker's own ExitSetupFailed (W record and shim exit), with no output.
+func validateSilentExecFailure(result JailedResult) error {
+	worker := result.Worker
+	if result.setupErr != nil || !worker.Known || !worker.Exited || worker.Code != ExitSetupFailed || result.exit != ExitSetupFailed || result.stdout != "" || result.stderr != "" {
+		return fmt.Errorf("wrong silent exec failure: %+v", result)
 	}
 	return nil
 }
