@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -174,7 +175,7 @@ func catalogueFile(t *testing.T, spec Spec, row bypassRow) {
 	}
 	p.Control("effect", ControlResult{Valid: true, Detail: "unjailed command changed the sink"})
 	command, target, before = prepare()
-	result := catalogueRun(t, p, spec, command, target, control)
+	result := catalogueRun(t, p, spec, command, target, control, false)
 	p.Jailed("command", result)
 	mutationEffect(t, p.caseDef.Name, "file", catalogueChanged(t, target, before))
 	p.Observed("effect", Observation{Valid: true, Sealed: result.validated, Conclusive: true, Detail: "sink snapshot after framed command completion"})
@@ -236,8 +237,9 @@ func catalogueNetworkAttempt(t *testing.T, spec Spec, kind string) {
 	}
 	mutationSetup(t, os.WriteFile(sink, seed, 0644))
 	p.Control("effect", ControlResult{Valid: true, Detail: "unjailed request and file sink verified"})
+	isHeaderOpenCrash := kind == "curl_dump_header" && curlCrashesOnHeaderOpen(t, prefix, url, &requests)
 	beforeRequests := requests.Load()
-	result := catalogueRun(t, p, spec, command, sink, control)
+	result := catalogueRun(t, p, spec, command, sink, control, isHeaderOpenCrash)
 	p.Jailed("command", result)
 	// Close joins active handlers before reading the immutable request counters.
 	listener.Close()
@@ -253,6 +255,30 @@ func catalogueNetworkAttempt(t *testing.T, spec Spec, kind string) {
 	mutationEffect(t, p.caseDef.Name, "file", !bytes.Equal(after, seed))
 	p.Observed("effect", Observation{Valid: true, Sealed: result.validated, Conclusive: true, Detail: "HTTP server joined; sink read after framed command"})
 	p.Finish()
+}
+
+// curlCrashesOnHeaderOpen runs this curl unjailed with a -D file that cannot be
+// opened and reports whether it died of SIGSEGV with no output and no request.
+func curlCrashesOnHeaderOpen(t *testing.T, prefix, url string, requests *atomic.Int64) bool {
+	t.Helper()
+	directory := t.TempDir() // a core_pattern of "core" dumps into the cwd
+	before := requests.Load()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	var stdout, stderr bytes.Buffer
+	probe := exec.CommandContext(ctx, "/bin/sh", "-c", "exec "+prefix+"-sD "+coverQuote(filepath.Join(directory, "missing", "headers"))+" "+url)
+	probe.Dir = directory
+	probe.Stdout, probe.Stderr = &stdout, &stderr
+	err := probe.Run()
+	var exit *exec.ExitError
+	if err != nil && !errors.As(err, &exit) || ctx.Err() != nil {
+		t.Fatalf("SETUP: curl -D probe: %v", err)
+	}
+	if exit == nil {
+		return false
+	}
+	status := exit.Sys().(syscall.WaitStatus)
+	return status.Signaled() && status.Signal() == syscall.SIGSEGV && stdout.Len() == 0 && stderr.Len() == 0 && requests.Load() == before
 }
 
 func catalogueNamespace(t *testing.T, root bool) bool {
@@ -310,7 +336,7 @@ func catalogueMount(t *testing.T, spec Spec, longOptions bool) {
 	}
 	mutationSetup(t, unix.Unmount(point, 0))
 	p.Control("effect", ControlResult{Valid: true, Detail: "unjailed mount appeared in mountinfo"})
-	result := catalogueRun(t, p, spec, command, point, control)
+	result := catalogueRun(t, p, spec, command, point, control, false)
 	p.Jailed("command", result)
 	if mounted() {
 		unix.Unmount(point, unix.MNT_DETACH)
@@ -375,7 +401,7 @@ func catalogueSysctl(t *testing.T, spec Spec, system bool) {
 	}
 	mutationSetup(t, os.WriteFile("/proc/sys/kernel/domainname", original, 0644))
 	p.Control("effect", ControlResult{Valid: true, Detail: "unjailed sysctl changed namespace-local domainname; restored before attempt"})
-	result := catalogueRun(t, p, spec, command, "", control)
+	result := catalogueRun(t, p, spec, command, "", control, false)
 	p.Jailed("command", result)
 	if result.exit == 0 {
 		unexpected(t, "catalogue sysctl write accepted: %+v", result)

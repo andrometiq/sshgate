@@ -367,10 +367,11 @@ func run() (result error) {
 			return err
 		}
 	}
-	fmt.Println("READY pid=" + strconv.Itoa(os.Getpid()))
+	// Subscribe before READY: Go drops an unsubscribed SIGUSR1, losing a barrier.
 	signals := make(chan os.Signal, 1)
 	signal.Notify(signals, syscall.SIGTERM, syscall.SIGINT, syscall.SIGUSR1)
 	defer signal.Stop(signals)
+	fmt.Println("READY pid=" + strconv.Itoa(os.Getpid()))
 	for {
 		select {
 		case sig := <-signals:

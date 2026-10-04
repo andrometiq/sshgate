@@ -494,3 +494,39 @@ func TestBackingExtJournal(t *testing.T) {
 		})
 	}
 }
+
+// autofsListingError judges the jailed `ls -A` of an automount point: a cover lists
+// empty. Linux 6.1 answers a follow of an automount whose daemon mounted it in
+// another (private) namespace with ELOOP, which only a reached trigger produces.
+func autofsListingError(point string, listing OpOutcome, isTriggered bool) error {
+	crossNamespace := OpOutcome{Stderr: "ls: cannot open directory '" + point + "': Too many levels of symbolic links\n", Exit: 2}
+	if listing == (OpOutcome{}) || isTriggered && listing == crossNamespace {
+		return nil
+	}
+	return fmt.Errorf("autofs cover not empty: %+v", listing)
+}
+
+func TestAutofsListing(t *testing.T) {
+	const point = "/tmp/a/automount"
+	loop := "ls: cannot open directory '" + point + "': Too many levels of symbolic links\n"
+	for _, item := range []struct {
+		listing     OpOutcome
+		isTriggered bool
+		valid       bool
+	}{
+		{OpOutcome{}, false, true},
+		{OpOutcome{}, true, true},
+		{OpOutcome{Stderr: loop, Exit: 2}, true, true},
+		{OpOutcome{Stderr: loop, Exit: 2}, false, false},
+		{OpOutcome{Stderr: loop, Exit: 1}, true, false},
+		{OpOutcome{Stderr: "ls: cannot open directory '/tmp/other': Too many levels of symbolic links\n", Exit: 2}, true, false},
+		{OpOutcome{Stderr: "ls: cannot open directory '" + point + "': Permission denied\n", Exit: 2}, true, false},
+		{OpOutcome{Stdout: "f\n", Stderr: loop, Exit: 2}, true, false},
+		{OpOutcome{Stdout: "f\n"}, true, false},
+		{OpOutcome{Exit: 2}, true, false},
+	} {
+		if err := autofsListingError(point, item.listing, item.isTriggered); (err == nil) != item.valid {
+			t.Errorf("%+v: %v", item, err)
+		}
+	}
+}

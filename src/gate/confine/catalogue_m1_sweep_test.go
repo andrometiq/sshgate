@@ -38,20 +38,22 @@ func catalogueControl(t *testing.T, command string) OpOutcome {
 
 // sink is the outside path the command writes (or mounts on); utility diagnostics
 // that name it instead of an errno are matched against it exactly.
-func catalogueRun(t *testing.T, p *proof, spec Spec, command, sink string, control OpOutcome) JailedResult {
+// isHeaderOpenCrash is the verdict of curlCrashesOnHeaderOpen's unjailed probe.
+func catalogueRun(t *testing.T, p *proof, spec Spec, command, sink string, control OpOutcome, isHeaderOpenCrash bool) JailedResult {
 	t.Helper()
 	return runJailed(t, p, spec, RunPlan{Mode: Execute, Ops: []ProofOp{{Name: "exec", Command: catalogueCommand(command), Validate: func(stdout, stderr string, exit int) error {
-		return validateCatalogueStatus(p.caseDef.Name, sink, control, stdout, stderr, exit)
+		return validateCatalogueStatus(p.caseDef.Name, sink, control, isHeaderOpenCrash, stdout, stderr, exit)
 	}}}})
 }
 
 // The shared frame reserves status >=126; git uses 128 for fatal errors and
-// 255 (error() returned from cmd_config) for a failed `git config` write.
+// 255 (error() returned from cmd_config) for a failed `git config` write, and
+// 139 is the shell's SIGSEGV status for curl's -D crash (isCurlHeaderOpenCrash).
 func catalogueCommand(command string) string {
-	return "( " + command + "\n ); catalogue_status=$?; printf '\\nCATALOGUE-STATUS %s\\n' \"$catalogue_status\"; if [ \"$catalogue_status\" -eq 128 ] || [ \"$catalogue_status\" -eq 255 ]; then exit 125; fi; exit \"$catalogue_status\""
+	return "( " + command + "\n ); catalogue_status=$?; printf '\\nCATALOGUE-STATUS %s\\n' \"$catalogue_status\"; if [ \"$catalogue_status\" -eq 128 ] || [ \"$catalogue_status\" -eq 139 ] || [ \"$catalogue_status\" -eq 255 ]; then exit 125; fi; exit \"$catalogue_status\""
 }
 
-func validateCatalogueStatus(name, sink string, control OpOutcome, stdout, stderr string, exit int) error {
+func validateCatalogueStatus(name, sink string, control OpOutcome, isHeaderOpenCrash bool, stdout, stderr string, exit int) error {
 	const marker = "\nCATALOGUE-STATUS "
 	if strings.Count(stdout, marker) != 1 {
 		return fmt.Errorf("missing or duplicate catalogue status")
@@ -66,18 +68,21 @@ func validateCatalogueStatus(name, sink string, control OpOutcome, stdout, stder
 		return fmt.Errorf("invalid catalogue status %q", raw)
 	}
 	framedStatus := status
-	if status == 128 || status == 255 {
+	if status == 128 || status == 139 || status == 255 {
 		framedStatus = 125
 	}
 	if exit != framedStatus {
 		return fmt.Errorf("catalogue status %d disagrees with frame %d", status, exit)
 	}
-	return validateCatalogueCompletion(name, sink, control, report, stderr, status)
+	return validateCatalogueCompletion(name, sink, control, isHeaderOpenCrash, report, stderr, status)
 }
 
-func validateCatalogueCompletion(name, sink string, control OpOutcome, stdout, stderr string, exit int) error {
+func validateCatalogueCompletion(name, sink string, control OpOutcome, isHeaderOpenCrash bool, stdout, stderr string, exit int) error {
 	isGitFatal := exit == 128 && strings.Contains(name, "/git_")
 	isGitConfigError := exit == 255 && strings.HasSuffix(name, "/git_config_set")
+	if isCurlHeaderOpenCrash(name, isHeaderOpenCrash, stdout, stderr, exit) {
+		return nil
+	}
 	if exit < 0 || exit > 125 && !isGitFatal && !isGitConfigError {
 		return fmt.Errorf("abnormal utility exit %d", exit)
 	}
@@ -170,6 +175,13 @@ func isCatalogueConsequence(name, line string) bool {
 	return strings.HasSuffix(name, "/git_remote_add") && line == "fatal: could not set 'remote.catalogue.url' to 'https://example.invalid/catalogue'"
 }
 
+// isCurlHeaderOpenCrash matches curl 7.88.1 (Debian 12) dying of SIGSEGV, with no
+// output and before any request, when its -D file cannot be opened; dash reports
+// the signal. It holds only when the unjailed probe proved this curl has the bug.
+func isCurlHeaderOpenCrash(name string, isProven bool, stdout, stderr string, exit int) bool {
+	return isProven && exit == 139 && strings.Contains(name, "/curl_dump_header/") && stdout == "" && stderr == "Segmentation fault\n"
+}
+
 // isCurlHeaderOpenWarning matches curl's warning for an unopenable -D file, which
 // curl wraps at 79 columns with a "curl: " prefix on every piece.
 func isCurlHeaderOpenWarning(name, sink string, exit int, lines []string) bool {
@@ -221,8 +233,44 @@ func TestCatalogueM1Completion(t *testing.T) {
 		{"L-CATALOGUE/git_remote_add", "", "", lockDenied, 255, false},
 		{"L-CATALOGUE/file_compile", "", "", "file: Permission denied\n\n", 1, false},
 	} {
-		if err := validateCatalogueCompletion(item.name, item.sink, control, item.stdout, item.stderr, item.exit); (err == nil) != item.valid {
+		if err := validateCatalogueCompletion(item.name, item.sink, control, false, item.stdout, item.stderr, item.exit); (err == nil) != item.valid {
 			t.Errorf("%+v: %v", item, err)
+		}
+	}
+}
+
+func TestCatalogueHeaderOpenCrash(t *testing.T) {
+	const crash = "Segmentation fault\n"
+	for _, item := range []struct {
+		name           string
+		isProven       bool
+		stdout, stderr string
+		exit           int
+		valid          bool
+	}{
+		{"L-CATALOGUE/curl_dump_header/deny", true, "", crash, 139, true},
+		{"L-CATALOGUE/curl_dump_header/grant", true, "", crash, 139, true},
+		{"L-CATALOGUE/curl_dump_header/deny", false, "", crash, 139, false},
+		{"L-CATALOGUE/curl_dump_header/deny", true, "", "Segmentation fault (core dumped)\n", 139, false},
+		{"L-CATALOGUE/curl_dump_header/deny", true, "", "", 139, false},
+		{"L-CATALOGUE/curl_dump_header/deny", true, "payload\n", crash, 139, false},
+		{"L-CATALOGUE/curl_dump_header/deny", true, "", "Bus error\n", 135, false},
+		{"L-CATALOGUE/curl_dump_header/deny", true, "", crash, 134, false},
+		{"L-CATALOGUE/curl_cookie_jar/deny", true, "", crash, 139, false},
+		{"L-CATALOGUE/curl_bundled_output/deny", true, "", crash, 139, false},
+		{"L-CATALOGUE/sed_inplace_abbrev", true, "", crash, 139, false},
+	} {
+		if err := validateCatalogueCompletion(item.name, "/tmp/sink", OpOutcome{}, item.isProven, item.stdout, item.stderr, item.exit); (err == nil) != item.valid {
+			t.Errorf("%+v: %v", item, err)
+		}
+	}
+	report := "\nCATALOGUE-STATUS 139\n"
+	if err := validateCatalogueStatus("L-CATALOGUE/curl_dump_header/deny", "/tmp/sink", OpOutcome{}, true, report, crash, 125); err != nil {
+		t.Fatal(err)
+	}
+	for _, frame := range []int{139, 0} {
+		if err := validateCatalogueStatus("L-CATALOGUE/curl_dump_header/deny", "/tmp/sink", OpOutcome{}, true, report, crash, frame); err == nil {
+			t.Fatalf("frame %d accepted", frame)
 		}
 	}
 }
@@ -242,19 +290,19 @@ func TestCatalogueM1Status(t *testing.T) {
 		{255, 255, "fatal: cannot create file: Permission denied\n", false},
 	} {
 		stdout := fmt.Sprintf("\nCATALOGUE-STATUS %d\n", item.status)
-		err := validateCatalogueStatus("L-CATALOGUE/git_branch_new", "", OpOutcome{}, stdout, item.stderr, item.frame)
+		err := validateCatalogueStatus("L-CATALOGUE/git_branch_new", "", OpOutcome{}, false, stdout, item.stderr, item.frame)
 		if (err == nil) != item.valid {
 			t.Errorf("%+v: %v", item, err)
 		}
 	}
-	if err := validateCatalogueStatus("L-CATALOGUE/git_config_set", "", OpOutcome{}, "\nCATALOGUE-STATUS 255\n", "error: could not lock config file .git/config: Read-only file system\n", 125); err != nil {
+	if err := validateCatalogueStatus("L-CATALOGUE/git_config_set", "", OpOutcome{}, false, "\nCATALOGUE-STATUS 255\n", "error: could not lock config file .git/config: Read-only file system\n", 125); err != nil {
 		t.Fatal(err)
 	}
-	for _, status := range []int{0, 1, 128, 137, 255} {
+	for _, status := range []int{0, 1, 128, 137, 139, 255} {
 		command := exec.Command("/bin/sh", "-c", catalogueCommand(fmt.Sprintf("printf payload; exit %d", status)))
 		output, err := command.Output()
 		want := status
-		if status == 128 || status == 255 {
+		if status == 128 || status == 139 || status == 255 {
 			want = 125
 		}
 		if proofExit(err) != want || string(output) != fmt.Sprintf("payload\nCATALOGUE-STATUS %d\n", status) {
@@ -262,7 +310,7 @@ func TestCatalogueM1Status(t *testing.T) {
 		}
 	}
 	control := OpOutcome{Stdout: "* Applying /etc/sysctl.conf ...\nkernel.domainname = fixture\n"}
-	if err := validateCatalogueCompletion("L-CATALOGUE/sysctl_system", "", control, "* Applying /etc/sysctl.conf ...\n", "sysctl: permission denied on key \"kernel.domainname\"\n", 1); err != nil {
+	if err := validateCatalogueCompletion("L-CATALOGUE/sysctl_system", "", control, false, "* Applying /etc/sysctl.conf ...\n", "sysctl: permission denied on key \"kernel.domainname\"\n", 1); err != nil {
 		t.Fatal(err)
 	}
 }

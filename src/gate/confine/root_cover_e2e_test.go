@@ -75,15 +75,18 @@ func legAutofs(t *testing.T, spec Spec) {
 	if len(kinds) != 1 || kinds[0] != "autofs" {
 		t.Fatalf("SETUP: trigger not initially dormant: %v", kinds)
 	}
-	result := runJailed(t, p, spec, RunPlan{Mode: Execute, Ops: []ProofOp{{Name: "directory", Command: "ls -A " + coverQuote(point), Outcomes: []OpOutcome{{Stdout: "", Stderr: "", Exit: 0}}}}})
+	result := runJailed(t, p, spec, RunPlan{Mode: Execute, Ops: []ProofOp{{Name: "directory", Command: "ls -A " + coverQuote(point), Validate: func(stdout, stderr string, exit int) error {
+		// The trigger is judged after completion; here only the report's shape.
+		return autofsListingError(point, OpOutcome{Stdout: stdout, Stderr: stderr, Exit: exit}, true)
+	}}}})
 	p.Jailed("probe", result)
 	coverRan(t, result.jailResult)
 	kinds = autofsKinds(t, point)
 	triggered := len(kinds) != 1 || kinds[0] != "autofs"
 	mutationEffect(t, "L-AUTOFS", "triggered", triggered)
 	p.Observed("mounts", Observation{Conclusive: true, Sealed: true, Valid: len(kinds) > 0, Detail: "mountinfo after synchronous listing"})
-	if result.exit != 0 || result.stdout != "" {
-		unexpected(t, "autofs cover not empty: %+v", result)
+	if err := autofsListingError(point, OpOutcome{Stdout: result.stdout, Stderr: result.stderr, Exit: result.exit}, triggered); err != nil {
+		unexpected(t, "%v", err)
 	}
 	output, err = exec.Command("ls", "-A", point).CombinedOutput()
 	if err != nil {
@@ -117,8 +120,16 @@ func legBinfmtFixed(t *testing.T, spec Spec) {
 	name := fmt.Sprintf("sshgate-fixed-%d", os.Getpid())
 	registration := fmt.Sprintf(":%s:M::SG22FIXED::%s/f:F", name, point)
 	mutationSetup(t, os.WriteFile(filepath.Join(registry, "register"), []byte(registration), 0600))
+	isRegistered := true
+	unregister := func() error {
+		isRegistered = false
+		return os.WriteFile(filepath.Join(registry, name), []byte("-1"), 0600)
+	}
 	t.Cleanup(func() {
-		if err := os.WriteFile(filepath.Join(registry, name), []byte("-1"), 0600); err != nil {
+		if !isRegistered {
+			return
+		}
+		if err := unregister(); err != nil {
 			unexpected(t, "binfmt unregister: %v", err)
 		}
 	})
@@ -153,5 +164,9 @@ func legBinfmtFixed(t *testing.T, spec Spec) {
 		unexpected(t, "R18 fixed interpreter did not delegate reads after cover: %s", log)
 	}
 	p.Observed("read", Observation{Conclusive: true, Sealed: true, Valid: coverHasRecord(log, "READ"), Detail: "R18 retained interpreter FUSE read"})
+	// The F entry holds the interpreter open on the FUSE mount, which keeps the
+	// detached mount alive and the server's device read blocked: release it
+	// before Finish stops the observer.
+	mutationSetup(t, unregister())
 	p.Finish()
 }

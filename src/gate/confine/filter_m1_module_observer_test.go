@@ -144,3 +144,55 @@ func TestM1ModuleRecords(t *testing.T) {
 		t.Fatalf("names=%v error=%v", names, err)
 	}
 }
+
+func validateM1DiagSS(stdout, stderr string, exit int) error {
+	if exit != 0 || !strings.HasSuffix(stdout, "\n") {
+		return fmt.Errorf("ss incomplete: exit %d stdout %q", exit, stdout)
+	}
+	lines := strings.Split(strings.TrimSuffix(stdout, "\n"), "\n")
+	if len(lines) == 0 || !strings.HasPrefix(lines[0], "Netid") || !strings.Contains(lines[0], "State") || !strings.Contains(lines[0], "Peer Address:Port") {
+		return fmt.Errorf("ss missing table header: %q", stdout)
+	}
+	for _, line := range lines[1:] {
+		fields := strings.Fields(line)
+		// iproute2 names a raw IPPROTO_ICMPV6 socket "icmp6" (systemd-networkd holds one).
+		if len(fields) < 6 || !slices.Contains([]string{"tcp", "udp", "u_str", "u_dgr", "u_seq", "raw", "icmp6"}, fields[0]) {
+			return fmt.Errorf("unexpected ss record %q", line)
+		}
+	}
+	if stderr != "" {
+		for _, line := range strings.Split(strings.TrimSuffix(stderr, "\n"), "\n") {
+			if line != "Cannot open netlink socket: Operation not permitted" {
+				return fmt.Errorf("unexpected ss diagnostic %q", line)
+			}
+		}
+	}
+	return nil
+}
+
+func TestM1DiagSS(t *testing.T) {
+	const header = "Netid State  Recv-Q Send-Q Local Address:Port Peer Address:Port\n"
+	const icmp6 = "icmp6 UNCONN 0      0      *%ens3:ipv6-icmp   *:*              \n"
+	const denied = "Cannot open netlink socket: Operation not permitted\n"
+	for _, item := range []struct {
+		stdout, stderr string
+		exit           int
+		valid          bool
+	}{
+		{header, "", 0, true},
+		{header + "tcp LISTEN 0 4096 127.0.0.1:631 0.0.0.0:*\n", "", 0, true},
+		{header + "raw UNCONN 0 0 *:255 *:*\n", denied, 0, true},
+		{header + icmp6, "", 0, true},
+		{header + "icmp UNCONN 0 0 *:icmp *:*\n", "", 0, false},
+		{header + "??? UNCONN 0 0 *:132 *:*\n", "", 0, false},
+		{header + "icmp6 UNCONN 0 0 *:ipv6-icmp\n", "", 0, false},
+		{header + icmp6, "", 1, false},
+		{header + icmp6, "Cannot open netlink socket: Protocol not supported\n", 0, false},
+		{icmp6, "", 0, false},
+		{header + icmp6[:len(icmp6)-1], "", 0, false},
+	} {
+		if err := validateM1DiagSS(item.stdout, item.stderr, item.exit); (err == nil) != item.valid {
+			t.Errorf("%+v: %v", item, err)
+		}
+	}
+}

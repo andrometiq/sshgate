@@ -105,27 +105,3 @@ func legSockdiagModule(t *testing.T, spec Spec) {
 	p.Control("autoload", ControlResult{Valid: slices.Contains(names, "raw_diag"), Detail: "unjailed AF_INET6/IPPROTO_RAW request loads raw_diag from cold state"})
 	p.Finish()
 }
-
-func validateM1DiagSS(stdout, stderr string, exit int) error {
-	if exit != 0 || !strings.HasSuffix(stdout, "\n") {
-		return fmt.Errorf("ss incomplete: exit %d stdout %q", exit, stdout)
-	}
-	lines := strings.Split(strings.TrimSuffix(stdout, "\n"), "\n")
-	if len(lines) == 0 || !strings.HasPrefix(lines[0], "Netid") || !strings.Contains(lines[0], "State") || !strings.Contains(lines[0], "Peer Address:Port") {
-		return fmt.Errorf("ss missing table header: %q", stdout)
-	}
-	for _, line := range lines[1:] {
-		fields := strings.Fields(line)
-		if len(fields) < 6 || !slices.Contains([]string{"tcp", "udp", "u_str", "u_dgr", "u_seq", "raw"}, fields[0]) {
-			return fmt.Errorf("unexpected ss record %q", line)
-		}
-	}
-	if stderr != "" {
-		for _, line := range strings.Split(strings.TrimSuffix(stderr, "\n"), "\n") {
-			if line != "Cannot open netlink socket: Operation not permitted" {
-				return fmt.Errorf("unexpected ss diagnostic %q", line)
-			}
-		}
-	}
-	return nil
-}
