@@ -35,6 +35,8 @@ func legCoverCwd(t *testing.T, spec Spec) {
 	results = append(results, result)
 	fixture.seal(t)
 	if coverAbort(t, "L-COVER-CWD", result.jailResult) {
+		// The window is the strict, aborted run; the non-strict rerun enters the FUSE cwd.
+		strictLog := fixture.since(t, mark)
 		spec.Strict = false
 		nonStrict, info := coverProofRun(t, p, spec, "echo COMMAND_RAN", nil)
 		results = append(results, nonStrict)
@@ -44,7 +46,9 @@ func legCoverCwd(t *testing.T, spec Spec) {
 		}
 		p.Jailed("probe", results...)
 		fixture.seal(t)
-		p.Observed("effects", Observation{Conclusive: true, Sealed: true, Valid: fixture.since(t, mark) == "", Detail: "aborted CWD window untouched"})
+		p.Observed("effects", Observation{Conclusive: true, Sealed: true, Valid: strictLog == "", Detail: "aborted CWD window untouched"})
+		// Leave the FUSE mount before Finish stops the observer: a busy mount cannot unmount.
+		mutationSetup(t, os.Chdir(previous))
 		p.Finish()
 		return
 	}
@@ -80,6 +84,7 @@ func legCoverCwd(t *testing.T, spec Spec) {
 	p.Observed("effects", Observation{Conclusive: true, Sealed: true, Valid: landed || log == "", Detail: "CWD ioctl window sealed"})
 	if jailmut.On("P-CWD") {
 		p.Jailed("probe", results...)
+		mutationSetup(t, os.Chdir(previous))
 		p.Finish()
 		return
 	}
@@ -91,6 +96,7 @@ func legCoverCwd(t *testing.T, spec Spec) {
 		unexpected(t, "covered descendant cwd not reset: %+v %+v", result, facts)
 	}
 	p.Jailed("probe", results...)
+	mutationSetup(t, os.Chdir(previous))
 	p.Finish()
 }
 func legShimProc(t *testing.T, spec Spec) {

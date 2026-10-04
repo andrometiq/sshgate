@@ -134,9 +134,11 @@ func validateFramed(result jailResult, ops []ProofOp) (string, error) {
 	return output.String(), nil
 }
 
+// proofOutput keeps its buffer unexported: an embedded bytes.Buffer would promote
+// ReadFrom, and io.Copy would then bypass Write (and the READY notification).
 type proofOutput struct {
-	mu sync.Mutex
-	bytes.Buffer
+	mu       sync.Mutex
+	buffer   bytes.Buffer
 	ready    chan struct{}
 	notified bool
 }
@@ -144,14 +146,14 @@ type proofOutput struct {
 func (w *proofOutput) Write(data []byte) (int, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	n, err := w.Buffer.Write(data)
-	if !w.notified && (strings.HasPrefix(w.Buffer.String(), "READY\n") || strings.Contains(w.Buffer.String(), "\nREADY\n")) {
+	n, err := w.buffer.Write(data)
+	if !w.notified && (strings.HasPrefix(w.buffer.String(), "READY\n") || strings.Contains(w.buffer.String(), "\nREADY\n")) {
 		w.notified = true
 		close(w.ready)
 	}
 	return n, err
 }
-func (w *proofOutput) snapshot() string { w.mu.Lock(); defer w.mu.Unlock(); return w.Buffer.String() }
+func (w *proofOutput) snapshot() string { w.mu.Lock(); defer w.mu.Unlock(); return w.buffer.String() }
 func proofExit(err error) int {
 	if err == nil {
 		return 0
@@ -325,7 +327,7 @@ func runJailed(t *testing.T, p *proof, spec Spec, plan RunPlan) JailedResult {
 		case err = <-done:
 			t.Fatalf("SETUP: worker ended before READY: %v", err)
 		case <-ctx.Done():
-			t.Fatal("SETUP: READY timeout")
+			t.Fatalf("SETUP: READY timeout: stdout=%q stderr=%q", stdout.snapshot(), stderr.String())
 		}
 	}
 	if plan.AfterStart != nil {
