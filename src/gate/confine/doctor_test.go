@@ -75,6 +75,8 @@ func TestDecideInjected(t *testing.T) {
 		{"clone ENOSPC (namespace count used up) -> deny", probeFacts{landlockABI: 10, maxUserns: 5, cloneErr: unix.ENOSPC, probeExit: -1}, Rung3Unconfined, false, true},
 		{"clone ENOSPC, no landlock -> deny, never unconfined", probeFacts{landlockABI: -1, maxUserns: 5, cloneErr: unix.ENOSPC, probeExit: -1}, Rung3Unconfined, false, true},
 		{"clone ENOMEM (transient) -> deny", probeFacts{landlockABI: 10, maxUserns: 100, cloneErr: enomem, probeExit: -1}, Rung3Unconfined, false, true},
+		{"clamp refuses the userns re-exec (EACCES) -> unconfined", probeFacts{landlockABI: 4, maxUserns: 100, clamp: true, cloneErr: fmt.Errorf("fork/exec /proc/self/exe: %w", unix.EACCES), probeExit: -1}, Rung3Unconfined, false, false},
+		{"clone EACCES, no clamp to explain it -> deny", probeFacts{landlockABI: 10, maxUserns: 100, cloneErr: fmt.Errorf("fork/exec /proc/self/exe: %w", unix.EACCES), probeExit: -1}, Rung3Unconfined, false, true},
 		{"clamp denies the mount -> landlock", probeFacts{landlockABI: 6, maxUserns: 100, clamp: true, probeExit: probeExitMountDenied}, Rung3Unconfined, false, false},
 		{"mount denied, no clamp to explain it -> deny", probeFacts{landlockABI: 10, maxUserns: 100, probeExit: probeExitMountDenied}, Rung3Unconfined, false, true},
 		{"other mount error -> deny", probeFacts{landlockABI: 10, maxUserns: 100, probeExit: probeExitMountError}, Rung3Unconfined, false, true},

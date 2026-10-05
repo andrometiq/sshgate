@@ -35,11 +35,11 @@ run)
  fi
  echo 'test-jail-mutate: fixture harness'; [ "$FIXTURE_MODE" != go-failure ]; exit $?;;
 esac
-if [ "$FIXTURE_MODE" = truncated ]; then echo '{"Action":"output","Output":"=== RUN   TestJailMatrix\n"}' ; exit 0; fi
+if [ "$FIXTURE_MODE" = truncated ]; then printf '%s\n' '{"Action":"output","Output":"=== RUN   TestJailMatrix\n"}' ; exit 0; fi
 for name in TestPhase1Tables TestFilterTables TestHostPIDFilters TestSyscallRowDecisions TestStrictSpecDecode TestStatusMutation TestCatalogueControls TestCatalogueRouting TestJailMatrix TestJailMatrixP12 TestJailMatrixPhase1 TestJailMatrixP14 TestJailMatrixP15 TestJailMatrixP15c TestJailMatrixCovers TestJailMatrixCredentials TestJailMatrixCatalogue TestJailMatrixWrite TestJailMatrixSyscallSweep TestROFallbackParent TestDetectUsernsCountUsedUpDenies TestExecWithRedactionConfinedNamespace TestExecWithRedactionConfineLifecycle TestExecWithRedactionConfinedEROFS TestExecWithRedactionConfineFailClosed TestExecWithRedactionConfineClosesInheritedFDs TestRunReadJailedRealEffect TestGateBinaryJailedRead TestRunReadJailSetupFailureDenies; do
  printf '{"Action":"output","Output":"--- PASS: %s (0.00s)\\n"}\n' "$name"
 done
-if [ "$FIXTURE_MODE" = ci-control ]; then echo '{"Action":"output","Output":"CONTROL-SKIPPED(ci-only): fixture\n"}' ; fi
+if [ "$FIXTURE_MODE" = ci-control ]; then printf '%s\n' '{"Action":"output","Output":"CONTROL-SKIPPED(ci-only): fixture\n"}' ; fi
 if [ "$FIXTURE_MODE" = go-failure ]; then exit 1; fi
 if [ "$FIXTURE_MODE" = first-failure ] && [ ! -f "$FIXTURE_COUNTER" ]; then : > "$FIXTURE_COUNTER"; exit 1; fi
 `,

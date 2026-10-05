@@ -200,6 +200,7 @@ func TestExecWithRedactionConfineNSVerify(t *testing.T) {
 }
 
 func testExecutorNamespaceClobber(t *testing.T) {
+	requireUserns(t)
 	p := newProof(t, "L-NSVERIFY")
 	spec := confine.Spec{Profile: confine.ProfileROv1}
 	if p.abi == "abi1" {

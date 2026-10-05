@@ -99,6 +99,10 @@ func decide(fx probeFacts) Report {
 		rep.Notes = append(rep.Notes, "user.max_user_namespaces=0: user namespaces disabled")
 	case fx.cloneErr != nil && isDefinitiveAbsence(fx.cloneErr):
 		rep.Notes = append(rep.Notes, fmt.Sprintf("userns clone refused: %v", fx.cloneErr))
+	case fx.cloneErr != nil && fx.clamp && errnoOf(fx.cloneErr) == unix.EACCES:
+		// Ubuntu 24.04's AppArmor userns restriction refuses the namespaced
+		// re-exec with EACCES: an explained absence, not a probe failure.
+		rep.Notes = append(rep.Notes, fmt.Sprintf("the AppArmor clamp refuses the userns: %v", fx.cloneErr))
 	case fx.cloneErr != nil:
 		rep.ProbeErr = fmt.Errorf("userns probe: %w", fx.cloneErr)
 	case fx.probeExit == probeExitOK:
