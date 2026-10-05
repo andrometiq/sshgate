@@ -186,6 +186,7 @@ define jail-runner
 	[ -n "$$tmp" ] && [ -d "$$tmp" ] || { echo "test-jail: invalid mktemp directory" >&2; exit 1; }; \
 	trap 'rm -rf "$$tmp"' 0; \
 	log="$$tmp/log"; json="$$tmp/baseline.json"; : > "$$json"; fail=0; invocation=0; \
+	go mod download || { echo "test-jail: go mod download failed" >&2; exit 1; }; \
 	run_jail() { \
 		invocation=$$((invocation + 1)); st="$$tmp/status-$$invocation"; invlog="$$tmp/log-$$invocation"; invjson="$$tmp/json-$$invocation"; inverr="$$tmp/stderr-$$invocation"; \
 		{ "$$@"; echo $$? > "$$st"; } 2>"$$inverr" | tee "$$invjson" >/dev/null; tee_st=$$?; \

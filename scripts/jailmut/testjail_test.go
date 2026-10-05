@@ -27,6 +27,7 @@ func TestTestJailStatusCapture(t *testing.T) {
 				commands := map[string]string{
 					"go": `#!/bin/sh
 case "$1" in
+mod) exit 0;;
 run)
  if [ "$3" = -render-json ]; then
   [ "$FIXTURE_MODE" != render-failure ] || exit 19
