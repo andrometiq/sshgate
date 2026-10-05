@@ -161,7 +161,8 @@ and refuses the read if any check fails. With that, a jailed read **cannot**:
 - connect to a local daemon over a Unix socket, or reach the host's System V or
   POSIX IPC objects or kernel keyrings;
 - signal, trace or re-tune (priority, CPU affinity) a process outside the jail,
-  or read its memory, file descriptors or environment;
+  or read its memory, file descriptors or environment (so tools such as `lsof`
+  cannot see which process holds a file or socket);
 - change mounts, namespaces or sysctls, or use any capability in the host's
   user namespace.
 

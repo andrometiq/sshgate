@@ -113,6 +113,10 @@ itself, not just in the classifier. What this means for you:
 - **Root-only kernel reads can fail.** `dmesg` may print "Operation not
   permitted" because the jail drops capabilities. `journalctl -k` reads the
   same kernel messages.
+- **Other processes' open files are hidden.** A jailed read cannot look into
+  another process's file descriptors, so `lsof -i :80` finds nothing and the
+  process column of `ss -tlnp` stays empty (`ss` also prints a harmless
+  "Cannot open netlink socket" line). `ss -tln` still shows which ports listen; find the owner with `systemctl status <unit>` or `ps aux | grep <name>`.
 - **On a host without jail support**, reads run as before, protected by the
   classifier only. You can't see which one applies; a human can check with
   `~/.sshgate-gate/gate doctor` on the host.

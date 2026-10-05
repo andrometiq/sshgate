@@ -1147,6 +1147,13 @@ func legReadCorpus(t *testing.T, spec Spec) {
 			t.Log("dmesg denied after dropping CAP_SYSLOG")
 			continue
 		}
+		// The read runs in its own user namespace, so it cannot open other
+		// processes' /proc/<pid>/fd: lsof finds no matching process and exits 1.
+		if strings.HasPrefix(cmd, "lsof ") && r.exit == 1 && r.stdout == "" && r.stderr == "" {
+			logged++
+			t.Logf("process-inspection limit: %q finds no process in the jail", cmd)
+			continue
+		}
 		if isDaemonRow(cmd) {
 			logged++
 			t.Logf("Lane-2 inventory: %q breaks in the jail (exit=%d) — daemon/AF_UNIX read", cmd, r.exit)
