@@ -130,7 +130,7 @@ func TestReadSafeFstypesLiteral(t *testing.T) {
 	}
 }
 func TestBackingLiterals(t *testing.T) {
-	if strings.Join(directDrivers, " ") != "pcieport nvme ahci ata_piix virtio-pci virtio_pci virtio-mmio virtio_mmio virtio_blk virtio_scsi sd xen-blkfront xen_blkfront vbd hv_storvsc storvsc mmcblk mmc_block sdhci-pci sdhci-pci-data sdhci-acpi mpt3sas mpt2sas megaraid_sas smartpqi aacraid hpsa vmw_pvscsi" {
+	if strings.Join(directDrivers, " ") != "pcieport nvme ahci ata_piix virtio-pci virtio_pci virtio-mmio virtio_mmio virtio_blk virtio_scsi sd xen-blkfront xen_blkfront vbd hv_storvsc storvsc hv_pci mmcblk mmc_block sdhci-pci sdhci-pci-data sdhci-acpi mpt3sas mpt2sas megaraid_sas smartpqi aacraid hpsa vmw_pvscsi" {
 		t.Fatal(directDrivers)
 	}
 	if strings.Join(directSCSIHosts, " ") != "ahci ata_piix virtio_scsi storvsc_host vmw_pvscsi mpt3sas mpt2sas megaraid_sas smartpqi aacraid hpsa" {
@@ -240,9 +240,14 @@ func TestBackingChains(t *testing.T) {
 	chain("dm-0", "253:0", "slaves", nvme)
 	chain("dm-1", "253:1", "slaves", loop)
 	chain("md0", "9:0", "slaves", nvme, tcp)
+	// Azure: the NVMe controller sits behind a VMBus device bound to hv_pci.
+	hyperv := disk("vmbus/guid/pci/nvme3/nvme3n1", "259:5", "nvme")
+	write(t, filepath.Join(filepath.Dir(hyperv), "transport"), "pcie")
+	mkdir(t, filepath.Join(sys, "drivers", "hv_pci"))
+	link(t, filepath.Join(sys, "drivers", "hv_pci"), filepath.Join(sys, "devices", "vmbus/guid", "driver"))
 	nvmePath := disk("pci/nvme0/nvme0c0n1", "259:4", "nvme")
 	chain("nvme2n1", "259:3", "multipath", nvmePath)
-	for dev, want := range map[string]backingClass{"259:1": backingDirect, "253:0": backingDirect, "253:1": backingCovered, "9:0": backingNetwork, "259:3": backingDirect, "0:1": backingCovered, "999:0": backingCovered} {
+	for dev, want := range map[string]backingClass{"259:1": backingDirect, "253:0": backingDirect, "253:1": backingCovered, "9:0": backingNetwork, "259:3": backingDirect, "259:5": backingDirect, "0:1": backingCovered, "999:0": backingCovered} {
 		if got := inspector.device(dev); got != want {
 			t.Errorf("%s=%v want %v", dev, got, want)
 		}

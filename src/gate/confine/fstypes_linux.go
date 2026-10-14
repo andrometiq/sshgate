@@ -18,9 +18,10 @@ var networkFstypes = strings.Fields("nfs nfs4 cifs smb3 smbfs ceph 9p afs")
 var blockFstypes = strings.Fields("ext2 ext3 ext4 xfs vfat msdos exfat iso9660 squashfs")
 
 // BUILD-22-P2 §3.2a: local-bus chains only; unlisted drivers fail closed.
-// NVMe/block/SCSI names checked in kernel v6.1/6.8/6.12/6.17;
+// NVMe/block/SCSI names checked in kernel v6.1/6.8/6.12/6.17; hv_pci is the
+// Hyper-V virtual PCI bridge in front of Azure's local NVMe disks;
 // PCI/ATA/MMC ancestor names seed the specification criterion (matrix pending).
-var directDrivers = strings.Fields("pcieport nvme ahci ata_piix virtio-pci virtio_pci virtio-mmio virtio_mmio virtio_blk virtio_scsi sd xen-blkfront xen_blkfront vbd hv_storvsc storvsc mmcblk mmc_block sdhci-pci sdhci-pci-data sdhci-acpi mpt3sas mpt2sas megaraid_sas smartpqi aacraid hpsa vmw_pvscsi")
+var directDrivers = strings.Fields("pcieport nvme ahci ata_piix virtio-pci virtio_pci virtio-mmio virtio_mmio virtio_blk virtio_scsi sd xen-blkfront xen_blkfront vbd hv_storvsc storvsc hv_pci mmcblk mmc_block sdhci-pci sdhci-pci-data sdhci-acpi mpt3sas mpt2sas megaraid_sas smartpqi aacraid hpsa vmw_pvscsi")
 
 // BUILD-22-P2 §3.2a: SCSI host templates, independently of PCI position.
 // Kernel drivers/scsi/* host_template.proc_name; storvsc uses storvsc_host.
