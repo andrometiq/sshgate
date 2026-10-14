@@ -163,3 +163,75 @@ func TestGateBinaryJailedRead(t *testing.T) {
 		})
 	}
 }
+
+// TestGateBinaryNetworkPin drives the real gate binary under each network pin:
+// net=deny refuses the jailed read an INET socket, net=allow connects, and a
+// network tool that fails without network gets the gate's hint.
+func TestGateBinaryNetworkPin(t *testing.T) {
+	requireJail(t)
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "gate")
+	tools := filepath.Join(dir, "tools")
+	for _, item := range []struct{ output, source string }{{bin, "."}, {filepath.Join(tools, "cat"), "../../confine/testdata/probe"}, {filepath.Join(tools, "curl"), "../../confine/testdata/probe"}} {
+		build := exec.Command("go", "build", "-trimpath", "-o", item.output, item.source)
+		build.Env = append(os.Environ(), "CGO_ENABLED=0")
+		if out, err := build.CombinedOutput(); err != nil {
+			unexpected(t, "build %s: %v\n%s", item.source, err, out)
+			t.FailNow()
+		}
+	}
+	runGate := func(t *testing.T, command string) (int, string, string) {
+		t.Helper()
+		gate := exec.Command(bin)
+		gate.Env = append(os.Environ(), "PATH="+tools+":"+os.Getenv("PATH"), "SSH_ORIGINAL_COMMAND="+command)
+		var stdout, stderr bytes.Buffer
+		gate.Stdout, gate.Stderr = &stdout, &stderr
+		code := 0
+		if err := gate.Run(); err != nil {
+			code = -1
+			if exit, ok := err.(*exec.ExitError); ok {
+				code = exit.ExitCode()
+			}
+		}
+		return code, stdout.String(), stderr.String()
+	}
+	for _, pin := range []string{pinDeny, pinAllow} {
+		writePin(t, dir, pin, 0o644)
+		for _, network := range []string{"tcp4", "tcp6"} {
+			t.Run(strings.TrimSpace(strings.Split(pin, "\n")[1])+"/"+network, func(t *testing.T) {
+				address, operation := "127.0.0.1:0", "dial-inet"
+				if network == "tcp6" {
+					address, operation = "[::1]:0", "dial-inet6"
+				}
+				listener, err := net.Listen(network, address)
+				if err != nil {
+					if network == "tcp6" {
+						t.Skipf("IPv6 loopback unavailable: %v", err)
+					}
+					unexpected(t, "%v", err)
+					t.FailNow()
+				}
+				defer listener.Close()
+				tcp := listener.(*net.TCPListener)
+				port := strconv.Itoa(tcp.Addr().(*net.TCPAddr).Port)
+				code, out, stderr := runGate(t, "cat "+operation+" "+port)
+				_ = tcp.SetDeadline(time.Now().Add(time.Second))
+				connection, acceptErr := listener.Accept()
+				if acceptErr == nil {
+					connection.Close()
+				}
+				if pin == pinAllow && (code != 0 || out != "socket=ok\nconnect=ok\n" || acceptErr != nil) {
+					unexpected(t, "net=allow: exit %d, stdout %q, stderr %q, accept %v", code, out, stderr, acceptErr)
+				}
+				if pin == pinDeny && (code != 1 || out != "socket=1\n" || acceptErr == nil) {
+					unexpected(t, "net=deny: exit %d, stdout %q, stderr %q, accept %v", code, out, stderr, acceptErr)
+				}
+			})
+		}
+	}
+	writePin(t, dir, pinDeny, 0o644)
+	code, _, stderr := runGate(t, "curl dial-inet 1")
+	if code != 1 || !strings.Contains(stderr, "gate: note: reads on this host have no network access") {
+		unexpected(t, "network hint: exit %d, stderr %q", code, stderr)
+	}
+}

@@ -40,6 +40,9 @@ func TestMain(m *testing.M) {
 	case "systemctl", "docker":
 		os.Exit(reportExec())
 	}
+	if config := os.Getenv(testGateEnv); config != "" {
+		os.Exit(testGateMain(config))
+	}
 	if os.Getenv("GORACE") == "" {
 		_ = os.Setenv("GORACE", "atexit_sleep_ms=0")
 	}
@@ -57,6 +60,32 @@ func TestMain(m *testing.M) {
 	code := m.Run()
 	_ = os.RemoveAll(tmp)
 	os.Exit(code)
+}
+
+// testGateEnv makes this binary act as the gate for one forced-command run,
+// with this package's test seams set from the leg's config. It stands in for
+// the gate binary where a leg needs the gate in its own process (a FUSE server
+// must not be the gate's child: the gate reaps its children after a jailed
+// run). The gate itself reads no policy from the environment.
+const testGateEnv = "SSHGATE_TEST_GATE"
+
+type testGateConfig struct {
+	Dir, ABI string
+	Grant    bool
+}
+
+func testGateMain(raw string) int {
+	var config testGateConfig
+	if json.Unmarshal([]byte(raw), &config) != nil || config.Dir == "" {
+		fmt.Fprintln(os.Stderr, "TestMain: bad test gate config")
+		return 2
+	}
+	gateDirFn = func() (string, string, error) { return config.Dir, filepath.Join(config.Dir, "gate"), nil }
+	forceNetGrant = config.Grant
+	if config.ABI == "abi1" {
+		readSpecHook = func(spec *confine.Spec) { spec.ForceABI = 1 }
+	}
+	return run()
 }
 
 // execReport is what a fake Lane-2 binary prints about its own exec.

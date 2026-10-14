@@ -20,18 +20,36 @@ const gateProofPackage = "./src/gate/cmd/sshgate-gate"
 // equal.
 func gateProofCases() []harness.Case {
 	var cases []harness.Case
-	for _, name := range []string{"U-ExecReadConfineRequired", "U-SpecStrictSources"} {
+	add := func(name, kind, mode string, modes, obligations, markers, omissions []string) {
+		root := "TestJailMatrixPhase2/"
+		if kind == "Unit" {
+			root = "TestPhase2Tables/"
+		}
 		cases = append(cases, harness.Case{
-			Name: name, Package: gateProofPackage, Kind: "Unit", ABIs: []string{"native", "abi1"},
-			Names:       map[string]string{"native": "TestPhase2Tables/native/" + name, "abi1": "TestPhase2Tables/abi1/" + name},
-			Obligations: []string{"control:decision"}, Markers: []string{"EFFECT:decision"},
+			Name: name, Package: gateProofPackage, Kind: kind, Mode: mode, Modes: modes, ABIs: []string{"native", "abi1"},
+			Names:       map[string]string{"native": root + "native/" + name, "abi1": root + "abi1/" + name},
+			Obligations: obligations, Markers: markers, Omissions: omissions,
 		})
 	}
+	for _, name := range []string{"U-ExecReadConfineRequired", "U-SpecStrictSources"} {
+		add(name, "Unit", "", nil, []string{"control:decision"}, []string{"EFFECT:decision"}, nil)
+	}
+	add("G-CONFINE-REQUIRED-ABSENT", "Effect", "Execute", []string{"SetupAbort"}, []string{"control:edit", "jailed:edit", "observe:target"}, []string{"EFFECT:ran-unconfined"}, nil)
+	add("G-CONFINE-REQUIRED-LANE2", "Effect", "Execute", nil, []string{"control:lane2", "jailed:lane2", "observe:lane2"}, []string{"EFFECT:lane2-ran"}, nil)
+	for _, name := range []string{"G-STRICT-UNMET-FUSE", "G-NET-STRICT-UNMET-FUSE"} {
+		add(name, "Effect", "Execute", []string{"SetupAbort"}, []string{"control:facility", "jailed:probe", "observe:effects"}, []string{"ABORT:selfcheck", "EFFECT:fuse-ioctl"}, []string{"fuse-unavailable"})
+	}
+	add("G-UNPINNED-UNMET-FUSE", "Effect", "Execute", nil, []string{"control:facility", "jailed:probe", "observe:effects"}, []string{"EFFECT:fuse-ioctl"}, []string{"fuse-unavailable"})
+	add("G-NSDROP-MNT", "Abort", "SetupAbort", []string{"Execute"}, []string{"control:intact", "jailed:attempt", "observe:mounts"}, []string{"ABORT:nsverify"}, nil)
+	add("G-FAULT", "Abort", "SetupAbort", nil, []string{"control:intact", "jailed:attempt"}, nil, nil)
+	add("G-FAULT-ABSENT", "Execution", "Execute", nil, []string{"jailed:fallback", "observe:target"}, nil, nil)
+	add("G-INET-DENY", "Effect", "Execute", nil, []string{"control:connect", "jailed:connect", "observe:listener"}, []string{"EFFECT:connected"}, []string{"ipv6-unavailable"})
+	add("G-INET-ALLOW", "Execution", "Execute", nil, []string{"jailed:connect", "observe:listener"}, nil, []string{"ipv6-unavailable"})
 	return cases
 }
 
 // gateHooks are the protections whose mutation may show an effect here.
-var gateHooks = []string{"P-G-CONFINE-REQUIRED", "P-G-STRICT", "P-G-NET-STRICT"}
+var gateHooks = []string{"P-G-CONFINE-REQUIRED", "P-G-STRICT", "P-G-NET-STRICT", "P-COVERS", "P-CLONE-MNT", "P-SC-NET"}
 
 // gateProof is the gate package's proof: one case, its obligations, and the
 // markers its legs observed. Finish prints the one PROOF-COMPLETE line.
@@ -72,24 +90,52 @@ func newProof(t *testing.T, name string) *gateProof {
 	return p
 }
 
-// Control completes a control obligation; an invalid control fails the leg.
+// Control, Jailed and Observed complete an obligation; an invalid one fails
+// the leg.
 func (p *gateProof) Control(name string, valid bool) {
 	p.t.Helper()
-	key := "control:" + name
+	p.complete("control:"+name, valid)
+}
+func (p *gateProof) Jailed(name string, valid bool) { p.t.Helper(); p.complete("jailed:"+name, valid) }
+func (p *gateProof) Observed(name string, valid bool) {
+	p.t.Helper()
+	p.complete("observe:"+name, valid)
+}
+
+func (p *gateProof) complete(key string, valid bool) {
+	p.t.Helper()
 	if p.finished || !slices.Contains(p.caseDef.Obligations, key) || p.done[key] {
 		p.t.Fatalf("SETUP: invalid or duplicate obligation %s", key)
 	}
 	if !valid {
-		p.t.Fatalf("SETUP: control %s failed", name)
+		p.t.Fatalf("SETUP: %s failed", key)
 	}
 	p.done[key] = true
 }
 
-// Effect records that a protection's effect was observed.
-func (p *gateProof) Effect(assertion string, observed bool) {
-	if observed && !slices.Contains(p.markers, "EFFECT:"+assertion) {
-		p.markers = append(p.markers, "EFFECT:"+assertion)
+// Effect and Abort record a protection's observed effect or setup abort.
+func (p *gateProof) Effect(assertion string, observed bool) { p.mark("EFFECT:"+assertion, observed) }
+func (p *gateProof) Abort(stage string, observed bool)      { p.mark("ABORT:"+stage, observed) }
+
+func (p *gateProof) mark(marker string, observed bool) {
+	if observed && !slices.Contains(p.markers, marker) {
+		p.markers = append(p.markers, marker)
 	}
+}
+
+// Omit finishes the case with a declared omission instead of evidence.
+func (p *gateProof) Omit(code string) {
+	p.t.Helper()
+	line := "PROOF-OMITTED " + p.caseDef.Name + " " + p.abi + " " + code
+	record, err := harness.ParseProof(line)
+	if err == nil {
+		err = harness.CheckProof(p.caseDef, record, os.Getuid() == 0, os.Getenv("SSHGATE_JAIL_CI") == "1")
+	}
+	if err != nil {
+		p.t.Fatal(err)
+	}
+	p.finished = true
+	p.t.Log(line)
 }
 
 func (p *gateProof) Finish() {
