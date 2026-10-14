@@ -6,10 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"os/exec"
-	"strconv"
-	"strings"
 
 	"golang.org/x/sys/unix"
 )
@@ -160,31 +157,4 @@ func runUsernsProbe() (cloneErr error, exit int) {
 func isDefinitiveAbsence(err error) bool {
 	e := errnoOf(err)
 	return e == unix.EPERM || e == unix.EINVAL
-}
-
-func readMaxUserns() int {
-	b, err := os.ReadFile("/proc/sys/user/max_user_namespaces")
-	if err != nil {
-		return -1
-	}
-	n, err := strconv.Atoi(strings.TrimSpace(string(b)))
-	if err != nil {
-		return -1
-	}
-	return n
-}
-
-func readLSMs() []string {
-	b, err := os.ReadFile("/sys/kernel/security/lsm")
-	if err != nil {
-		return nil
-	}
-	return strings.Split(strings.TrimSpace(string(b)), ",")
-}
-
-// readAppArmorUsernsClamp reports whether Ubuntu's AppArmor unprivileged-userns
-// restriction is on (sysctl absent means no clamp).
-func readAppArmorUsernsClamp() bool {
-	b, err := os.ReadFile("/proc/sys/kernel/apparmor_restrict_unprivileged_userns")
-	return err == nil && strings.TrimSpace(string(b)) == "1"
 }

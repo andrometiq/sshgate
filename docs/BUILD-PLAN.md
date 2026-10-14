@@ -238,9 +238,11 @@ Status: open.
     reads (77) and never affects signed writes or admin verbs. A leftover `jail-floor` file is
     ignored, with one note from doctor.
   - `confine.ReadHostFacts` and `confine.ClassifySetupFailure(stage, errno, facts)`: `clone`
-    `EPERM`/`EINVAL` (or `ENOSPC` with `user.max_user_namespaces == 0`), mount-stage
-    `EPERM`/`EACCES`, `setattr` `ENOSYS`, missing `/dev/shm`, Landlock `ENOSYS`/`EOPNOTSUPP` and
-    seccomp unavailability are Absent. Cover failures, `nsverify`, `selfcheck`, `report`,
+    `EPERM`/`EINVAL` (or `ENOSPC` with `user.max_user_namespaces == 0`, or `EACCES` with
+    Ubuntu's AppArmor userns restriction on, `kernel.apparmor_restrict_unprivileged_userns=1`,
+    which is how stock Ubuntu 24.04 refuses the jail's clone), mount-stage `EPERM`/`EACCES`,
+    `setattr` `ENOSYS`, missing `/dev/shm`, Landlock `ENOSYS`/`EOPNOTSUPP` and seccomp
+    unavailability are Absent. Cover failures, `nsverify`, `selfcheck`, `report`,
     `exec`, `spec` and `cwd` failures, and any other errno are Failed.
   - `execRead` attempts the jail and applies the outcome table above. The requires-confinement
     flag is computed once and passed to both the plain and the daemon-read branch; in this step
