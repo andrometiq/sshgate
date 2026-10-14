@@ -252,8 +252,10 @@ Status: open.
     `net=allow`.** When a jailed read without network fails and its command is a network tool
     (`curl`, `wget`, `dig`, `ssh`, `git`, …), the gate prints one hint line on stderr.
   - Audit fields on executed reads: `enforcement`, `profile`, `pinned`, `landlock_abi`, `net`,
-    `accept_fs`, `requires_confinement`, `cwd_reset`, and `label_clause_unmet` (unpinned runs
-    without required confinement only); denials record `deny_reason` (for example
+    `accept_fs`, `requires_confinement`, `cwd_reset`, `label_clause_unmet` (the `fs-view:`
+    clauses a kernel run left unmet; unpinned runs without required confinement only), and
+    `jail_absent` (`<stage>[:<ERRNO>]` of the Absent jail a classifier-only run fell back
+    from); denials record `deny_reason` (for example
     `jail:absent:setattr:ENOSYS`, `pin:damaged`, `confine:required`). The `rung` field goes.
   - Delete `rung.go`, `jail-floor`, `Detect` and its helpers, and the interim mapping; every
     deleted test is replaced by a test of the new code.

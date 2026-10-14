@@ -224,10 +224,46 @@ type AuditRecord struct {
 	// (omitted) on records that ran no read child — denials, admin verbs and
 	// signed writes — so those records are unchanged.
 	Rung string `json:"rung,omitempty"`
+	// ReadAudit is how an executed read was enforced. nil (no keys) on every
+	// other record.
+	*ReadAudit
+	// DenyReason says why the read jail refused a read: "pin:damaged",
+	// "confine:required", "jail:absent:<stage>[:<ERRNO>]" or
+	// "jail:failed:<stage>[:<ERRNO>]". Empty (omitted) on every other record.
+	DenyReason string `json:"deny_reason,omitempty"`
 	// Stdout/Stderr hold raw output, serialised ONLY at AuditAllFull — and
 	// never for a revealed command (see Revealed).
 	Stdout string `json:"stdout,omitempty"`
 	Stderr string `json:"stderr,omitempty"`
+}
+
+// ReadAudit is the enforcement of one executed read.
+type ReadAudit struct {
+	// Enforcement is "kernel" (the jail ran the read), "classifier" (an
+	// unpinned host without a usable jail) or "daemon-read" (the fixed
+	// systemctl/docker read verbs, outside the jail).
+	Enforcement string `json:"enforcement"`
+	// Profile is "ro-v1" when Enforcement is "kernel".
+	Profile string `json:"profile,omitempty"`
+	// Pinned is true when the host has a valid jail pin.
+	Pinned bool `json:"pinned"`
+	// LandlockABI is the ABI the jail applied; 0 outside the jail.
+	LandlockABI int `json:"landlock_abi"`
+	// Net is whether the read had network sockets: the jail's grant when
+	// kernel-enforced, true otherwise (nothing removes it).
+	Net      bool     `json:"net"`
+	AcceptFS []string `json:"accept_fs,omitempty"`
+	// RequiresConfinement is true when the read could only run in the jail.
+	RequiresConfinement bool `json:"requires_confinement"`
+	// CwdReset is true when the jail could not enter the caller's directory
+	// and ran the read from /.
+	CwdReset bool `json:"cwd_reset"`
+	// JailAbsent is "<stage>[:<ERRNO>]" of the Absent jail a classifier
+	// fallback ran after.
+	JailAbsent string `json:"jail_absent,omitempty"`
+	// LabelClauseUnmet lists the fs-view clauses a non-strict kernel run did
+	// not meet (unpinned reads that do not require confinement only).
+	LabelClauseUnmet []string `json:"label_clause_unmet,omitempty"`
 }
 
 // SetTransport adds the finalized delivery and lifecycle outcome to this record.
