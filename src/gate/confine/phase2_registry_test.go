@@ -25,7 +25,8 @@ func phase2Leg(name string, markers ...string) harness.Leg {
 }
 
 // phase2Registry is the gate's read routing: P2.1. Removing one Strict source
-// together with the covers leaves the other source's run aborting, and the
+// alone leaves its FUSE run covered (the green twin in its one-ID set); removing
+// it together with the covers leaves the other source's run aborting, and the
 // unpinned run reaching the uncovered FUSE mount.
 func phase2Registry() []prot {
 	fuse := func(strict string) harness.MutationSet {
@@ -48,10 +49,10 @@ func phase2Registry() []prot {
 				phase2Leg("G-CONFINE-REQUIRED-ABSENT", "MUTATION-EFFECT ran-unconfined"), phase2Leg("G-CONFINE-REQUIRED-LANE2", "MUTATION-EFFECT lane2-ran"))}},
 		{ID: "P-G-STRICT", Site: "readSpec Strict from a valid pin", Class: "multi", Partners: []string{"P-COVERS"}, DirectLeg: "U-SpecStrictSources",
 			EffectLegs:   []string{"G-STRICT-UNMET-FUSE"},
-			MutationSets: []harness.MutationSet{one("P-G-STRICT", phase2Leg("U-SpecStrictSources", "MUTATION-EFFECT decision")), strictSet}},
+			MutationSets: []harness.MutationSet{one("P-G-STRICT", phase2Leg("U-SpecStrictSources", "MUTATION-EFFECT decision"), phase2Leg("G-STRICT-UNMET-FUSE")), strictSet}},
 		{ID: "P-G-NET-STRICT", Site: "readSpec Strict from required confinement", Class: "multi", Partners: []string{"P-COVERS"}, DirectLeg: "U-SpecStrictSources",
 			EffectLegs:   []string{"G-NET-STRICT-UNMET-FUSE"},
-			MutationSets: []harness.MutationSet{one("P-G-NET-STRICT", phase2Leg("U-SpecStrictSources", "MUTATION-EFFECT decision")), netStrictSet}},
+			MutationSets: []harness.MutationSet{one("P-G-NET-STRICT", phase2Leg("U-SpecStrictSources", "MUTATION-EFFECT decision"), phase2Leg("G-NET-STRICT-UNMET-FUSE")), netStrictSet}},
 	}
 }
 

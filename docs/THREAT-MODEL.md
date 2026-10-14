@@ -142,12 +142,15 @@ would do.
 | **Pinned** | denied, exit 77 | denied, exit 77 |
 | **Unpinned** | runs **classifier-only**, audited `classifier` | denied, exit 77 |
 
-A denial prints `read jail unavailable` on stderr, and nothing runs. A damaged
-pin denies every read. A read that **requires confinement** — on a host pinned
-`net=allow` — is denied on an Absent jail even when unpinned would fall back,
-and never runs outside the jail. The fallback runs the command once, only when
-the attempt provably never started it: the failure came before the jail reported
-itself ready, and nothing was written to the client.
+A denial exits 77 with one `read jail unavailable` line on stderr, and the
+command did not run, with one rare exception: if the jail fails after reporting
+itself ready, the line says the read may have started and its result is not
+trusted. A read whose session ends before the jail starts exits 143 instead. A
+damaged pin denies every read. A read that **requires confinement** — any read on
+a host pinned `net=allow` — never runs outside the jail; that is why such a host
+refuses the fixed `systemctl`/`docker` read verbs below. The fallback runs the
+command once, only when the attempt provably never started it: the failure came
+before the jail reported itself ready, and nothing was written.
 
 On an unpinned host, a kernel feature that is missing, or a mount refused by an
 LSM or AppArmor, now means classifier-only rather than a deny. Pin the host to

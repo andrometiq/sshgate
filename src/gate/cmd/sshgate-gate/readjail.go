@@ -197,7 +197,7 @@ func execRead(audit *gate.AuditLogger, cmd, approval string, reveal bool) int {
 		auditReadDenied(audit, cmd, route.reason, exitCancelled, res.Transport)
 		return exitCancelled
 	case !route.fallback:
-		logf("read jail unavailable: %s; nothing ran", route.line)
+		logf("read jail unavailable: %s", route.line)
 		auditReadDenied(audit, cmd, route.reason, exitNoPermVal, res.Transport)
 		return exitNoPermVal
 	}
@@ -235,26 +235,40 @@ func routeAttempt(pinned, requires bool, res gate.ExecResult, setupErr error) at
 		absent := strings.TrimPrefix(confine.DenyReason(confine.Absent, setup.Stage, setup.Errno), "jail:absent:")
 		return attemptRoute{fallback: true, reason: confine.DenyReason(class, setup.Stage, setup.Errno), jailAbsent: absent}
 	}
-	return attemptRoute{reason: confine.DenyReason(class, setup.Stage, setup.Errno), line: unavailableReason(class, setup, pinned)}
+	reason, line := confine.DenyReason(class, setup.Stage, setup.Errno), unavailableReason(class, setup, pinned)+"; nothing ran"
+	// After an I report the command may have started, unless the worker
+	// reported its execve failing (XFexec:<errno>).
+	if setup.SawInfo && !(setup.Stage == "exec" && setup.Errno != 0) {
+		reason += ":after-start"
+		line = "the jail failed after the read may have started (" + setupDetail(setup) + "); its result is not trusted"
+	}
+	return attemptRoute{reason: reason, line: line}
 }
 
-// attemptClass classifies a jail attempt that never reached the command. An
-// Absent stage never reports I and writes nothing, so an attempt that did
-// either may have reached the command and is Failed.
+// attemptClass classifies a failed jail attempt. An Absent stage never
+// reports I and writes nothing, so an attempt that did either is Failed. The
+// bytes are also counted before redaction and delivery, so a lost client
+// cannot hide them. Only an I report means the command may have started: a
+// pre-X failure's bytes are the worker's own diagnostic.
 func attemptClass(setup *confine.SetupError, res gate.ExecResult) confine.FailureClass {
 	class := confine.ClassifySetupFailure(setup.Stage, setup.Errno, hostFactsFn())
-	if class == confine.Absent && (setup.SawInfo || res.StdoutBytes != 0 || res.StderrBytes != 0) {
+	wrote := res.StdoutBytes != 0 || res.StderrBytes != 0 || res.Transport.SourceBytesRead != 0
+	if class == confine.Absent && (setup.SawInfo || wrote) {
 		return confine.Failed
 	}
 	return class
 }
 
+func setupDetail(setup *confine.SetupError) string {
+	if setup.Errno != 0 {
+		return setup.Stage + ": " + setup.Errno.Error()
+	}
+	return setup.Stage
+}
+
 // unavailableReason is the human half of a read-jail deny line.
 func unavailableReason(class confine.FailureClass, setup *confine.SetupError, pinned bool) string {
-	detail := setup.Stage
-	if setup.Errno != 0 {
-		detail += ": " + setup.Errno.Error()
-	}
+	detail := setupDetail(setup)
 	switch {
 	case class != confine.Absent:
 		return "the jail could not be set up (" + detail + ")"
@@ -318,7 +332,7 @@ func needsNetwork(cmd string) bool {
 }
 
 // networkHintLine states the network default for unsigned reads.
-const networkHintLine = "note: unsigned reads have no network on this host; this command may need it (allow network per host by pinning it net=allow)"
+const networkHintLine = "note: reads on this host have no network; this command may need it (allow network per host by pinning it net=allow)"
 
 // networkHint prints one advisory line when a kernel read without network
 // failed and its command looks like it needs the network. It must run before

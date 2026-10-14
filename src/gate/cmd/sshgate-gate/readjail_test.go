@@ -437,18 +437,24 @@ func TestRunReadAbsentPinnedDenies(t *testing.T) {
 }
 
 // TestFallbackRefusedAfterInfo: an Absent stage on an unpinned host still
-// denies when the attempt may have reached the command — the worker reported
-// I, or the attempt produced output.
+// denies when the attempt is not quiet — the worker reported I, or the child
+// wrote output (delivered or not). After an I report the read may have run, and
+// the deny says so instead of "nothing ran".
 func TestFallbackRefusedAfterInfo(t *testing.T) {
 	readNamedWriter(t)
+	const notSetUp = "gate: read jail unavailable: the jail could not be set up (setattr: function not implemented); nothing ran\n"
 	for _, tc := range []struct {
-		name   string
-		result gate.ExecResult
-		setup  confine.SetupError
+		name, line, reason string
+		result             gate.ExecResult
+		setup              confine.SetupError
 	}{
-		{"after an I report", gate.ExecResult{ExitCode: -1}, confine.SetupError{Stage: "setattr", Errno: syscall.ENOSYS, SawInfo: true}},
-		{"with stdout", gate.ExecResult{ExitCode: -1, StdoutBytes: 3}, confine.SetupError{Stage: "setattr", Errno: syscall.ENOSYS}},
-		{"with stderr", gate.ExecResult{ExitCode: -1, StderrBytes: 5}, confine.SetupError{Stage: "setattr", Errno: syscall.ENOSYS}},
+		{"after an I report", "gate: read jail unavailable: the jail failed after the read may have started (setattr: function not implemented); its result is not trusted\n", "jail:failed:setattr:ENOSYS:after-start",
+			gate.ExecResult{ExitCode: -1}, confine.SetupError{Stage: "setattr", Errno: syscall.ENOSYS, SawInfo: true}},
+		{"execve failed after an I report", "gate: read jail unavailable: the jail could not be set up (exec: no such file or directory); nothing ran\n", "jail:failed:exec:ENOENT",
+			gate.ExecResult{ExitCode: -1}, confine.SetupError{Stage: "exec", Errno: syscall.ENOENT, SawInfo: true}},
+		{"with stdout", notSetUp, "jail:failed:setattr:ENOSYS", gate.ExecResult{ExitCode: -1, StdoutBytes: 3}, confine.SetupError{Stage: "setattr", Errno: syscall.ENOSYS}},
+		{"with stderr", notSetUp, "jail:failed:setattr:ENOSYS", gate.ExecResult{ExitCode: -1, StderrBytes: 5}, confine.SetupError{Stage: "setattr", Errno: syscall.ENOSYS}},
+		{"with undelivered output", notSetUp, "jail:failed:setattr:ENOSYS", gate.ExecResult{ExitCode: -1, Transport: gate.TransportMetadata{SourceBytesRead: 7}}, confine.SetupError{Stage: "setattr", Errno: syscall.ENOSYS}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -457,11 +463,11 @@ func TestFallbackRefusedAfterInfo(t *testing.T) {
 			fake := withFakeAttempt(t, tc.result, &setup)
 			target := seedTarget(t, dir)
 			code, _, stderr := runWith(t, "stat "+target+" ran")
-			if code != exitNoPermVal || !strings.Contains(stderr, "the jail could not be set up (setattr: function not implemented)") {
+			if code != exitNoPermVal || stderr != tc.line {
 				t.Fatalf("exit = %d, stderr = %q", code, stderr)
 			}
 			targetIs(t, target, "orig\n")
-			oneDeniedRead(t, dir, "jail:failed:setattr:ENOSYS", exitNoPermVal)
+			oneDeniedRead(t, dir, tc.reason, exitNoPermVal)
 			if fake.confined != 1 || fake.fallback != 0 {
 				t.Errorf("executor calls: %+v", fake)
 			}

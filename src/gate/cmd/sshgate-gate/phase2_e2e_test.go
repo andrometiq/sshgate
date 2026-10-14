@@ -335,9 +335,14 @@ func accepted(t *testing.T, listener *net.TCPListener) bool {
 // G-INET-ALLOW shows a host pinned net=allow gives reads the network.
 func legInet(t *testing.T, abi, name string) {
 	p := newProof(t, name)
+	networks := []string{"tcp4", "tcp6"}
 	if listener, err := net.Listen("tcp6", "[::1]:0"); err != nil {
-		p.Omit("ipv6-unavailable")
-		return
+		// CI must prove both families; elsewhere tcp4 still runs.
+		if os.Getenv("SSHGATE_JAIL_CI") == "1" {
+			t.Fatalf("SETUP: IPv6 loopback unavailable: %v", err)
+		}
+		t.Logf("tcp6 not run: IPv6 loopback unavailable: %v", err)
+		networks = networks[:1]
 	} else {
 		listener.Close()
 	}
@@ -349,7 +354,7 @@ func legInet(t *testing.T, abi, name string) {
 	}
 	controls, jailed, observed := true, true, true
 	for _, pin := range pins {
-		for _, network := range []string{"tcp4", "tcp6"} {
+		for _, network := range networks {
 			address, operation := "127.0.0.1:0", "dial-inet"
 			if network == "tcp6" {
 				address, operation = "[::1]:0", "dial-inet6"

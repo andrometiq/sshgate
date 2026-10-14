@@ -336,9 +336,11 @@ net=deny
 `net=allow` gives jailed reads network; on such a host the fixed
 `systemctl`/`docker` list is refused, because it cannot run in the jail. The
 optional `accept_fs=network[,autofs]` line accepts those mounts instead of
-hiding them. The file must belong to the gate's user, must not be group- or
-world-writable, and must hold only these lines; anything else makes it
-*damaged*, and a damaged pin refuses every read. `gate doctor --pin` writes
+hiding them. The file must be a regular file (not a symlink) with one link,
+at most 4 KiB, owned by the gate's user and not group- or world-writable, and
+must hold only these lines; anything else makes it *damaged*, and a damaged
+pin refuses every read. A pin installed by config management as a symlink
+therefore refuses every read. `gate doctor --pin` writes
 it after rehearsing the jail; that option arrives with the next build step
 ([BUILD-PLAN.md](BUILD-PLAN.md) P2.2). To remove the pin, delete the file.
 
@@ -702,10 +704,12 @@ clears it; if that fails, find the holder with
 The gate on that server refused to run the read: its jail pin is damaged,
 a 0.1.x `jail-floor` is left with no `jail` pin, or the kernel read jail
 could not be set up (on a pinned host, or for a read that must run
-confined). Nothing ran. Run `~/.sshgate-gate/gate doctor` on the server
+confined). Nothing ran, unless the line says the read may have started
+(the jail failed after reporting itself ready). Run `~/.sshgate-gate/gate doctor` on the server
 (Tier 1 step 5) and read its `pin:`, `attempt:`, `reads:` and `note:`
 lines. Fix the host or the pin, or delete the pin (or the leftover
-`jail-floor`) to accept classifier-only reads there.
+`jail-floor`) to make the host unpinned: reads then run in the jail where it
+works and classifier-only where it does not.
 
 **`go build` fails with "cannot find module".**
 You're not in the SSHGate repo root. `cd` to the directory containing

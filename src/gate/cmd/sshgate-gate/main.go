@@ -375,10 +375,10 @@ func execChild(cmd string, reveal bool, captureLimit int, plan execPlan) (rc int
 		Reveal:       reveal,
 		CaptureLimit: captureLimit,
 	}
-	if plan.confine != nil || plan.read != nil {
-		// Reads hold the client sink: a classifier-only fallback runs after
-		// the jail attempt made the client fds non-blocking. Signed writes
-		// keep it nil.
+	if plan.confine != nil || plan.read != nil && plan.argv == nil {
+		// Jailed reads and their classifier-only fallback hold the client
+		// sink: the fallback runs after the jail attempt made the client fds
+		// non-blocking. Signed writes and daemon reads keep it nil.
 		opts.ClientSink = sessionSink
 	}
 	var err error
