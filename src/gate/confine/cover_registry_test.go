@@ -59,7 +59,7 @@ func coverRegistry() []prot {
 }
 func completeRegistry() []prot {
 	result := append(append(append(append(append(p12Registry(), p15Registry()...), hostPIDRegistry()...), coverRegistry()...), credentialRegistry()...), writeRegistry()...)
-	result = append(result, phase1Registry()...)
+	result = append(append(result, phase1Registry()...), phase2Registry()...)
 	for i := range result {
 		protection := &result[i]
 		for j := range protection.MutationSets {

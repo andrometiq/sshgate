@@ -219,11 +219,6 @@ type AuditRecord struct {
 	// all+full. Reveal's accepted exposure is the agent + transcript + approval
 	// chat, not this on-disk record.
 	Revealed bool `json:"revealed,omitempty"`
-	// Rung is the kernel-confinement tier a READ ran under: "full" | "landlock"
-	// | "unconfined" | "lane2" (the shell-free daemon-read allowlist). Empty
-	// (omitted) on records that ran no read child — denials, admin verbs and
-	// signed writes — so those records are unchanged.
-	Rung string `json:"rung,omitempty"`
 	// ReadAudit is how an executed read was enforced. nil (no keys) on every
 	// other record.
 	*ReadAudit

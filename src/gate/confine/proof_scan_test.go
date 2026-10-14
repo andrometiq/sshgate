@@ -33,6 +33,7 @@ var proofLaunchExceptions = map[string]string{
 	"proof_m2_hostpid_observer_test.go:m2Recipient.Stop":    "unjailed signal-recipient observer teardown",
 	"proof_m2_hostpid_observer_test.go:m2ProcessOwner.Stop": "unjailed victim process teardown",
 	"proof_m2_user_observer_test.go:userRetuneVictim.Stop":  "unjailed USER retune victim teardown",
+	"xfer_e2e_test.go:e2eGateSSH.Run":                       "transfer e2e fake SSH transport, reached only by name through t.Run",
 }
 
 type proofFunction struct {

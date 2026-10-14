@@ -103,9 +103,9 @@ jobs:
           # so NOTHING should skip: a skipped jail leg (the patterns below include
           # older rung markers), or any in-leg t.Skip (chattr/xattr/sleep
           # unavailable), means the wall was not tested.
-          if grep -qE -- '--- SKIP|SKIP rung1|SKIP rung2' jail.log; then
+          if grep -qE -- '--- SKIP|SKIP rung|SKIP jail' jail.log; then
             echo "::error::make test-jail SKIPPED a leg despite userns+Landlock+tooling being present — the wall was not fully tested"
-            grep -nE -- '--- SKIP|SKIP rung1|SKIP rung2' jail.log || true
+            grep -nE -- '--- SKIP|SKIP rung|SKIP jail' jail.log || true
             exit 1
           fi
           echo "all jail legs ran (nothing skipped)"

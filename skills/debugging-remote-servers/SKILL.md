@@ -94,11 +94,15 @@ itself, not just in the classifier. What this means for you:
   `/tmp` and `/var/tmp` are visible but read-only. The only writable space is
   a private 64 MiB `/dev/shm` (`TMPDIR` points there), discarded when the read
   ends. Anything that has to change the box is a write: put it in a batch.
-- **Network still works.** A read can reach TCP/UDP services, including
-  `curl http://localhost:<port>/health`.
+- **No network unless the host allows it.** A jailed read cannot open TCP/UDP
+  sockets, not even `curl http://localhost:<port>/health`, unless the operator
+  pinned the host `net=allow`. The gate prints a note when a network tool fails
+  for this reason. Hosts without the jail run reads classifier-only, with
+  network.
 - **No local daemons over Unix sockets.** A fixed set of `systemctl` and
-  `docker` reads still works, because the gate runs them outside the jail,
-  but only in their plain form: one command, no pipe, no quotes.
+  `docker` reads still works, because the gate runs them outside the jail
+  (except on a host pinned `net=allow`, which refuses them), but only in
+  their plain form: one command, no pipe, no quotes.
   - `systemctl status | is-active | is-enabled | is-failed | list-units |
     list-unit-files | show | cat | get-default`, with display flags such as
     `--no-pager`, `-l`/`--full`, `-a`/`--all`, `--no-legend`, `--plain`,

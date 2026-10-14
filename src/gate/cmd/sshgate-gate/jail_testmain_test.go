@@ -22,7 +22,7 @@ import (
 //     main() does.
 //   - Invoked under the name of a Lane-2 binary (via a symlink a test plants in
 //     lane2BinDirs), it reports how it was exec'd instead of running tests.
-//   - On a rung-1 host the jail mounts a private tmpfs over /tmp, so a fixture
+//   - On a jail host the jail mounts a private tmpfs over /tmp, so a fixture
 //     under the host /tmp is invisible to a jailed read. TMPDIR is moved under
 //     the user cache dir (read-only but visible inside the jail) so t.TempDir
 //     fixtures stay readable by the jailed child, as the gate dir and the

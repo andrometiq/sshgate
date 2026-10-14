@@ -27,11 +27,11 @@ import (
 // one proves the shipped binary's own re-exec path puts the read in the jail.
 // In ONE invocation, a classifier-approved read that writes (readNamedWriter) must
 // leave the file unchanged, the read of that file must arrive redacted, and the
-// command's processes must carry the worker's NNP + seccomp (and, on rung 1, run
-// under the binary's own pid-1 shim).
+// command's processes must carry the worker's NNP + seccomp and run under the
+// binary's own shim. An unpinned host gives reads no network.
 func TestGateBinaryJailedRead(t *testing.T) {
 	readNamedWriter(t)
-	rung := liveRung(t)
+	requireJail(t)
 
 	dir := t.TempDir() // under the jail-visible TMPDIR set by TestMain
 	bin := filepath.Join(dir, "gate")
@@ -78,21 +78,19 @@ func TestGateBinaryJailedRead(t *testing.T) {
 		unexpected(t, "the command did not run under the worker's NNP + seccomp filter: %q", out)
 	}
 	// Host /proc reports host PIDs; walk from awk to its shell to the shim.
-	if rung == confine.Rung1Full {
-		for _, role := range []string{"worker", "shim"} {
-			match := regexp.MustCompile(`(?m)^` + role + ` NSpid:\s+(\d+)$`).FindStringSubmatch(out)
-			if len(match) != 2 {
-				unexpected(t, "invalid %s PID namespace identity: %q", role, out)
-			}
+	for _, role := range []string{"worker", "shim"} {
+		match := regexp.MustCompile(`(?m)^` + role + ` NSpid:\s+(\d+)$`).FindStringSubmatch(out)
+		if len(match) != 2 {
+			unexpected(t, "invalid %s PID namespace identity: %q", role, out)
 		}
 	}
-	if rung == confine.Rung1Full && !strings.Contains(out, "/proc/self/exe\x00"+confine.SentinelShim+"\x00") {
+	if !strings.Contains(out, "/proc/self/exe\x00"+confine.SentinelShim+"\x00") {
 		unexpected(t, "command parent is not the gate binary's %s shim: %q", confine.SentinelShim, out)
 	}
 
 	recs := auditRecords(t, dir)
-	if len(recs) != 1 || recs[0]["classification"] != "read" || recs[0]["approval_status"] != "unsigned" || recs[0]["rung"] != rung.String() {
-		unexpected(t, "audit = %v, want one unsigned read at rung %s", recs, rung)
+	if len(recs) != 1 || recs[0]["classification"] != "read" || recs[0]["approval_status"] != "unsigned" || recs[0]["enforcement"] != "kernel" || recs[0]["net"] != false {
+		unexpected(t, "audit = %v, want one unsigned kernel read without network", recs)
 	}
 
 	// A test-owned cat on PATH lets the existing syscall probe exercise a
@@ -148,19 +146,20 @@ func TestGateBinaryJailedRead(t *testing.T) {
 			gate.Env = append(os.Environ(), "PATH="+dir+":"+os.Getenv("PATH"), "SSH_ORIGINAL_COMMAND="+command)
 			var stdout, stderr bytes.Buffer
 			gate.Stdout, gate.Stderr = &stdout, &stderr
-			if err := gate.Run(); err != nil || stdout.String() != "socket=ok\nconnect=ok\n" {
-				unexpected(t, "jailed connect: %v, stdout=%q stderr=%q; want a connected socket and exit 0", err, stdout.String(), stderr.String())
+			err = gate.Run()
+			// An unpinned host gives reads no network: the jailed socket is
+			// refused with EPERM and nothing connects.
+			if exit, ok := err.(*exec.ExitError); !ok || exit.ExitCode() != 1 || stdout.String() != "socket=1\n" {
+				unexpected(t, "jailed connect: %v, stdout=%q stderr=%q; want socket EPERM and exit 1", err, stdout.String(), stderr.String())
 			}
 			if err := tcpListener.SetDeadline(time.Now().Add(time.Second)); err != nil {
 				unexpected(t, "%v", err)
 				t.FailNow()
 			}
-			connection, err = listener.Accept()
-			if err != nil {
-				unexpected(t, "accept jailed connection: %v; reads keep network access", err)
-				t.FailNow()
+			if connection, err := listener.Accept(); err == nil {
+				connection.Close()
+				unexpected(t, "a jailed read without network connected")
 			}
-			connection.Close()
 		})
 	}
 }

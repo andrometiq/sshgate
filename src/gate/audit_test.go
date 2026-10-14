@@ -275,27 +275,6 @@ func mustReadFile(t *testing.T, path string) string {
 	return string(b)
 }
 
-// TestAuditRungOmitEmpty pins the additive rung field: absent from records that
-// ran no read child (so their shape is unchanged), present when a read set it.
-func TestAuditRungOmitEmpty(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "audit.log")
-	l := gate.NewAuditLogger(gate.AuditAllMeta, path)
-	l.Record(makeRecord("deny", "write", "denied", 77, nil))
-	read := makeRecord("cat /etc/hostname", "read", "unsigned", 0, &gate.AuditMeta{})
-	read.Rung = "full"
-	l.Record(read)
-	recs := readRecords(t, path)
-	if len(recs) != 2 {
-		t.Fatalf("got %d records, want 2", len(recs))
-	}
-	if _, ok := recs[0]["rung"]; ok {
-		t.Errorf("record without a rung serialised one: %v", recs[0])
-	}
-	if recs[1]["rung"] != "full" {
-		t.Errorf("rung = %v, want full", recs[1]["rung"])
-	}
-}
-
 // TestAuditReadFieldsOmitEmpty pins the read block and deny_reason: records
 // that ran no read keep exactly their old keys, an executed read carries every
 // read key, and a read-jail denial carries deny_reason and no read keys.

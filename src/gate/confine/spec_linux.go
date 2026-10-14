@@ -174,7 +174,10 @@ func RunWorker(args []string) int {
 	fail := func(stage string, err error) int {
 		// The structured report (stage + errno) goes to the parent on fd 4; the
 		// detailed message goes to the gate's stderr log channel for diagnosis.
-		if err != nil {
+		// A failure that may mean the host has no jail stays quiet: an
+		// unpinned host then runs the read classifier-only, and a deny prints
+		// its own line.
+		if err != nil && !AbsentCandidate(stage, errnoOf(err)) {
 			fmt.Fprintf(os.Stderr, "gate-jail: setup failed at %s: %v\n", stage, err)
 		}
 		_, _ = io.WriteString(statusW, formatFailReport(stage, errnoOf(err)))

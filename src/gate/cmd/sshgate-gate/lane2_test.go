@@ -211,9 +211,9 @@ func TestRunLane2ExecShellFreeClosedEnv(t *testing.T) {
 				t.Errorf("Lane-2 child stdin is not /dev/null")
 			}
 			recs := auditRecords(t, dir)
-			if len(recs) != 1 || recs[0]["rung"] != "lane2" || recs[0]["classification"] != "read" ||
-				recs[0]["approval_status"] != tc.approval {
-				t.Errorf("audit = %v, want one read/%s record with rung lane2", recs, tc.approval)
+			if len(recs) != 1 || recs[0]["enforcement"] != "daemon-read" || recs[0]["classification"] != "read" ||
+				recs[0]["approval_status"] != tc.approval || recs[0]["pinned"] != false || recs[0]["net"] != true {
+				t.Errorf("audit = %v, want one read/%s daemon-read record", recs, tc.approval)
 			}
 		})
 	}
@@ -239,8 +239,8 @@ func TestRunLane2SignedRead(t *testing.T) {
 		t.Errorf("argv = %q, want %q", rep.Args, want)
 	}
 	recs := auditRecords(t, dir)
-	if len(recs) != 1 || recs[0]["rung"] != "lane2" || recs[0]["approval_status"] != "signed" {
-		t.Errorf("audit = %v, want one signed record with rung lane2", recs)
+	if len(recs) != 1 || recs[0]["enforcement"] != "daemon-read" || recs[0]["approval_status"] != "signed" {
+		t.Errorf("audit = %v, want one signed daemon-read record", recs)
 	}
 }
 
@@ -261,7 +261,7 @@ func TestRunLane2OutputRedacted(t *testing.T) {
 		t.Errorf("Lane-2 stdout = %q; want the planted secret replaced by a redaction marker", out)
 	}
 	recs := auditRecords(t, dir)
-	if len(recs) != 1 || recs[0]["rung"] != "lane2" {
-		t.Errorf("audit = %v, want one lane2 record", recs)
+	if len(recs) != 1 || recs[0]["enforcement"] != "daemon-read" {
+		t.Errorf("audit = %v, want one daemon-read record", recs)
 	}
 }

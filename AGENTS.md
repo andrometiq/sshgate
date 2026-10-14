@@ -100,10 +100,12 @@ have them check the host's `/var/log/auth.log` and that the key line was pasted 
   `systemctl`/`docker` read verbs run outside the jail) or touch other processes. They see
   the host's `/tmp` and `/var/tmp` read-only; their only writable space is a private
   `/dev/shm` (`TMPDIR` points there), so a tool that insists on writing to `/tmp` fails.
-  The network, including localhost TCP services, is still open to reads. Other hosts run
-  reads unconfined, classifier-only, unless the operator pinned a jail floor. A read denied
-  with 77 and `read jail unavailable` means the host's jail could not be confirmed or set
-  up (or is required by that pin and missing), so nothing ran: don't retry; a human runs
+  Jailed reads have no network (not even localhost TCP) unless the operator pinned the host
+  `net=allow`; on a host pinned `net=allow` the `systemctl`/`docker` read verbs are refused.
+  Hosts without the jail run reads classifier-only, with network, unless the operator
+  pinned the host. A read denied with 77 and `read jail unavailable` means the pin is
+  damaged, or the host's jail could not be set up (or is missing on a pinned host, or for
+  a read that must run confined), so nothing ran: don't retry; a human runs
   `~/.sshgate-gate/gate doctor` on the host. Details: `docs/THREAT-MODEL.md`.
 - `transfer` failing with `src/dest server not registered for transfer`: that endpoint has no
   transfer key on the signer. The user runs `sshgate xfer-register <alias>`, then you retry.
