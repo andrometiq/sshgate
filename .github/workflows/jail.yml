@@ -80,6 +80,16 @@ jobs:
           uname -a
           cat /proc/self/mountinfo
           sysctl kernel.apparmor_restrict_unprivileged_userns || true
+          dev=$(mountpoint -d /)
+          path=$(readlink -f "/sys/dev/block/$dev")
+          echo "root $dev -> $path"
+          case "$path" in /sys/devices/*) ;; *) path=/sys/devices ;; esac
+          while [ "$path" != /sys/devices ] && [ "${path#/sys/devices/}" != "$path" ]; do
+            driver=-; [ -e "$path/driver" ] && driver=$(basename "$(readlink -f "$path/driver")")
+            subsystem=-; [ -e "$path/subsystem" ] && subsystem=$(basename "$(readlink -f "$path/subsystem")")
+            echo "  $(basename "$path") subsystem=$subsystem driver=$driver"
+            path=$(dirname "$path")
+          done
 
       - name: make test-jail
         run: |
