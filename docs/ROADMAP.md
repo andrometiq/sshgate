@@ -39,24 +39,21 @@ is tagged only when its release gates pass:
   [BUILD-PLAN.md](BUILD-PLAN.md).
 - **#76 approval-assist and #65 async approval** — work item 2 of
   [BUILD-PLAN.md](BUILD-PLAN.md).
-- **The hosted signer's policy authority (Tier 3)** — the hosted signer is a
-  foundation today; its policy authority still needs design and implementation
-  work before it is a release-ready approval boundary (see *Deferred* below).
-- **The rest of the declared v0.2 queue.** The maintainers' 2026-07-11 ruling
-  keeps v0.2's original scope: product shape and packaging (#74), including the
-  hosted signer as an embeddable library and a simple reference web app; bundled
-  DevOps skills (#75); friendlier gate responses (#26); multiple gate modes
-  (#80); the background-job verb; the SQL service adapter (#24); transparent
-  gated SSH (#81, work item 3); and the gated interactive session (#25). Items
-  not yet in [BUILD-PLAN.md](BUILD-PLAN.md) are described under
-  *Next (unscheduled)*.
+- **CI green** on every workflow, including the jail lanes on GitHub's runners.
 - **The combined release checks** — cross-review and integration of the
   outstanding fixes, `make preflight`, `make e2e`, the jail test lanes, and a
   public-hygiene review, followed by one coordinated version, changelog and
   distribution cut.
 
-No interim release is cut before that. Everything not listed here is post-v0.2
-unless the maintainers schedule it into [BUILD-PLAN.md](BUILD-PLAN.md) first.
+No interim release is cut before that. On 2026-10-14 the maintainers narrowed
+v0.2 to the items above so it ships sooner. The rest of the earlier v0.2 queue
+moves to **v0.3**: the hosted signer's policy authority (Tier 3), product shape
+and packaging (#74, including the hosted signer as an embeddable library and a
+simple reference web app), bundled DevOps skills (#75), friendlier gate
+responses (#26), multiple gate modes (#80), the background-job verb, the SQL
+service adapter (#24), transparent gated SSH (#81, work item 3) and the gated
+interactive session (#25). Items not yet in [BUILD-PLAN.md](BUILD-PLAN.md) are
+described under *Next (unscheduled)*.
 
 ---
 
@@ -411,7 +408,7 @@ of reliability, safety and ergonomics gaps, ranked by impact.
 - **Tier-3 hosted signer: policy authority and extensions (#83).** The
   `pkg/signerkit` library and `sshgate-signer-server` provide a foundation, but
   the hosted policy authority still needs design and implementation work before
-  it is a release-ready approval boundary; that is a v0.2 release gate (see
+  it is a release-ready approval boundary; that is scheduled for v0.3 (see
   above). A stable HTTPS hostname is a deployment prerequisite because passkeys
   and mutation-origin checks are origin-bound. Deferred extensions: per-client
   credentials, hosted Telegram/grants/reveal/transfer, HA, a policy-management UI,

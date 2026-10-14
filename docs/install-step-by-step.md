@@ -77,7 +77,7 @@ release status and trust boundary match your needs.
   (`src/signer-server`) contains a systemd installer, embedded approval UI,
   TOTP/WebAuthn authentication, and N-of-M/deny-veto policy. The work that
   lets it enforce approval policy on its own (the "hosted policy authority")
-  and the v0.2 release gates are still open (see [ROADMAP.md](ROADMAP.md)),
+  is still open, scheduled for v0.3 (see [ROADMAP.md](ROADMAP.md)),
   so do not treat it as an installable hosted release. The local
   `/sshgate:setup` menu does not automate this tier; follow
   [`src/signer-server/README.md`](../src/signer-server/README.md) for the

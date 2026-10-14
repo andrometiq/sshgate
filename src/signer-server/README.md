@@ -9,7 +9,7 @@ stream.
 
 **Release status:** not release-ready. No SSHGate release has been tagged
 yet, and the work that lets this server enforce approval policy on its own
-(the hosted policy authority) and the v0.2 release gates are still open (see
+(the hosted policy authority) is still open, scheduled for v0.3 (see
 [`docs/ROADMAP.md`](../../docs/ROADMAP.md)). Treat this guide as an
 engineering/deployment reference, not as a declaration that the current code
 is a release-ready hosted boundary.

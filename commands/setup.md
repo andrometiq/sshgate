@@ -60,7 +60,7 @@ and one concrete next step.
   must be manually de-provisioned and re-added before it becomes
   signed-write.
 - **Tier 3 — Hosted server signer:** source foundation present, but the
-  hosted policy authority and the v0.2 release gates remain open
+  hosted policy authority is still open, scheduled for v0.3
   (`docs/ROADMAP.md`); there is no tagged release of any tier yet. This local setup command does
   not configure it; hand off to `src/signer-server/README.md` for current
   engineering/deployment requirements.
@@ -196,7 +196,7 @@ Branch on the answer:
 - Tier 1 → continue to **Tier 1 flow**.
 - Tier 2 → continue to **Tier 2 flow** (do tier-1 prep first, then tier-2 add-ons).
 - Tier 3 → print:
-  `Hosted server signer is not release-ready: its v0.2 policy-authority and release gates remain open. This local setup command does not configure it. Follow src/signer-server/README.md for the current engineering/deployment requirements.`
+  `Hosted server signer is not release-ready: its hosted policy authority is still open (scheduled for v0.3). This local setup command does not configure it. Follow src/signer-server/README.md for the current engineering/deployment requirements.`
   Stop; do not run hosted deployment commands from this local setup flow or
   imply that the current branch is an installable hosted release.
 
