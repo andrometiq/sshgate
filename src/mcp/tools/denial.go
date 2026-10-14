@@ -165,7 +165,7 @@ func newDenial(class string) *Denial {
 			RequiredAction: ActionEscalateToHuman,
 			Retryable:      false,
 			HowTo: []string{
-				"Ask a human to run `~/.sshgate-gate/gate doctor` on the host; it reports the jail level and why it is unavailable.",
+				"Ask a human to run `~/.sshgate-gate/gate doctor` on the host; it reports the jail state and the pin, and why reads are refused.",
 				"Do NOT auto-retry: the gate refuses every read the same way until the host is fixed.",
 			},
 		}

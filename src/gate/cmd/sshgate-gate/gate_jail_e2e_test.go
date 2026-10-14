@@ -231,7 +231,7 @@ func TestGateBinaryNetworkPin(t *testing.T) {
 	}
 	writePin(t, dir, pinDeny, 0o644)
 	code, _, stderr := runGate(t, "curl dial-inet 1")
-	if code != 1 || !strings.Contains(stderr, "gate: note: reads on this host have no network access") {
+	if code != 1 || !strings.Contains(stderr, "gate: "+networkHintLine) {
 		unexpected(t, "network hint: exit %d, stderr %q", code, stderr)
 	}
 }

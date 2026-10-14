@@ -711,7 +711,7 @@ func TestNetworkHintReachesClient(t *testing.T) {
 	if code != 6 || setupErr != nil {
 		t.Fatalf("exit = %d, %v", code, setupErr)
 	}
-	if got := <-stderr; got != "gate: note: reads on this host have no network access; this command may need it (network is granted per host by the jail pin, or per read by a signed request)\n" {
+	if got := <-stderr; got != "gate: "+networkHintLine+"\n" {
 		t.Fatalf("client stderr = %q", got)
 	}
 	<-stdout

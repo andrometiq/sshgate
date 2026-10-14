@@ -97,7 +97,7 @@ the classifier and the jail are both discussed honestly below.
   operator responsibilities. (`design.md` §"Install tiers",
   `src/signer-server/README.md`.)
 
-## The kernel read jail (phase 1, profile `ro-v1`)
+## The kernel read jail (profile `ro-v1`)
 
 Code: `src/gate/confine/` (the jail) and `src/gate/cmd/sshgate-gate/readjail.go`
 (how a read is routed). The remaining phases are work item 1 of
@@ -198,9 +198,10 @@ and refuses the read if any check fails. With that, a jailed read **cannot**:
 
 ### What a jailed read can still do
 
-- **Use the network, where the host allows it.** Network is a per-host
-  permission, off by default: a jailed read cannot open a TCP or UDP socket
-  unless the host is pinned `net=allow`. On such a host a read can send data
+- **Use the network, where the host allows it.** Network for unsigned reads is
+  off by default: a jailed read cannot open a TCP or UDP socket unless the host
+  is pinned `net=allow` (a per-read signed network grant is planned). On such a
+  host a read can send data
   out, or talk to a local TCP service (a database, an admin HTTP endpoint) and
   make that service change state. A classifier-only read on a host without the
   jail keeps network: nothing removes it there.
@@ -365,6 +366,6 @@ operators who need the key off the agent's machine entirely.
 - [`security-readonly-bypass.md`](security-readonly-bypass.md) — the read-only
   bypass landscape and per-item CLOSED/open status.
 - [`BUILD-PLAN.md`](BUILD-PLAN.md) — what is built next, including the remaining
-  phases of the read jail (network as a permission, a host pin, labels).
+  phases of the read jail (signed network grants, labels).
 - [`TESTING.md`](TESTING.md) — how the jail's protections are proved.
 - [`FUTURE.md`](FUTURE.md) — the honest limitations list and deferred directions.

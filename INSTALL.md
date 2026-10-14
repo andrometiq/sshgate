@@ -279,14 +279,14 @@ Tell the user:
 >
 >     ~/.sshgate-gate/gate doctor
 >
-> The `reads:` line shows what happens to reads there: `jailed:full` means reads run inside the
-> kernel jail; `unconfined` means the host lacks unprivileged user namespaces or Landlock, so reads
-> are guarded by the classifier only, as before. Stock Ubuntu 24.04 restricts the unprivileged
-> user namespaces the jail needs through AppArmor (`gate doctor` then shows
-> `apparmor_userns_clamp: yes`); reads there run unconfined until root lifts that restriction or
-> gives the gate an AppArmor profile. If the host is `jailed:full`, you can run
-> `~/.sshgate-gate/gate doctor --pin` so that from then on the gate refuses reads rather than ever
-> running them unjailed there.
+> The `reads:` line shows what happens to reads there: `kernel-jailed, …` means reads run inside
+> the kernel jail; `classifier-only` means the host lacks unprivileged user namespaces or
+> Landlock, so reads are guarded by the classifier only, as before. Stock Ubuntu 24.04 restricts
+> the unprivileged user namespaces the jail needs through AppArmor (`gate doctor` then shows
+> `apparmor_userns_clamp: yes`); reads there run classifier-only until root lifts that
+> restriction or gives the gate an AppArmor profile. Jailed reads have no network unless the host
+> is pinned to allow it, and a pin also makes the gate refuse reads rather than ever run them
+> unjailed: see [step 5 of the install guide](docs/install-step-by-step.md#5-check-the-servers-read-jail).
 >
 > **Use it.** Ask me in plain English, for example *What's eating disk on prod-db?* or
 > *Restart nginx on staging.* Reads come back at once. On Tier 2, writes wait for your tap on

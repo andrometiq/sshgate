@@ -8,6 +8,47 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 Dates are intentionally omitted where a release has not yet been tagged and
 published; entries are ordered newest-first by version.
 
+## [Unreleased]
+
+Phase 2 of the kernel read jail (work item #22). This entry covers P2.1; it
+ships together with P2.2 (`SSHGATE_JAIL`, the rewritten `gate doctor` and
+`--pin`), with no release between them.
+
+### Changed
+
+- **Network is off by default for unsigned reads.** On a host where the
+  kernel jail runs, an unsigned read can no longer open a TCP or UDP socket,
+  not even to localhost. Turn it back on per host by pinning the host
+  `net=allow` (`gate doctor --pin`, from P2.2); a per-read signed network grant
+  is planned. A jailed network tool that fails for this reason gets one note on
+  stderr. Hosts without a usable jail run reads classifier-only, as before, and
+  keep network.
+- **Every read attempts the jail; there is no separate probe.** A setup
+  failure caused by the host lacking the jail (user namespaces off, Ubuntu's
+  AppArmor userns restriction, an LSM-refused mount, a missing kernel feature)
+  is *Absent*: an unpinned host runs the read classifier-only. Any other
+  failure is *Failed* and refuses the read (exit 77), as does any failure on a
+  pinned host. A command the jail may have started is never run again.
+- **The `jail` pin replaces `jail-floor`.** A `jail` file in the gate
+  directory (`profile=ro-v1`, `net=allow|deny`, optional `accept_fs=`) pins the
+  host: reads never run outside the jail, runs are strict (a mount the jail
+  cannot hide refuses the read), and the pin sets network. A damaged pin
+  refuses every read. **Upgrading:** a leftover `jail-floor` with no `jail` pin
+  refuses every read until the host is re-pinned or the file is removed.
+- **On a host pinned `net=allow`, the `systemctl`/`docker` read verbs are
+  refused** (exit 77): they run outside the jail, and such a host requires
+  confinement. They move into the jail in a later phase.
+- **On Ubuntu with the AppArmor userns restriction** each read makes one jail
+  attempt, which logs one AppArmor `userns_create` denial. Install an AppArmor
+  profile for the gate, accept classifier-only reads, or pin the host to refuse
+  them.
+- **Audit.** Executed reads record `enforcement`, `profile`, `pinned`,
+  `landlock_abi`, `net`, `accept_fs`, `requires_confinement`, `cwd_reset`,
+  `jail_absent` and `label_clause_unmet`; jail denials record `deny_reason`.
+  The `rung` field is gone.
+- **`gate doctor`** (interim, until P2.2) reports the pin, the host facts, one
+  jail attempt and what an unsigned read would do; `--pin` is refused.
+
 ## [0.1.5]
 
 The kernel read jail (phase 1 of work item #22), plus public-release polish:

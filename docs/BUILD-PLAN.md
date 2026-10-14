@@ -85,8 +85,8 @@ hosts run reads classifier-only, as before. What Phase 1 built:
   publishes the command's wait status. The gate can therefore tell a read that never started
   from one that ran, and never re-runs a read that reached `X`. Descendant cleanup and output
   delivery are best effort and bounded after cancellation.
-- **Network.** Reads keep TCP/UDP network access, as before the jail. Network becomes a
-  permission in Phase 2 (P2.1) and Phase 4.
+- **Network.** Phase 1 left reads their TCP/UDP network access. P2.1 makes network a host
+  permission (the `jail` pin); Phase 4 adds per-read signed grants.
 - **Unchanged.** Signed writes and the admin verbs (`SSHGATE_REVOKE`, `SSHGATE_UPDATE`,
   `SSHGATE_XFER_*`) run exactly as before the jail; a jail problem never blocks them.
 - **Test system.** Every Phase-1 protection has a registry ID, a hook that exists only in
@@ -97,9 +97,7 @@ What Phase 1 does not do yet, and where it is done:
 
 | Gap | Step |
 |---|---|
-| Whether a read is jailed is still decided by the interim capability probe and the older `jail-floor` pin | P2.1 |
-| Runs are non-strict: a mount the jail cannot cover stays visible instead of refusing the read, and the gap is not in the audit record | P2.1 |
-| Reads have network access | P2.1, P4.2–P4.4 |
+| Network is a host setting only; there is no per-read signed network grant | P4.2–P4.4 |
 | The fixed `systemctl`/`docker` read verbs run outside the jail | P3.2 |
 | No `SSHGATE_JAIL` capability verb; the MCP shows only the signer tier | P2.2, P5.1 |
 | No host is labelled kernel read-only; the label is compiled off | P7.1 |
@@ -227,7 +225,7 @@ the environment; the signed wire stays v1 with only additive fields an older gat
 ### Phase 2: gate wiring
 
 **P2.1 — The `jail` pin, setup-failure classification, and network from the pin.**
-Status: open.
+Status: done.
 
 - *Goal:* replace the interim probe and the `jail-floor` pin with "the attempt is the probe";
   make network a host permission for unsigned reads.
@@ -269,6 +267,8 @@ Status: open.
   `SSHGATE_REVOKE` and a valid signed `SSHGATE_UPDATE` still run; INET legs show no socket
   under `net=deny` and a connection under `net=allow`.
 - *Depends:* Phase 1.
+- *Release:* P2.1 and P2.2 ship in one release, with no tag between them: P2.1 retires
+  `jail-floor` and the old `gate doctor --pin`, and operators can pin again only from P2.2.
 - *Release note:* any release containing P2.1 states that unsigned reads lost network and how
   to restore it (P5.2 wording).
 
@@ -373,7 +373,9 @@ Status: open.
   (`gate: network grant covers reads only`); a network-granted read runs jailed and strict with
   network; the envelope parser runs before the public-key load (Tier-1 handles it), sends an
   inner read to `execRead` with confinement required, denies an inner write or unknown 77, and
-  denies an envelope inside a signed command 77.
+  denies an envelope inside a signed command 77. `readSpec`'s `grant` input comes from
+  `Verified.Net`; the test-only `forceNetGrant` variable is deleted and its legs switch to real
+  signed grants.
 - *Acceptance:* `TestEncodeSigned_Golden` unchanged, `TestEncodeSigned_NetGolden`,
   `TestDecodeV1RejectsNet`; `P-G-ENVELOPE` registered with `U-EnvelopeParse`; the
   `P-G-CONFINE-REQUIRED` effect leg through the real signed path; `G-NET-NO-FALLBACK`,

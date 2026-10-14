@@ -119,8 +119,9 @@ What it does **not** do, stated plainly (details in the threat model):
 - **The classifier can be wrong.** If it ever judges a write to be a read, that command runs
   without approval. On a jail-capable host the jail limits what such a command can do; on other
   hosts, the classifier is the only thing in the way.
-- **Reads can use the network.** Jailed reads keep TCP and UDP access, including to services on
-  localhost. A read can send data out or talk to a local TCP service.
+- **Reads can use the network where it is allowed.** Network for reads is a per-host setting
+  ([docs/THREAT-MODEL.md](docs/THREAT-MODEL.md)). Where a read has it, it can send data out or
+  talk to a local TCP service. Hosts without the jail always give reads network.
 - **Reads can see what the SSH user can see.** The jail stops writes, not reads. Anything the
   server's SSH user can read, the agent can read, apart from what the redactor catches.
 - **The local signer is a safety rail, not a wall, against a privileged agent.** If the agent can
@@ -262,10 +263,10 @@ inside a kernel jail (profile `ro-v1`):
 - the jail checks itself before the command starts, and refuses the read if any check fails.
 
 **Which hosts get it.** The host needs unprivileged user namespaces that can mount, and Landlock
-(Linux 5.13 or newer, with Landlock enabled). On a host without both, reads run unconfined, guarded
-by the classifier only, as they did before 0.1.5. Some distributions, such as Ubuntu 24.04,
-restrict unprivileged user namespaces through AppArmor; on those, reads run unconfined until root
-lifts that restriction or gives the gate an AppArmor profile that allows it.
+(Linux 5.13 or newer, with Landlock enabled). Every read attempts the jail. On a host without it,
+reads run classifier-only, as they did before 0.1.5. Some distributions, such as Ubuntu 24.04,
+restrict unprivileged user namespaces through AppArmor; on those, reads run classifier-only until
+root lifts that restriction or gives the gate an AppArmor profile that allows it.
 
 **Check a host.** Log in to the server yourself (not through SSHGate) as the user SSHGate was
 installed for, and run:
@@ -274,23 +275,24 @@ installed for, and run:
 ~/.sshgate-gate/gate doctor          # human-readable; add --json for JSON
 ```
 
-The `reads:` line says what happens to reads on that host: `jailed:full`, `unconfined`, or
-`denied: <reason>`.
+The `reads:` line says what happens to an unsigned read on that host: `kernel-jailed, no network`,
+`kernel-jailed, network open`, `classifier-only (no usable jail)`, or `denied (<reason>)`.
 
-**Refuse unjailed reads.** `~/.sshgate-gate/gate doctor --pin` records `full` in a `jail-floor`
-file next to the gate. From then on, if the jail ever becomes unavailable on that host, the gate
-refuses reads (exit 77, "read jail unavailable") instead of running them unconfined. A jail that
-fails to set up, or a capability check that fails for an unexplained reason, is always refused;
-the gate never quietly falls back to an unconfined read on a host that supports the jail.
+**Pin a host.** A `jail` file next to the gate pins the host: reads are then never run outside the
+jail (exit 77, "read jail unavailable", when it cannot be set up), and the pin says whether reads
+get network. `gate doctor --pin` writes it after a rehearsal ([docs/BUILD-PLAN.md](docs/BUILD-PLAN.md)
+P2.2). A jail that fails to set up for an unexplained reason is always refused, pinned or not; only
+a host that lacks the jail (user namespaces off, the AppArmor restriction, no Landlock) runs reads
+classifier-only, and only when it is not pinned. A `jail-floor` file from 0.1.x with no `jail`
+pin makes the gate refuse reads until the host is re-pinned or the file is removed.
 
 **What runs outside the jail.** A short, fixed list of `systemctl` and `docker` read commands
 (such as `systemctl status` and `docker ps`) needs the daemons' Unix sockets, so it runs outside
 the jail without a shell, with an allowlist of flags. Signed writes and the gate's own admin
 commands run exactly as before, and a jail problem never blocks them.
 
-**What it does not stop.** Jailed reads keep network access, and some narrow residual effects
-remain. Both are listed in [docs/THREAT-MODEL.md](docs/THREAT-MODEL.md). A per-server network
-permission is planned in [docs/BUILD-PLAN.md](docs/BUILD-PLAN.md).
+**What it does not stop.** Network where a read is allowed it, and some narrow residual effects.
+Both are listed in [docs/THREAT-MODEL.md](docs/THREAT-MODEL.md).
 
 ## Secret redaction
 

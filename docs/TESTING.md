@@ -112,6 +112,12 @@ original → assign → restore via `defer`/`t.Cleanup`). Used for narrow,
 single-call indirections:
 
 - `gateDirFn` / `homeDirFn` — `src/gate/cmd/sshgate-gate/main.go` (`var gateDirFn`, `var homeDirFn`)
+- `executeCommand` (`main.go`) and the read router's seams in
+  `src/gate/cmd/sshgate-gate/readjail.go`: `forceNetGrant` (stands in for a signed network grant
+  until the signed wire carries one), `readSpecHook` (forces a Landlock ABI or a setup failure),
+  `hostFactsFn`, `pinUIDFn` and `jailPinFn`. The gate legs that need the gate in its own process
+  set the same seams through the test binary's `SSHGATE_TEST_GATE` mode (`jail_testmain_test.go`);
+  the gate itself never reads them from the environment.
 - `dialWithCtx` — `src/mcp/sign/client.go` (`var dialWithCtx`)
 - `randRead` — `src/signer/daemon.go` (`var randRead`)
 - `dialAgentSock`, `parsePrivateKey` — `src/mcp/tools/add_server.go` (package vars)
@@ -135,7 +141,7 @@ multi-step remote conversation in memory rather than against a real sshd.
 These are **package-var** seams, not env vars, and that is deliberate. The
 clearest case: `gateDirFn` resolves where the gate reads `gate.pub` (the
 signature-verification trust anchor), and also its other static operator files
-(`jail-floor`, `audit-level`, `audit-path`). If that location were `$ENV`-overridable,
+(the `jail` pin, `audit-level`, `audit-path`). If that location were `$ENV`-overridable,
 an attacker who controlled the environment could point the gate at a `gate.pub`
 they own and **forge signatures** — every "signed" admin command would verify.
 So the seam exists *only* so in-package tests can point resolution at a
@@ -231,7 +237,8 @@ Constants in `main.go` (sysexits-style); each asserted by a named case in
 | 1 | `exitGeneric` | generic runtime failure / empty inner command | `TestRunSignedWritePassthrough` (empty inner) |
 | 65 | `exitDataErr` (EX_DATAERR) | bad signature, bad envelope, expired sig, validity window too long | `TestRunVerifiedPaths` (bad signature / tampered cmd / expired) |
 | 70 | `exitSoftware` (EX_SOFTWARE) | `gate.pub` unreadable / corrupt / insecure mode | `TestRunPubkeyFailures` (corrupt / insecure-mode) |
-| 77 | `exitNoPermVal` (EX_NOPERM) | write command without a verified `SSHGATE_SIG` prefix; also a read refused because the read jail cannot be trusted or set up (stderr says `read jail unavailable`) | `TestRunWriteDenial` (unsigned write); `TestRunReadOnlyMode` (write in read-only); `TestRunReadFailsClosed` (probe error, damaged or higher floor); `TestRunReadJailSetupFailureDenies` (jail setup failure; needs a jail-capable host, run by `make test-jail`) |
+| 77 | `exitNoPermVal` (EX_NOPERM) | write command without a verified `SSHGATE_SIG` prefix; also a read the read jail refuses (stderr says `read jail unavailable`): a damaged pin or a 0.1.x `jail-floor` with no pin, a Failed jail, an Absent jail on a pinned host, or a read that must run confined | `TestRunWriteDenial` (unsigned write); `TestRunReadOnlyMode` (write in read-only); `TestRunReadDeniedDamagedPin`, `TestRunReadLegacyFloorDenies`, `TestRunReadFailedSetupDenies`, `TestRunReadAbsentPinnedDenies`; `TestRunReadJailSetupFailureDenies` (live jail, run by `make test-jail`) |
+| 143 | `exitCancelled` | a signed admin verb, or a read whose jail never started, cancelled before it ran (read deny_reason `cancelled`) | `TestRunReadCancelledBeforeFallback` |
 | 0–255 | passthrough | child's own exit code passed straight through | `TestRunSignedWritePassthrough` (child exits 42 → 42) |
 | 128+signum | passthrough | child killed by signal → `128+signal` | `TestRunSignedWritePassthrough` (SIGTERM → 143) |
 
@@ -626,7 +633,13 @@ make test-jail-mutate                  # every mutation set (slow)
 real-effect tests in `src/gate` (`TestExecWithRedactionConfine*`), and the gate
 binary's read-path tests in `src/gate/cmd/sshgate-gate` (for example
 `TestGateBinaryJailedRead`, which drives a forced-command read through the real
-gate binary and also checks that jailed reads keep TCP/UDP network access). It
+gate binary and checks that an unpinned jailed read gets no INET socket), the
+read router's decision tables (`TestPhase2Tables`) and its gate legs
+(`TestJailMatrixPhase2`, `TestGateBinaryNetworkPin`). The two tests that prove
+classifier-only reads on a host with Ubuntu's AppArmor userns restriction
+(`TestRunReadClampHostRunsClassifierOnly`, `TestGateBinaryClampHostClassifierOnly`) are not
+in this target, which needs a working jail; `make test` runs them, and CI requires them to pass
+on `ubuntu-latest`. It
 then checks the combined log against the case manifest (see 12.4).
 
 Some fast checks need no jail at all:

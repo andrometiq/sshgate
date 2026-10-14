@@ -100,10 +100,10 @@ have them check the host's `/var/log/auth.log` and that the key line was pasted 
   `systemctl`/`docker` read verbs run outside the jail) or touch other processes. They see
   the host's `/tmp` and `/var/tmp` read-only; their only writable space is a private
   `/dev/shm` (`TMPDIR` points there), so a tool that insists on writing to `/tmp` fails.
-  Jailed reads have no network (not even localhost TCP) unless the operator pinned the host
-  `net=allow`; on a host pinned `net=allow` the `systemctl`/`docker` read verbs are refused.
-  Hosts without the jail run reads classifier-only, with network, unless the operator
-  pinned the host. A read denied with 77 and `read jail unavailable` means the pin is
+  Whether jailed reads have network (even localhost TCP) is set per host by the operator's
+  pin; when a network tool fails for lack of it, the gate prints a note saying so. On a host
+  pinned `net=allow` the `systemctl`/`docker` read verbs are refused. Hosts without the
+  jail run reads classifier-only, with network, unless the operator pinned the host. A read denied with 77 and `read jail unavailable` means the pin is
   damaged, or the host's jail could not be set up (or is missing on a pinned host, or for
   a read that must run confined), so nothing ran: don't retry; a human runs
   `~/.sshgate-gate/gate doctor` on the host. Details: `docs/THREAT-MODEL.md`.

@@ -317,6 +317,9 @@ func needsNetwork(cmd string) bool {
 	return false
 }
 
+// networkHintLine states the network default for unsigned reads.
+const networkHintLine = "note: unsigned reads have no network on this host; this command may need it (allow network per host by pinning it net=allow)"
+
 // networkHint prints one advisory line when a kernel read without network
 // failed and its command looks like it needs the network. It must run before
 // the client sink is finished.
@@ -324,5 +327,5 @@ func networkHint(cmd string, rc int, facts *confine.Facts) {
 	if facts == nil || facts.Net || rc == 0 || !needsNetwork(cmd) {
 		return
 	}
-	logf("note: reads on this host have no network access; this command may need it (network is granted per host by the jail pin, or per read by a signed request)")
+	logf("%s", networkHintLine)
 }
