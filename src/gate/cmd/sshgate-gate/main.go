@@ -20,7 +20,8 @@
 //	     left intact)
 //	77 — EX_NOPERM: write command without a verified SSHGATE_SIG prefix;
 //	     also a read refused by the read jail, with "gate: read jail
-//	     unavailable" on stderr: the jail pin is damaged, the read must run
+//	     unavailable" on stderr: the jail pin is damaged (or a jail-floor
+//	     from an earlier release is left with no jail pin), the read must run
 //	     confined and cannot, the jail failed to set up, or the host has no
 //	     usable jail and is pinned
 //	143 — a signed admin verb, or a read whose jail never started, cancelled
@@ -108,8 +109,6 @@ func main() {
 			os.Exit(confine.RunShim(os.Args[2:]))
 		case confine.SentinelWorker:
 			os.Exit(confine.RunWorker(os.Args[2:]))
-		case confine.SentinelProbe:
-			os.Exit(confine.RunProbe(os.Args[2:]))
 		}
 		os.Exit(runLocalSubcommand(os.Args[1:]))
 	}

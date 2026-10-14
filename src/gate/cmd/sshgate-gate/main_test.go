@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 )
@@ -140,4 +141,20 @@ func TestRunReadOnlyMode(t *testing.T) {
 			t.Errorf("stdout = %q, want SSHGATE_OK", buf.String())
 		}
 	})
+}
+
+// TestGateSentinelsAreShimAndWorkerOnly: the real binary dispatches only the
+// jail's shim and worker sentinels. The retired probe sentinel reaches the
+// operator subcommands and is refused like any unknown one.
+func TestGateSentinelsAreShimAndWorkerOnly(t *testing.T) {
+	bin := filepath.Join(t.TempDir(), "gate")
+	build := exec.Command("go", "build", "-trimpath", "-o", bin, ".")
+	build.Env = append(os.Environ(), "CGO_ENABLED=0")
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build gate: %v\n%s", err, out)
+	}
+	out, err := exec.Command(bin, "__jailprobe", "{}").CombinedOutput()
+	if exit, ok := err.(*exec.ExitError); !ok || exit.ExitCode() != exitDataErr || string(out) != "gate: unknown subcommand\n" {
+		t.Fatalf("__jailprobe: %v, output %q; want exit %d as an unknown subcommand", err, out, exitDataErr)
+	}
 }

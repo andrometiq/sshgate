@@ -235,8 +235,10 @@ Status: open.
   - The `jail` pin parser: at most 4 KiB, `key=value` lines, `#` comments; `lstat` (no symlink),
     regular file, owned by the gate's uid, not group- or world-writable; an unknown or
     duplicate key, a missing required key or a bad value makes it damaged. A damaged pin denies
-    reads (77) and never affects signed writes or admin verbs. A leftover `jail-floor` file is
-    ignored, with one note from doctor.
+    reads (77) and never affects signed writes or admin verbs. A leftover `jail-floor` file
+    (any content) with no `jail` pin also denies reads (77, `pin:legacy-floor`): its operator
+    asked never to run reads outside the jail. Re-pinning or removing it clears the deny; under
+    a valid `jail` pin it is ignored, with one note from doctor.
   - `confine.ReadHostFacts` and `confine.ClassifySetupFailure(stage, errno, facts)`: `clone`
     `EPERM`/`EINVAL` (or `ENOSPC` with `user.max_user_namespaces == 0`, or `EACCES` with
     Ubuntu's AppArmor userns restriction on, `kernel.apparmor_restrict_unprivileged_userns=1`,

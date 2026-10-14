@@ -15,17 +15,6 @@ import (
 	"time"
 )
 
-func TestRungString(t *testing.T) {
-	for r, want := range map[Rung]string{
-		Rung1Full:       "full",
-		Rung3Unconfined: "unconfined",
-	} {
-		if got := r.String(); got != want {
-			t.Errorf("Rung(%d).String()=%q want %q", r, got, want)
-		}
-	}
-}
-
 // TestSpecJSONRoundTrip covers the parent->shim->worker marshalling: the Spec
 // travels as JSON in argv and must survive unchanged.
 func TestSpecJSONRoundTrip(t *testing.T) {

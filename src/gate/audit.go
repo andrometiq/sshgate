@@ -223,8 +223,9 @@ type AuditRecord struct {
 	// other record.
 	*ReadAudit
 	// DenyReason says why the read jail refused a read: "pin:damaged",
-	// "confine:required", "jail:absent:<stage>[:<ERRNO>]" or
-	// "jail:failed:<stage>[:<ERRNO>]". Empty (omitted) on every other record.
+	// "pin:legacy-floor", "confine:required", "jail:absent:<stage>[:<ERRNO>]",
+	// "jail:failed:<stage>[:<ERRNO>]", or "cancelled" when the session ended
+	// before the read could start. Empty (omitted) on every other record.
 	DenyReason string `json:"deny_reason,omitempty"`
 	// Stdout/Stderr hold raw output, serialised ONLY at AuditAllFull — and
 	// never for a revealed command (see Revealed).

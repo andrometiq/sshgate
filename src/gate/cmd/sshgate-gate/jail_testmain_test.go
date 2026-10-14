@@ -17,7 +17,7 @@ import (
 // TestMain makes this test binary behave like the real gate where the read
 // path re-execs it, and gives the run() tests a jail-visible temp dir.
 //
-//   - The jail (and its probe) re-exec /proc/self/exe — in a test build, THIS
+//   - The jail re-execs /proc/self/exe — in a test build, THIS
 //     binary — with confine's sentinels, so they are dispatched exactly as
 //     main() does.
 //   - Invoked under the name of a Lane-2 binary (via a symlink a test plants in
@@ -34,8 +34,6 @@ func TestMain(m *testing.M) {
 			os.Exit(confine.RunShim(os.Args[2:]))
 		case confine.SentinelWorker:
 			os.Exit(confine.RunWorker(os.Args[2:]))
-		case confine.SentinelProbe:
-			os.Exit(confine.RunProbe(os.Args[2:]))
 		}
 	}
 	switch filepath.Base(os.Args[0]) {

@@ -76,7 +76,7 @@ func (s Spec) command(ctx context.Context, cmd string) (*Jailed, error) {
 	}, nil
 }
 
-// cloneSysProcAttr is the rung-1 clone policy: new user+mount+ipc
+// cloneSysProcAttr is the jail's clone policy: new user+mount+ipc
 // namespaces (the ipc one isolates host SysV IPC and POSIX message queues),
 // identity uid/gid maps (so reads of the user's own files keep correct
 // ownership), and the mount-phase capabilities carried as ambient caps so they

@@ -49,8 +49,8 @@ type ExecOpts struct {
 	CaptureLimit int
 	// Confine, when non-nil, runs the command inside the kernel jail the Spec
 	// describes (the ro-v1 profile) instead of a plain
-	// /bin/sh -c. A nil Confine is byte-for-byte today's path (rung 3 / unset):
-	// the gate passes nil on an unconfined host so this field is purely additive.
+	// /bin/sh -c. A nil Confine is the plain path of signed writes and
+	// classifier-only reads.
 	// The jail only ADDS restrictions; stdout/stderr/stdin/redaction wiring below
 	// is identical either way.
 	Confine *confine.Spec

@@ -10,11 +10,7 @@ import (
 	"strings"
 
 	"github.com/karthikeyan5/sshgate/src/gate"
-	"github.com/karthikeyan5/sshgate/src/gate/confine"
 )
-
-// jailFloorFile is the older pin, now ignored. Doctor notes a leftover one.
-const jailFloorFile = "jail-floor"
 
 // doctorReport is `gate doctor` output: the jail pin, the host facts, one jail
 // attempt, and what an unsigned read would do with them right now.
@@ -70,17 +66,20 @@ func runDoctor(args []string) int {
 	return exitOK
 }
 
+// doctor reports what the read router would do: it reads the pin with the
+// router's reader and routes one `:` attempt with the router's routeAttempt.
 func doctor(gateDir string) doctorReport {
 	facts := hostFactsFn()
 	d := doctorReport{
 		LandlockABI: facts.LandlockABI, MaxUserNS: facts.MaxUserNS, AppArmorUsernsClamp: facts.AppArmorUsernsClamp,
 		SeccompFilter: facts.SeccompFilter, DevShm: facts.DevShmDir, LSM: facts.LSMs,
 	}
-	if _, err := os.Lstat(filepath.Join(gateDir, jailFloorFile)); !errors.Is(err, os.ErrNotExist) {
-		d.Notes = append(d.Notes, "jail-floor is no longer used and is ignored; reads on this host are NOT pinned. Re-pin with 'gate doctor --pin' (available from the next release step).")
-	}
 	pin := jailPinFn()
+	_, floorErr := os.Lstat(filepath.Join(gateDir, jailFloorFile))
 	switch {
+	case pin.legacyFloor:
+		d.Pin, d.PinError = "damaged", pin.damaged
+		d.Notes = append(d.Notes, "a jail-floor file from an earlier release is present and there is no jail pin, so reads are denied. Re-pin with 'gate doctor --pin' (available from the next release step), or remove jail-floor to run reads classifier-only where the host has no usable jail.")
 	case pin.damaged != "":
 		d.Pin, d.PinError = "damaged", pin.damaged
 	case pin.valid:
@@ -91,35 +90,38 @@ func doctor(gateDir string) doctorReport {
 	default:
 		d.Pin = "absent"
 	}
+	if pin.valid && !errors.Is(floorErr, os.ErrNotExist) {
+		d.Notes = append(d.Notes, "jail-floor is no longer used and is ignored: the jail pin decides.")
+	}
 
 	requires := requiresConfinement(pin, false)
 	spec := readSpec(pin, requires, false)
 	res, err := executeCommand(context.Background(), ":", gate.ExecOpts{Confine: &spec})
-	var setup *confine.SetupError
-	switch {
-	case res.ExitCode >= 0:
+	var setupErr error
+	if res.ExitCode < 0 {
+		setupErr = setupErrorOf(err)
+	}
+	route := routeAttempt(pin.valid, requires, res, setupErr)
+	d.Attempt = route.reason
+	if route.kernel {
 		d.Attempt = "kernel"
-	case errors.As(setupErrorOf(err), &setup):
-		class := attemptClass(setup, res)
-		d.Attempt = confine.DenyReason(class, setup.Stage, setup.Errno)
-		if class == confine.Absent && setup.Stage == "clone" && facts.AppArmorUsernsClamp {
-			d.Notes = append(d.Notes, "the AppArmor userns restriction refuses the jail: each read makes one attempt, which logs one AppArmor userns_create denial; install an AppArmor profile for the gate, or accept classifier-only reads (and the log line), or pin the host to refuse reads")
-		}
-	default:
-		d.Attempt = "failed: " + err.Error()
+	}
+	if route.reason == "jail:absent:clone:EACCES" && facts.AppArmorUsernsClamp {
+		d.Notes = append(d.Notes, "the AppArmor userns restriction refuses the jail: each read makes one attempt, which logs one AppArmor userns_create denial; install an AppArmor profile for the gate, or accept classifier-only reads (and the log line), or pin the host to refuse reads")
 	}
 
 	switch {
 	case pin.damaged != "":
-		d.Reads = "denied (the jail pin is damaged)"
-	case d.Attempt == "kernel" && spec.Net:
+		reason, _ := pin.denial()
+		d.Reads = "denied (" + reason + ")"
+	case route.kernel && spec.Net:
 		d.Reads = "kernel-jailed, network open"
-	case d.Attempt == "kernel":
+	case route.kernel:
 		d.Reads = "kernel-jailed, no network"
-	case setup != nil && routeAfterSetupFailure(pin.valid, requires, attemptClass(setup, res)):
+	case route.fallback:
 		d.Reads = "classifier-only (no usable jail)"
 	default:
-		d.Reads = "denied (" + d.Attempt + ")"
+		d.Reads = "denied (" + route.reason + ")"
 	}
 	return d
 }

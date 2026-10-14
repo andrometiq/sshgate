@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -49,7 +50,7 @@ func TestDoctorReportsPinStates(t *testing.T) {
 		{name: "absent", reads: "kernel-jailed, no network", want: doctorReport{Pin: "absent"}},
 		{name: "valid deny", pin: pinDeny + "accept_fs=autofs\n", mode: 0o644, reads: "kernel-jailed, no network", want: doctorReport{Pin: "valid", PinNet: "deny", AcceptFS: []string{"autofs"}}},
 		{name: "valid allow", pin: pinAllow, mode: 0o644, reads: "kernel-jailed, network open", want: doctorReport{Pin: "valid", PinNet: "allow"}},
-		{name: "damaged", pin: pinDeny, mode: 0o666, reads: "denied (the jail pin is damaged)", want: doctorReport{Pin: "damaged", PinError: "group- or world-writable"}},
+		{name: "damaged", pin: pinDeny, mode: 0o666, reads: "denied (pin:damaged)", want: doctorReport{Pin: "damaged", PinError: "group- or world-writable"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -128,8 +129,9 @@ func TestDoctorHumanOutput(t *testing.T) {
 	}
 }
 
-// TestDoctorJailFloorNote: a leftover jail-floor gets exactly one note and
-// changes nothing: reads on the host are not pinned by it.
+// TestDoctorJailFloorNote: a leftover jail-floor with no jail pin is reported
+// as the router treats it, denying reads; with a valid jail pin it is ignored,
+// with one note.
 func TestDoctorJailFloorNote(t *testing.T) {
 	withHostFacts(t, capableFacts)
 	dir := t.TempDir()
@@ -142,18 +144,59 @@ func TestDoctorJailFloorNote(t *testing.T) {
 		t.Fatal(err)
 	}
 	d := doctorJSON(t)
-	if len(d.Notes) != 1 || !strings.Contains(d.Notes[0], "jail-floor is no longer used and is ignored; reads on this host are NOT pinned") || d.Pin != "absent" {
-		t.Fatalf("doctor = %+v", d)
+	if d.Pin != "damaged" || d.Reads != "denied (pin:legacy-floor)" || len(d.Notes) != 1 || !strings.Contains(d.Notes[0], "reads are denied. Re-pin with 'gate doctor --pin'") {
+		t.Fatalf("leftover floor, no pin: %+v", d)
 	}
+	writePin(t, dir, pinDeny, 0o644)
+	d = doctorJSON(t)
+	if d.Pin != "valid" || d.Reads != "kernel-jailed, no network" || len(d.Notes) != 1 || !strings.Contains(d.Notes[0], "jail-floor is no longer used and is ignored") {
+		t.Fatalf("leftover floor under a jail pin: %+v", d)
+	}
+}
 
+// TestDoctorAgreesWithRouter: for every attempt outcome, what doctor says an
+// unsigned read would do is what the router does with that read.
+func TestDoctorAgreesWithRouter(t *testing.T) {
 	readNamedWriter(t)
-	fake := withFakeAttempt(t, gate.ExecResult{}, nil)
-	fake.result, fake.err = setupFailure("landlock", syscall.ENOSYS)
-	target := seedTarget(t, dir)
-	if code, _, stderr := runWith(t, "stat "+target+" edited"); code != exitOK || fake.fallback != 1 {
-		t.Fatalf("a read under a leftover floor: exit %d, stderr %q, executor %+v", code, stderr, fake)
+	clamp := capableFacts
+	clamp.AppArmorUsernsClamp = true
+	withHostFacts(t, clamp)
+	for _, pin := range []string{"", pinDeny, pinAllow} {
+		for _, failure := range []struct {
+			stage string
+			errno syscall.Errno
+		}{{"", 0}, {"clone", syscall.EACCES}, {"landlock", syscall.ENOSYS}, {"seccomp", syscall.EIO}} {
+			t.Run(fmt.Sprintf("pin=%q %s", pin, failure.stage), func(t *testing.T) {
+				dir := t.TempDir()
+				withGateDir(t, dir)
+				if pin != "" {
+					writePin(t, dir, pin, 0o644)
+				}
+				fake := withFakeAttempt(t, gate.ExecResult{ExitCode: 0, Jail: &confine.Facts{}}, nil)
+				if failure.stage != "" {
+					fake.result, fake.err = setupFailure(failure.stage, failure.errno)
+				}
+				reads := doctorJSON(t).Reads
+				target := seedTarget(t, dir)
+				code, _, _ := runWith(t, "stat "+target+" ran")
+				ran := fake.fallback == 1 || failure.stage == ""
+				switch {
+				case strings.HasPrefix(reads, "denied"):
+					if code != exitNoPermVal || fake.fallback != 0 {
+						t.Fatalf("doctor says %q, router: exit %d, fallback %d", reads, code, fake.fallback)
+					}
+				case reads == "classifier-only (no usable jail)":
+					if code != exitOK || fake.fallback != 1 {
+						t.Fatalf("doctor says %q, router: exit %d, fallback %d", reads, code, fake.fallback)
+					}
+				default:
+					if !strings.HasPrefix(reads, "kernel-jailed") || !ran || fake.fallback != 0 {
+						t.Fatalf("doctor says %q, router: exit %d, fallback %d", reads, code, fake.fallback)
+					}
+				}
+			})
+		}
 	}
-	targetIs(t, target, "edited\n")
 }
 
 func TestDoctorRejectsPinFlag(t *testing.T) {

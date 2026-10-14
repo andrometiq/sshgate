@@ -29,18 +29,34 @@ var (
 	jailPinFn    = readJailPin
 )
 
+// jailFloorFile is the pin of earlier releases. A host that has one and no
+// jail pin asked never to run reads outside the jail, which the jail pin can
+// no longer promise without being re-pinned, so its reads are denied.
+const jailFloorFile = "jail-floor"
+
 // pinState is the jail pin as the read path sees it: absent, valid, or
-// damaged (a non-empty reason).
+// damaged (a non-empty reason). legacyFloor marks a damaged state that is a
+// leftover jail-floor with no jail pin.
 type pinState struct {
-	valid   bool
-	damaged string
-	pin     confine.Pin
+	valid       bool
+	damaged     string
+	legacyFloor bool
+	pin         confine.Pin
+}
+
+// denial is the deny_reason and deny line of a damaged pin.
+func (p pinState) denial() (reason, line string) {
+	if p.legacyFloor {
+		return "pin:legacy-floor", "a jail-floor file from an earlier release is present and there is no jail pin; reads are denied until the host is re-pinned with 'gate doctor --pin' or the jail-floor file is removed"
+	}
+	return "pin:damaged", "the jail pin is damaged (" + p.damaged + "); reads are denied until it is fixed"
 }
 
 // readJailPin reads the jail pin from the gate directory. A pin that is not
 // a regular file owned by the gate's uid, is group- or world-writable, has
 // another link, is larger than confine.MaxPinBytes, or does not parse is
-// damaged. Only the read path and doctor call it.
+// damaged. With no jail pin, a leftover jail-floor (any content) also denies.
+// Only the read path and doctor call it.
 func readJailPin() pinState {
 	damaged := func(format string, args ...any) pinState {
 		return pinState{damaged: fmt.Sprintf(format, args...)}
@@ -52,6 +68,9 @@ func readJailPin() pinState {
 	pinPath := filepath.Join(gateDir, confine.PinFile)
 	before, err := os.Lstat(pinPath)
 	if errors.Is(err, os.ErrNotExist) {
+		if _, err := os.Lstat(filepath.Join(gateDir, jailFloorFile)); !errors.Is(err, os.ErrNotExist) {
+			return pinState{damaged: "jail-floor present", legacyFloor: true}
+		}
 		return pinState{}
 	}
 	if err != nil {
@@ -150,8 +169,9 @@ func readSpec(pin pinState, requires, grant bool) confine.Spec {
 func execRead(audit *gate.AuditLogger, cmd, approval string, reveal bool) int {
 	pin := jailPinFn()
 	if pin.damaged != "" {
-		logf("read jail unavailable: the jail pin is damaged (%s); reads are denied until it is fixed", pin.damaged)
-		auditReadDenied(audit, cmd, "pin:damaged", exitNoPermVal)
+		reason, line := pin.denial()
+		logf("read jail unavailable: %s", line)
+		auditReadDenied(audit, cmd, reason, exitNoPermVal)
 		return exitNoPermVal
 	}
 	grant := forceNetGrant
@@ -169,19 +189,16 @@ func execRead(audit *gate.AuditLogger, cmd, approval string, reveal bool) int {
 	spec := readSpec(pin, requires, grant)
 	read := &gate.ReadAudit{Enforcement: "kernel", Profile: spec.Profile, Pinned: pin.valid, AcceptFS: spec.AcceptFS, RequiresConfinement: requires}
 	rc, res, setupErr := execAndAudit(audit, cmd, "read", approval, reveal, execPlan{confine: &spec, read: read})
-	if setupErr == nil {
+	route := routeAttempt(pin.valid, requires, res, setupErr)
+	switch {
+	case route.kernel:
 		return rc
-	}
-	var setup *confine.SetupError
-	if !errors.As(setupErr, &setup) {
-		// The session ended before the jail could start.
-		auditReadDenied(audit, cmd, "cancelled", exitCancelled, res.Transport)
+	case route.cancelled:
+		auditReadDenied(audit, cmd, route.reason, exitCancelled, res.Transport)
 		return exitCancelled
-	}
-	class := attemptClass(setup, res)
-	if !routeAfterSetupFailure(pin.valid, requires, class) {
-		logf("read jail unavailable: %s; nothing ran", unavailableReason(class, setup, pin.valid))
-		auditReadDenied(audit, cmd, confine.DenyReason(class, setup.Stage, setup.Errno), exitNoPermVal, res.Transport)
+	case !route.fallback:
+		logf("read jail unavailable: %s; nothing ran", route.line)
+		auditReadDenied(audit, cmd, route.reason, exitNoPermVal, res.Transport)
 		return exitNoPermVal
 	}
 	if sessionContext != nil && sessionContext.Err() != nil {
@@ -190,10 +207,35 @@ func execRead(audit *gate.AuditLogger, cmd, approval string, reveal bool) int {
 	}
 	// The command never started, so running it once, classifier-only, is
 	// its first run. Nothing removes network here.
-	jailAbsent := strings.TrimPrefix(confine.DenyReason(confine.Absent, setup.Stage, setup.Errno), "jail:absent:")
-	fallback := &gate.ReadAudit{Enforcement: "classifier", Net: true, JailAbsent: jailAbsent}
+	fallback := &gate.ReadAudit{Enforcement: "classifier", Net: true, JailAbsent: route.jailAbsent}
 	rc, _, _ = execAndAudit(audit, cmd, "read", approval, reveal, execPlan{read: fallback})
 	return rc
+}
+
+// attemptRoute is what the read router does after a jail attempt: the read
+// reached the command in the jail, the session ended before the jail
+// started, a classifier-only fallback, or a deny with its reason and line.
+type attemptRoute struct {
+	kernel, cancelled, fallback bool
+	reason, line, jailAbsent    string
+}
+
+// routeAttempt applies the outcome table to a jail attempt. setupErr is
+// execChild's: nil when the jail reached the command.
+func routeAttempt(pinned, requires bool, res gate.ExecResult, setupErr error) attemptRoute {
+	if setupErr == nil {
+		return attemptRoute{kernel: true}
+	}
+	var setup *confine.SetupError
+	if !errors.As(setupErr, &setup) {
+		return attemptRoute{cancelled: true, reason: "cancelled"}
+	}
+	class := attemptClass(setup, res)
+	if routeAfterSetupFailure(pinned, requires, class) {
+		absent := strings.TrimPrefix(confine.DenyReason(confine.Absent, setup.Stage, setup.Errno), "jail:absent:")
+		return attemptRoute{fallback: true, reason: confine.DenyReason(class, setup.Stage, setup.Errno), jailAbsent: absent}
+	}
+	return attemptRoute{reason: confine.DenyReason(class, setup.Stage, setup.Errno), line: unavailableReason(class, setup, pinned)}
 }
 
 // attemptClass classifies a jail attempt that never reached the command. An

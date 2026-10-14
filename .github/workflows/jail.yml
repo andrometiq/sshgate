@@ -100,12 +100,11 @@ jobs:
         if: steps.probe.outputs.userns == 'yes'
         run: |
           # The userns probe passed and the runner has Landlock + the jail tooling,
-          # so NOTHING should skip: a skipped jail leg (the patterns below include
-          # older rung markers), or any in-leg t.Skip (chattr/xattr/sleep
-          # unavailable), means the wall was not tested.
-          if grep -qE -- '--- SKIP|SKIP rung|SKIP jail' jail.log; then
+          # so NOTHING should skip: a skipped jail leg, or any in-leg t.Skip
+          # (chattr/xattr/sleep unavailable), means the wall was not tested.
+          if grep -qE -- '--- SKIP|SKIP jail' jail.log; then
             echo "::error::make test-jail SKIPPED a leg despite userns+Landlock+tooling being present — the wall was not fully tested"
-            grep -nE -- '--- SKIP|SKIP rung|SKIP jail' jail.log || true
+            grep -nE -- '--- SKIP|SKIP jail' jail.log || true
             exit 1
           fi
           echo "all jail legs ran (nothing skipped)"

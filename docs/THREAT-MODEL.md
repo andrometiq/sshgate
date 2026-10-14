@@ -151,8 +151,10 @@ itself ready, and nothing was written to the client.
 
 On an unpinned host, a kernel feature that is missing, or a mount refused by an
 LSM or AppArmor, now means classifier-only rather than a deny. Pin the host to
-refuse instead. A leftover `jail-floor` file from earlier releases is ignored:
-a host that relied on it is **not** pinned until it is re-pinned.
+refuse instead. A leftover `jail-floor` file from earlier releases, with no `jail`
+pin, denies every read (exit 77) until the host is re-pinned or the file is
+removed: its operator asked never to run reads outside the jail. Under a valid
+`jail` pin it is ignored.
 
 On stock Ubuntu 24.04 the AppArmor userns restriction refuses the jail's
 clone, so unsigned reads there run classifier-only, and each read logs one

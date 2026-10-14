@@ -145,6 +145,22 @@ func TestReadJailPin(t *testing.T) {
 		}, damaged: "larger than 4096 bytes"},
 		{name: "bad content", setup: func(t *testing.T, dir string) { writePin(t, dir, "profile=ro-v1\nnet=maybe\n", 0o644) }, damaged: `bad value for "net"`},
 		{name: "old floor content", setup: func(t *testing.T, dir string) { writePin(t, dir, "full\n", 0o644) }, damaged: "not key=value"},
+		{name: "leftover jail-floor, no pin", setup: func(t *testing.T, dir string) {
+			if err := os.WriteFile(filepath.Join(dir, jailFloorFile), nil, 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}, damaged: "jail-floor present"},
+		{name: "leftover jail-floor symlink, no pin", setup: func(t *testing.T, dir string) {
+			if err := os.Symlink("/nonexistent", filepath.Join(dir, jailFloorFile)); err != nil {
+				t.Fatal(err)
+			}
+		}, damaged: "jail-floor present"},
+		{name: "jail pin wins over jail-floor", setup: func(t *testing.T, dir string) {
+			writePin(t, dir, pinDeny, 0o644)
+			if err := os.WriteFile(filepath.Join(dir, jailFloorFile), []byte("full\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}, valid: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -273,6 +289,37 @@ func TestRunReadDeniedDamagedPin(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestRunReadLegacyFloorDenies: a leftover jail-floor with no jail pin denies
+// every read before any attempt, so a host whose operator asked never to run
+// reads outside the jail does not silently fall back; a valid jail pin wins.
+func TestRunReadLegacyFloorDenies(t *testing.T) {
+	readNamedWriter(t)
+	dir := t.TempDir()
+	withGateDir(t, dir)
+	if err := os.WriteFile(filepath.Join(dir, jailFloorFile), []byte("full\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fake := withFakeAttempt(t, gate.ExecResult{}, nil)
+	fake.result, fake.err = setupFailure("clone", syscall.EPERM)
+	target := seedTarget(t, dir)
+	code, out, stderr := runWith(t, "stat "+target+" ran")
+	if code != exitNoPermVal || out != "" || stderr != "gate: read jail unavailable: a jail-floor file from an earlier release is present and there is no jail pin; reads are denied until the host is re-pinned with 'gate doctor --pin' or the jail-floor file is removed\n" {
+		t.Fatalf("exit = %d, stdout = %q, stderr = %q", code, out, stderr)
+	}
+	targetIs(t, target, "orig\n")
+	oneDeniedRead(t, dir, "pin:legacy-floor", exitNoPermVal)
+	if fake.confined+fake.fallback != 0 {
+		t.Fatalf("a leftover floor still attempted the read: %+v", fake)
+	}
+
+	writePin(t, dir, pinDeny, 0o644)
+	_ = os.Remove(filepath.Join(dir, "audit.log"))
+	if code, _, _ := runWith(t, "stat "+target+" ran"); code != exitNoPermVal || fake.confined != 1 {
+		t.Fatalf("under a jail pin: exit %d, executor %+v", code, fake)
+	}
+	oneDeniedRead(t, dir, "jail:absent:clone:EPERM", exitNoPermVal)
 }
 
 func TestRunReadFailedSetupDenies(t *testing.T) {
