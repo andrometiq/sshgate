@@ -75,6 +75,12 @@ jobs:
             exit 1
           fi
 
+      - name: Record the runner's kernel and mounts
+        run: |
+          uname -a
+          cat /proc/self/mountinfo
+          sysctl kernel.apparmor_restrict_unprivileged_userns || true
+
       - name: make test-jail
         run: |
           set -o pipefail

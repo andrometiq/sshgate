@@ -89,7 +89,7 @@ func framedCommand(ops []ProofOp) (string, error) {
 }
 func validateFramed(result jailResult, ops []ProofOp) (string, error) {
 	if result.setupErr != nil || result.exit != 0 {
-		return "", fmt.Errorf("framed shell failed: exit %d setup %v", result.exit, result.setupErr)
+		return "", fmt.Errorf("framed shell failed: exit %d setup %v stderr %q", result.exit, result.setupErr, result.stderr)
 	}
 	rest := result.stdout
 	var output strings.Builder
