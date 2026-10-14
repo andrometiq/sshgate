@@ -35,6 +35,8 @@ var proofLaunchExceptions = map[string]string{
 	"proof_m2_user_observer_test.go:userRetuneVictim.Stop":  "unjailed USER retune victim teardown",
 	"xfer_e2e_test.go:e2eGateSSH.Run":                       "transfer e2e fake SSH transport, reached only by name through t.Run",
 	"fuse_fixture_e2e_test.go:gateFuse.stop":                "gate FUSE observer shutdown and verdict join",
+	"phase22_e2e_test.go:startSealGate":                     "subprocess gate startup and cleanup reap",
+	"phase22_e2e_test.go:sealGate.finish":                   "subprocess gate FIFO feed and exit join",
 }
 
 type proofFunction struct {

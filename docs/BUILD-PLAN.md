@@ -199,7 +199,7 @@ details.
 **Per-step acceptance (every P-step):** `make vet`, `make test`, `make test-jail`,
 `make test-jail-root`, `make test-fidelity-smoke`, and
 `make test-jail-mutate MUTATE=<IDs this step added or touched>`. A set reported `NOT-RUN` in a
-per-step run (its red legs are root-only or CI-only) is named in the commit message and must be
+per-step run (its red legs are root-only, non-root-only or CI-only) is named in the commit message and must be
 red in the phase-end run.
 
 **Phase-end acceptance (end of each phase):** the full mutation union above, the independent

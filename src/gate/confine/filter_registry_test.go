@@ -1,6 +1,7 @@
 package confine
 
 import (
+	"slices"
 	"testing"
 
 	"golang.org/x/sys/unix"
@@ -202,9 +203,17 @@ func TestRegistryCIOnlyControls(t *testing.T) {
 	for _, protection := range registry {
 		for _, set := range protection.MutationSets {
 			nonCI, _ := harness.Select(set, true, false)
-			ci, omitted := harness.Select(set, true, true)
-			if len(ci) != len(set.Legs) || len(omitted) != 0 {
-				t.Errorf("%s: CI omitted registered legs", set.Name())
+			// The root CI lane runs every leg but the non-root-only ones,
+			// which the non-root CI lane runs.
+			ci, _ := harness.Select(set, true, true)
+			nonRootCI, _ := harness.Select(set, false, true)
+			for _, leg := range set.Legs {
+				selected := func(legs []harness.Leg) bool {
+					return slices.ContainsFunc(legs, func(l harness.Leg) bool { return l.Name == leg.Name })
+				}
+				if !selected(ci) && !(leg.NonRoot && selected(nonRootCI)) {
+					t.Errorf("%s: CI omitted registered leg %s", set.Name(), leg.Name)
+				}
 			}
 			for _, leg := range set.Legs {
 				if _, ok := controls[leg.Name]; !ok {

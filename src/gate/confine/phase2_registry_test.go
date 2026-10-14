@@ -19,15 +19,23 @@ func phase2Leg(name string, markers ...string) harness.Leg {
 	for _, c := range proofCasesPhase2() {
 		if c.Name == name {
 			leg.Omissions = append([]string(nil), c.Omissions...)
+			leg.Root, leg.NonRoot = c.Root, c.NonRoot
 		}
 	}
 	return leg
 }
 
-// phase2Registry is the gate's read routing: P2.1. Removing one Strict source
-// alone leaves its FUSE run covered (the green twin in its one-ID set); removing
-// it together with the covers leaves the other source's run aborting, and the
-// unpinned run reaching the uncovered FUSE mount.
+// phase2Registry is the gate's read routing (P2.1) and its seal (P2.2).
+//
+// Removing one Strict source alone leaves its FUSE run covered (the green twin
+// in its one-ID set); removing it together with the covers leaves the other
+// source's run aborting, and the unpinned run reaching the uncovered FUSE
+// mount.
+//
+// The seal's effect leg is non-root only: a capless root process cannot reach
+// even an unsealed root gate, whose capabilities are not a subset of its own.
+// The guard's leg is root only: a non-root clone from a sealed process fails
+// without it.
 func phase2Registry() []prot {
 	fuse := func(strict string) harness.MutationSet {
 		twin := map[string]string{"G-STRICT-UNMET-FUSE": "G-NET-STRICT-UNMET-FUSE", "G-NET-STRICT-UNMET-FUSE": "G-STRICT-UNMET-FUSE"}[strict]
@@ -53,6 +61,11 @@ func phase2Registry() []prot {
 		{ID: "P-G-NET-STRICT", Site: "readSpec Strict from required confinement", Class: "multi", Partners: []string{"P-COVERS"}, DirectLeg: "U-SpecStrictSources",
 			EffectLegs:   []string{"G-NET-STRICT-UNMET-FUSE"},
 			MutationSets: []harness.MutationSet{one("P-G-NET-STRICT", phase2Leg("U-SpecStrictSources", "MUTATION-EFFECT decision"), phase2Leg("G-NET-STRICT-UNMET-FUSE")), netStrictSet}},
+		{ID: "P-G-SEAL", Site: "sealRead PR_SET_DUMPABLE after a jailed read starts", Class: "single", DirectLeg: "U-SealReads", EffectLegs: []string{"G-GATE-SEAL"},
+			MutationSets: []harness.MutationSet{one("P-G-SEAL", phase2Leg("U-SealReads", "MUTATION-EFFECT decision"),
+				phase2Leg("G-GATE-SEAL", "MUTATION-EFFECT gate-environ", "MUTATION-EFFECT gate-fd"))}},
+		{ID: "P-G-SEAL-GUARD", Site: "runConfined refuses a jail in a non-dumpable process", Class: "single", EffectLegs: []string{"G-SEAL-GUARD"},
+			MutationSets: []harness.MutationSet{one("P-G-SEAL-GUARD", phase2Leg("G-SEAL-GUARD", "MUTATION-EFFECT second-ran"))}},
 	}
 }
 

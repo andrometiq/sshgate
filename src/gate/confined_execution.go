@@ -13,10 +13,14 @@ import (
 	"time"
 
 	"github.com/karthikeyan5/sshgate/src/gate/confine"
+	"github.com/karthikeyan5/sshgate/src/gate/confine/jailmut"
 	"github.com/karthikeyan5/sshgate/src/redact"
 )
 
-var cleanupConfinedDescendants = confine.CleanupDescendants
+var (
+	cleanupConfinedDescendants = confine.CleanupDescendants
+	dumpableFn                 = confine.Dumpable
+)
 
 // withDelivery preserves process metadata when merging the shared client's snapshot.
 func withDelivery(process, delivery TransportMetadata) TransportMetadata {
@@ -43,6 +47,17 @@ func runConfined(ctx context.Context, command *exec.Cmd, jailed *confine.Jailed,
 		res.Transport.CleanupError = res.CleanupError
 		res.Transport = withDelivery(res.Transport, opts.ClientSink.Snapshot())
 	}()
+	// A process that is no longer dumpable (sealed by an earlier attempt, or
+	// running a binary it cannot read) starts no jail. Non-root, its clone
+	// would fail EACCES, which a host with the AppArmor userns restriction
+	// reads as Absent; as root, the clone would succeed and hide a second
+	// attempt after the seal. Either way the attempt is Failed.
+	if !jailmut.On("P-G-SEAL-GUARD") {
+		if dumpable, err := dumpableFn(); err != nil || dumpable != 1 {
+			jailed.Abort()
+			return res, fmt.Errorf("exec: %w", &confine.SetupError{Stage: "sealed"})
+		}
+	}
 	if err := confine.EnableSubreaper(); err != nil {
 		jailed.Abort()
 		return res, fmt.Errorf("exec: gate subreaper: %w", err)
@@ -78,6 +93,19 @@ func runConfined(ctx context.Context, command *exec.Cmd, jailed *confine.Jailed,
 	command.Stdout, command.Stderr = writers[0], writers[1]
 	if err := jailed.Start(); err != nil {
 		return res, fmt.Errorf("exec: start jail: %w", err)
+	}
+	// Seal after Start (the uid/gid maps are written) and before Started (the
+	// worker blocks on the command pipe until then).
+	if opts.Seal != nil {
+		if err := opts.Seal(); err != nil {
+			_ = syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
+			_ = command.Wait()
+			_ = cleanupConfinedDescendants()
+			jailed.Abort()
+			var errno syscall.Errno
+			errors.As(err, &errno)
+			return res, fmt.Errorf("exec: %w", &confine.SetupError{Stage: "seal", Errno: errno})
+		}
 	}
 	done := make(chan error, 2)
 	var sourceBytes atomic.Int64

@@ -54,6 +54,12 @@ type ExecOpts struct {
 	// The jail only ADDS restrictions; stdout/stderr/stdin/redaction wiring below
 	// is identical either way.
 	Confine *confine.Spec
+	// Seal, when set on a confined run, is called right after the jailed
+	// child starts and before it receives its command (the gate passes
+	// confine.SealProcess). A Seal error kills the child before the command
+	// runs: SetupError stage "seal". A confined run in a process that is no
+	// longer dumpable is refused before it starts: stage "sealed".
+	Seal func() error
 	// ClientSink is shared with the entrypoint for diagnostics after execution.
 	// An unconfined run writes through it when it is set; signed writes and
 	// daemon reads leave it nil.

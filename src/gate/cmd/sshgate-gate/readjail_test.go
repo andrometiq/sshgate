@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -257,8 +258,43 @@ func TestPhase2Tables(t *testing.T) {
 				p.Control("decision", true)
 				p.Finish()
 			})
+			t.Run("U-SealReads", func(t *testing.T) { unitSealReads(t) })
 		})
 	}
+}
+
+// unitSealReads: a jailed read carries a Seal that seals the gate; its
+// classifier-only fallback and a signed write carry none.
+func unitSealReads(t *testing.T) {
+	p := newProof(t, "U-SealReads")
+	var seals []func() error
+	previous := executeCommand
+	executeCommand = func(_ context.Context, _ string, opts gate.ExecOpts) (gate.ExecResult, error) {
+		if opts.Confine == nil && opts.Seal != nil {
+			t.Fatal("an unconfined run carries a seal")
+		}
+		seals = append(seals, opts.Seal)
+		return gate.ExecResult{}, nil
+	}
+	t.Cleanup(func() { executeCommand = previous })
+	spec := readSpec(pinState{}, false, false)
+	execChild("true", false, 0, execPlan{confine: &spec, read: &gate.ReadAudit{}})
+	execChild("true", false, 0, execPlan{read: &gate.ReadAudit{}})
+	execChild("true", false, 0, execPlan{})
+	set := make([]bool, len(seals))
+	for i, seal := range seals {
+		set[i] = seal != nil
+	}
+	if !slices.Equal(set, []bool{true, false, false}) {
+		t.Fatalf("seal set for a jailed read, its fallback and a signed write: %v", set)
+	}
+	before := sealCalls.Load()
+	if err := seals[0](); err != nil {
+		t.Fatal(err)
+	}
+	p.Effect("decision", sealCalls.Load() != before+1)
+	p.Control("decision", true)
+	p.Finish()
 }
 
 func TestRunReadDeniedDamagedPin(t *testing.T) {

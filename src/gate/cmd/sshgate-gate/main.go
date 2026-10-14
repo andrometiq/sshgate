@@ -387,6 +387,9 @@ func execChild(cmd string, reveal bool, captureLimit int, plan execPlan) (rc int
 		res, err = gate.ExecArgvWithRedaction(ctx, plan.argv, lane2Env, opts)
 	default:
 		opts.Confine = plan.confine
+		if plan.confine != nil {
+			opts.Seal = sealRead
+		}
 		res, err = executeCommand(ctx, cmd, opts)
 	}
 	if plan.confine != nil && res.ExitCode < 0 {

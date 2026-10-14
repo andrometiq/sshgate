@@ -32,5 +32,10 @@ func proofCasesPhase2() []harness.Case {
 	add("G-FAULT-ABSENT", "Execution", "Execute", nil, []string{"jailed:fallback", "observe:target"}, nil, nil)
 	add("G-INET-DENY", "Effect", "Execute", nil, []string{"control:connect", "jailed:connect", "observe:listener"}, []string{"EFFECT:connected"}, nil)
 	add("G-INET-ALLOW", "Execution", "Execute", nil, []string{"jailed:connect", "observe:listener"}, nil, nil)
+	add("U-SealReads", "Unit", "", nil, []string{"control:decision"}, []string{"EFFECT:decision"}, nil)
+	add("G-GATE-SEAL", "Effect", "Execute", nil, []string{"control:gate-proc", "jailed:read", "observe:gate-proc"}, []string{"EFFECT:gate-environ", "EFFECT:gate-fd"}, []string{"nonroot-only"})
+	cases[len(cases)-1].NonRoot = true
+	add("G-SEAL-GUARD", "Effect", "Execute", []string{"SetupAbort"}, []string{"control:first-read", "jailed:second-read", "observe:output"}, []string{"EFFECT:second-ran"}, []string{"root-only"})
+	cases[len(cases)-1].Root = true
 	return cases
 }

@@ -263,10 +263,10 @@ func (p *proof) Omit(code string) {
 	if !allowed {
 		p.t.Fatalf("SETUP: undeclared omission %s", code)
 	}
-	if code == "root-only" && (!p.caseDef.Root || os.Geteuid() == 0) || code == "ci-only" && (!p.caseDef.CIOnly || os.Getenv("SSHGATE_JAIL_CI") == "1") {
+	if code == "root-only" && (!p.caseDef.Root || os.Geteuid() == 0) || code == "nonroot-only" && (!p.caseDef.NonRoot || os.Geteuid() != 0) || code == "ci-only" && (!p.caseDef.CIOnly || os.Getenv("SSHGATE_JAIL_CI") == "1") {
 		p.t.Fatalf("SETUP: invalid lane omission %s", code)
 	}
-	if os.Getenv("SSHGATE_JAIL_CI") == "1" && code != "root-only" {
+	if os.Getenv("SSHGATE_JAIL_CI") == "1" && code != "root-only" && code != "nonroot-only" {
 		p.t.Fatalf("SETUP: CI omission %s", code)
 	}
 	p.stopObservers()

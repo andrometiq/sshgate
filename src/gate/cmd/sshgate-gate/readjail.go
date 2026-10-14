@@ -27,7 +27,20 @@ var (
 	hostFactsFn  = confine.ReadHostFacts
 	pinUIDFn     = os.Getuid
 	jailPinFn    = readJailPin
+	// sealFn makes the gate non-dumpable. The in-process test binary records
+	// the call instead: sealed, it would refuse its own next jail attempt.
+	sealFn = confine.SealProcess
 )
+
+// sealRead is the Seal of every jailed read. While the read runs, the gate's
+// client pipes, environment and redaction key are then out of reach of
+// same-uid processes outside the jail that lack CAP_SYS_PTRACE.
+func sealRead() error {
+	if jailmut.On("P-G-SEAL") {
+		return nil
+	}
+	return sealFn()
+}
 
 // jailFloorFile is the pin of earlier releases. A host that has one and no
 // jail pin asked never to run reads outside the jail, which the jail pin can

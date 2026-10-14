@@ -115,7 +115,8 @@ single-call indirections:
 - `executeCommand` (`main.go`) and the read router's seams in
   `src/gate/cmd/sshgate-gate/readjail.go`: `forceNetGrant` (stands in for a signed network grant
   until the signed wire carries one), `readSpecHook` (forces a Landlock ABI or a setup failure),
-  `hostFactsFn`, `pinUIDFn` and `jailPinFn`. The gate legs that need the gate in its own process
+  `hostFactsFn`, `pinUIDFn`, `jailPinFn` and `sealFn` (the seal of a jailed read; the
+  in-process test binary records it instead of sealing itself). The gate legs that need the gate in its own process
   set the same seams through the test binary's `SSHGATE_TEST_GATE` mode (`jail_testmain_test.go`);
   the gate itself never reads them from the environment.
 - `dialWithCtx` — `src/mcp/sign/client.go` (`var dialWithCtx`)
@@ -682,7 +683,8 @@ and `TestDistGateHasNoMutationBuild` checks the committed one.
 ### 12.4 Lanes, CI mode and the phase-end gate
 
 - **Local runs omit what they cannot show.** Root-only legs are declared
-  omissions in the non-root lane, and some controls (among them the socket-family
+  omissions in the non-root lane, and non-root-only legs (`G-GATE-SEAL`: a capless
+  root process cannot reach even an unsealed root gate) in the root lane. Some controls (among them the socket-family
   sweeps, the module-autoload control, the crash legs and some cover fixtures)
   run only with `SSHGATE_JAIL_CI=1`. In a mutation run, a set with no remaining red
   leg prints `NOT-RUN`; a step's commit names those sets, and they must be red in

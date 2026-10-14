@@ -19,11 +19,12 @@ var capableHost = HostFacts{MaxUserNS: 100, DevShmDir: true, SeccompFilter: true
 var permissiveHost = HostFacts{MaxUserNS: 0, AppArmorUsernsClamp: true, LandlockABI: -1}
 
 // knownStages is every stage a setup failure can carry: the worker's and
-// shim's, Status's, the gate's start ("clone") and client sink ("sink").
+// shim's, Status's, the gate's start ("clone"), client sink ("sink"), seal
+// ("seal") and its guard against starting in a sealed process ("sealed").
 var knownStages = []string{
 	"clone", "spec", "cmdread", "nsverify", "mounts", "private", "setattr", "devnodes", "covers",
 	"scratch", "fds", "cwd", "nnp", "caps", "rlimits", "landlock", "seccomp", "tsync", "session",
-	"selfcheck", "exec", "report", "unknown", "shim", "sink",
+	"selfcheck", "exec", "report", "unknown", "shim", "sink", "seal", "sealed",
 }
 
 func TestClassifySetupFailure(t *testing.T) {
@@ -97,6 +98,8 @@ func TestClassifySetupFailure(t *testing.T) {
 		{"shim EPERM", "shim", unix.EPERM, permissiveHost, Failed},
 		{"unknown", "unknown", 0, permissiveHost, Failed},
 		{"sink EPIPE", "sink", unix.EPIPE, permissiveHost, Failed},
+		{"seal EPERM", "seal", unix.EPERM, permissiveHost, Failed},
+		{"sealed", "sealed", 0, permissiveHost, Failed},
 		{"unlisted stage", "elsewhere", unix.EPERM, permissiveHost, Failed},
 	}
 	for _, c := range cases {
@@ -151,7 +154,7 @@ func TestClassifyAbsentRows(t *testing.T) {
 // and the clamp sysctl still reads 1, so a clamp row on any of these stages
 // would let a real wall failure fall back silently.
 func TestClassifyNeverAbsentStages(t *testing.T) {
-	for _, stage := range []string{"nsverify", "selfcheck", "covers", "report", "exec", "spec", "cwd", "shim", "unknown", "sink", "mounts", "tsync"} {
+	for _, stage := range []string{"nsverify", "selfcheck", "covers", "report", "exec", "spec", "cwd", "shim", "unknown", "sink", "mounts", "tsync", "seal", "sealed"} {
 		for errno := syscall.Errno(0); errno < 4096; errno++ {
 			if AbsentCandidate(stage, errno) || ClassifySetupFailure(stage, errno, permissiveHost) != Failed {
 				t.Errorf("(%s, %d) can be Absent", stage, errno)

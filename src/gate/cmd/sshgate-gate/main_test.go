@@ -144,8 +144,9 @@ func TestRunReadOnlyMode(t *testing.T) {
 }
 
 // TestGateSentinelsAreShimAndWorkerOnly: the real binary dispatches only the
-// jail's shim and worker sentinels. The retired probe sentinel reaches the
-// operator subcommands and is refused like any unknown one.
+// jail's shim and worker sentinels. The retired probe sentinel and the test
+// binary's capless reader reach the operator subcommands and are refused like
+// any unknown one.
 func TestGateSentinelsAreShimAndWorkerOnly(t *testing.T) {
 	bin := filepath.Join(t.TempDir(), "gate")
 	build := exec.Command("go", "build", "-trimpath", "-o", bin, ".")
@@ -153,8 +154,10 @@ func TestGateSentinelsAreShimAndWorkerOnly(t *testing.T) {
 	if out, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build gate: %v\n%s", err, out)
 	}
-	out, err := exec.Command(bin, "__jailprobe", "{}").CombinedOutput()
-	if exit, ok := err.(*exec.ExitError); !ok || exit.ExitCode() != exitDataErr || string(out) != "gate: unknown subcommand\n" {
-		t.Fatalf("__jailprobe: %v, output %q; want exit %d as an unknown subcommand", err, out, exitDataErr)
+	for _, sentinel := range []string{"__jailprobe", sentinelCaplessReader} {
+		out, err := exec.Command(bin, sentinel, "{}").CombinedOutput()
+		if exit, ok := err.(*exec.ExitError); !ok || exit.ExitCode() != exitDataErr || string(out) != "gate: unknown subcommand\n" {
+			t.Fatalf("%s: %v, output %q; want exit %d as an unknown subcommand", sentinel, err, out, exitDataErr)
+		}
 	}
 }
