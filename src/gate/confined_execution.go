@@ -76,8 +76,7 @@ func runConfined(ctx context.Context, command *exec.Cmd, jailed *confine.Jailed,
 		readers, writers = append(readers, reader), append(writers, writer)
 	}
 	command.Stdout, command.Stderr = writers[0], writers[1]
-	if err := command.Start(); err != nil {
-		jailed.Abort()
+	if err := jailed.Start(); err != nil {
 		return res, fmt.Errorf("exec: start jail: %w", err)
 	}
 	done := make(chan error, 2)

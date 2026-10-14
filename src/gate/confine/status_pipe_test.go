@@ -145,3 +145,35 @@ func TestStatusPipeSurvivingDescendant(t *testing.T) {
 		})
 	}
 }
+
+// TestStatusSawInfo: every failure after an I line carries SawInfo, so the
+// gate never treats it as a jail that did not start; failures before one do
+// not.
+func TestStatusSawInfo(t *testing.T) {
+	const info = `I{"profile":"ro-v1","abi":1,"net":false,"lane2":false}` + "\n"
+	for _, test := range []struct {
+		name, report, stage string
+		errno               syscall.Errno
+		sawInfo             bool
+	}{
+		{"forged setup tail after info", info + "XFsetattr:38", "exec", 0, true},
+		{"exec failure", info + "XFexec:2\n", "exec", syscall.ENOENT, true},
+		{"info without X", info, "report", 0, true},
+		{"malformed info", `I{"profile":"wrong"}` + "\nX", "report", 0, true},
+		{"setup failure", "Fsetattr:38\n", "setattr", syscall.ENOSYS, false},
+		{"no report", "", "unknown", 0, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			jailed, writer := startStatusFixture(t)
+			if _, err := writer.WriteString(test.report); err != nil {
+				t.Fatal(err)
+			}
+			writer.Close()
+			_, err := jailed.Status()
+			var setup *SetupError
+			if !errors.As(err, &setup) || setup.Stage != test.stage || setup.Errno != test.errno || setup.SawInfo != test.sawInfo {
+				t.Fatalf("Status = %#v, want stage %s errno %d SawInfo %v", err, test.stage, test.errno, test.sawInfo)
+			}
+		})
+	}
+}

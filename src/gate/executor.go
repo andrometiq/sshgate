@@ -55,6 +55,8 @@ type ExecOpts struct {
 	// is identical either way.
 	Confine *confine.Spec
 	// ClientSink is shared with the entrypoint for diagnostics after execution.
+	// An unconfined run writes through it when it is set; signed writes and
+	// daemon reads leave it nil.
 	ClientSink *ClientSink
 }
 
@@ -277,8 +279,15 @@ func runRedacted(ctx context.Context, c *exec.Cmd, jailed *confine.Jailed, what 
 	// stream (see ExecResult). One per stream, never shared. CaptureLimit
 	// (>0 only for the audit all+full path) makes them also tee a capped
 	// copy of the forwarded bytes.
-	outCount := &countingWriter{dst: os.Stdout, captureLimit: opts.CaptureLimit}
-	errCount := &countingWriter{dst: os.Stderr, captureLimit: opts.CaptureLimit}
+	// A caller that already holds the client sink (a read falling back to
+	// classifier-only after a jail attempt) writes through it: the sink made
+	// the client fds non-blocking, so a direct write could fail with EAGAIN.
+	stdout, stderr := io.Writer(os.Stdout), io.Writer(os.Stderr)
+	if opts.ClientSink != nil {
+		stdout, stderr = opts.ClientSink.Stdout(), opts.ClientSink.Stderr()
+	}
+	outCount := &countingWriter{dst: stdout, captureLimit: opts.CaptureLimit}
+	errCount := &countingWriter{dst: stderr, captureLimit: opts.CaptureLimit}
 
 	// Stdout / Stderr: when a ruleset is configured (and not a reveal),
 	// wrap each stream's counting writer in a redact.Writer. Stderr is

@@ -105,6 +105,10 @@ type Report struct {
 type SetupError struct {
 	Stage string
 	Errno syscall.Errno
+	// SawInfo is set by Status when the report began with an I line: the
+	// worker claimed to pass setup, so the command may have started. It is
+	// parent-side only, never on the wire.
+	SawInfo bool
 }
 
 func (e *SetupError) Error() string {
@@ -183,6 +187,23 @@ func (j *Jailed) startStatusReader() {
 	}()
 }
 
+// Start starts the jail. A failure is the "clone" stage, and nothing ran. Its
+// errno is composite: whatever Cmd.Start returns, from the clone itself, the
+// parent's uid/gid map writes, or the child's steps up to the execve of
+// /proc/self/exe. A context already done is returned as is: that is a
+// cancellation, not a jail failure.
+func (j *Jailed) Start() error {
+	err := j.Cmd.Start()
+	if err == nil {
+		return nil
+	}
+	j.Abort()
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	return &SetupError{Stage: "clone", Errno: errnoOf(err)}
+}
+
 // Abort releases every pipe end when Cmd.Start fails.
 func (j *Jailed) Abort() {
 	for _, f := range j.childEnds {
@@ -203,6 +224,15 @@ func (j *Jailed) Abort() {
 // Status validates the worker's I/X report after Cmd.Wait and descendant cleanup. Facts are published
 // only on success; the shim appends worker status and an optional cleanup diagnostic.
 func (j *Jailed) Status() (Facts, error) {
+	facts, err := j.status()
+	var setup *SetupError
+	if report := j.statusReport.data; errors.As(err, &setup) && len(report) > 0 && report[0] == 'I' {
+		setup.SawInfo = true
+	}
+	return facts, err
+}
+
+func (j *Jailed) status() (Facts, error) {
 	defer func() {
 		if j.statusR != nil {
 			_ = j.statusR.Close()
@@ -344,6 +374,14 @@ func statusFromReport(buf []byte) error {
 	default:
 		return &SetupError{Stage: "unknown"}
 	}
+}
+
+func errnoOf(err error) syscall.Errno {
+	var e syscall.Errno
+	if errors.As(err, &e) {
+		return e
+	}
+	return 0
 }
 
 // Wire tokens for the fd-4 status pipe.

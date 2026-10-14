@@ -421,14 +421,6 @@ func resolveCwd(cwd string) (string, bool, error) {
 }
 
 // errnoOf extracts a syscall.Errno from err, or 0 if there is none.
-func errnoOf(err error) syscall.Errno {
-	var e syscall.Errno
-	if errors.As(err, &e) {
-		return e
-	}
-	return 0
-}
-
 func clearShimCaps() error {
 	if unix.Gettid() != unix.Getpid() {
 		return unix.EINVAL

@@ -371,7 +371,9 @@ func execChild(cmd string, reveal bool, captureLimit int, plan execPlan) (rc int
 		Rules:        rules,
 		Reveal:       reveal,
 		CaptureLimit: captureLimit,
-		ClientSink:   sessionSink,
+	}
+	if plan.confine != nil {
+		opts.ClientSink = sessionSink
 	}
 	var err error
 	switch {
