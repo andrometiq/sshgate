@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/karthikeyan5/sshgate/src/classify"
 	"github.com/karthikeyan5/sshgate/src/mcp/registry"
 	signpkg "github.com/karthikeyan5/sshgate/src/mcp/sign"
 	"github.com/karthikeyan5/sshgate/src/sigwire"
@@ -341,6 +342,78 @@ func TestRunNetworkProtection(t *testing.T) {
 				if err == nil {
 					t.Fatal("expected refusal")
 				}
+			}
+		})
+	}
+}
+
+func TestRunNetworkWrappedDaemon(t *testing.T) {
+	for _, command := range []string{
+		"env -- docker ps", "env -- systemctl status x",
+		"env LANG=C -- env -- docker ps",
+		"LANG=C env -- LANG=C env systemctl status x",
+		"watch -n 1 -- env -- docker ps",
+		"env -- watch --interval 1 -t systemctl status x",
+		"watch --interval=1 env LANG=C watch -n1 -- docker ps",
+	} {
+		t.Run(command, func(t *testing.T) {
+			if classify.Classify(command) != classify.KindRead {
+				t.Fatal("fixture is not an accepted read")
+			}
+			for _, envelope := range []bool{false, true} {
+				r, s, ssh := networkRunner(t, false, networkCap(envelope, envelope))
+				in := networkInput()
+				in.Command = command
+				out, err := r.Run(context.Background(), in)
+				if err == nil || networkVerdict(out) != VerdictNetworkGrantReadOnly || len(s.calls) != 0 || len(ssh.calls) != 0 {
+					t.Fatalf("wrapped daemon executed: %+v %v signs=%v ssh=%v", out, err, s.calls, ssh.calls)
+				}
+			}
+		})
+	}
+}
+
+func TestRunNetworkCappedDiagnostic(t *testing.T) {
+	for _, envelope := range []bool{false, true} {
+		t.Run(fmt.Sprintf("envelope=%t", envelope), func(t *testing.T) {
+			r, s, ssh := networkRunner(t, false, networkCap(envelope, envelope))
+			ssh.exit = 77
+			ssh.stderr = "command output that must not ride along\ngate: read jail unavailable: setup failed; command may have started\n"
+			in := networkInput()
+			cap := 8
+			in.MaxOutputBytes = &cap
+			out, err := r.Run(context.Background(), in)
+			if err == nil || networkVerdict(out) != VerdictNetworkRequiresConfinement {
+				t.Fatalf("missing refusal: %+v %v", out, err)
+			}
+			if out.Denial.Diagnostic != "gate: read jail unavailable: setup failed; command may have started" {
+				t.Fatalf("lost diagnostic: %+v %v", out.Denial, err)
+			}
+			signs := 1
+			if envelope {
+				signs = 0
+			}
+			want, _ := capOutput(ssh.stderr, cap)
+			if out.Stderr != want || len(ssh.calls) != 1 || len(s.calls) != signs {
+				t.Fatalf("cap or execution count changed: %+v", out)
+			}
+		})
+	}
+}
+
+func TestRunNetworkWrappedRead(t *testing.T) {
+	for _, command := range []string{
+		"env -- cat docker",
+		"env LANG=C -- watch -n 1 -- cat systemctl",
+		"watch --interval=1 env -- printf 'docker | systemctl'",
+	} {
+		t.Run(command, func(t *testing.T) {
+			r, s, ssh := networkRunner(t, false, networkCap(true, true))
+			in := networkInput()
+			in.Command = command
+			out, err := r.Run(context.Background(), in)
+			if err != nil || out.Denial != nil || len(s.calls) != 0 || !reflect.DeepEqual(ssh.calls, []string{sigwire.EnvelopeConfinedNet + command}) {
+				t.Fatalf("wrapped read refused: %+v %v signs=%v ssh=%v", out, err, s.calls, ssh.calls)
 			}
 		})
 	}

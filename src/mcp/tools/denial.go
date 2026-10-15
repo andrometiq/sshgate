@@ -1,7 +1,7 @@
 package tools
 
 // Denial is the structured, agent-parseable "why the command did not run and
-// what to do about it". It carries the verdict CLASS and the remedy only —
+// what to do about it". It carries the verdict CLASS, remedy and gate diagnostic —
 // never classifier internals or parse reasoning (that is #22 territory). Nil on
 // success (or on a non-verdict infra error); non-nil = a verdict/refusal the
 // agent must act on. Purely additive and migration-neutral: it is built from
@@ -9,11 +9,12 @@ package tools
 // string→argv classifier migration leaves this object and its call sites
 // untouched.
 type Denial struct {
-	VerdictClass   string   `json:"verdict_class"`   // stable enum, verdict_class* consts
-	Summary        string   `json:"summary"`         // one-line, CLASS-level "what happened" (never per-segment reasoning)
-	RequiredAction string   `json:"required_action"` // stable enum, action* consts
-	Retryable      bool     `json:"retryable"`       // explicit; true only for approval_timeout / bad_signature
-	HowTo          []string `json:"how_to"`          // ordered concrete steps referencing only real surfaces
+	Diagnostic     string   `json:"diagnostic,omitempty"` // gate refusal text, independent of command output caps
+	VerdictClass   string   `json:"verdict_class"`        // stable enum, verdict_class* consts
+	Summary        string   `json:"summary"`              // one-line, CLASS-level "what happened" (never per-segment reasoning)
+	RequiredAction string   `json:"required_action"`      // stable enum, action* consts
+	Retryable      bool     `json:"retryable"`            // explicit; true only for approval_timeout / bad_signature
+	HowTo          []string `json:"how_to"`               // ordered concrete steps referencing only real surfaces
 }
 
 // verdict_class values (closed, stable enum). Each maps 1:1 from a refusal

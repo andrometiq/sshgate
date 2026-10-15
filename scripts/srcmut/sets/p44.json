@@ -10,7 +10,7 @@
       {
         "test": "TestRunNetworkProtection/combined-net",
         "markers": [
-          "MUTATION-EFFECT combined-net"
+          "combined-net"
         ]
       }
     ],
@@ -29,7 +29,7 @@
       {
         "test": "TestRunNetworkProtection/combined-reveal",
         "markers": [
-          "MUTATION-EFFECT combined-reveal"
+          "combined-reveal"
         ]
       }
     ],
@@ -48,7 +48,7 @@
       {
         "test": "TestRunNetworkProtection/envelope-missing",
         "markers": [
-          "MUTATION-EFFECT envelope-missing"
+          "envelope-missing"
         ]
       }
     ],
@@ -67,7 +67,7 @@
       {
         "test": "TestRunNetworkProtection/fallback-ran",
         "markers": [
-          "MUTATION-EFFECT fallback-ran"
+          "fallback-ran"
         ]
       }
     ],
@@ -86,7 +86,7 @@
       {
         "test": "TestRunNetworkProtection/reason",
         "markers": [
-          "MUTATION-EFFECT reason"
+          "reason"
         ]
       }
     ],
@@ -105,7 +105,7 @@
       {
         "test": "TestRunNetworkProtection/tier1",
         "markers": [
-          "MUTATION-EFFECT tier1"
+          "tier1"
         ]
       }
     ],
@@ -124,7 +124,7 @@
       {
         "test": "TestRunNetworkProtection/batch",
         "markers": [
-          "MUTATION-EFFECT batch"
+          "batch"
         ]
       }
     ],
@@ -143,7 +143,7 @@
       {
         "test": "TestRunNetworkProtection/daemon",
         "markers": [
-          "MUTATION-EFFECT daemon"
+          "daemon"
         ]
       }
     ],
@@ -162,7 +162,7 @@
       {
         "test": "TestRunNetworkProtection/reveal-branch",
         "markers": [
-          "MUTATION-EFFECT reveal-branch"
+          "reveal-branch"
         ]
       }
     ],

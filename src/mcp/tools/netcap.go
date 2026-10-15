@@ -21,6 +21,7 @@ type hostCap struct {
 func (r *Runner) fetchCap(ctx context.Context, alias string, entry registry.Entry) *hostCap {
 	r.capMu.Lock()
 	cap, ok := r.caps[alias]
+	generation := r.capGeneration[alias]
 	r.capMu.Unlock()
 	if !ok {
 		stdout, _, exit, err := r.SSH.Run(ctx, entry.Host, entry.User, entry.Port, "SSHGATE_JAIL")
@@ -31,7 +32,9 @@ func (r *Runner) fetchCap(ctx context.Context, alias string, entry registry.Entr
 		if r.caps == nil {
 			r.caps = make(map[string]*hostCap)
 		}
-		r.caps[alias] = cap
+		if r.capGeneration[alias] == generation {
+			r.caps[alias] = cap
+		}
 		r.capMu.Unlock()
 	}
 	if cap == nil {
@@ -45,6 +48,10 @@ func (r *Runner) invalidateCap(alias string) {
 	r.capMu.Lock()
 	defer r.capMu.Unlock()
 	delete(r.caps, alias)
+	if r.capGeneration == nil {
+		r.capGeneration = make(map[string]uint64)
+	}
+	r.capGeneration[alias]++
 }
 
 func parseCap(stdout []byte) *hostCap {

@@ -143,8 +143,9 @@ type TransferClient interface {
 // non-nil before calling Run; the MCP entry point sets them at
 // startup.
 type Runner struct {
-	capMu sync.Mutex
-	caps  map[string]*hostCap
+	capMu         sync.Mutex
+	caps          map[string]*hostCap
+	capGeneration map[string]uint64
 
 	Servers *registry.Servers
 	Sign    SignClient

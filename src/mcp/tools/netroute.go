@@ -83,6 +83,7 @@ func (r *Runner) execNetwork(ctx context.Context, entry registry.Entry, command 
 	// Inspect the complete diagnostic before applying the output cap.
 	out.Denial = networkGateDenial(exit, string(stderr))
 	if out.Denial != nil {
+		out.Denial.Diagnostic = gateLines(string(stderr))
 		if err != nil {
 			return out, fmt.Errorf("tools: %s: %w", out.Denial.Summary, err)
 		}
@@ -101,6 +102,18 @@ func (r *Runner) execNetwork(ctx context.Context, entry registry.Entry, command 
 		}
 	}
 	return out, nil
+}
+
+// gateLines keeps only the gate's own "gate: " lines of stderr, so the
+// refusal survives the output cap without carrying the command's output.
+func gateLines(stderr string) string {
+	var lines []string
+	for _, line := range strings.Split(stderr, "\n") {
+		if strings.HasPrefix(line, "gate: ") {
+			lines = append(lines, line)
+		}
+	}
+	return strings.Join(lines, "\n")
 }
 
 func networkGateDenial(exit int, stderr string) *Denial {
@@ -122,19 +135,39 @@ func networkGateDenial(exit int, stderr string) *Denial {
 	return nil
 }
 
-// Scan shell words, skipping assignments and env wrappers at each command head.
+// Scan shell words using the env/watch wrapper grammar in src/classify.
 // Classification has already excluded opaque or writing shell constructs.
 func networkDaemonRead(command string) bool {
 	var word strings.Builder
 	var quote byte
 	atHead := true
+	wrapper := ""
+	skipValue := false
 	flush := func() bool {
 		token := word.String()
 		word.Reset()
 		if !atHead || token == "" {
 			return false
 		}
-		if strings.Contains(token, "=") || token == "env" {
+		if skipValue {
+			skipValue = false
+			return false
+		}
+		if wrapper != "" && token == "--" {
+			wrapper = ""
+			return false
+		}
+		if wrapper == "watch" && strings.HasPrefix(token, "-") {
+			skipValue = token == "-n" || token == "--interval"
+			return false
+		}
+		// Other env options are rejected by Classify before this scan.
+		if strings.Contains(token, "=") && !strings.HasPrefix(token, "-") {
+			return false
+		}
+		wrapper = ""
+		if token == "env" || token == "watch" {
+			wrapper = token
 			return false
 		}
 		atHead = false
@@ -169,6 +202,8 @@ func networkDaemonRead(command string) bool {
 				return true
 			}
 			atHead = true
+			wrapper = ""
+			skipValue = false
 		default:
 			word.WriteByte(c)
 		}

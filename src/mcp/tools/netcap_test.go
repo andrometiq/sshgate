@@ -200,3 +200,64 @@ func TestCapCacheConcurrent(t *testing.T) {
 		t.Fatalf("capability=%+v", cap)
 	}
 }
+
+type blockedCapSSH struct {
+	started, release chan struct{}
+	calls            int
+}
+
+func (s *blockedCapSSH) Run(_ context.Context, _, _ string, _ int, command string) ([]byte, []byte, int, error) {
+	if command != "SSHGATE_JAIL" {
+		return nil, nil, 0, nil
+	}
+	s.calls++
+	if s.calls == 1 {
+		close(s.started)
+		<-s.release
+		return []byte(capReply), nil, 0, nil
+	}
+	return []byte(strings.Replace(capReply, `"net":true`, `"net":false`, 1)), nil, 0, nil
+}
+
+func TestCapProbeCrossesInvalidation(t *testing.T) {
+	for _, cause := range []string{"update", "network-refusal"} {
+		t.Run(cause, func(t *testing.T) {
+			r, _, _ := networkRunner(t, false, nil)
+			delete(r.caps, "test")
+			ssh := &blockedCapSSH{started: make(chan struct{}), release: make(chan struct{})}
+			r.SSH = ssh
+			r.Sign = capSigner{}
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				r.fetchCap(context.Background(), "test", capEntry)
+			}()
+			<-ssh.started
+			if cause == "update" {
+				body := []byte("fixture")
+				staged := filepath.Join(t.TempDir(), "gate")
+				if err := os.WriteFile(staged, body, 0600); err != nil {
+					t.Fatal(err)
+				}
+				r.StagedGatePath = staged
+				r.SSHStdin = capUpdate{out: fmt.Sprintf("SSHGATE_UPDATED sha256=%x size=7 rev=test", sha256.Sum256(body))}
+				if _, err := r.UpdateGate(context.Background(), UpdateGateInput{Alias: "test"}); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				in := networkInput()
+				in.Reason = ""
+				out, err := r.Run(context.Background(), in)
+				if err == nil || networkVerdict(out) != VerdictNetworkNeedsReason {
+					t.Fatalf("refusal: %+v %v", out, err)
+				}
+			}
+			close(ssh.release)
+			<-done
+			cap := r.fetchCap(context.Background(), "test", capEntry)
+			if cap == nil || cap.Net || ssh.calls != 2 {
+				t.Fatalf("stale probe republished: cap=%+v probes=%d", cap, ssh.calls)
+			}
+		})
+	}
+}
