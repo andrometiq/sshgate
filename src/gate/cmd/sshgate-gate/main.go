@@ -18,7 +18,7 @@
 //	     non-ELF/wrong-arch binary — nothing is written)
 //	70 — EX_SOFTWARE: pubkey file unreadable, corrupt, or has insecure
 //	     mode; also a SSHGATE_UPDATE filesystem/replace failure (old gate
-//	     left intact), and SSHGATE_JAIL could not open its output
+//	     left intact), and SSHGATE_JAIL could not open or write its output
 //	77 — EX_NOPERM: write command without a verified SSHGATE_SIG prefix;
 //	     also a read refused by the read jail, with "gate: read jail
 //	     unavailable" on stderr: the jail pin is damaged (or a jail-floor

@@ -460,3 +460,67 @@ func TestDoctorRehearsalRealHost(t *testing.T) {
 		t.Fatalf("network verb label %q", label)
 	}
 }
+
+// descendantNamed finds a process named comm below root, by host /proc.
+func descendantNamed(root int, comm string) int {
+	parents, names := map[int]int{}, map[int]string{}
+	entries, _ := os.ReadDir("/proc")
+	for _, entry := range entries {
+		pid, err := strconv.Atoi(entry.Name())
+		if err != nil {
+			continue
+		}
+		if facts, err := readProcessFacts(pid); err == nil {
+			parents[pid], _ = strconv.Atoi(facts.ppid)
+		}
+		if name, err := os.ReadFile("/proc/" + entry.Name() + "/comm"); err == nil {
+			names[pid] = strings.TrimSpace(string(name))
+		}
+	}
+	for pid, name := range names {
+		if name != comm {
+			continue
+		}
+		for ancestor := parents[pid]; ancestor > 1; ancestor = parents[ancestor] {
+			if ancestor == root {
+				return pid
+			}
+		}
+	}
+	return 0
+}
+
+// TestSealResidualJailedCommandReachable pins the documented residual of the
+// seal (THREAT-MODEL, "What SSHGate does NOT protect against"): while a sealed
+// gate's jailed read runs, a capless same-uid process outside the jail can
+// read the jailed command's environment (a copy of the gate's) and write into
+// its stdout, which the gate forwards to the client. The jail's user
+// namespace belongs to the same uid and execve makes the command dumpable. If
+// this test fails, the residual closed: update the threat model.
+func TestSealResidualJailedCommandReachable(t *testing.T) {
+	requireJail(t)
+	sealed := startSealGate(t, "native", false)
+	var command int
+	for deadline := time.Now().Add(10 * time.Second); command == 0 && time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+		command = descendantNamed(sealed.cmd.Process.Pid, "cat")
+	}
+	if command == 0 {
+		t.Fatal("the gate's jailed cat was not found")
+	}
+	// Plain words: a random token would be redacted on its way to the client.
+	sealed.marker = "written by another process of the same user"
+	out, err := exec.Command(os.Args[0], sentinelCaplessReader, strconv.Itoa(command), sealed.nonce, sealed.marker).Output()
+	var report caplessReport
+	if err != nil || json.Unmarshal(out, &report) != nil {
+		t.Fatalf("capless reader: %v, output %q", err, out)
+	}
+	gate := sealed.probe(t)
+	ran := sealed.finish(t)
+	if !ran || gate.EnvironErr != "EACCES" || gate.FDWriteErr != "EACCES" {
+		t.Fatalf("the sealed gate itself: ran %v, reader %+v", ran, gate)
+	}
+	injected := strings.Contains(sealed.stdout.String(), sealed.marker+"\n")
+	if !report.NonceFound || report.EnvironErr != "0" || report.FDWriteErr != "0" || !injected {
+		t.Fatalf("the jailed command was not reachable (the residual may have closed; update THREAT-MODEL): reader %+v, client stdout %q", report, sealed.stdout.String())
+	}
+}

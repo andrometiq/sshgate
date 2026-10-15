@@ -645,7 +645,9 @@ read router's decision tables (`TestPhase2Tables`) and its gate legs
 (`TestJailMatrixPhase2`, `TestGateBinaryNetworkPin`), the in-process read's
 recorded seal (`TestInProcessReadLeavesDumpable`), the `SSHGATE_JAIL` verb through
 the real binary (`TestGateBinaryJailVerb`), and the real binary's `gate doctor`
-rehearsal and `--pin` on the host (`TestDoctorRehearsalRealHost`). The two tests that prove
+rehearsal and `--pin` on the host (`TestDoctorRehearsalRealHost`), and the seal's
+documented residual: a same-uid process outside the jail still reaches the jailed
+command (`TestSealResidualJailedCommandReachable`). The two tests that prove
 classifier-only reads on a host with Ubuntu's AppArmor userns restriction
 (`TestRunReadClampHostRunsClassifierOnly`, `TestGateBinaryClampHostClassifierOnly`) are not
 in this target, which needs a working jail; `make test` runs them, and CI requires them to pass

@@ -227,14 +227,14 @@ and refuses the read if any check fails. With that, a jailed read **cannot**:
 - change mounts, namespaces or sysctls, or use any capability in the host's
   user namespace.
 
-The gate itself is also shielded while a jailed read runs: right after the
-read's jail starts, the gate makes itself non-dumpable. Its client pipes, its
-environment and the session's redaction key in memory then need
-`CAP_SYS_PTRACE` to reach through `/proc`, so another process of the same user
-outside the jail (a classifier-only read, another SSH session, a signed write)
-can neither read them nor inject bytes into the client's output. A gate binary
-its owner cannot read is not dumpable from the start; such a gate refuses every
-jailed read, and doctor says so.
+The gate process itself is also shielded while a jailed read runs: right after
+the read's jail starts, the gate makes itself non-dumpable. The gate's own
+`/proc` entries (its file descriptors to the SSH session, its environment, and
+the session's redaction key in its memory) then need `CAP_SYS_PTRACE`, so
+another process of the same user outside the jail cannot reach them through
+the gate. This does not cover the jailed command: see "What SSHGate does NOT
+protect against". A gate binary its owner cannot read is not dumpable from the
+start; such a gate refuses every jailed read, and doctor says so.
 
 ### What a jailed read can still do
 
@@ -360,6 +360,15 @@ item 1; others are outside what a read jail can promise.
   corpus + the jail where available, with one known structural hole".
 - **Reads that do harm without writing a file** — network use, the residuals in
   the read-jail section above, and everything on a host without the jail.
+- **Other processes of the same user, while a read runs.** The jail's user
+  namespace belongs to the SSH user, and `execve` makes the jailed command
+  dumpable again, so the seal on the gate cannot extend to it. While a jailed
+  read runs, any process of that user outside the jail (another SSH session, a
+  signed write, a cron job) can read the command's environment, a copy of the
+  gate's, and open its stdout or stderr through `/proc/<pid>/fd` to write bytes
+  that the gate then forwards to the agent as the read's output. Code already
+  running as that user is outside what SSHGate protects; the read's own jail
+  stops it from doing this to other processes.
 - **PTY-based escapes and `~/.ssh/rc` execution at the `authorized_keys` layer —
   closed.** The forced-command entry leads with `restrict` (the OpenSSH ≥ 7.2
   deny-all catch-all) and additionally pins

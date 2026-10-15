@@ -33,11 +33,13 @@ together.
 
 ### Security
 
-- **The gate seals itself while a jailed read runs.** It becomes
+- **The gate process seals itself while a jailed read runs.** It becomes
   non-dumpable right after the read's jail starts, so another process of the
-  same user outside the jail can no longer read its environment or redaction
-  key, or inject bytes into the client's output, through `/proc`. A gate binary
-  its owner cannot read refuses every jailed read; doctor says so.
+  same user outside the jail can no longer reach the gate's own session file
+  descriptors, environment or redaction key through `/proc`. The jailed command
+  itself stays reachable by such processes (its environment, and its output
+  pipes); the threat model lists this. A gate binary its owner cannot read
+  refuses every jailed read; doctor says so.
 
 ### Changed
 

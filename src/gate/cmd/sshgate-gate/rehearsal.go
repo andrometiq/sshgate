@@ -37,6 +37,9 @@ var (
 	rehearsalSpecHook func(*confine.Spec)
 	// rehearsalObserveHook sees the result after the outside checks.
 	rehearsalObserveHook func(*rehearsalResult)
+	// fixtureTmp is where the /tmp canary goes: the host's /tmp, which the
+	// jail shows read-only.
+	fixtureTmp = "/tmp"
 )
 
 // selftestBinary is the running gate binary, provided the file at its path is
@@ -168,7 +171,7 @@ func buildFixtures(gateDir string) (_ *fixtures, err error) {
 	if err = f.listen(); err != nil {
 		return nil, err
 	}
-	tmp, err := os.CreateTemp("/tmp", "sshgate-doctor-")
+	tmp, err := os.CreateTemp(fixtureTmp, "sshgate-doctor-")
 	if err != nil {
 		return nil, err
 	}

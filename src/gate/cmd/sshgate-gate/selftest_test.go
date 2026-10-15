@@ -138,6 +138,27 @@ func TestSelftestNeverExecs(t *testing.T) {
 			t.Errorf("selftest.go imports %s", imp.Path.Value)
 		}
 	}
+	// selftest.go is in package main: an unqualified call could reach any of
+	// the gate's functions. Only its own functions, builtins and conversions
+	// may be called that way.
+	local := map[string]bool{}
+	for _, decl := range file.Decls {
+		if function, ok := decl.(*ast.FuncDecl); ok && function.Recv == nil {
+			local[function.Name.Name] = true
+		}
+	}
+	builtins := []string{"append", "len", "make", "max", "min", "string", "byte", "int", "int32", "uint64", "uintptr"}
+	ast.Inspect(file, func(node ast.Node) bool {
+		if call, ok := node.(*ast.CallExpr); ok {
+			if ident, ok := call.Fun.(*ast.Ident); ok && !local[ident.Name] && !slices.Contains(builtins, ident.Name) {
+				t.Errorf("selftest.go calls %s from outside the file", ident.Name)
+			}
+			if _, ok := call.Fun.(*ast.FuncLit); ok {
+				t.Error("selftest.go calls a function literal")
+			}
+		}
+		return true
+	})
 	forbidden := []string{"exec", "Exec", "ForkExec", "StartProcess", "Clone", "Clone3", "Syscall", "Syscall6", "RawSyscall", "RawSyscall6", "Vfork", "Fork"}
 	ast.Inspect(file, func(node ast.Node) bool {
 		switch n := node.(type) {

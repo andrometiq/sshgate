@@ -68,7 +68,7 @@ func parseDoctorArgs(args []string) (doctorOptions, bool) {
 			opts.pin = true
 		case name == "--net" && (value == "allow" || value == "deny"):
 			opts.net = value
-		case name == "--accept-fs" && hasValue && value != "":
+		case name == "--accept-fs" && hasValue && acceptFSValue(value):
 			opts.acceptFS = value
 		default:
 			return opts, false
@@ -78,6 +78,18 @@ func parseDoctorArgs(args []string) (doctorOptions, bool) {
 		return opts, false
 	}
 	return opts, true
+}
+
+// acceptFSValue is a comma-separated list of lowercase words: the pin's
+// grammar then decides which words it takes. Nothing else, a newline least
+// of all, reaches the candidate's text.
+func acceptFSValue(value string) bool {
+	for _, word := range strings.Split(value, ",") {
+		if word == "" || strings.Trim(word, "abcdefghijklmnopqrstuvwxyz") != "" {
+			return false
+		}
+	}
+	return true
 }
 
 // doctorCandidate is the pin doctor rehearses: from the flags with --pin
@@ -231,13 +243,13 @@ func rehearsalRefusal(r rehearsalResult) string {
 // probe (none for a damaged pin), the unsealed candidate precheck, then the
 // sealed rehearsal, the last attempt of the process. The fixtures are built
 // before all of them.
-func doctor(ctx context.Context, gateDir string, current pinState, cand confine.Pin) (doctorReport, error) {
-	var d doctorReport
+func doctor(ctx context.Context, gateDir string, current pinState, cand confine.Pin) (d doctorReport, err error) {
+	// Leftovers of an interrupted doctor, before this run makes its own.
+	stale := staleDoctorFiles(gateDir)
 	d.Pin = currentPinReport(gateDir, current)
 	d.Pin.Result = "not-requested"
 	d.MountView = mountView()
 	d.Modules.ModulesDisabled = readSysctl("/proc/sys/kernel/modules_disabled")
-	var err error
 	if d.Mounts, err = describeMountsFn(cand.AcceptFS); err != nil {
 		return d, fmt.Errorf("mounts: %w", err)
 	}
@@ -295,6 +307,7 @@ func doctor(ctx context.Context, gateDir string, current pinState, cand confine.
 			skipped = "no usable jail: " + precheck.Route
 		default:
 			skipped = "the candidate's jail fails: " + precheck.Route
+			d.Advice = append(d.Advice, unshownNetworkMounts(d.Mounts)...)
 		}
 	}
 	closeSink()
@@ -309,6 +322,9 @@ func doctor(ctx context.Context, gateDir string, current pinState, cand confine.
 		d.Rehearsal.Skipped = skipped
 	}
 	d.Advice = append(d.Advice, nowAdvice(gateDir, current, now, d.Features)...)
+	for _, path := range stale {
+		advise("%s was left by an interrupted doctor or pin write; it is never read and can be removed", path)
+	}
 	if d.MountView == "container" {
 		advise("this gate runs in a container or toolbox: sshd may run the gate in another mount namespace, where the mounts differ")
 	}
@@ -391,10 +407,30 @@ func nowAdvice(gateDir string, current pinState, now capability, features doctor
 	if now.route.kernel && !current.valid && now.res.Jail != nil && len(now.res.Jail.Unmet) > 0 {
 		advice = append(advice, fmt.Sprintf("reads here are classifier-only: the read jail cannot show %s; --accept-fs=network shows network file systems, other types cannot be shown in this build", strings.Join(now.res.Jail.Unmet, ", ")))
 	}
-	for _, stale := range staleTempPins(gateDir) {
-		advice = append(advice, "a stale temporary pin "+stale+" was left by a failed write; it is never read and can be removed")
+	return advice
+}
+
+// unshownNetworkMounts is advice for a candidate whose jail failed: each
+// network mount the jail does not show, which --accept-fs=network would.
+func unshownNetworkMounts(mounts []confine.MountReport) []string {
+	var advice []string
+	for _, mount := range mounts {
+		if !mount.Accepted && (mount.Class == "network" || mount.Backing == "network") {
+			advice = append(advice, fmt.Sprintf("the jail does not show %s (%s), a network file system, and a pinned read refuses an unshown mount; add --accept-fs=network to show it", mount.Point, mount.FSType))
+		}
 	}
 	return advice
+}
+
+// staleDoctorFiles are leftovers of an interrupted doctor: temporary pins,
+// fixture directories in the gate directory, and /tmp fixture files.
+func staleDoctorFiles(gateDir string) []string {
+	var stale []string
+	for _, pattern := range []string{filepath.Join(gateDir, pinTempPrefix+"*"), filepath.Join(gateDir, ".doctor-*"), filepath.Join(fixtureTmp, "sshgate-doctor-*")} {
+		matches, _ := filepath.Glob(pattern)
+		stale = append(stale, matches...)
+	}
+	return stale
 }
 
 // mountView is "container" when a container or toolbox marker is present,

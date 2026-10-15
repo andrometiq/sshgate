@@ -32,9 +32,11 @@ var (
 	sealFn = confine.SealProcess
 )
 
-// sealRead is the Seal of every jailed read. While the read runs, the gate's
-// client pipes, environment and redaction key are then out of reach of
-// same-uid processes outside the jail that lack CAP_SYS_PTRACE.
+// sealRead is the Seal of every jailed read. While the read runs, the gate
+// process's own /proc entries (its session fds, its environment, the
+// redaction key in its memory) then need CAP_SYS_PTRACE. The jailed command
+// itself is dumpable after exec and stays reachable by same-uid processes
+// outside the jail; see THREAT-MODEL.
 func sealRead() error {
 	if jailmut.On("P-G-SEAL") {
 		return nil

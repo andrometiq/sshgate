@@ -7,7 +7,6 @@ import (
 	"io"
 	"os"
 	"reflect"
-	"strings"
 
 	"github.com/karthikeyan5/sshgate/src/gate/confine"
 	"golang.org/x/sys/unix"
@@ -15,6 +14,13 @@ import (
 
 // pinTempPrefix names the temporary file the pin is written through.
 const pinTempPrefix = ".jail.tmp-"
+
+// Test-only seams for the pin write's failure paths: the read-back of the
+// temporary file and the directory sync.
+var (
+	pinReadBackFn = readPinAt
+	dirSyncFn     = unix.Fsync
+)
 
 // pinPrecondition is why `doctor --pin` cannot write here; code is its exit.
 type pinPrecondition struct {
@@ -117,7 +123,7 @@ func writePin(dir *os.File, candBytes []byte, cand confine.Pin) (string, error) 
 	if err != nil {
 		return "", err
 	}
-	data, _, err := readPinAt(dirfd, temp)
+	data, _, err := pinReadBackFn(dirfd, temp)
 	parsed, parseErr := confine.ParsePin(data)
 	if err != nil || parseErr != nil || !bytes.Equal(data, candBytes) || !reflect.DeepEqual(parsed, cand) {
 		return "", errors.New("the written pin does not read back as the rehearsed one")
@@ -126,10 +132,10 @@ func writePin(dir *os.File, candBytes []byte, cand confine.Pin) (string, error) 
 		return "", fmt.Errorf("replace the pin: %w", err)
 	}
 	renamed = true
-	if err := unix.Fsync(dirfd); err != nil {
+	if err := dirSyncFn(dirfd); err != nil {
 		return "", fmt.Errorf("sync the gate directory: %w", err)
 	}
-	if pin := readJailPin(); !pin.valid || !reflect.DeepEqual(pin.pin, cand) {
+	if pin := jailPinFn(); !pin.valid || !reflect.DeepEqual(pin.pin, cand) {
 		return "", errors.New("the read path does not see the written pin")
 	}
 	return "written", nil
@@ -153,17 +159,4 @@ func writeTempPin(file *os.File, candBytes []byte) error {
 		return err
 	}
 	return file.Sync()
-}
-
-// staleTempPins lists temporary pin files a failed write left behind. They
-// are never read.
-func staleTempPins(gateDir string) []string {
-	entries, _ := os.ReadDir(gateDir)
-	var stale []string
-	for _, entry := range entries {
-		if strings.HasPrefix(entry.Name(), pinTempPrefix) {
-			stale = append(stale, entry.Name())
-		}
-	}
-	return stale
 }

@@ -30,9 +30,10 @@ func withHostFacts(t *testing.T, facts confine.HostFacts) {
 
 // fakeRehearser stands in for the fixtures and the rehearsal.
 type fakeRehearser struct {
-	result    rehearsalResult
-	cands     []confine.Pin
-	teardowns int
+	result      rehearsalResult
+	cands       []confine.Pin
+	teardowns   int
+	teardownErr error
 }
 
 func (f *fakeRehearser) rehearse(_ context.Context, cand confine.Pin, _ func() error) rehearsalResult {
@@ -44,7 +45,7 @@ func (f *fakeRehearser) rehearse(_ context.Context, cand confine.Pin, _ func() e
 
 func (f *fakeRehearser) teardown() error {
 	f.teardowns++
-	return nil
+	return f.teardownErr
 }
 
 // passedRehearsal is a rehearsal in which every row and check passed.
@@ -64,13 +65,14 @@ var directRoot = confine.MountReport{Point: "/", FSType: "ext4", Source: "/dev/v
 func withDoctorFakes(t *testing.T) *fakeRehearser {
 	t.Helper()
 	fake := &fakeRehearser{result: passedRehearsal()}
-	previousFixtures, previousMountOf, previousMounts, previousBinary := fixturesFn, mountOfFn, describeMountsFn, selftestBinaryFn
+	previousFixtures, previousMountOf, previousMounts, previousBinary, previousTmp := fixturesFn, mountOfFn, describeMountsFn, selftestBinaryFn, fixtureTmp
 	fixturesFn = func(string) (rehearser, error) { return fake, nil }
 	mountOfFn = func(string, []string) (confine.MountReport, error) { return directRoot, nil }
 	describeMountsFn = func([]string) ([]confine.MountReport, error) { return []confine.MountReport{directRoot}, nil }
 	selftestBinaryFn = func() (string, error) { return "/gate", nil }
+	fixtureTmp = t.TempDir()
 	t.Cleanup(func() {
-		fixturesFn, mountOfFn, describeMountsFn, selftestBinaryFn = previousFixtures, previousMountOf, previousMounts, previousBinary
+		fixturesFn, mountOfFn, describeMountsFn, selftestBinaryFn, fixtureTmp = previousFixtures, previousMountOf, previousMounts, previousBinary, previousTmp
 	})
 	return fake
 }
@@ -134,6 +136,8 @@ func TestDoctorGrammar(t *testing.T) {
 		{"--bogus"}, {"--net=deny"}, {"--accept-fs=network"}, {"--pin"}, {"--pin", "--net=maybe"},
 		{"--pin", "--net=deny", "--net=deny"}, {"--json"}, {"--pin", "--net=deny", "--accept-fs="},
 		{"--pin", "--net=deny", "--accept-fs=fuse"}, {"--pin", "--net=deny", "--accept-fs=network,network"},
+		{"--pin", "--net=deny", "--accept-fs=network\ndocker_socket=/x"}, {"--pin", "--net=deny", "--accept-fs=network\x00"},
+		{"--pin", "--net=deny", "--accept-fs=network,"}, {"--pin", "--net=deny", "--accept-fs=Network"},
 	} {
 		// runDoctorJSON adds one --json, so {"--json"} repeats it.
 		if code, _, _ := runDoctorJSON(t, args...); code != exitDataErr {
@@ -441,7 +445,7 @@ func TestDoctorPinWriteSafety(t *testing.T) {
 		if code, _, _ := runDoctorJSON(t, "--pin", "--net=deny"); code != exitSoftware {
 			t.Fatalf("exit %d, want %d", code, exitSoftware)
 		}
-		if stale := staleTempPins(dir); len(stale) != 0 {
+		if stale, _ := filepath.Glob(filepath.Join(dir, pinTempPrefix+"*")); len(stale) != 0 {
 			t.Fatalf("temporary pins left: %v", stale)
 		}
 	})
@@ -498,15 +502,22 @@ func TestDoctorPinWriteSafety(t *testing.T) {
 			t.Fatalf("released: exit %d", code)
 		}
 	})
-	t.Run("stale temporary pin is reported, never read", func(t *testing.T) {
+	t.Run("leftovers are reported, never read", func(t *testing.T) {
 		dir, _, _ := pinHost(t)
-		stale := filepath.Join(dir, pinTempPrefix+"0123456789abcdef")
-		if err := os.WriteFile(stale, []byte(pinAllow), 0o600); err != nil {
-			t.Fatal(err)
+		leftovers := []string{filepath.Join(dir, pinTempPrefix+"0123456789abcdef"), filepath.Join(dir, ".doctor-1234"), filepath.Join(fixtureTmp, "sshgate-doctor-5678")}
+		for _, path := range leftovers {
+			if err := os.WriteFile(path, []byte(pinAllow), 0o600); err != nil {
+				t.Fatal(err)
+			}
 		}
 		_, d, _ := runDoctorJSON(t)
-		if d.Pin.State != "absent" || len(d.Advice) != 1 || !strings.Contains(d.Advice[0], "stale temporary pin") {
+		if d.Pin.State != "absent" || len(d.Advice) != len(leftovers) {
 			t.Fatalf("doctor %+v", d)
+		}
+		for i, path := range leftovers {
+			if !strings.HasPrefix(d.Advice[i], path+" was left by an interrupted doctor") {
+				t.Errorf("advice %q", d.Advice[i])
+			}
 		}
 	})
 }
@@ -637,4 +648,81 @@ func writePinCallSites() error {
 		return fmt.Errorf("writePin: %d call sites, %d inside if pinAllowed(...)", total, guarded)
 	}
 	return nil
+}
+
+// TestDoctorReportsTeardown: the fixtures are torn down once, and a teardown
+// failure is reported.
+func TestDoctorReportsTeardown(t *testing.T) {
+	_, fake, _ := pinHost(t)
+	fake.teardownErr = errors.New("fixture child did not exit")
+	code, d, _ := runDoctorJSON(t)
+	if code != exitOK || fake.teardowns != 1 || len(d.Advice) != 1 || d.Advice[0] != "fixture teardown: fixture child did not exit" {
+		t.Fatalf("exit %d, teardowns %d, advice %v", code, fake.teardowns, d.Advice)
+	}
+}
+
+// TestDoctorPrecheckNamesUnshownNetworkMounts: when the candidate's jail
+// fails, each network mount it does not show gets --accept-fs=network advice.
+func TestDoctorPrecheckNamesUnshownNetworkMounts(t *testing.T) {
+	pinHost(t)
+	result, err := setupFailure("covers", syscall.EIO)
+	recordAttempts(t, result, err)
+	describeMountsFn = func([]string) ([]confine.MountReport, error) {
+		return []confine.MountReport{directRoot, {Point: "/srv/share", FSType: "nfs4", Class: "network"}, {Point: "/srv/fuse", FSType: "fuse.sshfs", Class: "unsupported"}}, nil
+	}
+	code, d, _ := runDoctorJSON(t, "--pin", "--net=deny")
+	advised := 0
+	for _, advice := range d.Advice {
+		if strings.Contains(advice, "/srv/share (nfs4)") && strings.Contains(advice, "--accept-fs=network") {
+			advised++
+		}
+		if strings.Contains(advice, "/srv/fuse") {
+			t.Errorf("advice for a mount --accept-fs cannot show: %q", advice)
+		}
+	}
+	if code != exitNoPermVal || advised != 1 {
+		t.Fatalf("exit %d, advice %v", code, d.Advice)
+	}
+}
+
+// TestDoctorPinWriteFailures: a pin that does not read back is never put in
+// place; a failure after the rename exits 70 and leaves the new pin, the
+// safe direction (the read path checks it like any pin).
+func TestDoctorPinWriteFailures(t *testing.T) {
+	t.Run("read-back mismatch", func(t *testing.T) {
+		dir, _, _ := pinHost(t)
+		plantPin(t, dir, pinAllow, 0o600)
+		previous := pinReadBackFn
+		pinReadBackFn = func(dirfd int, name string) ([]byte, unix.Stat_t, error) {
+			data, stat, err := previous(dirfd, name)
+			return append(data, '#'), stat, err
+		}
+		t.Cleanup(func() { pinReadBackFn = previous })
+		code, _, _ := runDoctorJSON(t, "--pin", "--net=deny")
+		content, _ := readPinFile(t, dir)
+		stale, _ := filepath.Glob(filepath.Join(dir, pinTempPrefix+"*"))
+		if code != exitSoftware || content != pinAllow || len(stale) != 0 {
+			t.Fatalf("exit %d, pin %q, temporary %v", code, content, stale)
+		}
+	})
+	t.Run("directory sync fails", func(t *testing.T) {
+		dir, _, _ := pinHost(t)
+		previous := dirSyncFn
+		dirSyncFn = func(int) error { return syscall.EIO }
+		t.Cleanup(func() { dirSyncFn = previous })
+		code, _, _ := runDoctorJSON(t, "--pin", "--net=deny")
+		if content, _ := readPinFile(t, dir); code != exitSoftware || content != canonicalDeny {
+			t.Fatalf("exit %d, pin %q", code, content)
+		}
+	})
+	t.Run("the read path does not see the pin", func(t *testing.T) {
+		dir, _, _ := pinHost(t)
+		previous := jailPinFn
+		jailPinFn = func() pinState { return pinState{damaged: "injected"} }
+		t.Cleanup(func() { jailPinFn = previous })
+		code, _, _ := runDoctorJSON(t, "--pin", "--net=deny")
+		if content, _ := readPinFile(t, dir); code != exitSoftware || content != canonicalDeny {
+			t.Fatalf("exit %d, pin %q", code, content)
+		}
+	})
 }
