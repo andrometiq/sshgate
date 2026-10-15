@@ -42,6 +42,13 @@ func selfcheck(spec Spec, abi int, facts *Facts) error {
 	return nil
 }
 
+// CheckJailedCredentials reports whether a /proc/<pid>/status text shows the
+// jailed command's credentials: no capabilities (CAP_DAC_READ_SEARCH alone for
+// root), no_new_privs, and seccomp filter mode with at least one filter.
+func CheckJailedCredentials(status string, root bool) error {
+	return selfcheckCredentials(status, root)
+}
+
 func selfcheckCredentials(status string, root bool) error {
 	expected := map[string]uint64{"CapInh": 0, "CapPrm": 0, "CapEff": 0, "CapBnd": 0, "CapAmb": 0, "NoNewPrivs": 1, "Seccomp": 2}
 	if root {

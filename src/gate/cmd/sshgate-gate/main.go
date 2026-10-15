@@ -3,11 +3,12 @@
 // SSHGate dedicated key; the forwarded command from the client arrives
 // in $SSH_ORIGINAL_COMMAND.
 //
-// Exit codes (BSD sysexits where applicable):
+// Exit codes (BSD sysexits where applicable), forced-command path:
 //
 //	0  — success (also: empty SSH_ORIGINAL_COMMAND, the post-install
 //	     verification probe, prints SSHGATE_OK; the unsigned SSHGATE_VERSION
-//	     probe, prints the running gate's build revision; and a completed
+//	     probe, prints the running gate's build revision; the unsigned
+//	     SSHGATE_JAIL verb, prints exactly one JSON line; and a completed
 //	     SSHGATE_UPDATE, prints SSHGATE_UPDATED)
 //	1  — generic runtime failure or non-zero from /bin/sh -c on the
 //	     non-pass-through paths
@@ -17,11 +18,26 @@
 //	     non-ELF/wrong-arch binary — nothing is written)
 //	70 — EX_SOFTWARE: pubkey file unreadable, corrupt, or has insecure
 //	     mode; also a SSHGATE_UPDATE filesystem/replace failure (old gate
-//	     left intact)
+//	     left intact), and SSHGATE_JAIL could not open or write its output
 //	77 — EX_NOPERM: write command without a verified SSHGATE_SIG prefix;
-//	     also a read refused because the host's read jail cannot be trusted
-//	     (probe error, rung below the pinned jail-floor, damaged floor) or
-//	     could not be set up; stderr then says "read jail unavailable"
+//	     also a read refused by the read jail, with "gate: read jail
+//	     unavailable" on stderr: the jail pin is damaged (or a jail-floor
+//	     from an earlier release is left with no jail pin), the read must run
+//	     confined and cannot, the jail failed to set up (or failed after the
+//	     read may have started), or the host has no usable jail and is pinned
+//	143 — a signed admin verb, a read whose jail never started, or
+//	     SSHGATE_JAIL, cancelled before it ran
+//
+// Exit codes of the argv subcommands, reached only from a plain shell:
+//
+//	genkeys        — 0, 65 usage, 70 failure
+//	doctor         — 0 report (with --pin: written or unchanged), 65 usage,
+//	                 70 internal error or a gate binary that is not the running
+//	                 one, 75 another doctor --pin holds the lock, 77 --pin
+//	                 refused (rehearsal skipped or failed, wrong user, unsafe
+//	                 gate directory)
+//	__jailselftest — 0 inside the jail, 65 bad arguments, 77 anywhere else
+//	shim, worker   — the jail's own sentinels; 70 when setup fails
 //
 // Exit codes from the executed inner command are passed through
 // directly (so /bin/sh -c 'exit 42' makes gate exit 42).
@@ -80,6 +96,7 @@ const (
 	exitGeneric   = 1
 	exitDataErr   = 65  // EX_DATAERR
 	exitSoftware  = 70  // EX_SOFTWARE
+	exitTempFail  = 75  // EX_TEMPFAIL: doctor --pin found the gate dir locked
 	exitNoPermVal = 77  // EX_NOPERM
 	exitCancelled = 143 // 128+SIGTERM: cancelled before an admin verb ran
 )
@@ -105,8 +122,10 @@ func main() {
 			os.Exit(confine.RunShim(os.Args[2:]))
 		case confine.SentinelWorker:
 			os.Exit(confine.RunWorker(os.Args[2:]))
-		case confine.SentinelProbe:
-			os.Exit(confine.RunProbe(os.Args[2:]))
+		case sentinelSelftest:
+			// The rehearsal's probe menu, run by doctor inside the jail. It
+			// refuses (77) anywhere but there; see selftest.go.
+			os.Exit(runJailSelftest(os.Args[2:]))
 		}
 		os.Exit(runLocalSubcommand(os.Args[1:]))
 	}
@@ -160,6 +179,13 @@ func run() int {
 		// read-only gate can answer it too.
 		fmt.Println(runningGateVersion())
 		return exitOK
+	}
+
+	if command, ok := jailVerbProbe(raw); ok {
+		// Unsigned host-capability probe: one jail attempt of a constant
+		// command, one JSON line. Like SSHGATE_VERSION it is not audited and
+		// is recognised before the pubkey load, so a Tier-1 gate answers it.
+		return runJailVerb(command)
 	}
 
 	// Tier 6a — resolve the gate-side authoritative audit logger from the
@@ -305,7 +331,8 @@ func run() int {
 			auditNoExec(audit, innerCmd, "write", "denied", exitNoPermVal)
 			return exitNoPermVal
 		}
-		return execAndAudit(audit, innerCmd, "write", "signed", reveal, execPlan{})
+		rc, _, _ := execAndAudit(audit, innerCmd, "write", "signed", reveal, execPlan{})
+		return rc
 	default:
 		logf("unexpected classification: %v", kind)
 		auditNoExec(audit, innerCmd, "write", "denied", exitGeneric)
@@ -340,17 +367,17 @@ var executeCommand = gate.ExecWithRedaction
 // signed path (see run()); it is never set for an unsigned read.
 //
 // plan selects how the child runs: Lane-2 argv (shell-free), the read jail,
-// or the zero plan's plain /bin/sh -c (signed writes, rung-3 reads).
+// or the zero plan's plain /bin/sh -c (signed writes, classifier-only reads).
 //
 // It returns the gate exit code AND the ExecResult (output metadata) so
 // the caller can feed the Tier-6a audit log. captureLimit (>0 only at the
 // audit all+full level) makes the executor tee a capped copy of the
 // output into the result. On an exec start-failure (exit<0) the gate exit
 // code is normalised to exitGeneric (1) — except for a jailed read, where
-// exit<0 means the jail never reached the command (scratch dir, build, start
-// or setup failure): that is a deny, jailDenied is true and the code is 77, so
-// it can never pass for a command that ran and exited 1.
-func execChild(cmd string, reveal bool, captureLimit int, plan execPlan) (rc int, res gate.ExecResult, jailDenied bool) {
+// exit<0 means the jail never reached the command: setupErr is then set (see
+// setupErrorOf) and the read router decides what happens, so it can never
+// pass for a command that ran and exited 1.
+func execChild(cmd string, reveal bool, captureLimit int, plan execPlan) (rc int, res gate.ExecResult, setupErr error) {
 	ctx := sessionContext
 	if ctx == nil {
 		var cancel context.CancelFunc
@@ -359,7 +386,7 @@ func execChild(cmd string, reveal bool, captureLimit int, plan execPlan) (rc int
 	}
 	if plan.confine != nil && sessionContext != nil {
 		if err := ensureClientSink(); err != nil {
-			return exitNoPermVal, gate.ExecResult{ExitCode: -1, Transport: gate.TransportMetadata{DeliveryError: err.Error(), OutputDestination: sessionDestination}}, true
+			return exitNoPermVal, gate.ExecResult{ExitCode: -1, Transport: gate.TransportMetadata{DeliveryError: err.Error(), OutputDestination: sessionDestination}}, &confine.SetupError{Stage: "sink"}
 		}
 	}
 	// Resolve the redaction ruleset lazily via auditRules() — only this
@@ -371,7 +398,12 @@ func execChild(cmd string, reveal bool, captureLimit int, plan execPlan) (rc int
 		Rules:        rules,
 		Reveal:       reveal,
 		CaptureLimit: captureLimit,
-		ClientSink:   sessionSink,
+	}
+	if plan.confine != nil || plan.read != nil && plan.argv == nil {
+		// Jailed reads and their classifier-only fallback hold the client
+		// sink: the fallback runs after the jail attempt made the client fds
+		// non-blocking. Signed writes and daemon reads keep it nil.
+		opts.ClientSink = sessionSink
 	}
 	var err error
 	switch {
@@ -379,19 +411,23 @@ func execChild(cmd string, reveal bool, captureLimit int, plan execPlan) (rc int
 		res, err = gate.ExecArgvWithRedaction(ctx, plan.argv, lane2Env, opts)
 	default:
 		opts.Confine = plan.confine
+		if plan.confine != nil {
+			opts.Seal = sealRead
+		}
 		res, err = executeCommand(ctx, cmd, opts)
+	}
+	if plan.confine != nil && res.ExitCode < 0 {
+		// The read router logs the outcome: a deny line, or nothing for a
+		// classifier-only fallback.
+		return exitNoPermVal, res, setupErrorOf(err)
 	}
 	if err != nil {
 		logf("%v", err)
 	}
 	if res.ExitCode < 0 {
-		if plan.confine != nil {
-			logf("read jail unavailable: the jail could not be set up; the read did not run")
-			return exitNoPermVal, res, true
-		}
-		return exitGeneric, res, false
+		return exitGeneric, res, nil
 	}
-	return res.ExitCode, res, false
+	return res.ExitCode, res, nil
 }
 
 // auditRulesOnce + cachedAuditRules MEMOIZE the production ruleset compile so
@@ -467,7 +503,11 @@ func newAuditLogger() *gate.AuditLogger {
 // code. It is the single exec+audit chokepoint for reads and signed
 // writes. The audit write is fail-open inside Record — a logging failure
 // never affects the returned exit code.
-func execAndAudit(audit *gate.AuditLogger, cmd, classification, approval string, reveal bool, plan execPlan) int {
+//
+// A jailed read that never reached its command returns setupErr and the
+// attempt's result, and writes no record: the read router records the deny
+// (with the attempt's transport) or runs the classifier-only fallback.
+func execAndAudit(audit *gate.AuditLogger, cmd, classification, approval string, reveal bool, plan execPlan) (int, gate.ExecResult, error) {
 	// Only buffer output when the audit level actually wants raw output
 	// (all+full). At every other level captureLimit stays 0 and the
 	// executor streams without buffering — zero added cost on the hot path.
@@ -483,12 +523,19 @@ func execAndAudit(audit *gate.AuditLogger, cmd, classification, approval string,
 	if audit != nil && audit.Level() >= gate.AuditAllFull && !reveal {
 		captureLimit = auditFullCaptureLimit
 	}
-	rc, res, jailDenied := execChild(cmd, reveal, captureLimit, plan)
-	if jailDenied {
-		// Nothing ran: record a denial with no output metadata and no rung.
-		auditNoExec(audit, cmd, classification, "denied", rc, res.Transport)
-		return rc
+	rc, res, setupErr := execChild(cmd, reveal, captureLimit, plan)
+	if setupErr != nil {
+		return rc, res, setupErr
 	}
+	if plan.read != nil && res.Jail != nil {
+		plan.read.LandlockABI, plan.read.Net, plan.read.CwdReset = res.Jail.ABI, res.Jail.Net, res.Jail.CwdReset
+		if !plan.read.Pinned && !plan.read.RequiresConfinement {
+			plan.read.LabelClauseUnmet = res.Jail.Unmet
+		}
+	}
+	// Every gate line on a read path is written before finishTransport ends
+	// delivery to the client.
+	networkHint(cmd, rc, res.Jail)
 	record := gate.AuditRecord{
 		TS: time.Now().UTC().Unix(),
 		// Redact a secret embedded in the command STRING before persisting it
@@ -513,9 +560,9 @@ func execAndAudit(audit *gate.AuditLogger, cmd, classification, approval string,
 		// these are empty — the raw secret is never even buffered, let alone
 		// persisted. AuditLogger.Record additionally blanks them below all+full,
 		// so all+meta provably cannot leak raw output either.
-		Stdout: res.Stdout,
-		Stderr: res.Stderr,
-		Rung:   plan.rung,
+		Stdout:    res.Stdout,
+		Stderr:    res.Stderr,
+		ReadAudit: plan.read,
 	}
 	if res.Transport.CleanupError == "" {
 		res.Transport.CleanupError = res.CleanupError
@@ -525,35 +572,23 @@ func execAndAudit(audit *gate.AuditLogger, cmd, classification, approval string,
 	}
 	record.SetTransport(finishTransport(res.Transport))
 	audit.Record(record)
-	return rc
+	return rc, res, nil
 }
 
-// execPlan says how execChild runs a command. The zero value is today's plain
-// /bin/sh -c (the signed-write path). A read sets exactly one of argv (Lane 2,
-// shell-free) or confine (the jail; nil on a rung-3 host), plus its audit rung.
+// execPlan says how execChild runs a command. The zero value is the plain
+// /bin/sh -c of a signed write. A read sets read (its audit block) and at most
+// one of argv (Lane 2, shell-free) or confine (the jail); a read with neither
+// is a classifier-only run.
 type execPlan struct {
 	argv    []string
 	confine *confine.Spec
-	rung    string
+	read    *gate.ReadAudit
 }
 
-// execRead runs a command the classifier called a read, on the Tier-1 and
-// signed read paths alike. An exact Lane-2 daemon read runs shell-free and
-// unjailed; everything else runs in the read jail the host supports. If the
-// jail rung cannot be trusted (probe error, live rung below the pinned floor,
-// damaged floor) the read is denied — it never falls back to unconfined.
-// Reveal only switches off output redaction; a revealed read is still jailed.
-func execRead(audit *gate.AuditLogger, cmd, approval string, reveal bool) int {
-	if argv, ok := lane2Argv(cmd); ok {
-		return execAndAudit(audit, cmd, "read", approval, reveal, execPlan{argv: argv, rung: "lane2"})
-	}
-	spec, deny := resolveReadConfine()
-	if deny != "" {
-		logf("read jail unavailable: %s", deny)
-		auditNoExec(audit, cmd, "read", "denied", exitNoPermVal)
-		return exitNoPermVal
-	}
-	return execAndAudit(audit, cmd, "read", approval, reveal, execPlan{confine: spec, rung: rungLabel(spec)})
+// auditReadDenied records a read the read jail refused, with its deny
+// reason. The deny line must already be written: this finishes delivery.
+func auditReadDenied(audit *gate.AuditLogger, cmd, reason string, exit int, outcome ...gate.TransportMetadata) {
+	auditNoExecReason(audit, cmd, "read", "denied", exit, reason, outcome...)
 }
 
 // auditNoExec records a Tier-6a line for a command that ran NO /bin/sh
@@ -561,8 +596,13 @@ func execRead(audit *gate.AuditLogger, cmd, approval string, reveal bool) int {
 // signed admin verb handled internally (approval="signed"). Meta is nil
 // because there is no output metadata. The write is fail-open.
 func auditNoExec(audit *gate.AuditLogger, cmd, classification, approval string, exit int, outcome ...gate.TransportMetadata) {
+	auditNoExecReason(audit, cmd, classification, approval, exit, "", outcome...)
+}
+
+func auditNoExecReason(audit *gate.AuditLogger, cmd, classification, approval string, exit int, denyReason string, outcome ...gate.TransportMetadata) {
 	record := gate.AuditRecord{
-		TS: time.Now().UTC().Unix(),
+		DenyReason: denyReason,
+		TS:         time.Now().UTC().Unix(),
 		// Redact a secret embedded in the command string even on the no-exec
 		// (denial / admin-verb) path — a denied command can still carry a
 		// secret in its text (F5). Fail-open.
@@ -698,6 +738,9 @@ func ensureClientSink() error {
 	return nil
 }
 
+// finishTransport ends delivery to the client and merges its outcome. After it,
+// gate lines no longer reach the client (logf drops them), so every line on a
+// read path — a deny, the network hint — is written before it.
 func finishTransport(process gate.TransportMetadata) gate.TransportMetadata {
 	if sessionSink != nil {
 		delivery := sessionSink.Finish()

@@ -38,7 +38,7 @@ func CheckUnion(registry []Protection, reports []Report) error {
 				for _, leg := range set.Legs {
 					covered := false
 					for _, report := range reports {
-						eligible := !leg.Root || report.Root
+						eligible := (!leg.Root || report.Root) && (!leg.NonRoot || !report.Root)
 						matched := false
 						for _, outcome := range report.Outcomes {
 							if outcome.Set == set.Name() && outcome.ABI == abi && outcome.Leg == leg.Name {

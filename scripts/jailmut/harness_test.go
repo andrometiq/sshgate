@@ -109,6 +109,44 @@ func TestHarnessLaneUnion(t *testing.T) {
 	}
 }
 
+// TestHarnessNonRootLaneUnion: a non-root-only leg is omitted in the root lane
+// and must be red in the non-root lane.
+func TestHarnessNonRootLaneUnion(t *testing.T) {
+	leg := fixtureLeg()
+	leg.NonRoot = true
+	set := harness.MutationSet{IDs: []string{"P-FIXTURE"}, Legs: []harness.Leg{leg}}
+	registry := []harness.Protection{{ID: "P-FIXTURE", Site: "fixture", Class: "single", MutationSets: []harness.MutationSet{set}}}
+	if err := harness.Validate(registry); err != nil {
+		t.Fatal(err)
+	}
+	legs, omitted := harness.Select(set, true, true)
+	if len(legs) != 0 || len(omitted) != 1 || !strings.Contains(omitted[0], "MUTATE-OMITTED(non-root)") {
+		t.Fatal("wrong root CI omission")
+	}
+	if legs, omitted = harness.Select(set, false, true); len(legs) != 1 || len(omitted) != 0 {
+		t.Fatal("non-root CI omitted leg")
+	}
+	nonroot := harness.Report{CI: true}
+	root := harness.Report{CI: true, Root: true}
+	for _, abi := range []string{"native", "abi1"} {
+		nonroot.Outcomes = append(nonroot.Outcomes, harness.Outcome{Set: set.Name(), ABI: abi, Leg: leg.Name, Red: true})
+	}
+	if err := harness.CheckUnion(registry, []harness.Report{nonroot, root}); err != nil {
+		t.Fatal(err)
+	}
+	if err := harness.CheckUnion(registry, []harness.Report{{CI: true}, root}); err == nil {
+		t.Fatal("accepted missing non-root coverage")
+	}
+	root.Outcomes = nonroot.Outcomes
+	if err := harness.CheckUnion(registry, []harness.Report{nonroot, root}); err == nil {
+		t.Fatal("accepted a non-root-only leg run as root")
+	}
+	registry[0].MutationSets[0].Legs[0].Root = true
+	if err := harness.Validate(registry); err == nil {
+		t.Fatal("accepted a leg that is both root-only and non-root-only")
+	}
+}
+
 func TestHarnessLaneExecution(t *testing.T) {
 	leg := fixtureLeg()
 	leg.CIOnly = true

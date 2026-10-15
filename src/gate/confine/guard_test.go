@@ -65,7 +65,7 @@ func envViolations(f *ast.File) []string {
 }
 
 // TestNoEnvDrivenPolicy is a reviewer-checkable guard: no non-test source in
-// this package may read the environment (except the one allow-listed site), because the confinement Spec (rung, ABI cap, inject) must
+// this package may read the environment (except the one allow-listed site), because the confinement Spec (profile, ABI cap, inject) must
 // come only from the parent-written sentinel argv and host probes — never from an
 // environment variable an SSH client could set.
 func TestNoEnvDrivenPolicy(t *testing.T) {

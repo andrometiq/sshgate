@@ -17,7 +17,7 @@ import (
 )
 
 func TestExecWithRedactionConfineLifecycle(t *testing.T) {
-	requireUserns(t)
+	requireJail(t)
 	if os.Getenv("SSHGATE_TEST_EXEC_LIFECYCLE") != "1" {
 		ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
 		defer cancel()
@@ -139,7 +139,7 @@ func TestExecWithRedactionConfineLifecycle(t *testing.T) {
 }
 
 func TestExecWithRedactionConfinedOutputCounts(t *testing.T) {
-	requireUserns(t)
+	requireJail(t)
 	// Unterminated tails written to the test's own stdout would swallow the
 	// "--- PASS" line that go test -json needs, so the client streams are files.
 	stdout, err := os.CreateTemp(t.TempDir(), "stdout")
