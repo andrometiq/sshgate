@@ -34,6 +34,12 @@ func phase3Registry() []prot {
 				phase3Leg("G-L2-ADMIT-RUNPATH-UNTRUSTED", "MUTATION-EFFECT lib-ran"),
 				phase3Leg("G-L2-ADMIT-ENDPOINT", "MUTATION-EFFECT endpoint-accepted"),
 			}}}},
+		{ID: "P-L2-INTERP", Site: "lane2Plan interpreter trust verdict", Class: "single", DirectLeg: "U-Lane2Interp",
+			EffectLegs: []string{"G-L2-INTERP-UNTRUSTED"},
+			MutationSets: []harness.MutationSet{{IDs: []string{"P-L2-INTERP"}, Legs: []harness.Leg{
+				phase3Leg("U-Lane2Interp", "MUTATION-EFFECT decision"),
+				phase3Leg("G-L2-INTERP-UNTRUSTED", "MUTATION-EFFECT interp-ran"),
+			}}}},
 		{ID: "P-L2-GRAMMAR", Site: "lane2Parse refuses a non-grammar token", Class: "multi", Partners: []string{"P-L2-REDIRECT"}, DirectLeg: "U-Lane2Grammar",
 			EffectLegs: []string{"G-L2-GRAMMAR"},
 			MutationSets: []harness.MutationSet{{IDs: []string{"P-L2-GRAMMAR"}, Legs: []harness.Leg{

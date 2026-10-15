@@ -78,7 +78,7 @@ func lane2AdmissionRows(t *testing.T, verdict func(name string, accepted bool)) 
 	dir := buildLane2Fixtures(t)
 	for _, name := range []string{"systemctl", "docker"} {
 		if path, err := exec.LookPath(name); err == nil {
-			_, file, refusal, err := lane2Admit(path)
+			_, file, _, refusal, err := lane2Admit(path)
 			if file != nil {
 				file.Close()
 			}
@@ -160,7 +160,7 @@ func lane2AdmissionRows(t *testing.T, verdict func(name string, accepted bool)) 
 			}
 			lane2BuildSearch(t, dir, search, false)
 			if shape == "writable" {
-				_, f, reason, err := lane2Admit(filepath.Join(dir, "systemctl"))
+				_, f, _, reason, err := lane2Admit(filepath.Join(dir, "systemctl"))
 				if f != nil {
 					f.Close()
 				}
@@ -575,7 +575,7 @@ func TestLane2InstalledClients(t *testing.T) {
 			if err != nil {
 				t.Skipf("client not installed: %v", err)
 			}
-			_, file, refusal, err := lane2Admit(path)
+			_, file, _, refusal, err := lane2Admit(path)
 			if file != nil {
 				defer file.Close()
 			}

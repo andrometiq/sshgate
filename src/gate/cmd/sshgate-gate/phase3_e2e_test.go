@@ -34,6 +34,7 @@ func TestJailMatrixPhase3(t *testing.T) {
 			t.Run("G-L2-ADMIT-RUNPATH-ORIGIN", func(t *testing.T) { legLane2Admit(t, abi, "G-L2-ADMIT-RUNPATH-ORIGIN") })
 			t.Run("G-L2-ADMIT-RUNPATH-UNTRUSTED", func(t *testing.T) { legLane2Admit(t, abi, "G-L2-ADMIT-RUNPATH-UNTRUSTED") })
 			t.Run("G-L2-ADMIT-ENDPOINT", func(t *testing.T) { legLane2AdmitEndpoint(t, abi) })
+			t.Run("G-L2-INTERP-UNTRUSTED", func(t *testing.T) { legLane2InterpUntrusted(t, abi) })
 			t.Run("G-L2-GRAMMAR", func(t *testing.T) { legLane2Unadmitted(t, abi, "G-L2-GRAMMAR", "--sg-unlisted", "grammar-flag") })
 			t.Run("G-L2-REDIRECT", func(t *testing.T) { legLane2Unadmitted(t, abi, "G-L2-REDIRECT", "--user", "redirect-flag") })
 		})
@@ -165,5 +166,45 @@ func legLane2AdmitEndpoint(t *testing.T, abi string) {
 	p.Jailed("lane2", accepted && code == 0 && executed && strings.Contains(out, "HOST-CONNECTED "+nonce) ||
 		!accepted && code == exitNoPermVal && denied && out == "" && strings.Contains(stderr, "nothing ran"))
 	p.Observed("listener", healthy)
+	p.Finish()
+}
+
+// legLane2InterpUntrusted: a trusted client whose PT_INTERP names a loader in a
+// world-writable directory is refused before it runs. The effect is the
+// client's own report nonce, which only a run through that loader prints.
+func legLane2InterpUntrusted(t *testing.T, abi string) {
+	p := newProof(t, "G-L2-INTERP-UNTRUSTED")
+	dir := buildLane2Fixtures(t)
+	gateDir := t.TempDir()
+	withGateDir(t, gateDir)
+	withReadSpec(t, abi, nil)
+	host, err := filepath.EvalSymlinks(lane2HostInterp(t, filepath.Join(dir, "systemctl")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	loader, err := os.ReadFile(host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaders := filepath.Join(dir, "ld")
+	if err := os.Mkdir(loaders, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(loaders, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	lane2Write(t, filepath.Join(loaders, "ld.so"), loader, 0o755)
+	lane2BuildClient(t, filepath.Join(dir, "systemctl"), "-Wl,--dynamic-linker="+filepath.Join(loaders, "ld.so"))
+	mode := lane2Mode(t, "report")
+	direct, err := exec.Command(filepath.Join(dir, "systemctl"), "status", mode).Output()
+	p.Control("exec", err == nil && lane2Reported(direct, mode))
+	code, out, stderr := runWith(t, "systemctl status "+mode)
+	ran := lane2Reported([]byte(out), mode)
+	p.Effect("interp-ran", ran)
+	records := auditRecords(t, gateDir)
+	single := len(records) == 1
+	p.Jailed("lane2", ran && code == 0 && single && records[0]["enforcement"] == "daemon-read" && records[0]["deny_reason"] == nil ||
+		!ran && code == exitNoPermVal && single && records[0]["deny_reason"] == "lane2:admit:interp" && out == "" && strings.Contains(stderr, "nothing ran"))
+	p.Observed("output", ran || out == "")
 	p.Finish()
 }

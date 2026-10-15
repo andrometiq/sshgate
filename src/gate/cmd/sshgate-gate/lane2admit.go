@@ -107,6 +107,7 @@ func trustedPath(name string, owners []uint32) (lane2Path, error) {
 type lane2Execution struct {
 	argv   []string
 	binary lane2Path
+	interp lane2Path // zero for a static client
 	held   []*os.File
 }
 
@@ -133,7 +134,7 @@ func lane2Plan(cmd string, pin pinState) (plan lane2Execution, matched bool, ref
 	if name == "" {
 		return plan, false, ""
 	}
-	binary, file, binaryRefusal, err := lane2Admit(name)
+	binary, file, executable, binaryRefusal, err := lane2Admit(name)
 	plan.binary = binary
 	if file != nil {
 		plan.held = append(plan.held, file)
@@ -141,24 +142,86 @@ func lane2Plan(cmd string, pin pinState) (plan lane2Execution, matched bool, ref
 	if err != nil {
 		return plan, true, "binary"
 	}
+	interpRefusal, err := plan.admitInterp(executable)
+	if err != nil {
+		return plan, true, "interp"
+	}
 	endpoint, endpointRefusal, err := plan.admitEndpoints(call.client, pin, uint32(os.Geteuid()))
 	if err != nil {
 		return plan, true, "endpoint"
 	}
 	plan.argv = call.render(name, endpoint)
-	refusal = cmp.Or(binaryRefusal, endpointRefusal)
-	if refusal != "" && jailmut.On("P-L2-ADMIT") {
-		refusal = ""
+	if jailmut.On("P-L2-ADMIT") {
+		binaryRefusal, endpointRefusal = "", ""
 	}
-	return plan, true, refusal
+	if jailmut.On("P-L2-INTERP") {
+		interpRefusal = ""
+	}
+	return plan, true, cmp.Or(binaryRefusal, interpRefusal, endpointRefusal)
+}
+
+// admitInterp resolves the client's first PT_INTERP (the one the kernel
+// uses), read at its file offset as the kernel reads it, holds the resolved
+// loader's fd and records its identity. A malformed string or an
+// unresolvable path is an error: there is no inode to record. A nil
+// executable (lane2Admit refused it) or a static one has no interpreter.
+func (p *lane2Execution) admitInterp(executable *elf.File) (refusal string, err error) {
+	if executable == nil {
+		return "", nil
+	}
+	index := slices.IndexFunc(executable.Progs, func(ph *elf.Prog) bool { return ph.Type == elf.PT_INTERP })
+	if index < 0 {
+		return "", nil
+	}
+	header := executable.Progs[index]
+	if header.Filesz < 2 || header.Filesz > 4096 {
+		return "interp", syscall.ENAMETOOLONG
+	}
+	raw := make([]byte, header.Filesz)
+	if _, err := header.ReadAt(raw, 0); err != nil {
+		return "interp", err
+	}
+	name := string(raw[:len(raw)-1])
+	if raw[len(raw)-1] != 0 || strings.IndexByte(name, 0) >= 0 || !filepath.IsAbs(name) || filepath.Clean(name) != name {
+		return "interp", syscall.EINVAL
+	}
+	id, trusted, err := walkTrustedPath(name, lane2TrustedUIDs)
+	if err != nil {
+		return "interp", err
+	}
+	fd, err := syscall.Open(id.path, syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC|syscall.O_NONBLOCK|syscall.O_NOCTTY, 0)
+	if err != nil {
+		return "interp", err
+	}
+	file := os.NewFile(uintptr(fd), id.path)
+	p.held = append(p.held, file)
+	var st syscall.Stat_t
+	if err := syscall.Fstat(fd, &st); err != nil {
+		return "interp", err
+	}
+	if st.Dev != id.stat.Dev || st.Ino != id.stat.Ino {
+		return "interp", syscall.ESTALE
+	}
+	id.stat = st
+	p.interp = id
+	if !trusted || st.Mode&syscall.S_IFMT != syscall.S_IFREG {
+		return "interp", nil
+	}
+	loader, err := elf.NewFile(file)
+	if err != nil || loader.Class != elf.ELFCLASS64 || loader.Data != elf.ELFDATA2LSB || loader.Machine != elf.EM_X86_64 || loader.Type != elf.ET_DYN ||
+		slices.ContainsFunc(loader.Progs, func(ph *elf.Prog) bool { return ph.Type == elf.PT_INTERP }) {
+		return "interp", nil
+	}
+	return "", nil
 }
 
 // admitEndpoints checks and holds the daemon sockets the client will reach and
 // returns docker's, for its --host. A pinned docker_socket is owned by the
 // gate's euid under directories owned by root or that euid; a system socket
 // is owned by a trusted uid. systemctl reaches the system bus, and as root
-// first systemd's private socket: each present one is checked, and at least
-// one must be present.
+// first systemd's private socket: each present one is checked, an absent one
+// must lie under a trusted existing directory, and at least one must be
+// present.
 func (p *lane2Execution) admitEndpoints(client string, pin pinState, euid uint32) (docker, refusal string, err error) {
 	if client == "docker" {
 		path, directoryOwners, owners := lane2SystemEndpoints.docker, lane2TrustedUIDs, lane2TrustedUIDs
@@ -179,6 +242,11 @@ func (p *lane2Execution) admitEndpoints(client string, pin pinState, euid uint32
 	for _, path := range paths {
 		_, trusted, err := p.holdEndpoint(path, lane2TrustedUIDs, lane2TrustedUIDs)
 		if errors.Is(err, os.ErrNotExist) {
+			// The client may still reach it if it appears later: only a
+			// trusted uid may be able to create it.
+			if !lane2SearchDirectory(path) {
+				refusal = "endpoint"
+			}
 			continue
 		}
 		if err != nil {
@@ -220,38 +288,40 @@ func (p *lane2Execution) holdEndpoint(path string, directoryOwners, owners []uin
 	return socket, trusted, nil
 }
 
-func lane2Admit(name string) (id lane2Path, file *os.File, refusal string, err error) {
+// lane2Admit resolves, opens and checks the client binary. executable is the
+// ELF parsed from the admitted fd, and is nil only when refusal is set.
+func lane2Admit(name string) (id lane2Path, file *os.File, executable *elf.File, refusal string, err error) {
 	id, trusted, err := walkTrustedPath(name, lane2TrustedUIDs)
 	if err != nil {
-		return id, nil, "binary", err
+		return id, nil, nil, "binary", err
 	}
 	// NONBLOCK prevents a substituted FIFO or device from blocking admission.
 	fd, err := syscall.Open(id.path, syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC|syscall.O_NONBLOCK|syscall.O_NOCTTY, 0)
 	if err != nil {
-		return id, nil, "binary", err
+		return id, nil, nil, "binary", err
 	}
 	file = os.NewFile(uintptr(fd), id.path)
 	var st syscall.Stat_t
 	if err = syscall.Fstat(fd, &st); err != nil {
-		return id, file, "binary", err
+		return id, file, nil, "binary", err
 	}
 	if st.Dev != id.stat.Dev || st.Ino != id.stat.Ino {
-		return id, file, "binary", syscall.ESTALE
+		return id, file, nil, "binary", syscall.ESTALE
 	}
 	id.stat = st
-	if !trusted || !slices.Contains(lane2TrustedUIDs, st.Uid) || st.Mode&0022 != 0 || st.Mode&syscall.S_IFMT != syscall.S_IFREG || st.Mode&0111 == 0 || st.Mode&(syscall.S_ISUID|syscall.S_ISGID) != 0 {
-		return id, file, "binary", nil
+	if st.Mode&syscall.S_IFMT != syscall.S_IFREG {
+		return id, file, nil, "binary", nil
 	}
 	_, xerr := unix.Fgetxattr(fd, "security.capability", nil)
-	if xerr == nil || xerr != unix.ENODATA && xerr != unix.ENOTSUP {
-		return id, file, "binary", nil
+	if !trusted || !slices.Contains(lane2TrustedUIDs, st.Uid) || st.Mode&0022 != 0 || st.Mode&0111 == 0 || st.Mode&(syscall.S_ISUID|syscall.S_ISGID) != 0 ||
+		xerr == nil || xerr != unix.ENODATA && xerr != unix.ENOTSUP {
+		refusal = "binary"
 	}
-	executable, eerr := elf.NewFile(file)
-	if eerr != nil {
-		return id, file, "binary-elf", nil
-	}
-	if executable.Class != elf.ELFCLASS64 || executable.Data != elf.ELFDATA2LSB || executable.Machine != elf.EM_X86_64 || executable.Type != elf.ET_EXEC && executable.Type != elf.ET_DYN {
-		return id, file, "binary-elf", nil
+	// Parsed even past a refused verdict: a mutation that ignores the verdict
+	// still needs the interpreter to pin.
+	executable, err = elf.NewFile(file)
+	if err != nil || executable.Class != elf.ELFCLASS64 || executable.Data != elf.ELFDATA2LSB || executable.Machine != elf.EM_X86_64 || executable.Type != elf.ET_EXEC && executable.Type != elf.ET_DYN {
+		return id, file, nil, cmp.Or(refusal, "binary-elf"), nil
 	}
 	interps, dynamics := 0, 0
 	for _, ph := range executable.Progs {
@@ -262,13 +332,14 @@ func lane2Admit(name string) (id lane2Path, file *os.File, refusal string, err e
 			dynamics++
 		}
 	}
-	if interps > 1 || dynamics > 1 || !lane2LoadPagesDisjoint(executable) {
-		return id, file, "binary-elf", nil
+	switch {
+	case refusal != "":
+	case interps > 1 || dynamics > 1 || !lane2LoadPagesDisjoint(executable):
+		refusal = "binary-elf"
+	case !lane2SearchTags(executable):
+		refusal = "search-tag"
 	}
-	if !lane2SearchTags(executable) {
-		return id, file, "search-tag", nil
-	}
-	return id, file, "", nil
+	return id, file, executable, refusal, nil
 }
 
 // The loader consumes program headers, not sections, and reads PT_DYNAMIC and
@@ -374,6 +445,9 @@ func lane2SearchTags(executable *elf.File) bool {
 	return true
 }
 
+// lane2SearchDirectory reports whether directory is a trusted directory, or
+// is absent under a trusted existing directory so only a trusted uid can
+// create it.
 func lane2SearchDirectory(directory string) bool {
 	if !filepath.IsAbs(directory) || filepath.Clean(directory) != directory {
 		return false

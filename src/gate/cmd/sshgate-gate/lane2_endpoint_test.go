@@ -157,6 +157,14 @@ func TestLane2EndpointChecks(t *testing.T) {
 			lane2SystemEndpoints.private = missing
 			return "systemctl", pinState{}, 0
 		}, outcome{held: 1}, nil},
+		{"systemctl root with the private socket absent under a writable directory", func(t *testing.T) (string, pinState, uint32) {
+			dir := lane2SocketDir(t)
+			if err := os.Chmod(dir, 0o770); err != nil {
+				t.Fatal(err)
+			}
+			lane2SystemEndpoints.private = filepath.Join(dir, "private")
+			return "systemctl", pinState{}, 0
+		}, outcome{refusal: "endpoint", held: 1}, nil},
 		{"systemctl root with only the private socket", func(t *testing.T) (string, pinState, uint32) {
 			lane2SystemEndpoints.bus = missing
 			return "systemctl", pinState{}, 0
