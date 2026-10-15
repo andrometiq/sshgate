@@ -57,10 +57,18 @@ type projections struct {
 	total                      counters
 	principals                 map[string]counters
 	due                        map[string]time.Time
+	work                       map[string]ap.Work
+	unflushed                  map[string]struct{}
+	quarantined                map[string]int64
 }
 
 func newProjections() projections {
-	return projections{records: map[string]recordCharge{}, grants: map[string]*grantProjection{}, newest: map[grantOwner]string{}, cards: index{}, handles: index{}, requestIDs: index{}, principals: map[string]counters{}, due: map[string]time.Time{}}
+	return projections{
+		records: map[string]recordCharge{}, grants: map[string]*grantProjection{},
+		newest: map[grantOwner]string{}, cards: index{}, handles: index{}, requestIDs: index{},
+		principals: map[string]counters{}, due: map[string]time.Time{},
+		work: map[string]ap.Work{}, unflushed: map[string]struct{}{}, quarantined: map[string]int64{},
+	}
 }
 func (p *projections) count(c recordCharge, delta int) {
 	apply := func(n *counters) {
@@ -93,6 +101,8 @@ func (p *projections) removeRecord(key string) {
 		delete(p.records, key)
 	}
 	delete(p.due, key)
+	delete(p.work, key)
+	delete(p.unflushed, key)
 }
 func (p *projections) remove(key string) {
 	p.removeRecord(key)
@@ -145,7 +155,17 @@ func (p *projections) update(key string, before *ap.R1, after ap.R1, now ap.Now,
 	p.count(charge, 1)
 	p.handles.add(charge.handle, key)
 	p.requestIDs.add(charge.requestID, key)
-	if due := ap.NextDueAt(after, now, settings); !due.IsZero() {
-		p.due[key] = due
+	if ap.Unflushed(after) {
+		p.unflushed[key] = struct{}{}
+	}
+	p.schedule(key, after, now, epoch, settings)
+}
+
+func (p *projections) schedule(key string, rec ap.R1, now ap.Now, epoch string, settings ap.Settings) {
+	work := ap.Next(rec, now, epoch, settings, p.grants[key] != nil)
+	p.work[key] = work
+	delete(p.due, key)
+	if !work.DueAt.IsZero() {
+		p.due[key] = work.DueAt
 	}
 }

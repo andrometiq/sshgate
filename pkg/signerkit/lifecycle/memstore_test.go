@@ -225,5 +225,5 @@ func TestNoDirectTimeReads(t *testing.T) {
 	if len(sources) < 4 {
 		t.Fatalf("expected at least four source files, got %d", len(sources))
 	}
-	elapsedtest.AssertNoDirectTimeReads(t, sources)
+	elapsedtest.AssertNoDirectTimeReads(t, sources, "reconcile.go:newReconcileTicker")
 }

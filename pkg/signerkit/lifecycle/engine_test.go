@@ -258,7 +258,7 @@ func TestGrantSupersessionDeletionAndExpiryLatch(t *testing.T) {
 	}
 }
 
-func TestNewIDWindowAndEmptyStoreGuard(t *testing.T) {
+func TestNewIDWindowAndRecovery(t *testing.T) {
 	e, clock, store, f := engineFixture(t)
 	d := st.GrantDraft(st.ID(1), "web-1", time.Hour, clock.Wall())
 	clock.Advance(2 * time.Hour)
@@ -266,8 +266,8 @@ func TestNewIDWindowAndEmptyStoreGuard(t *testing.T) {
 		t.Fatal("expired new ID reached freeze or commit")
 	}
 	submitGrant(t, e, 2, st.PrincipalA)
-	if _, err := New(e.config); err == nil {
-		t.Fatal("nonempty store served without recovery")
+	if _, err := New(e.config); err != nil {
+		t.Fatal(err)
 	}
 }
 

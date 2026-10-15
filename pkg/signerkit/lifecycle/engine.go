@@ -2,7 +2,6 @@ package lifecycle
 
 import (
 	"context"
-	"crypto/rand"
 	"errors"
 	"fmt"
 	"slices"
@@ -26,7 +25,7 @@ type Config struct {
 }
 
 // Engine serializes all record mutations. Its Store must not have another writer.
-// Background effects and recovery are installed separately from this core.
+// Run drives time-based reconciliation until its context is canceled.
 type Engine struct {
 	mu          sync.Mutex
 	config      Config
@@ -34,8 +33,7 @@ type Engine struct {
 	projections projections
 }
 
-// New constructs a core over an empty store. Recovery of existing stores belongs
-// to Startup; refusing them here prevents serving incomplete projections.
+// New recovers the store before exposing the engine. The caller owns running Run.
 func New(c Config) (*Engine, error) {
 	if c.Store == nil || c.Clock == nil || c.Freezer == nil || c.SnapshotBuilder == nil {
 		return nil, errors.New("lifecycle: store, clock, freezer and snapshot builder are required")
@@ -52,18 +50,11 @@ func New(c Config) (*Engine, error) {
 	if c.AssistTimeout == 0 || c.AssistTimeout > 5*time.Second {
 		c.AssistTimeout = 5 * time.Second
 	}
-	entries, err := c.Store.List()
-	if err != nil {
+	e := &Engine{config: c, projections: newProjections()}
+	if err := e.startup(); err != nil {
 		return nil, err
 	}
-	if len(entries) != 0 {
-		return nil, errors.New("lifecycle: nonempty store requires Startup")
-	}
-	epoch, err := ap.NewEpoch(rand.Reader)
-	if err != nil {
-		return nil, err
-	}
-	return &Engine{config: c, epoch: epoch, projections: newProjections()}, nil
+	return e, nil
 }
 
 func (e *Engine) now() ap.Now {
