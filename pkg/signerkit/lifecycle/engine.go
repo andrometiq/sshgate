@@ -19,6 +19,8 @@ type Config struct {
 	Clock           elapsed.Clock
 	Freezer         Freezer
 	SnapshotBuilder SnapshotBuilder
+	Minter          Minter
+	XferDigests     XferDigests
 	Settings        ap.Settings
 	AssistTimeout   time.Duration
 }
