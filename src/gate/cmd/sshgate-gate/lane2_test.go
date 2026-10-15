@@ -43,22 +43,23 @@ func withLane2Bins(t *testing.T) string {
 func TestLane2Argv(t *testing.T) {
 	bin := withLane2Bins(t)
 	sc, dk := filepath.Join(bin, "systemctl"), filepath.Join(bin, "docker")
+	host := "--host=unix://" + lane2SystemEndpoints.docker
 
 	match := map[string][]string{
-		"systemctl status sshd":                           {sc, "--no-pager", "status", "sshd"},
-		"systemctl status\t nginx.service  --no-pager":    {sc, "--no-pager", "status", "nginx.service"},
-		"systemctl status -l -n 50 getty@tty1.service":    {sc, "--no-pager", "status", "--full", "--lines=50", "getty@tty1.service"},
-		"systemctl list-units --type=service -a":          {sc, "--no-pager", "list-units", "--all", "--type=service"},
-		"systemctl show -p ActiveState sshd":              {sc, "--no-pager", "show", "--property=ActiveState", "sshd"},
-		"systemctl is-active -q sshd":                     {sc, "--no-pager", "is-active", "--quiet", "sshd"},
-		"systemctl get-default":                           {sc, "--no-pager", "get-default"},
-		"docker ps -a":                                    {dk, "ps", "--all"},
-		"docker ps --filter status=running --format json": {dk, "ps", "--filter=status=running", "--format={{json .}}"},
-		"docker logs --tail 100 --since 1h web":           {dk, "logs", "--tail=100", "--since=1h", "web"},
-		"docker stats --no-stream":                        {dk, "stats", "--no-stream"},
-		"docker inspect --format=json web":                {dk, "inspect", "--format={{json .}}", "web"},
-		"docker top web":                                  {dk, "top", "web"},
-		"docker version":                                  {dk, "version"},
+		"systemctl status sshd":                           {sc, "--no-pager", "--no-ask-password", "status", "sshd"},
+		"systemctl status\t nginx.service  --no-pager":    {sc, "--no-pager", "--no-ask-password", "status", "nginx.service"},
+		"systemctl status -l -n 50 getty@tty1.service":    {sc, "--no-pager", "--no-ask-password", "status", "--full", "--lines=50", "getty@tty1.service"},
+		"systemctl list-units --type=service -a":          {sc, "--no-pager", "--no-ask-password", "list-units", "--all", "--type=service"},
+		"systemctl show -p ActiveState sshd":              {sc, "--no-pager", "--no-ask-password", "show", "--property=ActiveState", "sshd"},
+		"systemctl is-active -q sshd":                     {sc, "--no-pager", "--no-ask-password", "is-active", "--quiet", "sshd"},
+		"systemctl get-default":                           {sc, "--no-pager", "--no-ask-password", "get-default"},
+		"docker ps -a":                                    {dk, host, "ps", "--all"},
+		"docker ps --filter status=running --format json": {dk, host, "ps", "--filter=status=running", "--format={{json .}}"},
+		"docker logs --tail 100 --since 1h web":           {dk, host, "logs", "--tail=100", "--since=1h", "web"},
+		"docker stats --no-stream":                        {dk, host, "stats", "--no-stream"},
+		"docker inspect --format=json web":                {dk, host, "inspect", "--format={{json .}}", "web"},
+		"docker top web":                                  {dk, host, "top", "web"},
+		"docker version":                                  {dk, host, "version"},
 	}
 	for cmd, want := range match {
 		got, ok := lane2Argv(cmd)
@@ -185,8 +186,8 @@ func TestRunLane2ExecShellFreeClosedEnv(t *testing.T) {
 		approval string
 		wantArgs []string
 	}{
-		{"docker ps -a", "unsigned", []string{filepath.Join(bin, "docker"), "ps", "--all"}},
-		{"systemctl status sshd", "unsigned", []string{filepath.Join(bin, "systemctl"), "--no-pager", "status", "sshd"}},
+		{"docker ps -a", "unsigned", []string{filepath.Join(bin, "docker"), "--host=unix://" + lane2SystemEndpoints.docker, "ps", "--all"}},
+		{"systemctl status sshd", "unsigned", []string{filepath.Join(bin, "systemctl"), "--no-pager", "--no-ask-password", "status", "sshd"}},
 	} {
 		t.Run(tc.cmd, func(t *testing.T) {
 			dir := t.TempDir() // no gate.pub: Tier-1 unsigned read
@@ -244,7 +245,7 @@ func TestRunLane2SignedRead(t *testing.T) {
 	if err := json.Unmarshal([]byte(out), &rep); err != nil {
 		t.Fatalf("child report %q: %v", out, err)
 	}
-	if want := []string{filepath.Join(bin, "docker"), "ps"}; !reflect.DeepEqual(rep.Args, want) {
+	if want := []string{filepath.Join(bin, "docker"), "--host=unix://" + lane2SystemEndpoints.docker, "ps"}; !reflect.DeepEqual(rep.Args, want) {
 		t.Errorf("argv = %q, want %q", rep.Args, want)
 	}
 	recs := auditRecords(t, dir)

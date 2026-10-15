@@ -10,50 +10,50 @@ import (
 // name: the prefix, the verb, the flags in grammar order and the positionals.
 var lane2Golden = map[string][]string{
 	// The P3.0 matrix lines.
-	"docker version":                           {"version"},
-	"docker ps":                                {"ps"},
-	"docker ps -a --no-trunc":                  {"ps", "--all", "--no-trunc"},
-	"docker ps -s":                             {"ps", "--size"},
-	"docker ps -q --filter name=p30":           {"ps", "--quiet", "--filter=name=p30"},
-	"docker inspect p30":                       {"inspect", "p30"},
-	"docker inspect -s p30":                    {"inspect", "--size", "p30"},
-	"docker inspect --type image busybox:1.36": {"inspect", "--type=image", "busybox:1.36"},
-	"docker logs p30":                          {"logs", "p30"},
-	"docker logs -t --tail 2 p30":              {"logs", "--timestamps", "--tail=2", "p30"},
-	"docker images":                            {"images"},
-	"docker images -a --digests --no-trunc":    {"images", "--all", "--no-trunc", "--digests"},
-	"docker stats --no-stream":                 {"stats", "--no-stream"},
-	"docker stats --no-stream -a --no-trunc":   {"stats", "--no-stream", "--all", "--no-trunc"},
-	"docker top p30":                           {"top", "p30"},
-	"systemctl status docker.service":          {"--no-pager", "status", "docker.service"},
-	"systemctl status ssh.service -n 5":        {"--no-pager", "status", "--lines=5", "ssh.service"},
-	"systemctl status":                         {"--no-pager", "status"},
-	"systemctl is-active docker.service":       {"--no-pager", "is-active", "docker.service"},
-	"systemctl is-failed docker.service":       {"--no-pager", "is-failed", "docker.service"},
-	"systemctl list-units":                     {"--no-pager", "list-units"},
-	"systemctl list-units --type=service --all --plain --no-legend": {"--no-pager", "list-units", "--all", "--no-legend", "--plain", "--type=service"},
-	"systemctl list-unit-files":                                     {"--no-pager", "list-unit-files"},
-	"systemctl show docker.service":                                 {"--no-pager", "show", "docker.service"},
-	"systemctl show -p MainPID --value docker.service":              {"--no-pager", "show", "--property=MainPID", "--value", "docker.service"},
-	"systemctl cat docker.service":                                  {"--no-pager", "cat", "docker.service"},
-	"systemctl get-default":                                         {"--no-pager", "get-default"},
+	"docker version":                           {"--host=unix:///run/docker.sock", "version"},
+	"docker ps":                                {"--host=unix:///run/docker.sock", "ps"},
+	"docker ps -a --no-trunc":                  {"--host=unix:///run/docker.sock", "ps", "--all", "--no-trunc"},
+	"docker ps -s":                             {"--host=unix:///run/docker.sock", "ps", "--size"},
+	"docker ps -q --filter name=p30":           {"--host=unix:///run/docker.sock", "ps", "--quiet", "--filter=name=p30"},
+	"docker inspect p30":                       {"--host=unix:///run/docker.sock", "inspect", "p30"},
+	"docker inspect -s p30":                    {"--host=unix:///run/docker.sock", "inspect", "--size", "p30"},
+	"docker inspect --type image busybox:1.36": {"--host=unix:///run/docker.sock", "inspect", "--type=image", "busybox:1.36"},
+	"docker logs p30":                          {"--host=unix:///run/docker.sock", "logs", "p30"},
+	"docker logs -t --tail 2 p30":              {"--host=unix:///run/docker.sock", "logs", "--timestamps", "--tail=2", "p30"},
+	"docker images":                            {"--host=unix:///run/docker.sock", "images"},
+	"docker images -a --digests --no-trunc":    {"--host=unix:///run/docker.sock", "images", "--all", "--no-trunc", "--digests"},
+	"docker stats --no-stream":                 {"--host=unix:///run/docker.sock", "stats", "--no-stream"},
+	"docker stats --no-stream -a --no-trunc":   {"--host=unix:///run/docker.sock", "stats", "--no-stream", "--all", "--no-trunc"},
+	"docker top p30":                           {"--host=unix:///run/docker.sock", "top", "p30"},
+	"systemctl status docker.service":          {"--no-pager", "--no-ask-password", "status", "docker.service"},
+	"systemctl status ssh.service -n 5":        {"--no-pager", "--no-ask-password", "status", "--lines=5", "ssh.service"},
+	"systemctl status":                         {"--no-pager", "--no-ask-password", "status"},
+	"systemctl is-active docker.service":       {"--no-pager", "--no-ask-password", "is-active", "docker.service"},
+	"systemctl is-failed docker.service":       {"--no-pager", "--no-ask-password", "is-failed", "docker.service"},
+	"systemctl list-units":                     {"--no-pager", "--no-ask-password", "list-units"},
+	"systemctl list-units --type=service --all --plain --no-legend": {"--no-pager", "--no-ask-password", "list-units", "--all", "--no-legend", "--plain", "--type=service"},
+	"systemctl list-unit-files":                                     {"--no-pager", "--no-ask-password", "list-unit-files"},
+	"systemctl show docker.service":                                 {"--no-pager", "--no-ask-password", "show", "docker.service"},
+	"systemctl show -p MainPID --value docker.service":              {"--no-pager", "--no-ask-password", "show", "--property=MainPID", "--value", "docker.service"},
+	"systemctl cat docker.service":                                  {"--no-pager", "--no-ask-password", "cat", "docker.service"},
+	"systemctl get-default":                                         {"--no-pager", "--no-ask-password", "get-default"},
 	// Every other flag, spelling and verb.
-	"systemctl status --no-pager --no-ask-password --system -q -l -a --no-legend --plain a b": {"--no-pager", "status", "--full", "--all", "--no-legend", "--plain", "--quiet", "a", "b"},
-	"systemctl list-unit-files -t timer --state enabled":                                      {"--no-pager", "list-unit-files", "--type=timer", "--state=enabled"},
-	"systemctl list-units --state=failed sshd.service":                                        {"--no-pager", "list-units", "--state=failed", "sshd.service"},
-	"systemctl show --property=A,B,C 1234":                                                    {"--no-pager", "show", "--property=A,B,C", "1234"},
-	"systemctl status --lines=0 /dev/sda":                                                     {"--no-pager", "status", "--lines=0", "/dev/sda"},
-	"systemctl cat getty@tty1.service":                                                        {"--no-pager", "cat", "getty@tty1.service"},
-	"docker ps -l -n 3 -f status=running --format table":                                      {"ps", "--latest", "--last=3", "--filter=status=running", "--format=table"},
-	"docker ps --format=json":                                                                 {"ps", "--format={{json .}}"},
-	"docker inspect -f json --type=volume a b":                                                {"inspect", "--format={{json .}}", "--type=volume", "a", "b"},
-	"docker logs --details -n all --since 2026-10-15 --until 2026-10-15T00:00:00-05:00 web":   {"logs", "--details", "--tail=all", "--since=2026-10-15", "--until=2026-10-15T00:00:00-05:00", "web"},
-	"docker logs --since 2026-10-15T00:00:00Z --until 2026-10-15T00:00:00+05:30 web":          {"logs", "--since=2026-10-15T00:00:00Z", "--until=2026-10-15T00:00:00+05:30", "web"},
-	"docker logs --since=10m web":                                                             {"logs", "--since=10m", "web"},
-	"docker images -q -f dangling=true --format json alpine":                                  {"images", "--quiet", "--filter=dangling=true", "--format={{json .}}", "alpine"},
-	"docker version -f json":                                                                  {"version", "--format={{json .}}"},
-	"docker stats --format json --no-stream web db":                                           {"stats", "--no-stream", "--format={{json .}}", "web", "db"},
-	"docker inspect sha256:0123abcd":                                                          {"inspect", "sha256:0123abcd"},
+	"systemctl status --no-pager --no-ask-password --system -q -l -a --no-legend --plain a b": {"--no-pager", "--no-ask-password", "status", "--full", "--all", "--no-legend", "--plain", "--quiet", "a", "b"},
+	"systemctl list-unit-files -t timer --state enabled":                                      {"--no-pager", "--no-ask-password", "list-unit-files", "--type=timer", "--state=enabled"},
+	"systemctl list-units --state=failed sshd.service":                                        {"--no-pager", "--no-ask-password", "list-units", "--state=failed", "sshd.service"},
+	"systemctl show --property=A,B,C 1234":                                                    {"--no-pager", "--no-ask-password", "show", "--property=A,B,C", "1234"},
+	"systemctl status --lines=0 /dev/sda":                                                     {"--no-pager", "--no-ask-password", "status", "--lines=0", "/dev/sda"},
+	"systemctl cat getty@tty1.service":                                                        {"--no-pager", "--no-ask-password", "cat", "getty@tty1.service"},
+	"docker ps -l -n 3 -f status=running --format table":                                      {"--host=unix:///run/docker.sock", "ps", "--latest", "--last=3", "--filter=status=running", "--format=table"},
+	"docker ps --format=json":                                                                 {"--host=unix:///run/docker.sock", "ps", "--format={{json .}}"},
+	"docker inspect -f json --type=volume a b":                                                {"--host=unix:///run/docker.sock", "inspect", "--format={{json .}}", "--type=volume", "a", "b"},
+	"docker logs --details -n all --since 2026-10-15 --until 2026-10-15T00:00:00-05:00 web":   {"--host=unix:///run/docker.sock", "logs", "--details", "--tail=all", "--since=2026-10-15", "--until=2026-10-15T00:00:00-05:00", "web"},
+	"docker logs --since 2026-10-15T00:00:00Z --until 2026-10-15T00:00:00+05:30 web":          {"--host=unix:///run/docker.sock", "logs", "--since=2026-10-15T00:00:00Z", "--until=2026-10-15T00:00:00+05:30", "web"},
+	"docker logs --since=10m web":                                                             {"--host=unix:///run/docker.sock", "logs", "--since=10m", "web"},
+	"docker images -q -f dangling=true --format json alpine":                                  {"--host=unix:///run/docker.sock", "images", "--quiet", "--filter=dangling=true", "--format={{json .}}", "alpine"},
+	"docker version -f json":                                                                  {"--host=unix:///run/docker.sock", "version", "--format={{json .}}"},
+	"docker stats --format json --no-stream web db":                                           {"--host=unix:///run/docker.sock", "stats", "--no-stream", "--format={{json .}}", "web", "db"},
+	"docker inspect sha256:0123abcd":                                                          {"--host=unix:///run/docker.sock", "inspect", "sha256:0123abcd"},
 }
 
 // lane2Unlisted are lines refused only because a token is outside the
@@ -112,7 +112,7 @@ func testLane2Grammar(t *testing.T) {
 			t.Errorf("lane2Parse(%q) refused a grammar line", line)
 			continue
 		}
-		if got := call.render("/fixed/" + call.client)[1:]; !reflect.DeepEqual(got, want) {
+		if got := call.render("/fixed/"+call.client, "/run/docker.sock")[1:]; !reflect.DeepEqual(got, want) {
 			t.Errorf("render(%q) = %q, want %q", line, got, want)
 		}
 		again, ok := lane2Parse(call.canonicalLine())
@@ -260,12 +260,12 @@ func FuzzLane2Parse(f *testing.F) {
 			t.Fatalf("canonical line %q of %q does not parse back to the same call", canonical, line)
 		}
 		name := "/usr/bin/" + call.client
-		argv := call.render(name)
-		if !reflect.DeepEqual(again.render(name), argv) {
+		argv := call.render(name, "/run/docker.sock")
+		if !reflect.DeepEqual(again.render(name, "/run/docker.sock"), argv) {
 			t.Fatalf("argv of %q is not idempotent", line)
 		}
 		grammar := lane2Grammar[call.client]
-		tokens := argv[1+len(grammar.prefix):]
+		tokens := argv[1+len(call.prefix("/run/docker.sock")):]
 		if tokens[0] != call.verb {
 			t.Fatalf("argv %q does not start with the verb", argv)
 		}

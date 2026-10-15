@@ -502,7 +502,7 @@ func lane2TrustedSocketRows(t *testing.T) {
 }
 
 func TestLane2AdmitDenyAudit(t *testing.T) {
-	for _, reason := range []string{"binary", "binary-elf", "search-tag"} {
+	for _, reason := range []string{"binary", "binary-elf", "search-tag", "endpoint"} {
 		t.Run(reason, func(t *testing.T) {
 			dir := buildLane2Fixtures(t)
 			gateDir := t.TempDir()
@@ -516,6 +516,9 @@ func TestLane2AdmitDenyAudit(t *testing.T) {
 				lane2Write(t, filepath.Join(dir, "systemctl"), []byte("#!/bin/sh\necho unsafe\n"), 0755)
 			case "search-tag":
 				lane2BuildSearch(t, dir, "$ORIGIN/lib", false)
+			case "endpoint":
+				missing := filepath.Join(t.TempDir(), "missing")
+				lane2SystemEndpoints.bus, lane2SystemEndpoints.private = missing, missing
 			}
 			code, out, stderr := runWith(t, "systemctl status sg-agent-private-value.service")
 			if code != exitNoPermVal || out != "" || !strings.Contains(stderr, "daemon read refused: "+reason+"; nothing ran") || strings.Contains(stderr, "sg-agent-private") {

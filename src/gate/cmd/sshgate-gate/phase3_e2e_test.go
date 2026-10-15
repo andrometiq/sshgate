@@ -3,13 +3,16 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"errors"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/karthikeyan5/sshgate/src/gate"
 	"github.com/karthikeyan5/sshgate/src/gate/confine"
@@ -30,6 +33,7 @@ func TestJailMatrixPhase3(t *testing.T) {
 			t.Run("G-L2-ADMIT-WRITABLE-DIR", func(t *testing.T) { legLane2Admit(t, abi, "G-L2-ADMIT-WRITABLE-DIR") })
 			t.Run("G-L2-ADMIT-RUNPATH-ORIGIN", func(t *testing.T) { legLane2Admit(t, abi, "G-L2-ADMIT-RUNPATH-ORIGIN") })
 			t.Run("G-L2-ADMIT-RUNPATH-UNTRUSTED", func(t *testing.T) { legLane2Admit(t, abi, "G-L2-ADMIT-RUNPATH-UNTRUSTED") })
+			t.Run("G-L2-ADMIT-ENDPOINT", func(t *testing.T) { legLane2AdmitEndpoint(t, abi) })
 			t.Run("G-L2-GRAMMAR", func(t *testing.T) { legLane2Unadmitted(t, abi, "G-L2-GRAMMAR", "--sg-unlisted", "grammar-flag") })
 			t.Run("G-L2-REDIRECT", func(t *testing.T) { legLane2Unadmitted(t, abi, "G-L2-REDIRECT", "--user", "redirect-flag") })
 		})
@@ -95,5 +99,71 @@ func legLane2Admit(t *testing.T, abi, name string) {
 	executed := len(records) == 1 && records[0]["enforcement"] == "daemon-read"
 	p.Jailed("lane2", ran && code == 0 && executed || !ran && code == exitNoPermVal && denied && strings.Contains(stderr, "nothing ran"))
 	p.Observed("output", ran || out == "")
+	p.Finish()
+}
+
+// legLane2AdmitEndpoint: a pinned docker_socket owned by another uid is
+// refused before the client runs. The socket is 0666, so only its owner fails
+// admission, and a mutated run connects as the jailed root would.
+func legLane2AdmitEndpoint(t *testing.T, abi string) {
+	p := newProof(t, "G-L2-ADMIT-ENDPOINT")
+	if os.Geteuid() != 0 {
+		p.Omit("root-only")
+		return
+	}
+	buildLane2Fixtures(t)
+	gateDir := t.TempDir()
+	withGateDir(t, gateDir)
+	withReadSpec(t, abi, nil)
+	socketDir, err := os.MkdirTemp("", "l2-endpoint-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(socketDir) })
+	path := filepath.Join(socketDir, "docker.sock")
+	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	for _, err := range []error{os.Chmod(socketDir, 0o755), os.Chown(path, 65534, -1), os.Chmod(path, 0o666)} {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	plantPin(t, gateDir, pinDeny+"docker_socket="+path+"\n", 0o644)
+	// received is the line the next connection sends, or "" when none arrives.
+	healthy := true
+	received := func() string {
+		if err := listener.SetDeadline(time.Now().Add(2 * time.Second)); err != nil {
+			healthy = false
+			return ""
+		}
+		conn, err := listener.Accept()
+		if err != nil {
+			healthy = healthy && errors.Is(err, os.ErrDeadlineExceeded)
+			return ""
+		}
+		defer conn.Close()
+		line, _ := bufio.NewReader(conn).ReadString('\n')
+		return strings.TrimSuffix(line, "\n")
+	}
+	control, err := net.Dial("unix", path)
+	if err == nil {
+		_, err = control.Write([]byte("control\n"))
+		control.Close()
+	}
+	p.Control("connect", err == nil && received() == "control")
+	mode := lane2Mode(t, "host")
+	nonce := strings.TrimPrefix(mode, "sg-host.")
+	code, out, stderr := runWith(t, "docker inspect "+mode)
+	accepted := received() == nonce
+	p.Effect("endpoint-accepted", accepted)
+	records := auditRecords(t, gateDir)
+	denied := len(records) == 1 && records[0]["deny_reason"] == "lane2:admit:endpoint"
+	executed := len(records) == 1 && records[0]["enforcement"] == "daemon-read"
+	p.Jailed("lane2", accepted && code == 0 && executed && strings.Contains(out, "HOST-CONNECTED "+nonce) ||
+		!accepted && code == exitNoPermVal && denied && out == "" && strings.Contains(stderr, "nothing ran"))
+	p.Observed("listener", healthy)
 	p.Finish()
 }

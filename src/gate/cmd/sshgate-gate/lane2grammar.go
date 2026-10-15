@@ -43,9 +43,10 @@ type lane2Verb struct {
 }
 
 type lane2Client struct {
-	prefix  []string // gate-chosen arguments before the verb
-	dropped []string // accepted from the agent and dropped: the prefix pins them
-	verbs   map[string]lane2Verb
+	prefix   []string // gate-chosen arguments before the verb
+	hostFlag string   // completed with the admitted endpoint, after prefix
+	dropped  []string // accepted from the agent and dropped: the prefix pins them
+	verbs    map[string]lane2Verb
 }
 
 // lane2Arg is one admitted flag in canonical form.
@@ -152,7 +153,7 @@ var lane2Grammar = func() map[string]lane2Client {
 	table := lane2Enum("json", "table")
 	return map[string]lane2Client{
 		"systemctl": {
-			prefix:  []string{"--no-pager"},
+			prefix:  []string{"--no-pager", "--no-ask-password"},
 			dropped: []string{"--no-pager", "--no-ask-password", "--system"},
 			verbs: map[string]lane2Verb{
 				"status":          systemctlVerb(0, 16, lane2Valued("--lines", lane2Uint(10000), "-n")),
@@ -166,6 +167,7 @@ var lane2Grammar = func() map[string]lane2Client {
 			},
 		},
 		"docker": {
+			hostFlag: "--host=unix://",
 			verbs: map[string]lane2Verb{
 				"ps": dockerVerb(0, 0, lane2Switch("--all", "-a"), lane2Switch("--quiet", "-q"), lane2Switch("--no-trunc"),
 					lane2Switch("--latest", "-l"), lane2Switch("--size", "-s"), lane2Valued("--last", lane2Uint(1000), "-n"),
@@ -329,8 +331,18 @@ func (c lane2Call) tokens(forArgv bool) []string {
 // render is the canonical argv: name (the fixed-directory path that matched),
 // the client's prefix, the verb, the flags in grammar order and the
 // positionals in the agent's order.
-func (c lane2Call) render(name string) []string {
-	return append(append([]string{name}, lane2Grammar[c.client].prefix...), c.tokens(true)...)
+func (c lane2Call) render(name, endpoint string) []string {
+	return append(append([]string{name}, c.prefix(endpoint)...), c.tokens(true)...)
+}
+
+// prefix is the gate-chosen arguments before the verb: the client's fixed
+// prefix and, for docker, --host naming the admitted endpoint.
+func (c lane2Call) prefix(endpoint string) []string {
+	client := lane2Grammar[c.client]
+	if client.hostFlag == "" {
+		return client.prefix
+	}
+	return append(slices.Clone(client.prefix), client.hostFlag+endpoint)
 }
 
 // canonicalLine is an agent-shaped line that lane2Parse accepts: the client

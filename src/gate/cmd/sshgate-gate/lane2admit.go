@@ -18,10 +18,15 @@ import (
 )
 
 var lane2TrustedUIDs = []uint32{0}
-var lane2SystemEndpoints = map[string][]string{
-	"docker":    {"/run/docker.sock"},
-	"systemctl": {"/run/dbus/system_bus_socket", "/run/systemd/private"},
+
+// lane2Endpoints are the daemon sockets the clients reach when no pin names one.
+type lane2Endpoints struct {
+	docker  string
+	bus     string // the system bus: systemctl's endpoint for every user
+	private string // systemd's private socket, which systemctl tries first as root
 }
+
+var lane2SystemEndpoints = lane2Endpoints{docker: "/run/docker.sock", bus: "/run/dbus/system_bus_socket", private: "/run/systemd/private"}
 
 type lane2Path struct {
 	path string
@@ -128,20 +133,91 @@ func lane2Plan(cmd string, pin pinState) (plan lane2Execution, matched bool, ref
 	if name == "" {
 		return plan, false, ""
 	}
-	plan.argv = call.render(name)
-	var file *os.File
-	var err error
-	plan.binary, file, refusal, err = lane2Admit(name)
+	binary, file, binaryRefusal, err := lane2Admit(name)
+	plan.binary = binary
 	if file != nil {
 		plan.held = append(plan.held, file)
 	}
 	if err != nil {
 		return plan, true, "binary"
 	}
-	if refusal != "" && !jailmut.On("P-L2-ADMIT") {
-		return plan, true, refusal
+	endpoint, endpointRefusal, err := plan.admitEndpoints(call.client, pin, uint32(os.Geteuid()))
+	if err != nil {
+		return plan, true, "endpoint"
 	}
-	return plan, true, ""
+	plan.argv = call.render(name, endpoint)
+	refusal = cmp.Or(binaryRefusal, endpointRefusal)
+	if refusal != "" && jailmut.On("P-L2-ADMIT") {
+		refusal = ""
+	}
+	return plan, true, refusal
+}
+
+// admitEndpoints checks and holds the daemon sockets the client will reach and
+// returns docker's, for its --host. A pinned docker_socket is owned by the
+// gate's euid under directories owned by root or that euid; a system socket
+// is owned by a trusted uid. systemctl reaches the system bus, and as root
+// first systemd's private socket: each present one is checked, and at least
+// one must be present.
+func (p *lane2Execution) admitEndpoints(client string, pin pinState, euid uint32) (docker, refusal string, err error) {
+	if client == "docker" {
+		path, directoryOwners, owners := lane2SystemEndpoints.docker, lane2TrustedUIDs, lane2TrustedUIDs
+		if pin.valid && pin.pin.DockerSocket != "" {
+			path, directoryOwners, owners = pin.pin.DockerSocket, []uint32{0, euid}, []uint32{euid}
+		}
+		socket, trusted, err := p.holdEndpoint(path, directoryOwners, owners)
+		if err != nil || !trusted {
+			return socket.path, "endpoint", err
+		}
+		return socket.path, "", nil
+	}
+	paths := []string{lane2SystemEndpoints.bus}
+	if euid == 0 {
+		paths = append(paths, lane2SystemEndpoints.private)
+	}
+	present := 0
+	for _, path := range paths {
+		_, trusted, err := p.holdEndpoint(path, lane2TrustedUIDs, lane2TrustedUIDs)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return "", "endpoint", err
+		}
+		present++
+		if !trusted {
+			refusal = "endpoint"
+		}
+	}
+	if present == 0 {
+		return "", "endpoint", os.ErrNotExist
+	}
+	return "", refusal, nil
+}
+
+// holdEndpoint walks path, opens the socket it resolves to O_PATH, requires
+// the walk's inode, and keeps the fd so the inode cannot be freed and its
+// number reused while the read is planned and run.
+func (p *lane2Execution) holdEndpoint(path string, directoryOwners, owners []uint32) (socket lane2Path, trusted bool, err error) {
+	socket, trusted, err = walkTrustedPath(path, directoryOwners)
+	if err != nil {
+		return socket, false, err
+	}
+	fd, err := syscall.Open(socket.path, unix.O_PATH|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		return socket, false, err
+	}
+	p.held = append(p.held, os.NewFile(uintptr(fd), socket.path))
+	var st syscall.Stat_t
+	if err := syscall.Fstat(fd, &st); err != nil {
+		return socket, false, err
+	}
+	if st.Dev != socket.stat.Dev || st.Ino != socket.stat.Ino {
+		return socket, false, syscall.ESTALE
+	}
+	socket.stat = st
+	trusted = trusted && st.Mode&syscall.S_IFMT == syscall.S_IFSOCK && slices.Contains(owners, st.Uid)
+	return socket, trusted, nil
 }
 
 func lane2Admit(name string) (id lane2Path, file *os.File, refusal string, err error) {

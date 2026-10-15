@@ -16,7 +16,7 @@ func TestLane2TrustDefaults(t *testing.T) {
 	expected := map[string]string{
 		"lane2BinDirs":         `[]string{"/usr/bin", "/bin", "/usr/sbin"}`,
 		"lane2TrustedUIDs":     `[]uint32{0}`,
-		"lane2SystemEndpoints": `map[string][]string{"docker": {"/run/docker.sock"}, "systemctl": {"/run/dbus/system_bus_socket", "/run/systemd/private"}}`,
+		"lane2SystemEndpoints": `lane2Endpoints{docker: "/run/docker.sock", bus: "/run/dbus/system_bus_socket", private: "/run/systemd/private"}`,
 	}
 	files, err := filepath.Glob("*.go")
 	if err != nil {
@@ -139,7 +139,7 @@ func TestLane2TrustGuardMutations(t *testing.T) {
 		`append(lane2TrustedUIDs, 1000)`, `copy(lane2TrustedUIDs, other)`, `clear(lane2SystemEndpoints)`,
 		`delete(lane2SystemEndpoints,"docker")`, `x := &lane2TrustedUIDs[0]`,
 		`for _, lane2TrustedUIDs[0] = range []uint32{1000} {}`, `for lane2TrustedUIDs[0] = range other {}`,
-		`lane2AfterAdmitHook.field = f`,
+		`lane2AfterAdmitHook.field = f`, `lane2SystemEndpoints.docker = "/tmp/socket"`, `x := &lane2SystemEndpoints.bus`,
 	} {
 		t.Run(source, func(t *testing.T) {
 			file, err := parser.ParseFile(token.NewFileSet(), "snippet.go", "package main; func f(){"+source+"}", 0)

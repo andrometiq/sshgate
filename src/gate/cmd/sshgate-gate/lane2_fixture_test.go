@@ -84,7 +84,6 @@ func withLane2Seams(t *testing.T, dir string) {
 	t.Helper()
 	previousDirs, previousUIDs, previousEndpoints := lane2BinDirs, lane2TrustedUIDs, lane2SystemEndpoints
 	lane2BinDirs, lane2TrustedUIDs = []string{dir}, []uint32{0, uint32(os.Getuid())}
-	lane2SystemEndpoints = map[string][]string{}
 	// Unix socket paths are limited to 108 bytes; proof subtest names make
 	// t.TempDir paths too long under the jail-visible test cache.
 	socketDir, err := os.MkdirTemp("", "l2-sockets-")
@@ -95,15 +94,16 @@ func withLane2Seams(t *testing.T, dir string) {
 	if err := os.Chmod(socketDir, 0755); err != nil {
 		t.Fatal(err)
 	}
-	for _, client := range []string{"docker", "systemctl"} {
-		path := filepath.Join(socketDir, client)
+	listen := func(name string) string {
+		path := filepath.Join(socketDir, name)
 		listener, err := net.Listen("unix", path)
 		if err != nil {
 			t.Fatal(err)
 		}
 		t.Cleanup(func() { listener.Close() })
-		lane2SystemEndpoints[client] = []string{path}
+		return path
 	}
+	lane2SystemEndpoints = lane2Endpoints{docker: listen("docker"), bus: listen("bus"), private: listen("private")}
 	t.Cleanup(func() {
 		lane2BinDirs, lane2TrustedUIDs, lane2SystemEndpoints = previousDirs, previousUIDs, previousEndpoints
 	})
