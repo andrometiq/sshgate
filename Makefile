@@ -1,7 +1,8 @@
 .PHONY: all build install-local test test-jail test-integration vet clean sshgate-gate-linux \
 	sshgate-mcp-darwin sshgate-signer-telegram-darwin darwin cross sshgate-signer-server \
 	preflight e2e smoke gitleaks release-gate verify-dist verify-repro verify-versions mcpb \
-	test-refapp-js test-jail-root test-jail-mutate selftest-testjail selftest-jailmut
+	test-refapp-js test-jail-root test-jail-mutate selftest-testjail selftest-jailmut \
+	verify-gate-closure verify-mcp-closure verify-lifecycle-closure
 
 # ---------------------------------------------------------------------------
 # Verified release channel (spec §11)
@@ -272,7 +273,8 @@ clean:
 # unit suite, a secret scan of the commits about to be pushed, a clean build,
 # the CHEAP verified-release-channel checks, and the two-build reproducibility
 # assertion. No Docker, so it runs anywhere in well under a minute.
-preflight: vet test test-refapp-js gitleaks build verify-dist verify-versions verify-repro verify-no-sqlite-local verify-no-humanauth-local
+preflight: vet test test-refapp-js gitleaks build verify-dist verify-versions verify-repro verify-no-sqlite-local verify-no-humanauth-local \
+	verify-gate-closure verify-mcp-closure verify-lifecycle-closure
 	@echo "preflight: OK — safe to push"
 
 # verify-no-sqlite-local proves the SQLite-containment invariant (D10 / spec
@@ -309,6 +311,39 @@ verify-no-humanauth-local:
 		echo "verify-no-humanauth-local: FAIL — the local signer links the human-plane auth stack (go-webauthn/pquerna-otp must stay contained in pkg/signerkit/hosted)" >&2; exit 1; \
 	fi
 	@echo "verify-no-humanauth-local: OK — local Telegram signer does not link the human-auth (WebAuthn/TOTP) stack"
+
+# The closure gates keep the approval lifecycle (#76/#65) out of binaries that
+# must not carry it. Like the two gates above they are import-graph checks.
+#
+# verify-gate-closure: the gate's closure must not gain the approval packages,
+# signerkit, the executor or anything of the MCP; every gate byte stays proven
+# by the reproducible build.
+verify-gate-closure:
+	@deps="$$(go list -deps ./src/gate/cmd/sshgate-gate)" || { echo "verify-gate-closure: FAIL — go list could not resolve the gate dependency graph" >&2; exit 1; }; \
+	if printf '%s\n' "$$deps" | grep -E 'approvalplan|approvalwire|approvalreview|/pkg/signerkit|/src/executor|/src/mcp/' >&2; then \
+		echo "verify-gate-closure: FAIL — the gate links the packages above" >&2; exit 1; \
+	fi
+	@echo "verify-gate-closure: OK — the gate links no approval, signerkit, executor or MCP package"
+
+# verify-mcp-closure: the MCP talks to signers only over approvalwire, so it
+# must never link signerkit, SQLite or the human-auth stack.
+verify-mcp-closure:
+	@deps="$$(go list -deps ./src/mcp/cmd/sshgate-mcp)" || { echo "verify-mcp-closure: FAIL — go list could not resolve the MCP dependency graph" >&2; exit 1; }; \
+	if printf '%s\n' "$$deps" | grep -E '/pkg/signerkit|modernc.org/sqlite|go-webauthn|pquerna/otp' >&2; then \
+		echo "verify-mcp-closure: FAIL — the MCP links the packages above" >&2; exit 1; \
+	fi
+	@echo "verify-mcp-closure: OK — the MCP links no signerkit, SQLite or human-auth package"
+
+# verify-lifecycle-closure: pkg/signerkit imports the local lifecycle, so the
+# lifecycle must never import signerkit, the hosted packages, SQLite or
+# WebAuthn (E62). A no-op until pkg/signerkit/lifecycle exists.
+verify-lifecycle-closure:
+	@if [ ! -d pkg/signerkit/lifecycle ]; then echo "verify-lifecycle-closure: OK — pkg/signerkit/lifecycle does not exist yet"; exit 0; fi; \
+	deps="$$(go list -deps ./pkg/signerkit/lifecycle/...)" || { echo "verify-lifecycle-closure: FAIL — go list could not resolve the lifecycle dependency graph" >&2; exit 1; }; \
+	if printf '%s\n' "$$deps" | grep -E '/pkg/signerkit$$|/pkg/signerkit/(hosted|sqlitestore)|modernc.org/sqlite|go-webauthn' >&2; then \
+		echo "verify-lifecycle-closure: FAIL — the lifecycle links the packages above" >&2; exit 1; \
+	fi; \
+	echo "verify-lifecycle-closure: OK — the lifecycle links no signerkit, hosted, SQLite or WebAuthn package"
 
 # verify-dist: the FAST verified-release-channel checks (§11). It deliberately
 # does NOT do the reproducible rebuild (that needs the pinned-toolchain download

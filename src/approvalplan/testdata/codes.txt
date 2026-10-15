@@ -1,0 +1,16 @@
+not_found retryable=false
+conflict retryable=false
+invalid_request retryable=false
+reserved_verb retryable=false
+request_too_large retryable=false
+request_unrenderable retryable=false
+submit_window_closed retryable=false
+submit_window_ahead retryable=true
+queue_full retryable=true
+invalid_claim retryable=false
+invalid_report retryable=false
+storage_uncertain retryable=true
+busy retryable=true
+record_corrupt retryable=false
+lifecycle_unavailable retryable=true
+signer_incompatible retryable=false

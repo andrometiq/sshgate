@@ -1,0 +1,5 @@
+package holder
+
+import "time"
+
+func deadlinePassed(end time.Time) bool { return time.Now().After(end) }

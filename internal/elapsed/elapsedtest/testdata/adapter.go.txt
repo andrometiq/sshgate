@@ -1,0 +1,5 @@
+package holder
+
+import "time"
+
+func wall() time.Time { return time.Now().UTC() }

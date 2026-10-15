@@ -1,0 +1,11 @@
+R1Max 1376256
+ShedMax 196608
+R2NonBodyMax 327680
+R2BodyOverhead 4096
+R2Max 11516588
+MaxDraftBytes 262144
+LocalPayloadBudget 83886080
+ReviewSnapshotMax 262144
+OutboxMax(N=1) 188
+R1Reservation(r1-write) 147211
+R2Reservation(write, 8 MiB) 11191364
