@@ -84,7 +84,9 @@ func checkEntries(r *runner, entries []entry, output io.Writer) error {
 	return nil
 }
 func moduleRoot() (string, error) {
-	data, err := exec.Command("go", "env", "GOMOD").Output()
+	command := exec.Command("go", "env", "GOMOD")
+	command.Env = environment(entry{})
+	data, err := command.Output()
 	if err != nil {
 		return "", err
 	}
@@ -211,6 +213,7 @@ func newRunner(root string, timeout time.Duration) (*runner, func(), error) {
 	r := &runner{root: root, temporary: dir, wrapper: filepath.Join(dir, "execwrap"), timeout: timeout, grace: 30 * time.Second}
 	command := exec.Command("go", "build", "-o", r.wrapper, "./scripts/srcmut/execwrap")
 	command.Dir = root
+	command.Env = environment(entry{})
 	if data, err := command.CombinedOutput(); err != nil {
 		cleanup()
 		return nil, nil, fmt.Errorf("build execwrap: %w: %s", err, data)
@@ -222,7 +225,8 @@ func environment(e entry) []string {
 	for k, v := range e.Env {
 		env = append(env, k+"="+v)
 	}
-	return env
+	// A nonempty blank also overrides flags persisted by go env -w.
+	return append(env, "GOFLAGS= ")
 }
 func (r *runner) overlay(e entry) (string, error) {
 	target := e.File
@@ -280,8 +284,17 @@ func (r *runner) overlay(e entry) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if bytes.Count(data, []byte(e.Old)) != 1 {
+	command = exec.Command("git", "show", "HEAD:"+filepath.ToSlash(relative))
+	command.Dir = r.root
+	head, err := command.Output()
+	if err != nil {
+		return "", fmt.Errorf("patch target unavailable at HEAD: %w", err)
+	}
+	if bytes.Count(head, []byte(e.Old)) != 1 {
 		return "", errors.New("patch no longer applies")
+	}
+	if !bytes.Equal(data, head) {
+		return "", errors.New("patch target differs from HEAD")
 	}
 	dir, err := os.MkdirTemp(r.temporary, "overlay-")
 	if err != nil {
@@ -342,7 +355,10 @@ func (r *runner) execute(e entry, overlay string) result {
 	defer timer.Stop()
 	timedOut := false
 	select {
-	case <-done:
+	case err := <-done:
+		if err != nil {
+			_ = syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
+		}
 	case <-timer.C:
 		timedOut = true
 		_ = syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
