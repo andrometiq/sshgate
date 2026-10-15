@@ -19,6 +19,13 @@ type Denial struct {
 // verdict_class values (closed, stable enum). Each maps 1:1 from a refusal
 // branch in run.go / run_batch.go.
 const (
+	VerdictNetworkNeedsReason         = "network_needs_reason"
+	VerdictNetworkNotPermitted        = "network_not_permitted"
+	VerdictNetworkUnsupportedSigner   = "network_unsupported_signer"
+	VerdictNetworkUnsupportedGate     = "network_unsupported_gate"
+	VerdictNetworkGrantReadOnly       = "network_grant_read_only"
+	VerdictNetworkRequiresConfinement = "network_requires_confinement"
+
 	VerdictReadOnlyServer      = "read_only_server"
 	VerdictNoSignerConfigured  = "no_signer_configured"
 	VerdictApprovalDenied      = "approval_denied"
@@ -49,6 +56,19 @@ const (
 // denial", falling back to the prose error only).
 func newDenial(class string) *Denial {
 	switch class {
+	case VerdictNetworkNeedsReason:
+		return &Denial{VerdictClass: class, Summary: "Network access requires a non-empty reason.", RequiredAction: ActionProvideReason, Retryable: false, HowTo: []string{"Use run with network=true and a reason explaining the required access."}}
+	case VerdictNetworkNotPermitted:
+		return &Denial{VerdictClass: class, Summary: "Host policy does not permit this network read.", RequiredAction: ActionEscalateToHuman, Retryable: false, HowTo: []string{"A human can use gate doctor --pin --net=allow on the host, or provision Tier-2 for the signed network route."}}
+	case VerdictNetworkUnsupportedSigner:
+		return &Denial{VerdictClass: class, Summary: "The signer does not support signed network reads.", RequiredAction: ActionEscalateToHuman, Retryable: false, HowTo: []string{"Upgrade the local Telegram signer; the hosted signer does not support network grants."}}
+	case VerdictNetworkUnsupportedGate:
+		return &Denial{VerdictClass: class, Summary: "The gate does not support this network read.", RequiredAction: ActionEscalateToHuman, Retryable: false, HowTo: []string{"A human must upgrade the gate before requesting network access."}}
+	case VerdictNetworkGrantReadOnly:
+		return &Denial{VerdictClass: class, Summary: "Network grants cover only reads and exclude daemon-read verbs.", RequiredAction: ActionRephraseAsRead, Retryable: false, HowTo: []string{"Use a plain read without systemctl or docker; network cannot authorise a write."}}
+	case VerdictNetworkRequiresConfinement:
+		return &Denial{VerdictClass: class, Summary: "This network read requires a working kernel read jail.", RequiredAction: ActionEscalateToHuman, Retryable: false, HowTo: []string{"A human runs ~/.sshgate-gate/gate doctor on the host and restores confinement before another request."}}
+
 	case VerdictReadOnlyServer:
 		return &Denial{
 			VerdictClass:   VerdictReadOnlyServer,
