@@ -1,0 +1,17 @@
+🌐 READ WITH NETWORK on prod-db: may connect anywhere, including services on prod-db itself that can change state.
+Network justification (agent-stated, unverified, legacy per-command field)
+batch-first: invalid_request | commands[0].net | network requires a single-command request
+batch-second: invalid_request | commands[1].net | network requires a single-command request
+zero-commands: invalid_request | commands[0].net | network requires a single-command request
+revoke: invalid_request | commands[0].net | network is not allowed on an SSHGATE_ command
+update: invalid_request | commands[0].net | network is not allowed on an SSHGATE_ command
+transfer: invalid_request | commands[0].net | network is not allowed on an SSHGATE_ command
+envelope: invalid_request | commands[0].net | network is not allowed on an SSHGATE_ command
+empty-reason: invalid_request | commands[0].net | reason must be non-empty, non-whitespace and valid UTF-8
+whitespace-reason: invalid_request | commands[0].net | reason must be non-empty, non-whitespace and valid UTF-8
+invalid-reason: invalid_request | commands[0].net | reason must be non-empty, non-whitespace and valid UTF-8
+empty-command: invalid_request | commands[0].net | is empty
+long-command: invalid_request | commands[0].net | is 4097 bytes; maximum is 4096
+invalid-command: invalid_request | commands[0].net | must be valid UTF-8 without NUL
+nul-command: invalid_request | commands[0].net | must be valid UTF-8 without NUL
+legacy_sign_digest 3bd6576d074b54133cda3bfa47bc4c308baec36299803e682af49c8e063843d1
