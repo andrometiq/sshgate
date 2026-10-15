@@ -11,6 +11,7 @@ import (
 	"io/fs"
 	"os"
 	"strings"
+	"sync"
 
 	"github.com/karthikeyan5/sshgate/src/classify"
 	"github.com/karthikeyan5/sshgate/src/mcp/registry"
@@ -141,6 +142,9 @@ type TransferClient interface {
 // non-nil before calling Run; the MCP entry point sets them at
 // startup.
 type Runner struct {
+	capMu sync.Mutex
+	caps  map[string]*hostCap
+
 	Servers *registry.Servers
 	Sign    SignClient
 	SSH     SSHRunner

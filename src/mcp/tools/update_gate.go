@@ -230,6 +230,8 @@ func (r *Runner) UpdateGate(ctx context.Context, in UpdateGateInput) (UpdateGate
 			"tools: gate confirmed a DIFFERENT hash than approved (approved=%s confirmed=%s) — refusing to report success", hexHash, gotHash)
 	}
 
+	r.invalidateCap(in.Alias)
+
 	// Best-effort liveness re-probe: an empty command makes the gate print
 	// SSHGATE_OK (mirrors status/verifyProvision). The update already succeeded
 	// and was confirmed by the marker, so do NOT fail the tool if this probe
