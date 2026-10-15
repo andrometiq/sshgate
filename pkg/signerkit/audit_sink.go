@@ -10,9 +10,11 @@ import (
 	"fmt"
 	"io"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/karthikeyan5/sshgate/src/approvalplan"
 	"github.com/karthikeyan5/sshgate/src/policy"
 	"github.com/karthikeyan5/sshgate/src/policyauthority"
 	"github.com/karthikeyan5/sshgate/src/policywire"
@@ -36,12 +38,14 @@ import (
 // file adapts to this interface via its Call/Verdict methods below).
 type AuditSink interface {
 	// Call records either an incoming Submit / POST /v1/sign (the zero-value
-	// Lifecycle field) or a custody lifecycle transition. See AuditCall for the
+	// Lifecycle field) or a custody or approval lifecycle transition. See AuditCall for the
 	// discriminated-union contract. Neither variant carries a signature.
 	Call(ctx context.Context, e AuditCall) error
 	// Verdict records a single operator's resolution of a request: who, over
 	// which command (by SHA-256, never the raw bytes on this ledger), how they
 	// authenticated (Operator.AuthnMethod), and whether they approved.
+	// Approval.Replay marks an inert attempt, not a resolution. Hosted v2
+	// events use Call with an approval- lifecycle instead.
 	Verdict(ctx context.Context, e AuditVerdict) error
 }
 
@@ -58,7 +62,8 @@ type DurableAuditSink interface {
 // AuditCall is a backwards-compatible discriminated union. Lifecycle == "" is
 // an incoming hosted sign request on the machine plane, before any human has
 // voted; RequestID, HostKeyFP, and Command carry that request. A non-empty
-// Lifecycle is a custody transition ("lock", "unlock", or "rotate"); Reason and
+// Lifecycle starting with "approval-" is an approval lifecycle event. Other
+// non-empty values are custody transitions ("lock", "unlock", or "rotate"); Reason and
 // Operator carry the authorization context and the request fields are empty.
 // Existing AuditSink implementations that only understand hosted calls remain
 // source-compatible and see zero values for the additive lifecycle fields.
@@ -87,13 +92,15 @@ type AuditCall struct {
 	// Recovery is non-nil only for the durable sink's audit_log_recovered
 	// lifecycle record. Its position and omitempty tag preserve every existing
 	// ordinary, custody, and policy encoding.
-	Recovery *AuditRecoveryMetadata `json:"recovery,omitempty"`
+	Recovery *AuditRecoveryMetadata      `json:"recovery,omitempty"`
+	Approval *approvalplan.AuditMetadata `json:"approval,omitempty"`
 }
 
 // AuditVerdict is the event recorded for every vote on the hosted human plane.
 // Command is identified by SHA-256 so the ledger can be shared/anchored without
 // leaking the raw command; Operator carries the actor's identity and
-// AuthnMethod (webauthn/totp).
+// AuthnMethod (webauthn/totp). Approval.Replay marks an inert attempt, not
+// a resolution, regardless of Approved or the transition name.
 type AuditVerdict struct {
 	Time          time.Time `json:"time"`
 	RequestID     string    `json:"request_id"`
@@ -102,7 +109,8 @@ type AuditVerdict struct {
 	Approved      bool      `json:"approved"`
 	// Policy is non-nil only for the dedicated base-manifest human-verdict
 	// phase. Ordinary hosted verdict encodings remain byte-identical.
-	Policy *PolicyAuditMetadata `json:"policy,omitempty"`
+	Policy   *PolicyAuditMetadata        `json:"policy,omitempty"`
+	Approval *approvalplan.AuditMetadata `json:"approval,omitempty"`
 }
 
 // PolicyAuditMetadata is the payload-free, additive policy-authority audit
@@ -307,7 +315,11 @@ func (s *appendOnlySink) Call(_ context.Context, e AuditCall) error {
 }
 
 func (s *appendOnlySink) Verdict(_ context.Context, e AuditVerdict) error {
-	return s.write(auditLine{Kind: "verdict", Event: e})
+	kind := "verdict"
+	if e.Approval != nil && e.Approval.Replay {
+		kind = "verdict_inert"
+	}
+	return s.write(auditLine{Kind: kind, Event: e})
 }
 
 func (s *appendOnlySink) write(v auditLine) error {
@@ -339,6 +351,15 @@ func marshalAuditLine(line auditLine) ([]byte, error) {
 // variant preserves the legacy lock/unlock/rotate AuditEvent status while a
 // normal call keeps the hosted-plane shape below.
 func (a *AuditLog) Call(_ context.Context, e AuditCall) error {
+	if strings.HasPrefix(e.Lifecycle, "approval-") {
+		return a.Write(AuditEvent{
+			TS:        e.Time.UTC(),
+			RequestID: e.RequestID,
+			Status:    e.Lifecycle,
+			Commands:  []string{},
+			Approval:  e.Approval,
+		})
+	}
 	if e.Policy != nil {
 		return a.Write(AuditEvent{
 			TS:        e.Time.UTC(),
@@ -417,6 +438,9 @@ func (a *AuditLog) Verdict(_ context.Context, e AuditVerdict) error {
 	if e.Approved {
 		status = "approved"
 	}
+	if e.Approval != nil && e.Approval.Replay {
+		status = "approval-" + e.Approval.Transition
+	}
 	return a.Write(AuditEvent{
 		TS:         e.Time.UTC(),
 		RequestID:  e.RequestID,
@@ -424,6 +448,7 @@ func (a *AuditLog) Verdict(_ context.Context, e AuditVerdict) error {
 		Commands:   []string{e.CommandSHA256},
 		ApprovedBy: e.Operator.DisplayName,
 		AuthMode:   e.Operator.AuthnMethod,
+		Approval:   e.Approval,
 	})
 }
 
