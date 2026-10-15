@@ -5,7 +5,6 @@ import (
 	"context"
 	"reflect"
 	"testing"
-	"time"
 
 	ap "github.com/karthikeyan5/sshgate/src/approvalplan"
 	"github.com/karthikeyan5/sshgate/src/approvalplan/statetest"
@@ -94,7 +93,7 @@ func checkV2Projection(t *testing.T, db *DB, rec ap.R1, now ap.Now, settings ap.
 	if rec.Header.Shed {
 		shed = 1
 	}
-	if view.Class == ap.ClassLive {
+	if ap.Class(rec, now, settings, false) == ap.ClassLive {
 		live = 1
 	}
 	want := []any{decision, decided, mint, mintReason, last, rec.Header.ClaimCount, final, audited, shed, payloadBytes,
@@ -112,51 +111,27 @@ func checkV2Projection(t *testing.T, db *DB, rec ap.R1, now ap.Now, settings ap.
 		t.Fatal(err)
 	}
 	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("columns differ:\ngot  %#v\nwant %#v", got, want)
+		columns := []string{"decision_status", "decided_at", "mint_state", "mint_error_reason", "last_window_end", "claim_count", "final_class", "audited_complete", "shed", "payload_bytes", "submit_not_after", "created_at", "request_expires_at", "view_status", "class", "next_due_at", "record_handle", "live predicate"}
+		for i := range want {
+			if !reflect.DeepEqual(got[i], want[i]) {
+				t.Errorf("%s: got %#v, want %#v", columns[i], got[i], want[i])
+			}
+		}
+		t.FailNow()
 	}
 }
 
 func TestV2StatetestProjectionProperties(t *testing.T) {
 	db := legacyDB(t)
-	for seed := uint64(1); seed <= 12; seed++ {
-		model := statetest.NewModel(seed)
-		if err := model.Run(80); err != nil {
-			t.Fatal(err)
-		}
-		for _, rec := range model.Signer.Store {
-			checkV2Projection(t, db, rec, model.Clock.Now(), model.Signer.Settings)
-		}
+	for _, snapshot := range generatedV2Snapshots(t) {
+		checkV2Projection(t, db, snapshot.record, snapshot.now, snapshot.settings)
+		checkV2Unflushed(t, db)
 	}
-	// Model.Run quiesces before returning. Sample the intermediate live, minted,
-	// erased and awaiting-report states through the same A1b harness as well.
-	clock := &statetest.Clock{Wall: statetest.T0, Elapsed: time.Hour}
-	signer := statetest.NewSigner(clock, 17)
-	id := statetest.ID(999)
-	key := ap.RecordKey(statetest.PrincipalA, id)
-	signer.Submit(statetest.PrincipalA, statetest.JobDraft(id, ap.CoordinatorExecutor, clock.Wall, statetest.Write("true", 60)))
-	check := func() {
-		t.Helper()
-		if signer.Err != nil {
-			t.Fatal(signer.Err)
-		}
-		checkV2Projection(t, db, signer.Store[key], clock.Now(), signer.Settings)
-	}
-	check()
-	clock.Advance(6 * time.Second)
-	signer.Tick()
-	check()
-	signer.Tap(key, ap.VoteApprove, statetest.Operator, true)
-	check()
-	signer.FlushPass()
-	check()
-	signer.Claim(key, statetest.Token(id))
-	check()
-	clock.Advance(time.Minute)
-	signer.Tick()
-	check()
-	clock.Advance(25 * time.Hour)
-	signer.Tick()
-	check()
+	checkV2Unflushed(t, db)
+}
+
+func checkV2Unflushed(t *testing.T, db *DB) {
+	t.Helper()
 	// Compare membership against every actual record, not just the SQL flag.
 	rows, err := db.UnflushedV2(context.Background(), 256)
 	if err != nil {

@@ -2,7 +2,6 @@ package sqlitestore
 
 import (
 	"testing"
-	"time"
 
 	ap "github.com/karthikeyan5/sshgate/src/approvalplan"
 	"github.com/karthikeyan5/sshgate/src/approvalplan/statetest"
@@ -69,34 +68,8 @@ func TestLiveV2PredicateMatchesClass(t *testing.T) {
 			}
 		}
 	}
-	// Sample reachable records from A1b's generated schedules.
-	for seed := uint64(1); seed <= 12; seed++ {
-		model := statetest.NewModel(seed)
-		if err := model.Run(80); err != nil {
-			t.Fatal(err)
-		}
-		for _, rec := range model.Signer.Store {
-			checkLivePredicate(t, db, rec, model.Clock.Now())
-		}
-	}
-	// Also sample the live intermediate records before the generator quiesces.
-	clock := &statetest.Clock{Wall: statetest.T0, Elapsed: time.Hour}
-	signer := statetest.NewSigner(clock, 17)
-	id := statetest.ID(1)
-	key := ap.RecordKey(statetest.PrincipalA, id)
-	signer.Submit(statetest.PrincipalA, statetest.JobDraft(id, ap.CoordinatorExecutor, clock.Wall, statetest.Write("true", 60)))
-	checkLivePredicate(t, db, signer.Store[key], clock.Now())
-	clock.Advance(6 * time.Second)
-	signer.Tick()
-	signer.Tap(key, ap.VoteApprove, statetest.Operator, true)
-	signer.FlushPass()
-	checkLivePredicate(t, db, signer.Store[key], clock.Now())
-	signer.Claim(key, statetest.Token(id))
-	checkLivePredicate(t, db, signer.Store[key], clock.Now())
-	clock.Advance(time.Hour)
-	signer.Tick()
-	checkLivePredicate(t, db, signer.Store[key], clock.Now())
-	if signer.Err != nil {
-		t.Fatal(signer.Err)
+	for _, snapshot := range generatedV2Snapshots(t) {
+		checkV2Projection(t, db, snapshot.record, snapshot.now, snapshot.settings)
+		checkV2Unflushed(t, db)
 	}
 }
