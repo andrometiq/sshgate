@@ -167,14 +167,14 @@ func TestGoldenRecords(t *testing.T) {
 
 	d := *fixtures()[0].draft
 	dh, _ := DraftHash(d)
-	exit, final := 0, t0.Add(time.Minute)
+	exit, final, stdout := 0, t0.Add(time.Minute), []byte("ok <\xff>\n")
 	job := R2{
 		Version: R2Version, RequestID: d.RequestID, InputHash: digestA, Draft: d, DraftHash: dh, CreatedAt: t0,
 		Reservation: int64(R2Reservation(d, MaxJobOutputBytes)), SignerAck: digestA,
 		ReportResult: &ReportResult{State: ReportAcked}, FinalAt: &final,
 		Steps: []JobStep{{Ordinal: 1, Marker: &Marker{Epoch: epochA, At: t0.Add(45 * time.Second)}, Result: &StepResult{
-			Status: StepSucceeded, ExitCode: &exit, StdoutBytes: 12, StdoutSHA256: digestA, StderrSHA256: sha256Hex(""),
-			Stdout: []byte("ok <\xff>\n"),
+			Status: StepSucceeded, ExitCode: &exit, StdoutBytes: int64(len(stdout)), StdoutSHA256: sha256Hex(string(stdout)),
+			StderrSHA256: sha256Hex(""), Stdout: stdout,
 		}}},
 	}
 	jb, err := EncodeR2(job)

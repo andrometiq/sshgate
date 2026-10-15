@@ -1,0 +1,1 @@
+{"approval_proto":1,"ok":false,"error":{"code":"signer_incompatible","message":"hosted signer-server does not serve /v2/approvals; upgrade it (migration 7) before this MCP"}}

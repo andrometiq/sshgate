@@ -402,8 +402,8 @@ func EncodeR2(job R2) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if len(b) > R2Max {
-		return nil, codeErr(CodeRequestTooLarge, "r2", "is %d bytes encoded; maximum is %d", len(b), R2Max)
+	if int64(len(b)) > job.Reservation {
+		return nil, codeErr(CodeRequestTooLarge, "r2", "is %d bytes encoded; its reservation is %d", len(b), job.Reservation)
 	}
 	return b, nil
 }
@@ -419,6 +419,9 @@ func DecodeR2(b []byte) (R2, error) {
 	}
 	if err := job.validate(); err != nil {
 		return R2{}, corrupt("r2", err)
+	}
+	if int64(len(b)) > job.Reservation {
+		return R2{}, codeErr(CodeRecordCorrupt, "r2", "is %d bytes; its reservation is %d", len(b), job.Reservation)
 	}
 	return job, nil
 }
@@ -909,8 +912,8 @@ func (job R2) validate() error {
 	if err := within("draft", job.Draft.Validate()); err != nil {
 		return err
 	}
-	if !job.Draft.Kind.ExecutionApplicable() || job.RequestID != job.Draft.RequestID {
-		return invalid("draft", "must be an execution-applicable draft for this request ID")
+	if !job.Draft.Kind.ExecutionApplicable() || job.Draft.Coordinator != CoordinatorExecutor || job.RequestID != job.Draft.RequestID {
+		return invalid("draft", "must be an executor-coordinated, execution-applicable draft for this request ID")
 	}
 	if sum, err := DraftHash(job.Draft); err != nil || sum != job.DraftHash {
 		return invalid("draft_hash", "does not match the draft")
@@ -921,8 +924,8 @@ func (job R2) validate() error {
 	if err := validRecordStamp("created_at", job.CreatedAt); err != nil {
 		return err
 	}
-	if job.Reservation < 1 || job.Reservation > R2Max {
-		return invalid("reservation", "%d is outside 1..%d", job.Reservation, R2Max)
+	if floor := int64(R2Reservation(job.Draft, PermittedOutputBytes(job.Draft))); job.Reservation < floor || job.Reservation > R2Max {
+		return invalid("reservation", "%d is outside %d..%d, the draft's own worst case and R2Max", job.Reservation, floor, R2Max)
 	}
 	if job.ClaimToken != "" && !ValidSHA256Hex(job.ClaimToken) {
 		return invalid("claim_token", "must be 64 lowercase hex")
@@ -978,6 +981,7 @@ func (job R2) validateSteps() error {
 		return invalid("steps", "%d steps; the draft has %d", len(job.Steps), jobStepCount(job.Draft))
 	}
 	var total int64
+	streamCap := streamOutputCap(job.Draft)
 	for i, s := range job.Steps {
 		if s.Ordinal != i+1 {
 			return invalid(fmt.Sprintf("steps[%d].ordinal", i), "must be %d", i+1)
@@ -985,20 +989,45 @@ func (job R2) validateSteps() error {
 		if s.Marker != nil && (!ValidEpoch(s.Marker.Epoch) || !validStamp(s.Marker.At, false)) {
 			return invalid(fmt.Sprintf("steps[%d].marker", i), "needs an epoch and a UTC time")
 		}
-		if s.Result != nil {
-			if err := s.Result.validate(); err != nil {
-				return within(fmt.Sprintf("steps[%d].result", i), err)
-			}
-			total += int64(len(s.Result.Stdout) + len(s.Result.Stderr))
+		if s.Result == nil {
+			continue
 		}
+		if err := s.Result.validate(streamCap, job.BodiesRemoved != nil); err != nil {
+			return within(fmt.Sprintf("steps[%d].result", i), err)
+		}
+		total += int64(len(s.Result.Stdout) + len(s.Result.Stderr))
 	}
-	if total > MaxJobOutputBytes {
-		return invalid("steps", "%d body bytes; maximum is %d", total, MaxJobOutputBytes)
+	if permitted := PermittedOutputBytes(job.Draft); total > permitted {
+		return invalid("steps", "%d body bytes; the job may hold %d", total, permitted)
 	}
 	return nil
 }
 
-func (r StepResult) validate() error {
+// streamOutputCap is the most raw bytes one stored body may hold: the
+// draft's max_output_bytes for a command_job, MaxStreamOutputBytes for a
+// transfer.
+func streamOutputCap(d ApprovalDraft) int64 {
+	if d.CommandJob != nil && d.CommandJob.MaxOutputBytes > 0 {
+		return min(d.CommandJob.MaxOutputBytes, MaxStreamOutputBytes)
+	}
+	return MaxStreamOutputBytes
+}
+
+// PermittedOutputBytes is the most raw output a job of draft d may store:
+// two streams per step at the draft's per-stream cap, at most
+// MaxJobOutputBytes. Executor admission reserves
+// R2Reservation(d, PermittedOutputBytes(d)), and a job record must carry at
+// least that reservation.
+func PermittedOutputBytes(d ApprovalDraft) int64 {
+	return min(2*int64(jobStepCount(d))*streamOutputCap(d), MaxJobOutputBytes)
+}
+
+// validate checks one step result. streamCap bounds each body, and
+// bodiesRemoved says the job's bodies are gone. A retained body must agree
+// with its metadata: its digest is the body's, and an untruncated body holds
+// exactly the bytes counted. A removed or unstorable body keeps the digest
+// and count of the output it replaced.
+func (r StepResult) validate(streamCap int64, bodiesRemoved bool) error {
 	if !r.Status.Valid() {
 		return invalid("status", "unknown status %q", r.Status)
 	}
@@ -1011,8 +1040,16 @@ func (r StepResult) validate() error {
 	if !ValidSHA256Hex(r.StdoutSHA256) || !ValidSHA256Hex(r.StderrSHA256) {
 		return invalid("stdout_sha256", "digests must be 64 lowercase hex")
 	}
-	if len(r.Stdout) > MaxStreamOutputBytes || len(r.Stderr) > MaxStreamOutputBytes {
-		return invalid("stdout", "a body is at most %d bytes", MaxStreamOutputBytes)
+	if (bodiesRemoved || r.BodiesUnstorable) && (len(r.Stdout) > 0 || len(r.Stderr) > 0) {
+		return invalid("stdout", "bodies marked removed or unstorable must be empty")
+	}
+	if !bodiesRemoved && !r.BodiesUnstorable {
+		if err := retainedBody("stdout", r.Stdout, r.StdoutBytes, r.StdoutSHA256, r.Truncated, streamCap); err != nil {
+			return err
+		}
+		if err := retainedBody("stderr", r.Stderr, r.StderrBytes, r.StderrSHA256, r.Truncated, streamCap); err != nil {
+			return err
+		}
 	}
 	if r.Annotation != "" && !isRouteTokenOrSpaced(r.Annotation, MaxAnnotationBytes) {
 		return invalid("annotation", "must be 1..%d printable ASCII bytes", MaxAnnotationBytes)
@@ -1040,3 +1077,18 @@ func isRouteTokenOrSpaced(s string, max int) bool {
 // A transient code never becomes a stored refusal or outcome: the work stays
 // owed and retryable (SA-5).
 func definitive(c Code) bool { return c.Valid() && !c.Retryable() }
+
+// retainedBody checks a stored body against its count and digest. Truncated
+// applies to the step: a truncated stream produced at least what it kept.
+func retainedBody(field string, body []byte, count int64, digest string, truncated bool, streamCap int64) error {
+	if int64(len(body)) > streamCap {
+		return invalid(field, "is %d bytes; the stream cap is %d", len(body), streamCap)
+	}
+	if digest != sha256Hex(string(body)) {
+		return invalid(field+"_sha256", "is not the digest of the stored body")
+	}
+	if truncated && count < int64(len(body)) || !truncated && count != int64(len(body)) {
+		return invalid(field+"_bytes", "%d does not account for the %d stored bytes", count, len(body))
+	}
+	return nil
+}

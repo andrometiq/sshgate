@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 	"sync"
 
@@ -64,6 +65,8 @@ type Store struct {
 	// afterRename is the corresponding uncertainty seam: the replacement is
 	// already installed when it runs, but directory durability is not confirmed.
 	afterRename func() error
+	// afterUnlink injects uncertainty after deletion, before directory fsync.
+	afterUnlink func() error
 	// beforeTransactionSync is a test-only seam for the durability confirmation
 	// every transaction performs after taking the inode-stable flock.
 	beforeTransactionSync func() error
@@ -365,6 +368,165 @@ func (tx *Transaction) WriteCanonicalJSON(name string, value any, max int) ([]by
 		return nil, err
 	}
 	return append([]byte(nil), body...), nil
+}
+
+// ListNames returns sorted, validated data names within the caller's bound.
+func (tx *Transaction) ListNames(max int) ([]string, error) {
+	if err := tx.check(false); err != nil {
+		return nil, err
+	}
+	if max <= 0 {
+		return nil, fmt.Errorf("securestate: invalid maximum %d", max)
+	}
+	names := make([]string, 0)
+	err := scanDirectory(tx.store.dirFD, func(name string) error {
+		if name == lockName || isTempName(name) {
+			return nil
+		}
+		if err := validateDataName(name); err != nil {
+			return err
+		}
+		if _, err := tx.store.statPath(name); err != nil {
+			return err
+		}
+		if len(names) == max {
+			return fmt.Errorf("%w: more than %d data names", ErrTooLarge, max)
+		}
+		names = append(names, name)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	sort.Strings(names)
+	return names, nil
+}
+
+// Remove durably unlinks one validated data file in a write transaction.
+func (tx *Transaction) Remove(name string) error {
+	if err := tx.check(true); err != nil {
+		return err
+	}
+	if err := validateDataName(name); err != nil {
+		return err
+	}
+	if _, err := tx.store.statPath(name); err != nil {
+		return err
+	}
+	if err := unix.Unlinkat(tx.store.dirFD, name, 0); err != nil {
+		if errors.Is(err, unix.ENOENT) {
+			return fmt.Errorf("%w: %s", ErrNotFound, name)
+		}
+		return fmt.Errorf("securestate: unlink %s: %w", name, err)
+	}
+	if tx.store.afterUnlink != nil {
+		if err := tx.store.afterUnlink(); err != nil {
+			return fmt.Errorf("%w: injected after unlink: %v", ErrCommitUncertain, err)
+		}
+	}
+	if err := unix.Fsync(tx.store.dirFD); err != nil {
+		return fmt.Errorf("%w: fsync directory: %v", ErrCommitUncertain, err)
+	}
+	return nil
+}
+
+// RemoveOrphanTemps validates all temp entries before unlinking any of them.
+func (tx *Transaction) RemoveOrphanTemps() (int, error) {
+	if err := tx.check(true); err != nil {
+		return 0, err
+	}
+	var names []string
+	err := scanDirectory(tx.store.dirFD, func(name string) error {
+		if !strings.HasPrefix(name, ".tmp-") {
+			return nil
+		}
+		if !isTempName(name) {
+			return fmt.Errorf("%w: invalid temp name %q", ErrUnsafe, name)
+		}
+		var st unix.Stat_t
+		if err := unix.Fstatat(tx.store.dirFD, name, &st, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+			return fmt.Errorf("%w: stat temp %s: %v", ErrUnsafe, name, err)
+		}
+		if st.Mode&unix.S_IFMT != unix.S_IFREG || st.Uid != tx.store.expectedUID || st.Mode&0o7777 & ^uint32(fileMode) != 0 {
+			return fmt.Errorf("%w: temp %s type/owner/mode", ErrUnsafe, name)
+		}
+		names = append(names, name)
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	removed := 0
+	for _, name := range names {
+		if err := unix.Unlinkat(tx.store.dirFD, name, 0); err != nil {
+			if removed > 0 {
+				return removed, fmt.Errorf("%w: unlink temp %s: %v", ErrCommitUncertain, name, err)
+			}
+			return 0, fmt.Errorf("securestate: unlink temp %s: %w", name, err)
+		}
+		removed++
+		if tx.store.afterUnlink != nil {
+			if err := tx.store.afterUnlink(); err != nil {
+				return removed, fmt.Errorf("%w: injected after unlink: %v", ErrCommitUncertain, err)
+			}
+		}
+	}
+	if err := unix.Fsync(tx.store.dirFD); err != nil {
+		return removed, fmt.Errorf("%w: fsync directory: %v", ErrCommitUncertain, err)
+	}
+	return removed, nil
+}
+
+func isTempName(name string) bool {
+	if len(name) != len(".tmp-")+24 || !strings.HasPrefix(name, ".tmp-") {
+		return false
+	}
+	for _, c := range name[len(".tmp-"):] {
+		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func scanDirectory(dirFD int, visit func(string) error) error {
+	fd, err := unix.Openat(dirFD, ".", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return fmt.Errorf("%w: open directory listing: %v", ErrUnsafe, err)
+	}
+	defer unix.Close(fd)
+	var pinned, opened unix.Stat_t
+	if err := unix.Fstat(dirFD, &pinned); err != nil {
+		return fmt.Errorf("%w: stat pinned directory: %v", ErrUnsafe, err)
+	}
+	if err := unix.Fstat(fd, &opened); err != nil {
+		return fmt.Errorf("%w: stat listing directory: %v", ErrUnsafe, err)
+	}
+	if !sameInode(pinned, opened) {
+		return fmt.Errorf("%w: listing directory inode mismatch", ErrUnsafe)
+	}
+	var buf [8192]byte
+	for {
+		n, err := unix.ReadDirent(fd, buf[:])
+		if errors.Is(err, unix.EINTR) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("securestate: read directory: %w", err)
+		}
+		if n == 0 {
+			return nil
+		}
+		_, _, names := unix.ParseDirent(buf[:n], -1, nil)
+		for _, name := range names {
+			if name == "." || name == ".." {
+				continue
+			}
+			if err := visit(name); err != nil {
+				return err
+			}
+		}
+	}
 }
 
 func (tx *Transaction) atomicReplace(name string, body []byte) error {

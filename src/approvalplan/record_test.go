@@ -457,14 +457,15 @@ func worstJob(t testing.TB) R2 {
 		Version: R2Version, RequestID: d.RequestID, InputHash: digestA, Draft: d, DraftHash: draftHash, CreatedAt: t0,
 		Reservation: int64(R2Reservation(d, MaxJobOutputBytes)), ClaimToken: digestA, SignerAck: digestA,
 		Outcome: &JobOutcome{Kind: OutcomeJobError, Code: CodeRequestUnrenderable}, ReportResult: &ReportResult{State: ReportRefused, Code: CodeRequestUnrenderable},
-		FirstDeliveredAt: &final, BodiesRemoved: &BodiesRemoved{Cause: strings.Repeat("c", MaxReasonTokenBytes)}, FinalAt: &final,
+		FirstDeliveredAt: &final, FinalAt: &final,
 	}
+	bodyDigest := sha256Hex(string(body))
 	for i := 1; i <= len(d.CommandJob.Steps); i++ {
 		job.Steps = append(job.Steps, JobStep{
 			Ordinal: i, Marker: &Marker{Epoch: epochA, At: t0.Add(999999999)},
 			Result: &StepResult{
 				Status: StepFailed, ExitCode: &exit, StdoutBytes: math.MaxInt64, StderrBytes: math.MaxInt64, Truncated: true,
-				StdoutSHA256: digestA, StderrSHA256: digestA, Stdout: body, Stderr: body, BodiesUnstorable: true,
+				StdoutSHA256: bodyDigest, StderrSHA256: bodyDigest, Stdout: body, Stderr: body,
 				Annotation: strings.Repeat("n", MaxAnnotationBytes),
 			},
 		})
@@ -514,7 +515,7 @@ func TestR2Refusals(t *testing.T) {
 		d := *fixtures()[0].draft
 		h, _ := DraftHash(d)
 		return R2{Version: R2Version, RequestID: d.RequestID, InputHash: digestA, Draft: d, DraftHash: h, CreatedAt: t0,
-			Reservation: int64(R2Reservation(d, 0)), ClaimToken: digestA, Steps: []JobStep{{Ordinal: 1}}}
+			Reservation: int64(R2Reservation(d, PermittedOutputBytes(d))), ClaimToken: digestA, Steps: []JobStep{{Ordinal: 1}}}
 	}
 	if _, err := EncodeR2(base()); err != nil {
 		t.Fatalf("base job: %v", err)
@@ -527,16 +528,20 @@ func TestR2Refusals(t *testing.T) {
 		"ordinal":     func(j *R2) { j.Steps[0].Ordinal = 2 },
 		"grant draft": func(j *R2) { j.Draft = *fixtures()[6].draft; j.RequestID = j.Draft.RequestID },
 		"body over cap": func(j *R2) {
-			j.Steps[0].Result = &StepResult{Status: StepSucceeded, StdoutSHA256: digestA, StderrSHA256: digestA, Stdout: big}
+			j.Steps[0].Result = retained(big, nil)
 		},
 		"unknown status": func(j *R2) {
 			j.Steps[0].Result = &StepResult{Status: "ok", StdoutSHA256: digestA, StderrSHA256: digestA}
 		},
-		"outcome code":  func(j *R2) { j.Outcome = &JobOutcome{Kind: OutcomeDenied, Code: CodeBusy} },
-		"adopted class": func(j *R2) { j.Outcome = &JobOutcome{Kind: OutcomeAdopted} },
-		"refused code":  func(j *R2) { j.ReportResult = &ReportResult{State: ReportRefused} },
-		"reservation":   func(j *R2) { j.Reservation = 0 },
-		"marker":        func(j *R2) { j.Steps[0].Marker = &Marker{Epoch: "x", At: t0} },
+		"outcome code":         func(j *R2) { j.Outcome = &JobOutcome{Kind: OutcomeDenied, Code: CodeBusy} },
+		"adopted class":        func(j *R2) { j.Outcome = &JobOutcome{Kind: OutcomeAdopted} },
+		"refused code":         func(j *R2) { j.ReportResult = &ReportResult{State: ReportRefused} },
+		"reservation":          func(j *R2) { j.Reservation = 0 },
+		"one-byte reservation": func(j *R2) { j.Reservation = 1 },
+		"reservation below the draft's worst case": func(j *R2) {
+			j.Reservation = int64(R2Reservation(j.Draft, PermittedOutputBytes(j.Draft))) - 1
+		},
+		"marker": func(j *R2) { j.Steps[0].Marker = &Marker{Epoch: "x", At: t0} },
 	}
 	for name, f := range cases {
 		j := base()
@@ -695,7 +700,7 @@ func TestR2RefusesTransientCodesAsSettlement(t *testing.T) {
 		h, _ := DraftHash(d)
 		final := t0.Add(time.Minute)
 		return R2{Version: R2Version, RequestID: d.RequestID, InputHash: digestA, Draft: d, DraftHash: h, CreatedAt: t0,
-			Reservation: int64(R2Reservation(d, 0)), FinalAt: &final, Steps: []JobStep{{Ordinal: 1}}}
+			Reservation: int64(R2Reservation(d, PermittedOutputBytes(d))), FinalAt: &final, Steps: []JobStep{{Ordinal: 1}}}
 	}
 	for _, c := range AllCodes {
 		for context, set := range map[string]func(*R2){
@@ -714,5 +719,164 @@ func TestR2RefusesTransientCodesAsSettlement(t *testing.T) {
 	j.Outcome = &JobOutcome{Kind: OutcomeJobError}
 	if _, err := EncodeR2(j); err != nil {
 		t.Fatalf("an error outcome without a code: %v", err)
+	}
+}
+
+// retained is a result whose stored bodies agree with their counts and
+// digests.
+func retained(stdout, stderr []byte) *StepResult {
+	return &StepResult{
+		Status: StepSucceeded, StdoutBytes: int64(len(stdout)), StderrBytes: int64(len(stderr)),
+		StdoutSHA256: sha256Hex(string(stdout)), StderrSHA256: sha256Hex(string(stderr)), Stdout: stdout, Stderr: stderr,
+	}
+}
+
+// smallCapJob is a one-step job whose draft caps each stream at capBytes.
+func smallCapJob(t *testing.T, capBytes int64) R2 {
+	t.Helper()
+	d := *fixtures()[0].draft
+	job := *d.CommandJob
+	job.MaxOutputBytes = capBytes
+	d.CommandJob = &job
+	h, err := DraftHash(d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return R2{Version: R2Version, RequestID: d.RequestID, InputHash: digestA, Draft: d, DraftHash: h, CreatedAt: t0,
+		Reservation: int64(R2Reservation(d, PermittedOutputBytes(d))), Steps: []JobStep{{Ordinal: 1}}}
+}
+
+// expectR2Refused checks a job is refused by EncodeR2 and, as bytes, by
+// DecodeR2.
+func expectR2Refused(t *testing.T, name string, j R2) {
+	t.Helper()
+	if _, err := EncodeR2(j); err == nil {
+		t.Errorf("%s: EncodeR2 accepted it", name)
+	}
+	b, err := json.Marshal(j)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := DecodeR2(b); codeOf(err) != CodeRecordCorrupt {
+		t.Errorf("%s: DecodeR2 = %v, want record_corrupt", name, err)
+	}
+}
+
+func TestR2OutputWithinTheDraftAndReservation(t *testing.T) {
+	j := smallCapJob(t, 1)
+	if got := PermittedOutputBytes(j.Draft); got != 2 {
+		t.Fatalf("PermittedOutputBytes = %d, want 2 (one step, two streams of 1 byte)", got)
+	}
+	j.Steps[0].Result = retained([]byte("a"), []byte("b"))
+	b, err := EncodeR2(j)
+	if err != nil {
+		t.Fatalf("output within a 1-byte cap: %v", err)
+	}
+	if _, err := DecodeR2(b); err != nil {
+		t.Fatal(err)
+	}
+	if int64(len(b)) > j.Reservation {
+		t.Fatalf("encoded %d bytes over the reservation %d", len(b), j.Reservation)
+	}
+
+	over := smallCapJob(t, 1)
+	over.Steps[0].Result = retained([]byte("ab"), nil)
+	expectR2Refused(t, "2-byte body under a 1-byte cap", over)
+
+	mib := smallCapJob(t, 1)
+	mib.Reservation = int64(R2Reservation(mib.Draft, 2))
+	mib.Steps[0].Result = retained(bytes.Repeat([]byte("x"), MaxStreamOutputBytes), nil)
+	expectR2Refused(t, "1 MiB of stdout under a 1-byte cap", mib)
+
+	under := smallCapJob(t, 1)
+	under.Reservation = 1
+	expectR2Refused(t, "1-byte reservation", under)
+
+}
+
+// TestR2FullStreamFitsTheDraftFloor fills one stream to its cap with the
+// worst-escaping byte and checks the record stays within the reservation the
+// draft's floor demands, which the codec enforces on both sides.
+func TestR2FullStreamFitsTheDraftFloor(t *testing.T) {
+	j := smallCapJob(t, MaxStreamOutputBytes)
+	j.Steps[0].Result = retained(bytes.Repeat([]byte("<"), MaxStreamOutputBytes), bytes.Repeat([]byte{0xff}, MaxStreamOutputBytes))
+	b, err := EncodeR2(j)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if floor := int64(R2Reservation(j.Draft, PermittedOutputBytes(j.Draft))); int64(len(b)) > floor {
+		t.Fatalf("%d bytes over the draft floor %d", len(b), floor)
+	}
+	if _, err := DecodeR2(b); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestR2RemovedBodiesAreGone(t *testing.T) {
+	j := smallCapJob(t, MaxStreamOutputBytes)
+	j.Steps[0].Result = retained([]byte("secret\n"), []byte("warn\n"))
+	if _, err := EncodeR2(j); err != nil {
+		t.Fatal(err)
+	}
+	removed := j
+	removed.BodiesRemoved = &BodiesRemoved{Cause: "retention"}
+	expectR2Refused(t, "bodies_removed with bodies present", removed)
+
+	unstorable := j
+	r := *j.Steps[0].Result
+	r.BodiesUnstorable = true
+	unstorable.Steps = []JobStep{{Ordinal: 1, Result: &r}}
+	expectR2Refused(t, "bodies_unstorable with bodies present", unstorable)
+
+	// Removing the bodies keeps the digests and counts of what was there.
+	for name, mk := range map[string]func() R2{
+		"removed": func() R2 {
+			k := removed
+			r := *j.Steps[0].Result
+			r.Stdout, r.Stderr = nil, nil
+			k.Steps = []JobStep{{Ordinal: 1, Result: &r}}
+			return k
+		},
+		"unstorable": func() R2 {
+			k := j
+			r := *j.Steps[0].Result
+			r.Stdout, r.Stderr, r.BodiesUnstorable = nil, nil, true
+			k.Steps = []JobStep{{Ordinal: 1, Result: &r}}
+			return k
+		},
+	} {
+		b, err := EncodeR2(mk())
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if _, err := DecodeR2(b); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+	}
+}
+
+func TestR2RetainedBodiesMatchTheirMetadata(t *testing.T) {
+	mutate := func(f func(*StepResult)) R2 {
+		j := smallCapJob(t, MaxStreamOutputBytes)
+		r := retained([]byte("ok <\xff>\n"), nil)
+		f(r)
+		j.Steps[0].Result = r
+		return j
+	}
+	if _, err := EncodeR2(mutate(func(*StepResult) {})); err != nil {
+		t.Fatal(err)
+	}
+	cases := map[string]func(*StepResult){
+		"body changed":           func(r *StepResult) { r.Stdout = []byte("ok >\xff<\n") },
+		"stdout digest":          func(r *StepResult) { r.StdoutSHA256 = digestA },
+		"stderr digest":          func(r *StepResult) { r.StderrSHA256 = digestA },
+		"count without truncate": func(r *StepResult) { r.StdoutBytes = 12 },
+		"truncated short count":  func(r *StepResult) { r.Truncated, r.StdoutBytes = true, 3 },
+	}
+	for name, f := range cases {
+		expectR2Refused(t, name, mutate(f))
+	}
+	if _, err := EncodeR2(mutate(func(r *StepResult) { r.Truncated, r.StdoutBytes = true, 1<<20 })); err != nil {
+		t.Fatalf("a truncated stream that produced more than it kept: %v", err)
 	}
 }
