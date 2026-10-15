@@ -89,6 +89,9 @@ func (a *notifyActor) commit(ctx context.Context, cmd ap.Command) (ap.R1, ap.Ans
 		return ap.R1{}, ap.Answer{}, err
 	}
 	if rec == nil {
+		if _, exists := e.projections.records[a.key]; !exists {
+			return ap.R1{}, ap.Answer{Reason: "reclaimed"}, nil
+		}
 		return ap.R1{}, ap.Answer{}, keyError()
 	}
 	after, answer, err := e.commitLocked(a.key, rec, cmd, e.now(), ap.Inputs{})
@@ -238,7 +241,7 @@ func (a *notifyActor) burst(ctx context.Context, session BurstSession) error {
 			if err != nil {
 				return err
 			}
-			if rec.Header.Decision != nil {
+			if rec == nil || rec.Payload == nil || rec.Header.Decision != nil {
 				return nil
 			}
 			ids, sendErr := session.SendParts(ctx, notification(*rec))
@@ -260,7 +263,7 @@ func (a *notifyActor) burst(ctx context.Context, session BurstSession) error {
 			if err != nil {
 				return err
 			}
-			if rec.Header.Decision != nil {
+			if rec == nil || rec.Payload == nil || rec.Header.Decision != nil {
 				return nil
 			}
 			id, sendErr := session.SendCard(ctx, n)

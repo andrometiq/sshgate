@@ -72,6 +72,15 @@ func (e *Engine) Reconcile() error {
 	defer e.mu.Unlock()
 	now := e.now()
 	e.projections.expireGrants(now)
+	for _, key := range e.dueKeys(now) {
+		if err := e.reconcileLocked(key, now); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (e *Engine) dueKeys(now ap.Now) []string {
 	keys := make([]string, 0)
 	for key, due := range e.projections.due {
 		if !now.Wall.Before(due) {
@@ -90,12 +99,7 @@ func (e *Engine) Reconcile() error {
 		}
 		return 0
 	})
-	for _, key := range keys {
-		if err := e.reconcileLocked(key, now); err != nil {
-			return err
-		}
-	}
-	return nil
+	return keys
 }
 
 func (e *Engine) reconcileLocked(key string, now ap.Now) error {
@@ -109,6 +113,29 @@ func (e *Engine) reconcileLocked(key string, now ap.Now) error {
 	work := ap.Next(*rec, now, e.epoch, e.config.Settings, e.projections.grants[key] != nil)
 	if work.Clock {
 		after, answer, err := e.commitLocked(key, rec, ap.Tick{}, now, ap.Inputs{})
+		if err != nil {
+			return err
+		}
+		if err := answerError(answer); err != nil {
+			return err
+		}
+		rec = &after
+	}
+	work = ap.Next(*rec, now, e.epoch, e.config.Settings, e.projections.grants[key] != nil)
+	if work.Delete {
+		_, answer, err := e.commitLocked(key, rec, ap.Delete{}, now, ap.Inputs{})
+		if err != nil {
+			return err
+		}
+		if err := answerError(answer); err != nil {
+			return err
+		}
+		if answer.Removed {
+			return nil
+		}
+	}
+	if work.Shed {
+		after, answer, err := e.commitLocked(key, rec, ap.ShedRecord{}, now, ap.Inputs{})
 		if err != nil {
 			return err
 		}

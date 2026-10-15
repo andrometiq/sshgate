@@ -36,6 +36,7 @@ func startEngine(t *testing.T, e *Engine) {
 
 func TestFlushBatchOrderingAndFailure(t *testing.T) {
 	e, _, store, _ := engineFixture(t)
+	e.config.Caps.LivePerPrincipal, e.config.Caps.LiveTotal = 300, 300
 	// Reverse assist deadlines relative to IDs.
 	for id := 1; id <= 300; id++ {
 		draft := st.JobDraft(st.ID(id), ap.CoordinatorExecutor, st.T0, st.Write("true", 60))

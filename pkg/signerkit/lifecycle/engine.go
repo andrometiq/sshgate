@@ -23,6 +23,7 @@ type Config struct {
 	Notifier           Notifier
 	AuditWriter        AuditWriter // nil leaves the outbox unflushed and Claim gated.
 	XferDigests        XferDigests
+	Caps               Caps // Zero fields use the local defaults.
 	Settings           ap.Settings
 	AssistTimeout      time.Duration
 	AssistPool         *assist.Pool // nil leaves the slot for Clock at its deadline.
@@ -66,6 +67,9 @@ func New(c Config) (*Engine, error) {
 	if c.AssistTimeout == 0 || c.AssistTimeout > 5*time.Second {
 		c.AssistTimeout = 5 * time.Second
 	}
+	if err := c.Caps.defaults(); err != nil {
+		return nil, err
+	}
 	e := &Engine{config: c, effectErrors: make(chan error, 1), projections: newProjections(), flushNudge: make(chan struct{}, 1), flushWaiters: make(map[string]*flushWaiter)}
 	if err := e.startup(); err != nil {
 		return nil, err
@@ -94,6 +98,18 @@ func (e *Engine) load(key string) (*ap.R1, error) {
 // commitLocked is the only record writer. Callers hold mu from the owner-scoped
 // load through impure input resolution and this confirmed projection update.
 func (e *Engine) commitLocked(key string, before *ap.R1, cmd ap.Command, now ap.Now, in ap.Inputs) (ap.R1, ap.Answer, error) {
+	// Apply's Delete checks the stored record without Clock. Persist any due
+	// slots first so deletion cannot bypass their outbox's flush gate.
+	if _, deleting := cmd.(ap.Delete); deleting && before != nil {
+		after, answer, err := e.commitLocked(key, before, ap.Tick{}, now, in)
+		if err != nil {
+			return ap.R1{}, ap.Answer{}, err
+		}
+		if err := answerError(answer); err != nil {
+			return ap.R1{}, ap.Answer{}, err
+		}
+		before = &after
+	}
 	in.Epoch, in.Settings = e.epoch, e.config.Settings
 	in.GrantLive = e.projections.grants[key] != nil
 	after, answer := ap.Apply(before, cmd, now, in)
@@ -165,6 +181,15 @@ func (e *Engine) Submit(ctx context.Context, principal string, draft ap.Approval
 		e.projections.expireGrants(now)
 		in.Grant, err = e.matchGrant(plan)
 		if err != nil {
+			return ap.Summary{}, err
+		}
+		previewInputs := in
+		previewInputs.Epoch, previewInputs.Settings = e.epoch, e.config.Settings
+		candidate, answer := ap.Apply(nil, command, now, previewInputs)
+		if err := answerError(answer); err != nil {
+			return ap.Summary{}, err
+		}
+		if err := e.admitLocked(candidate, now); err != nil {
 			return ap.Summary{}, err
 		}
 	}
