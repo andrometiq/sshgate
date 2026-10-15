@@ -59,6 +59,10 @@ type Request struct {
 	CreatedAt  time.Time
 	ResolvedAt *time.Time
 	ApprovedBy string
+	// ExpiresAt freezes the legacy pending deadline; nil uses CreatedAt + 24h.
+	ExpiresAt *time.Time
+	// TerminalReason is empty, expired, or canceled; it is set only by the legacy CAS.
+	TerminalReason string
 	// RequiredApprovals is the number of distinct approving operators
 	// this request needs before it crosses into approved (the N the
 	// approval state machine reads). It is a MECHANISM input: the value
@@ -317,3 +321,12 @@ var ErrVoteConflict = errors.New("store: conflicting duplicate vote")
 // ErrRequestResolved means a vote claim raced with or followed a terminal
 // transition. No vote row was inserted.
 var ErrRequestResolved = errors.New("store: request already resolved")
+
+// LegacyResolver is an optional extension for hosted v1 expiry and admin cancel.
+// Both methods return whether the pending-only CAS won and all preserved votes
+// (including unaudited votes) for the caller's terminal audit line. A missing or
+// terminal request is a no-op. Expiry also requires ExpiresAt <= now.
+type LegacyResolver interface {
+	ExpireLegacy(ctx context.Context, id string, now time.Time) (bool, []*Vote, error)
+	CancelLegacy(ctx context.Context, id string, now time.Time) (bool, []*Vote, error)
+}
