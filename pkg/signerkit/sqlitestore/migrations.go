@@ -312,6 +312,15 @@ func applyOne(db *sql.DB, m migration) error {
 	}
 	defer conn.Close()
 
+	// Concurrent openers each take the write lock once per migration, so the
+	// last one can wait longer than the request paths' 5 s busy timeout. Give
+	// migrations their own longer wait and restore 5 s before the connection
+	// returns to the pool.
+	if _, err := conn.ExecContext(ctx, `PRAGMA busy_timeout = 60000`); err != nil {
+		return fmt.Errorf("set migration busy timeout: %w", err)
+	}
+	defer func() { _, _ = conn.ExecContext(context.Background(), `PRAGMA busy_timeout = 5000`) }()
+
 	// Take the write reservation explicitly on this one held connection before
 	// either creating or reading the ledger. This closes the simultaneous-first-
 	// opener race that a deferred transaction or pre-transaction snapshot leaves.
