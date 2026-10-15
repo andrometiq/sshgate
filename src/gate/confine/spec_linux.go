@@ -307,7 +307,7 @@ func RunWorker(args []string) int {
 			return fail("lane2id", err)
 		}
 	}
-	err = applyWorkerLandlock(abi, probeErr)
+	err = applyWorkerLandlock(abi, probeErr, lane2.fds(spec.Lane2 != nil))
 	restrictedABI := 0
 	if err == nil {
 		restrictedABI = abi
@@ -315,12 +315,18 @@ func RunWorker(args []string) int {
 	if st, errno := spec.inject(); st == "landlock" {
 		err = errno
 	}
+	// A daemon read's own rule failure (stage lane2id) is never a fault the
+	// landlock-stage mutation may ignore.
+	if setup := (*SetupError)(nil); errors.As(err, &setup) {
+		return fail(setup.Stage, setup.Errno)
+	}
 	if !jailmut.On("P-FAULT-landlock") && err != nil {
 		return fail("landlock", err)
 	}
 	filter := buildFilter(filterParams{
 		allowInet: spec.Net,
 		abi:       abi,
+		lane2:     spec.Lane2 != nil,
 	})
 	err = installSeccomp(filter, spec)
 	if err != nil {
@@ -510,9 +516,9 @@ func workerLandlockABI(force int, probe func() (int, unix.Errno)) (int, unix.Err
 	return abi, errno
 }
 
-func applyWorkerLandlock(abi int, probeErr unix.Errno) error {
+func applyWorkerLandlock(abi int, probeErr unix.Errno, lane2 *lane2FDs) error {
 	if abi < 1 && !jailmut.On("P-LL-REQUIRED") {
 		return probeErr
 	}
-	return applyLandlock(abi, writableSet())
+	return applyLandlock(abi, writableSet(), lane2)
 }

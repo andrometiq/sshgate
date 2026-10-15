@@ -16,6 +16,21 @@ type lane2Opened struct {
 	sockets        []*os.File
 }
 
+// fds is the Landlock view of the opened objects; nil for a plain read.
+func (o lane2Opened) fds(isLane2 bool) *lane2FDs {
+	if !isLane2 {
+		return nil
+	}
+	fds := &lane2FDs{binary: int(o.binary.Fd()), interp: -1}
+	if o.interp != nil {
+		fds.interp = int(o.interp.Fd())
+	}
+	for _, socket := range o.sockets {
+		fds.sockets = append(fds.sockets, int(socket.Fd()))
+	}
+	return fds
+}
+
 func (o lane2Opened) close() {
 	for _, file := range append([]*os.File{o.binary, o.interp}, o.sockets...) {
 		if file != nil {

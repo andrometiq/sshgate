@@ -81,8 +81,59 @@ func probeLandlockABI() (int, unix.Errno) {
 	return int(abi), 0
 }
 
-// applyLandlock requires Landlock even when mounts provide another wall.
-func applyLandlock(abi int, writable []string) error {
+// lane2FDs are a daemon read's admitted inodes, opened inside the jail's view:
+// the client binary, its interpreter (-1 for a static client) and its sockets.
+type lane2FDs struct {
+	binary, interp int
+	sockets        []int
+}
+
+// landlockRule grants rights beneath path, or, when fd >= 0, on the inode fd
+// already names (a daemon read's checked object, never walked again).
+type landlockRule struct {
+	path     string
+	fd       int
+	rights   uint64
+	optional bool // a missing path is skipped
+}
+
+// landlockPlan is the jail's Landlock rules: reads beneath /, writes beneath the
+// writable set, and for a daemon read (lane2 != nil) EXECUTE only on its client
+// and interpreter and, from ABI 9, Unix-socket connects only to its sockets.
+// The daemon-read rules come last; a failure adding one is stage lane2id.
+func landlockPlan(abi int, writable []string, lane2 *lane2FDs) []landlockRule {
+	read, write := readRights(), writeRights(abi)
+	if lane2 != nil {
+		read &^= unix.LANDLOCK_ACCESS_FS_EXECUTE
+		write &^= unix.LANDLOCK_ACCESS_FS_EXECUTE
+	}
+	if jailmut.On("P-LL-FS") {
+		read = handledFS(abi)
+	}
+	rules := []landlockRule{{path: "/", fd: -1, rights: read}}
+	for _, path := range writable {
+		rules = append(rules, landlockRule{path: path, fd: -1, rights: write, optional: true})
+	}
+	if lane2 == nil {
+		return rules
+	}
+	execute := uint64(unix.LANDLOCK_ACCESS_FS_EXECUTE | unix.LANDLOCK_ACCESS_FS_READ_FILE)
+	rules = append(rules, landlockRule{fd: lane2.binary, rights: execute})
+	if lane2.interp >= 0 {
+		rules = append(rules, landlockRule{fd: lane2.interp, rights: execute})
+	}
+	if abi >= 9 {
+		for _, socket := range lane2.sockets {
+			rules = append(rules, landlockRule{fd: socket, rights: landlockAccessFSResolveUnix})
+		}
+	}
+	return rules
+}
+
+// applyLandlock requires Landlock even when mounts provide another wall. The
+// ruleset and its shared rules are stage landlock; a daemon read's own rules
+// are stage lane2id, so they can never make the jail look Absent.
+func applyLandlock(abi int, writable []string, lane2 *lane2FDs) error {
 	if abi < 1 {
 		if jailmut.On("P-LL-REQUIRED") {
 			return nil
@@ -98,25 +149,31 @@ func applyLandlock(abi int, writable []string) error {
 	}
 	defer unix.Close(int(rfd))
 
-	// Reads everywhere.
-	rights := readRights()
-	if jailmut.On("P-LL-FS") {
-		rights = handledFS(abi)
-	}
-	if err := addLandlockRule(rfd, "/", rights, false); err != nil {
-		return err
-	}
-	// Writes only beneath the writable set. A missing path (e.g. a host without
-	// /var/tmp) is skipped; any other open error aborts.
-	wr := writeRights(abi)
-	for _, p := range writable {
-		if err := addLandlockRule(rfd, p, wr, true); err != nil {
+	for _, rule := range landlockPlan(abi, writable, lane2) {
+		if rule.fd >= 0 {
+			if err := addLandlockRuleFD(rfd, rule.fd, rule.rights); err != nil {
+				return &SetupError{Stage: "lane2id", Errno: errnoOf(err)}
+			}
+			continue
+		}
+		if err := addLandlockRule(rfd, rule.path, rule.rights, rule.optional); err != nil {
 			return err
 		}
 	}
 
 	if _, _, errno := unix.Syscall(uintptr(unix.SYS_LANDLOCK_RESTRICT_SELF), rfd, 0, 0); errno != 0 {
 		return fmt.Errorf("landlock restrict self: %w", errno)
+	}
+	return nil
+}
+
+// addLandlockRuleFD grants file rights on the inode fd names.
+func addLandlockRuleFD(rfd uintptr, fd int, rights uint64) error {
+	pb := unix.LandlockPathBeneathAttr{Allowed_access: rights & landlockFileRights, Parent_fd: int32(fd)}
+	_, _, errno := unix.Syscall6(uintptr(unix.SYS_LANDLOCK_ADD_RULE), rfd,
+		uintptr(unix.LANDLOCK_RULE_PATH_BENEATH), uintptr(unsafe.Pointer(&pb)), 0, 0, 0)
+	if errno != 0 {
+		return errno
 	}
 	return nil
 }

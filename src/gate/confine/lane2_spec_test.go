@@ -162,6 +162,25 @@ func TestLane2StagesFailed(t *testing.T) {
 	}
 }
 
+// TestLane2RuleFailureIsLane2id: a failure adding a daemon read's own Landlock
+// rule reports stage lane2id (always Failed), never landlock, and returns
+// before restrict_self, so this test's process stays unconfined.
+func TestLane2RuleFailureIsLane2id(t *testing.T) {
+	abi, errno := probeLandlockABI()
+	if abi < 1 {
+		t.Skipf("no Landlock here: %v", errno)
+	}
+	closed := 1 << 20
+	err := applyLandlock(abi, writableSet(), &lane2FDs{binary: closed, interp: -1})
+	var setup *SetupError
+	if !errors.As(err, &setup) || setup.Stage != "lane2id" || setup.Errno != syscall.EBADF {
+		t.Fatalf("err = %v, want stage lane2id EBADF", err)
+	}
+	if ClassifySetupFailure(setup.Stage, setup.Errno, HostFacts{LandlockABI: -1, LandlockErrno: syscall.ENOSYS}) != Failed {
+		t.Fatal("a daemon-read rule failure classified Absent")
+	}
+}
+
 // TestStrictSpecDecodeLane2: the worker's decoder takes a daemon-read Spec
 // exactly, and never the held files or an unknown field.
 func TestStrictSpecDecodeLane2(t *testing.T) {

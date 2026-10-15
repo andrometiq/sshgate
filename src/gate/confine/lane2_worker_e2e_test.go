@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -62,6 +63,22 @@ func lane2Client(t *testing.T, path, socket string) *Lane2 {
 	file, id := lane2Held(t, socket, unix.O_PATH)
 	l.Sockets = []Endpoint{{Path: socket, ID: id, File: file}}
 	return l
+}
+
+// lane2MemfdClient builds a client that reports memfd_create's result.
+func lane2MemfdClient(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	source, binary := filepath.Join(dir, "memfd.c"), filepath.Join(dir, "memfd")
+	program := "#define _GNU_SOURCE\n#include <errno.h>\n#include <stdio.h>\n#include <string.h>\n#include <sys/mman.h>\n" +
+		"int main(void) { int fd = memfd_create(\"sg\", 0); printf(\"memfd:%s\\n\", fd < 0 ? strerror(errno) : \"created\"); return 0; }\n"
+	if err := os.WriteFile(source, []byte(program), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if output, err := exec.Command("cc", "-O2", "-o", binary, source).CombinedOutput(); err != nil {
+		t.Fatalf("SETUP: cc: %v: %s", err, output)
+	}
+	return binary
 }
 
 // lane2Listen binds a listener at dir/name.
@@ -142,6 +159,47 @@ func TestLane2WorkerJail(t *testing.T) {
 			defer again.Close()
 			if got := run(replaced, "--"); stage(got) != "lane2id:"+syscall.ESTALE.Error() || got.stdout != "" {
 				t.Errorf("replaced socket: %s %q", stage(got), got.stdout)
+			}
+
+			// Narrow EXECUTE: the admitted client cannot run another program.
+			got := run(lane2Client(t, "/usr/bin/env", socket), "/usr/bin/true")
+			if got.setupErr != nil || got.exit != 126 || !strings.Contains(got.stderr, "Permission denied") {
+				t.Errorf("client exec of another program: exit=%d setup=%v stderr=%q", got.exit, got.setupErr, got.stderr)
+			}
+
+			// A daemon read cannot create a memfd (no anonymous executable past
+			// narrow EXECUTE).
+			if got := run(lane2Client(t, lane2MemfdClient(t), socket), "--"); got.setupErr != nil || got.stdout != "memfd:Operation not permitted\n" {
+				t.Errorf("memfd_create in a daemon read: setup=%v stdout=%q stderr=%q", got.setupErr, got.stdout, got.stderr)
+			}
+
+			// A daemon read reaches its admitted daemon over a Unix stream socket,
+			// and, from Landlock ABI 9, no other socket.
+			systemctl := func(sockets ...string) jailResult {
+				l := lane2Client(t, "/usr/bin/systemctl", sockets[0])
+				l.Client = "systemctl"
+				for _, path := range sockets[1:] {
+					file, id := lane2Held(t, path, unix.O_PATH)
+					l.Sockets = append(l.Sockets, Endpoint{Path: path, ID: id, File: file})
+				}
+				spec := Spec{Profile: ProfileROv1, Cwd: "/", ForceABI: abi, Lane2: l}
+				return runJailedTimeout(t, spec, EncodeArgv([]string{"/usr/bin/systemctl", "--no-pager", "is-system-running"}), 30*time.Second)
+			}
+			endpoints := []string{"/run/dbus/system_bus_socket"}
+			if os.Geteuid() == 0 {
+				endpoints = append(endpoints, "/run/systemd/private")
+			}
+			direct := exec.Command("/usr/bin/systemctl", "--no-pager", "is-system-running")
+			direct.Env, direct.Dir = Lane2Env(), "/"
+			want, _ := direct.Output()
+			if got := systemctl(endpoints...); got.setupErr != nil || got.stdout != string(want) || strings.Contains(got.stderr, "Failed to connect") {
+				t.Errorf("admitted daemon: stdout=%q want %q setup=%v stderr=%q", got.stdout, want, got.setupErr, got.stderr)
+			}
+			native, _ := probeLandlockABI()
+			got = systemctl(socket)
+			// systemd words the refusal differently across versions.
+			if pinned := abi == 0 && native >= 9; pinned != strings.Contains(got.stderr, "Failed to connect") || pinned == (got.stdout == string(want)) {
+				t.Errorf("unadmitted daemon at ABI %d (pinned=%t): stdout=%q stderr=%q", native, pinned, got.stdout, got.stderr)
 			}
 		})
 	}
