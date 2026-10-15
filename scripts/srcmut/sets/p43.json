@@ -17,5 +17,24 @@
     "green": [
       "TestHostedServerBackend_RejectsReveal"
     ]
+  },
+  {
+    "id": "P-S-GRANT-NET",
+    "name": "grant-net-guard",
+    "package": "./src/signer",
+    "file": "pkg/signerkit/daemon.go",
+    "old": "if c.Reveal || c.Net || isAdminVerb(c.Cmd) {",
+    "new": "if c.Reveal || isAdminVerb(c.Cmd) {",
+    "red": [
+      {
+        "test": "TestMatchGrantNeverAutoSignsNet",
+        "markers": [
+          "MUTATION-EFFECT grant-autosigned-net"
+        ]
+      }
+    ],
+    "green": [
+      "TestGrant_RevealNeverAutoSigned"
+    ]
   }
 ]

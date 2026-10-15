@@ -6,7 +6,6 @@ import (
 	"context"
 	"encoding/json"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -88,44 +87,6 @@ type countingBackend struct {
 func (b *countingBackend) Request(ctx context.Context, req ApprovalRequest) (<-chan Result, error) {
 	b.requests.Add(1)
 	return b.MockBackend.Request(ctx, req)
-}
-
-// TestSignNetInterimRefused proves this signer refuses a sign request asking
-// for network before any approval or signing, and audits the refusal.
-// P4.3 replaces the interim refusal (and this test).
-func TestSignNetInterimRefused(t *testing.T) {
-	backend := &countingBackend{MockBackend: NewMockBackend()}
-	backend.Approve("r_net_wire", "operator")
-	priv, _ := goldenSignerKey()
-	auditPath := filepath.Join(t.TempDir(), "audit.jsonl")
-	audit, err := OpenAuditLog(auditPath)
-	if err != nil {
-		t.Fatalf("open audit: %v", err)
-	}
-	t.Cleanup(func() { audit.Close() })
-	d := &Daemon{Key: priv, Backend: backend, Audit: audit, NowFunc: goldenNow}
-
-	var resp signResponse
-	if err := json.Unmarshal([]byte(driveGolden(t, d, clientRequestNet)), &resp); err != nil {
-		t.Fatalf("decode response: %v", err)
-	}
-	if resp.Status != "error" || !strings.HasPrefix(resp.Error, sigwire.SignerNetUnsupported) {
-		t.Errorf("response = %+v; want status error with %q", resp, sigwire.SignerNetUnsupported)
-	}
-	if len(resp.Signatures) != 0 {
-		t.Errorf("refusal carried %d signatures", len(resp.Signatures))
-	}
-	if n := backend.requests.Load(); n != 0 {
-		t.Errorf("backend asked for approval %d times; want 0", n)
-	}
-
-	rows := readAuditRows(t, auditPath)
-	if len(rows) != 1 {
-		t.Fatalf("audit rows = %d; want 1: %+v", len(rows), rows)
-	}
-	if rows[0].Status != "error" || rows[0].RequestID != "r_net_wire" {
-		t.Errorf("audit row = %+v; want status error for r_net_wire", rows[0])
-	}
 }
 
 func readAuditRows(t *testing.T, path string) []AuditEvent {
