@@ -142,6 +142,9 @@ type SignerAnswer struct {
 // retried; a definitive one ends the job. It returns the command to commit
 // (nil for none) and the actor's updated memory.
 func JobOnAnswer(job R2, mem JobMemory, act JobAction, ans SignerAnswer) (JobCommand, JobMemory) {
+	if !ans.Lost && (ans.Code != "" && !ans.Code.Valid() || ans.Code == "" && !validSignerSuccess(job, act, ans)) {
+		ans.Code = CodeSignerIncompatible
+	}
 	if ans.Lost || ans.Code.Retryable() {
 		return nil, mem
 	}
@@ -152,8 +155,6 @@ func JobOnAnswer(job R2, mem JobMemory, act JobAction, ans SignerAnswer) (JobCom
 			return SetOutcome{Outcome: JobOutcome{Kind: OutcomeApprovalLost}}, mem
 		case ans.Code != "":
 			return SetOutcome{Outcome: JobOutcome{Kind: OutcomeJobError, Code: ans.Code}}, mem
-		case !ValidSHA256Hex(ans.PlanHash):
-			return nil, mem
 		}
 		mem.Approved = mem.Approved || ans.Decision == ApprovalApproved
 		return SignerAck{PlanHash: ans.PlanHash}, mem
@@ -175,6 +176,33 @@ func JobOnAnswer(job R2, mem JobMemory, act JobAction, ans SignerAnswer) (JobCom
 		return SettleReport{Result: ReportResult{State: ReportAcked}}, mem
 	}
 	return nil, mem
+}
+
+func validSignerSuccess(job R2, act JobAction, ans SignerAnswer) bool {
+	switch act.Kind {
+	case JobActSubmit:
+		return ValidSHA256Hex(ans.PlanHash) && ans.Decision.Valid()
+	case JobActObserve:
+		return ans.Decision.Valid()
+	case JobActClaim:
+		if !ans.Claim.Valid() {
+			return false
+		}
+		if ans.Claim == ClaimExecutionReported {
+			return ans.Class.Valid()
+		}
+		if ans.Claim == ClaimSignatures {
+			if ans.DecidedAt.IsZero() || len(ans.Windows) != len(job.Steps) {
+				return false
+			}
+			for i, end := range ans.Windows {
+				if stepSigned(job, i+1) && end.IsZero() {
+					return false
+				}
+			}
+		}
+	}
+	return true
 }
 
 func adoptDecision(d ApprovalStatus) JobCommand {

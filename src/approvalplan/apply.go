@@ -304,7 +304,12 @@ func Apply(rec *R1, cmd Command, now Now, in Inputs) (R1, Answer) {
 	}
 	c := begin(*rec, now, in.Epoch)
 	c.clock()
+	clocked := begin(c.rec, c.now, c.epoch)
+	clocked.changed = c.changed
 	ans := c.apply(cmd, in)
+	if ans.Code != "" && !ans.Noise {
+		c = clocked
+	}
 	if ans.MintRequired {
 		return *rec, Answer{MintRequired: true}
 	}
@@ -324,7 +329,7 @@ func (c *change) apply(cmd Command, in Inputs) Answer {
 	case AssistDone:
 		return c.assistDone(cmd)
 	case CastVote:
-		return c.vote(cmd)
+		return c.vote(cmd, in.Settings.Hosted)
 	case AdminCancel:
 		return c.adminCancel(cmd)
 	case Revoke:
@@ -480,7 +485,7 @@ func (c *change) assistDone(a AssistDone) Answer {
 
 // vote applies one tap or POST (SA-4 Vote). Every guard is judged after
 // Clock; a vote that fails one is recorded as exactly one noise event.
-func (c *change) vote(v CastVote) Answer {
+func (c *change) vote(v CastVote, hosted bool) Answer {
 	if !ValidOperatorID(v.Operator) || (v.Decision != VoteApprove && v.Decision != VoteDeny) ||
 		!isEventToken(v.Authn, MaxAuthnBytes) || (v.Card == nil) == (v.Hosted == nil) {
 		return Answer{Code: CodeInvalidRequest, Reason: "vote: operator, decision, authn and exactly one challenge are required"}
@@ -493,7 +498,7 @@ func (c *change) vote(v CastVote) Answer {
 		}
 		return c.noise(EventVoteRefused, v.Operator, v.Decision, resolvedReason(h.Decision.Status))
 	}
-	if reason := c.challengeRefusal(v); reason != "" {
+	if reason := c.challengeRefusal(v, hosted); reason != "" {
 		return c.noise(EventVoteRefused, v.Operator, v.Decision, reason)
 	}
 	if voted {
@@ -533,9 +538,12 @@ func resolvedReason(s ApprovalStatus) string {
 
 // challengeRefusal judges a tap's challenge against the record after Clock
 // (SA-6.1); "" means valid.
-func (c *change) challengeRefusal(v CastVote) string {
+func (c *change) challengeRefusal(v CastVote, hosted bool) string {
 	_, rev, digest := assistView(c.rec.Header)
 	if t := v.Hosted; t != nil {
+		if !hosted {
+			return "stale_challenge"
+		}
 		switch {
 		case t.Refusal != "":
 			if !isEventToken(t.Refusal, MaxDetailBytes) {
@@ -656,7 +664,7 @@ func deleteAllowed(rec R1, now Now, s Settings, grantLive, pressure bool) bool {
 		return false
 	}
 	if pressure {
-		return true
+		return !s.Hosted || s.MaxAge > 0
 	}
 	at, ok := deleteAt(h, s)
 	return ok && !now.Wall.Before(at)

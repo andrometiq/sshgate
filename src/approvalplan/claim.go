@@ -32,10 +32,7 @@ func decisionAudited(h R1Header) bool {
 	return h.Decision != nil && !slices.ContainsFunc(h.Outbox, func(e OutboxEvent) bool { return e.Kind == EventDecision })
 }
 
-// claim is the Claim answer, a total function of the record after Clock
-// (SA-4 Claim), in SA-4's precedence: the two expired rows ahead of the flush
-// gate, then not_ready, the terminal decisions, a final report, a mint error,
-// a repeat Claim, and the first Claim, which mints inside this commit.
+// claim authenticates first; an accepted final report survives expiry and erasure.
 func (c *change) claim(cl Claim, in Inputs) Answer {
 	h := &c.rec.Header
 	if !tokenMatches(*h, cl.Token, cl.PlanHash) {
@@ -45,6 +42,8 @@ func (c *change) claim(cl Claim, in Inputs) Answer {
 	}
 	m := h.Mint
 	switch {
+	case h.FinalReport != nil:
+		return Answer{Claim: ClaimExecutionReported, Class: h.FinalReport.Class}
 	case m != nil && m.State == MintError && m.Reason == MintReasonWindowClosed,
 		m != nil && m.State == MintSignatures && !bytesHeld(c.rec):
 		return Answer{Claim: ClaimExpired}
@@ -52,8 +51,6 @@ func (c *change) claim(cl Claim, in Inputs) Answer {
 		return Answer{Claim: ClaimNotReady}
 	case h.Decision.Status != ApprovalApproved:
 		return Answer{Claim: ClaimStatus(h.Decision.Status)}
-	case h.FinalReport != nil:
-		return Answer{Claim: ClaimExecutionReported, Class: h.FinalReport.Class}
 	case m != nil && m.State == MintError:
 		return Answer{Claim: ClaimMaterializationError, Reason: m.Reason}
 	case m != nil:

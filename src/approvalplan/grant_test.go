@@ -143,3 +143,66 @@ func TestHeldPair(t *testing.T) {
 		t.Fatalf("a wall end already passed acquires %s", past.ElapsedEnd)
 	}
 }
+
+func TestGrantCoverageBindings(t *testing.T) {
+	for _, name := range []string{"matching", "fingerprint", "reveal", "admin route", "admin bytes", "outside scope", "sub principal", "principal", "shed"} {
+		t.Run(name, func(t *testing.T) {
+			r := newRig(t)
+			gkey := r.grant(st.ID(1), st.PrincipalA, time.Hour)
+			g := r.rec(gkey)
+			key := r.submit(st.ID(2), ap.CoordinatorExecutor, st.Write("w", 60))
+			rec := r.rec(key)
+			step := &rec.Payload.Plan.CommandJob.Steps[0]
+			switch name {
+			case "fingerprint":
+				step.Target.TrustedHostFingerprint = st.Fingerprint("other")
+			case "reveal":
+				step.Route = ap.RouteSignedReveal
+			case "admin route":
+				step.Route = ap.RouteSignedAdmin
+			case "admin bytes":
+				step.ExactCommand = "SSHGATE_REVOKE"
+			case "outside scope":
+				g.Payload.Plan.StandingGrant.Scope = ap.GrantScopeCommands
+				g.Payload.Plan.StandingGrant.Commands = []string{"different"}
+			case "sub principal":
+				rec.Header.SubPrincipal = "local-uid:1002"
+			case "principal":
+				rec.Header.Principal = st.PrincipalB
+			case "shed":
+				g = ap.Shed(g)
+			}
+			if got := ap.GrantCovers(g, rec); got != (name == "matching") {
+				t.Fatalf("coverage=%v", got)
+			}
+		})
+	}
+	for _, name := range []string{"expired", "revoked", "other epoch", "superseded"} {
+		t.Run(name, func(t *testing.T) {
+			r := newRig(t)
+			gkey := r.grant(st.ID(1), st.PrincipalA, time.Minute)
+			if name == "expired" {
+				r.clock.Advance(50 * time.Second)
+			}
+			key := r.submit(st.ID(2), ap.CoordinatorExecutor, st.Write("w", 60))
+			r.s.FlushPass()
+			if r.rec(key).Header.Decision == nil {
+				t.Fatal("not grant decided")
+			}
+			switch name {
+			case "expired":
+				r.clock.Advance(11 * time.Second)
+			case "revoked":
+				r.s.RevokeAlias("web-1")
+			case "other epoch":
+				r.s.NewEpoch()
+			case "superseded":
+				r.grant(st.ID(3), st.PrincipalA, time.Hour)
+			}
+			a := r.claim(key, st.ID(2))
+			if a.Claim != ap.ClaimMaterializationError || a.Reason != ap.MintReasonGrantNotLive {
+				t.Fatalf("grant=%s answer=%+v", gkey, a)
+			}
+		})
+	}
+}

@@ -413,3 +413,20 @@ func TestFlushRetry(t *testing.T) {
 		}
 	}
 }
+
+func TestPressureDeletionHostedAgeSetting(t *testing.T) {
+	for _, hosted := range []bool{false, true} {
+		for _, age := range []time.Duration{0, time.Hour} {
+			r := newRig(t)
+			key := r.submit(st.ID(1), ap.CoordinatorExecutor, st.Write("w", 60))
+			r.s.Cancel(key)
+			r.s.FlushPass()
+			r.clock.Advance(ap.SubmitWindowMax + ap.DeleteFloor + time.Second)
+			rec := r.rec(key)
+			_, ans := ap.Apply(&rec, ap.Delete{Pressure: true}, r.clock.Now(), ap.Inputs{Epoch: r.s.Epoch, Settings: ap.Settings{Hosted: hosted, MaxAge: age}})
+			if ans.Removed != (!hosted || age > 0) {
+				t.Fatalf("hosted=%v age=%s: %+v", hosted, age, ans)
+			}
+		}
+	}
+}

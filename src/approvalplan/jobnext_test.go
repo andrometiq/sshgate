@@ -1,6 +1,7 @@
 package approvalplan_test
 
 import (
+	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"slices"
@@ -418,6 +419,8 @@ func TestJobDeletionPredicate(t *testing.T) {
 		j.do(ap.MarkStep{Ordinal: 1})
 		r := result(ap.StepSucceeded)
 		r.Stdout, r.StdoutBytes = []byte("ok\n"), 3
+		digest := sha256.Sum256(r.Stdout)
+		r.StdoutSHA256 = hex.EncodeToString(digest[:])
 		j.do(ap.RecordResult{Ordinal: 1, Result: r})
 		return j
 	}
@@ -491,6 +494,89 @@ func TestJobReportSplit(t *testing.T) {
 		}
 		if !c.settled && mustJSON(t, j.next().Report) != mustJSON(t, act.Report) {
 			t.Fatal("the resent report differs")
+		}
+	}
+}
+
+func TestRemoveBodiesRechecksCommitAge(t *testing.T) {
+	j := newJob(t, ap.StopNever, st.Write("w", 60))
+	j.approve()
+	j.answer(j.next(), j.signatures(j.now.Wall))
+	_, j.mem = ap.JobOnCheck(j.mem, 1, true)
+	j.do(ap.MarkStep{Ordinal: 1})
+	r := result(ap.StepSucceeded)
+	r.Stdout = []byte("ok\n")
+	r.StdoutBytes = 3
+	digest := sha256.Sum256(r.Stdout)
+	r.StdoutSHA256 = hex.EncodeToString(digest[:])
+	j.do(ap.RecordResult{Ordinal: 1, Result: r})
+	final := *j.job.FinalAt
+	planned := ap.JobRetention(j.job, ap.Now{Wall: final.Add(ap.BodyRetention)}, false)
+	for _, tc := range []struct {
+		name      string
+		cmd       ap.JobCommand
+		age       time.Duration
+		delivered bool
+		want      bool
+	}{
+		{"clock back", planned, ap.BodyRetention - time.Hour, false, false},
+		{"at age", planned, ap.BodyRetention, false, true},
+		{"unknown", ap.RemoveBodies{Cause: "bogus"}, ap.BodyRetention, false, false},
+		{"undelivered", ap.RemoveBodies{Cause: ap.BodiesRemovedBudget}, ap.BodyRetention, false, false},
+		{"delivery too new", ap.RemoveBodies{Cause: ap.BodiesRemovedBudget}, ap.BodyPressureMinAge - time.Second, true, false},
+		{"delivery old", ap.RemoveBodies{Cause: ap.BodiesRemovedBudget}, ap.BodyPressureMinAge, true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			job := j.job
+			if tc.delivered {
+				job.FirstDeliveredAt = &final
+			}
+			after, a := ap.ApplyJob(job, tc.cmd, ap.Now{Wall: final.Add(tc.age)}, j.ep)
+			if a.Changed != tc.want || (len(after.Steps[0].Result.Stdout) == 0) != tc.want {
+				t.Fatalf("%+v", a)
+			}
+		})
+	}
+}
+
+func TestMalformedSignerAnswersAreDefinitive(t *testing.T) {
+	j := newJob(t, ap.StopNever, st.Write("w", 60))
+	for _, kind := range []ap.JobActionKind{ap.JobActSubmit, ap.JobActObserve, ap.JobActClaim, ap.JobActReport} {
+		job := j.job
+		if kind == ap.JobActReport {
+			final := newJob(t, ap.StopNever, st.Write("w", 60))
+			final.approve()
+			final.runStep(final.signatures(final.now.Wall), ap.StepSucceeded, 0)
+			job = final.job
+		}
+		cmd, _ := ap.JobOnAnswer(job, j.mem, ap.JobAction{Kind: kind, Step: 1}, ap.SignerAnswer{Code: "unknown"})
+		after, a := ap.ApplyJob(job, cmd, j.now, j.ep)
+		if kind == ap.JobActReport {
+			if !a.Changed || after.ReportResult == nil || after.ReportResult.State != ap.ReportRefused || after.ReportResult.Code != ap.CodeSignerIncompatible || ap.JobNext(after, j.now, j.ep, ap.JobMemory{}).Kind != ap.JobActNone {
+				t.Fatalf("report did not settle: %+v %+v", after.ReportResult, a)
+			}
+			continue
+		}
+		if !a.Changed || after.Outcome == nil || after.Outcome.Code != ap.CodeSignerIncompatible {
+			t.Fatalf("%s: %+v %+v", kind, cmd, a)
+		}
+	}
+	for _, tc := range []struct {
+		kind ap.JobActionKind
+		ans  ap.SignerAnswer
+	}{
+		{ap.JobActSubmit, ap.SignerAnswer{Decision: ap.ApprovalPending}},
+		{ap.JobActSubmit, ap.SignerAnswer{PlanHash: "bad", Decision: ap.ApprovalPending}},
+		{ap.JobActObserve, ap.SignerAnswer{Decision: "unknown"}},
+		{ap.JobActClaim, ap.SignerAnswer{Claim: "unknown"}},
+		{ap.JobActClaim, ap.SignerAnswer{Claim: ap.ClaimExecutionReported}},
+		{ap.JobActClaim, ap.SignerAnswer{Claim: ap.ClaimExecutionReported, Class: "unknown"}},
+		{ap.JobActClaim, ap.SignerAnswer{Claim: ap.ClaimSignatures}},
+	} {
+		cmd, _ := ap.JobOnAnswer(j.job, j.mem, ap.JobAction{Kind: tc.kind, Step: 1}, tc.ans)
+		after, a := ap.ApplyJob(j.job, cmd, j.now, j.ep)
+		if !a.Changed || after.Outcome == nil || after.Outcome.Code != ap.CodeSignerIncompatible || ap.JobNext(after, j.now, j.ep, ap.JobMemory{}).Kind != ap.JobActNone {
+			t.Fatalf("%+v did not end job: %+v %+v", tc, after.Outcome, a)
 		}
 	}
 }

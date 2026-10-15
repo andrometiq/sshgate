@@ -271,8 +271,20 @@ func ApplyJob(job R2, cmd JobCommand, now Now, epoch string) (R2, JobAnswer) {
 		}
 		next.FirstDeliveredAt = &at
 	case RemoveBodies:
-		if !wasFinal || job.BodiesRemoved != nil || !hasBodies(job) {
+		if !wasFinal || job.FinalAt == nil || job.BodiesRemoved != nil || !hasBodies(job) {
 			return refuse("not_due")
+		}
+		switch cmd.Cause {
+		case BodiesRemovedAge:
+			if now.Wall.Before(job.FinalAt.Add(BodyRetention)) {
+				return refuse("not_due")
+			}
+		case BodiesRemovedBudget:
+			if job.FirstDeliveredAt == nil || now.Wall.Before(job.FirstDeliveredAt.Add(BodyPressureMinAge)) {
+				return refuse("not_due")
+			}
+		default:
+			return refuse("unsupported cause")
 		}
 		for i, s := range next.Steps {
 			if s.Result != nil {

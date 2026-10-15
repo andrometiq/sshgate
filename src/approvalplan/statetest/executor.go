@@ -16,6 +16,7 @@ type Gate struct {
 	Start      time.Time
 	Dispatches map[string]int
 	Refused    int
+	Checked    int
 }
 
 // Executor is the model executor: a durable store of R2 jobs, each job's
@@ -203,9 +204,11 @@ func (e *Executor) dispatch(key string, mem ap.JobMemory, act ap.JobAction) {
 		e.applyJob(key, ap.RecordResult{Ordinal: act.Step, Result: ap.NoOutputResult(ap.StepExpiredUnexecuted, "")})
 		return
 	}
+	e.Signer.checkReleaseAuthority(ap.RecordKey(e.Principal, job.RequestID))
 	e.Gate.Dispatches[fmt.Sprintf("%s/%d", key, act.Step)]++
 	status, exit := ap.StepSucceeded, 0
 	if act.Signed {
+		e.Gate.Checked++
 		gateNow := e.Gate.Start.Add(e.Clock.Elapsed)
 		if exp := mem.Held[act.Step].WallEnd; !gateNow.Before(exp) {
 			e.Gate.Refused++

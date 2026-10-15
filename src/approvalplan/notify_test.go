@@ -307,3 +307,50 @@ func TestDuplicateTapsAreNoise(t *testing.T) {
 	}
 	r.clock.Advance(time.Second)
 }
+
+func TestRefusedNotifyPreservesOnlyClock(t *testing.T) {
+	t.Run("card outcome", func(t *testing.T) {
+		r := newRig(t)
+		key := r.submit(st.ID(1), ap.CoordinatorExecutor, st.Write("w", 60))
+		r.apply(key, ap.BurstStart{})
+		r.apply(key, ap.BurstDone{PartMsgIDs: []int64{1}})
+		h, c := r.s.NewCard()
+		r.apply(key, ap.CardStart{Handle: h, ChalHash: c})
+		r.clock.Advance(st.AssistTimeout)
+		before := r.rec(key)
+		want, _ := ap.Clock(before, r.now(), r.s.Epoch)
+		after, a := ap.Apply(&before, ap.CardDone{Handle: h, MsgID: 0}, r.now(), ap.Inputs{Epoch: r.s.Epoch, Settings: r.s.Settings})
+		gotBytes, _ := ap.EncodeR1(after)
+		wantBytes, _ := ap.EncodeR1(want)
+		if a.Code != ap.CodeInvalidRequest || !a.Changed || string(gotBytes) != string(wantBytes) {
+			t.Fatalf("refusal changed card or lost Clock: %+v", a)
+		}
+	})
+	t.Run("edit supersession", func(t *testing.T) {
+		r := newRig(t)
+		key := r.submit(st.ID(1), ap.CoordinatorExecutor, st.Write("w", 60))
+		r.s.Reconcile(key)
+		r.s.AssistArrives(key, false)
+		h, c := r.s.NewCard()
+		r.apply(key, ap.EditStart{Handle: h, ChalHash: c})
+		r.s.NewEpoch()
+		before := r.rec(key)
+		after, a := ap.Apply(&before, ap.EditStart{Handle: "bad"}, r.now(), ap.Inputs{Epoch: r.s.Epoch, Settings: r.s.Settings})
+		x, _ := ap.EncodeR1(before)
+		y, _ := ap.EncodeR1(after)
+		if a.Code != ap.CodeInvalidRequest || a.Changed || string(x) != string(y) {
+			t.Fatalf("refused edit retired entry: %+v", a)
+		}
+	})
+}
+
+func TestHostedTapRefusedLocally(t *testing.T) {
+	r := newRig(t)
+	key := r.submit(st.ID(1), ap.CoordinatorExecutor, st.Write("w", 60))
+	r.s.AssistArrives(key, false)
+	rec := r.rec(key)
+	a := r.apply(key, ap.CastVote{Operator: st.Operator, Decision: ap.VoteApprove, Authn: "hosted", Flags: ap.LocalVoteFlags, Hosted: &ap.HostedTap{PlanHash: rec.Header.PlanHash, Revision: 1, Digest: rec.Header.Assist.Digest, Actions: ap.ActionsAt(1)}})
+	if !a.Noise || r.rec(key).Header.Decision != nil || len(r.rec(key).Header.Votes) != 0 {
+		t.Fatal(a)
+	}
+}

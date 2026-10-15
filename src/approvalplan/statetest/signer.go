@@ -52,14 +52,18 @@ func (t *Telegram) next() int64 { t.msg++; return t.msg }
 // running through approvalplan's pure core. Every commit is checked with
 // CheckTransition, and a commit can be made a crash point, landed or not.
 type Signer struct {
-	Settings ap.Settings
-	Flags    ap.VoteFlags
-	Validity time.Duration
-	Clock    *Clock
-	Store    map[string]ap.R1
-	Epoch    string
-	Sink     *Sink
-	TG       *Telegram
+	Oracle     bool
+	authorized map[string]authorization
+	LiveCap    int
+	FlushOrder []string
+	Settings   ap.Settings
+	Flags      ap.VoteFlags
+	Validity   time.Duration
+	Clock      *Clock
+	Store      map[string]ap.R1
+	Epoch      string
+	Sink       *Sink
+	TG         *Telegram
 	// Released is the one signature set that left per record.
 	Released map[string][]string
 	// CrashAt makes commit number CrashAt a crash point; CrashLanded says
@@ -92,6 +96,7 @@ func NewSigner(clock *Clock, seed uint64) *Signer {
 		TG:       &Telegram{BurstSends: map[string]int{}, CardSends: map[string]int{}},
 		Released: map[string][]string{}, Reserved: map[string]int{}, rnd: rand.New(rand.NewPCG(seed, 1)),
 	}
+	s.authorized = map[string]authorization{}
 	s.Restart()
 	return s
 }
@@ -167,7 +172,7 @@ func (s *Signer) apply(key string, cmd ap.Command, in ap.Inputs) ap.Answer {
 		if err := s.checkVote(cur, after, cmd, ans); err != nil {
 			s.fail(err)
 		}
-		s.commit(key, cur, after, now)
+		s.commit(key, cur, after, now, cmd, in)
 	}
 	return ans
 }
@@ -201,13 +206,14 @@ func (s *Signer) checkVote(before *ap.R1, after ap.R1, cmd ap.Command, ans ap.An
 	return nil
 }
 
-func (s *Signer) commit(key string, before *ap.R1, after ap.R1, now ap.Now) {
+func (s *Signer) commit(key string, before *ap.R1, after ap.R1, now ap.Now, cmd ap.Command, in ap.Inputs) {
 	if err := CheckTransition(before, after, now); err != nil {
 		s.fail(fmt.Errorf("commit %d on %s: %w", s.Commits+1, key, err))
 	}
 	s.Commits++
 	crashing := s.Commits == s.CrashAt
 	if !crashing || s.CrashLanded {
+		s.checkAuthorization(key, before, after, cmd, in)
 		if before == nil {
 			s.Reserved[key] = ap.R1Reservation(after)
 		}
@@ -247,12 +253,27 @@ func (s *Signer) Submit(principal string, d ap.ApprovalDraft) ap.Answer {
 	in := s.inputs(key)
 	if _, exists := s.Store[key]; !exists {
 		probe, ans := ap.Apply(nil, cmd, now, in)
-		if ans.Code == "" {
-			for _, gk := range s.keys() {
-				if s.grantLive(gk) && ap.GrantCovers(s.Store[gk], probe) {
-					in.Grant = &ap.GrantRef{Record: s.Store[gk], Live: true}
-					break
+		if ans.Code != "" {
+			return ans
+		}
+		if s.LiveCap > 0 {
+			for _, k := range s.keys() {
+				s.apply(k, ap.Tick{}, s.inputs(k))
+			}
+			live := 0
+			for _, k := range s.keys() {
+				if ap.Class(s.Store[k], now, s.Settings, s.grantLive(k)) == ap.ClassLive {
+					live++
 				}
+			}
+			if live >= s.LiveCap {
+				return ap.Answer{Code: ap.CodeQueueFull}
+			}
+		}
+		for _, gk := range s.keys() {
+			if s.grantLive(gk) && ap.GrantCovers(s.Store[gk], probe) {
+				in.Grant = &ap.GrantRef{Record: s.Store[gk], Live: true}
+				break
 			}
 		}
 	}
@@ -292,6 +313,7 @@ func (s *Signer) Claim(key string, token [32]byte) ap.Answer {
 		ans = s.apply(key, cmd, in)
 	}
 	if len(ans.Signatures) > 0 {
+		s.checkReleaseAuthority(key)
 		if prev, ok := s.Released[key]; ok && !slices.Equal(prev, ans.Signatures) {
 			s.fail(fmt.Errorf("a second signature set left for %s", key))
 		}
@@ -456,7 +478,25 @@ func (s *Signer) notify(key string, step ap.NotifyStep) bool {
 // FlushPass is the flusher's retry pass: every unflushed record, stopping at
 // the first sink failure.
 func (s *Signer) FlushPass() {
-	for _, key := range s.keys() {
+	keys := s.keys()
+	slices.SortStableFunc(keys, func(a, b string) int {
+		x, y := ap.NextDueAt(s.Store[a], s.Clock.Now(), s.Settings), ap.NextDueAt(s.Store[b], s.Clock.Now(), s.Settings)
+		if x.IsZero() {
+			if y.IsZero() {
+				return 0
+			}
+			return 1
+		}
+		if y.IsZero() {
+			return -1
+		}
+		return x.Compare(y)
+	})
+	count := 0
+	for _, key := range keys {
+		if count >= ap.FlushBatch {
+			return
+		}
 		rec := s.Store[key]
 		if !ap.Unflushed(rec) {
 			continue
@@ -464,6 +504,8 @@ func (s *Signer) FlushPass() {
 		if s.Sink.Fail {
 			return
 		}
+		count++
+		s.FlushOrder = append(s.FlushOrder, key)
 		for _, e := range rec.Header.Outbox {
 			s.Sink.Keys[ap.EventKey(key, e.Seq)]++
 		}

@@ -38,13 +38,13 @@ func TestClaimTotality(t *testing.T) {
 			approved(r, key)
 			r.s.Report(key, st.Token(idOf(key, r)), negativeReport(1))
 			r.s.FlushPass()
-		}, ap.ClaimExecutionReported, ap.ClaimExpired},
+		}, ap.ClaimExecutionReported, ap.ClaimExecutionReported},
 		{"reported claimed", func(r *rig, key string) {
 			approved(r, key)
 			r.claim(key, idOf(key, r))
 			r.s.Report(key, st.Token(idOf(key, r)), reportOf(ap.StepSucceeded))
 			r.s.FlushPass()
-		}, ap.ClaimExpired, ap.ClaimExpired},
+		}, ap.ClaimExecutionReported, ap.ClaimExecutionReported},
 	}
 	for _, s := range states {
 		for _, past := range []bool{false, true} {
@@ -248,6 +248,50 @@ func TestAbsentRecordAnswersIdentically(t *testing.T) {
 		rec, ans := ap.Apply(nil, cmd, ap.Now{Wall: st.T0}, ap.Inputs{Epoch: st.Epoch(1)})
 		if mustJSON(t, ans) != mustJSON(t, ap.Answer{Code: ap.CodeNotFound}) || mustJSON(t, rec) != mustJSON(t, ap.R1{}) {
 			t.Errorf("%T: %+v", cmd, ans)
+		}
+	}
+}
+
+func TestReportedClaimSurvivesRetention(t *testing.T) {
+	for _, claimed := range []bool{false, true} {
+		for _, expired := range []bool{false, true} {
+			for _, phase := range []string{"unflushed", "flushed", "shed"} {
+				t.Run(fmt.Sprintf("claimed=%v/expired=%v/%s", claimed, expired, phase), func(t *testing.T) {
+					r := newRig(t)
+					id := st.ID(1)
+					key := r.submit(id, ap.CoordinatorExecutor, st.Write("w", 60))
+					r.approve(key)
+					body := negativeReport(1)
+					if claimed {
+						r.claim(key, id)
+						body = reportOf(ap.StepSucceeded)
+					}
+					if a := r.s.Report(key, st.Token(id), body); a.Code != "" {
+						t.Fatal(a)
+					}
+					if expired {
+						r.clock.Advance(25 * time.Hour)
+						r.apply(key, ap.Tick{})
+					}
+					if phase != "unflushed" {
+						r.s.FlushPass()
+					}
+					if phase == "shed" {
+						if a := r.apply(key, ap.ShedRecord{Pressure: true}); !a.Changed {
+							t.Fatal(a)
+						}
+					}
+					a := r.claim(key, id)
+					if a.Claim != ap.ClaimExecutionReported || a.Class != body.Class || len(a.Signatures) != 0 {
+						t.Fatal(a)
+					}
+					cmd, _ := ap.JobOnAnswer(ap.R2{}, ap.JobMemory{}, ap.JobAction{Kind: ap.JobActClaim, Step: 1}, ap.SignerAnswer{Claim: a.Claim, Class: a.Class})
+					o, ok := cmd.(ap.SetOutcome)
+					if !ok || o.Outcome.Kind != ap.OutcomeAdopted || o.Outcome.Class != body.Class {
+						t.Fatalf("not adopted: %+v", cmd)
+					}
+				})
+			}
 		}
 	}
 }
