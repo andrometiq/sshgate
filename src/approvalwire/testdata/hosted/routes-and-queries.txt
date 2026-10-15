@@ -1,0 +1,11 @@
+query get ?requester_sub=local-uid%3A1000
+query get-direct ?
+query list-direct-next ?cursor=c&limit=1
+query list-first ?limit=50&requester_sub=local-uid%3A1000
+query list-next ?cursor=c2_cursor-1&limit=50&requester_sub=local-uid%3A1000
+route approval_submit_v2 POST /v2/approvals
+route approval_get_v2 GET /v2/approvals/a2_AAAAAAAAAAAAAAAAAAAAAA
+route approval_list_v2 GET /v2/approvals
+route approval_wait_v2 POST /v2/approvals/wait
+route approval_claim_v2 POST /v2/approvals/a2_AAAAAAAAAAAAAAAAAAAAAA/claim
+route approval_report_v2 POST /v2/approvals/a2_AAAAAAAAAAAAAAAAAAAAAA/report
