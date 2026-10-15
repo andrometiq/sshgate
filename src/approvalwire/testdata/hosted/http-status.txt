@@ -1,0 +1,16 @@
+not_found 404
+conflict 409
+invalid_request 400
+reserved_verb 400
+request_too_large 413
+request_unrenderable 422
+submit_window_closed 409
+submit_window_ahead 425
+queue_full 429
+invalid_claim 403
+invalid_report 422
+storage_uncertain 503
+busy 503
+record_corrupt 500
+lifecycle_unavailable 503
+signer_incompatible 0

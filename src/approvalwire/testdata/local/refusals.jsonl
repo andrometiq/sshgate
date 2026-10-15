@@ -1,0 +1,16 @@
+{"approval_proto":1,"ok":false,"error":{"code":"not_found","message":"approval request not found"}}
+{"approval_proto":1,"ok":false,"error":{"code":"conflict","message":"refused: conflict"}}
+{"approval_proto":1,"ok":false,"error":{"code":"invalid_request","message":"refused: invalid_request"}}
+{"approval_proto":1,"ok":false,"error":{"code":"reserved_verb","message":"refused: reserved_verb"}}
+{"approval_proto":1,"ok":false,"error":{"code":"request_too_large","message":"refused: request_too_large"}}
+{"approval_proto":1,"ok":false,"error":{"code":"request_unrenderable","message":"refused: request_unrenderable"}}
+{"approval_proto":1,"ok":false,"error":{"code":"submit_window_closed","message":"refused: submit_window_closed"}}
+{"approval_proto":1,"ok":false,"error":{"code":"submit_window_ahead","message":"refused: submit_window_ahead"}}
+{"approval_proto":1,"ok":false,"error":{"code":"queue_full","message":"refused: queue_full"}}
+{"approval_proto":1,"ok":false,"error":{"code":"invalid_claim","message":"refused: invalid_claim"}}
+{"approval_proto":1,"ok":false,"error":{"code":"invalid_report","message":"refused: invalid_report"}}
+{"approval_proto":1,"ok":false,"error":{"code":"storage_uncertain","message":"refused: storage_uncertain"}}
+{"approval_proto":1,"ok":false,"error":{"code":"busy","message":"signer busy: the command was not applied; resend the same request"}}
+{"approval_proto":1,"ok":false,"error":{"code":"record_corrupt","message":"refused: record_corrupt"}}
+{"approval_proto":1,"ok":false,"error":{"code":"lifecycle_unavailable","message":"refused: lifecycle_unavailable"}}
+{"approval_proto":1,"ok":false,"error":{"code":"signer_incompatible","message":"hosted signer-server does not serve /v2/approvals; upgrade it (migration 7) before this MCP"}}
