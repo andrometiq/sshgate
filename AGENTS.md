@@ -97,12 +97,12 @@ have them check the host's `/var/log/auth.log` and that the key line was pasted 
   signature, usually clock skew or a stale approval: retry once.
 - **Read jail.** On hosts with unprivileged user namespaces and Landlock, reads run in a
   kernel jail: they cannot change host files, reach Unix-socket daemons (a few fixed
-  `systemctl`/`docker` read verbs run outside the jail) or touch other processes. They see
+  `systemctl`/`docker` read verbs reach their own daemon, in a narrower jail without
+  network) or touch other processes. They see
   the host's `/tmp` and `/var/tmp` read-only; their only writable space is a private
   `/dev/shm` (`TMPDIR` points there), so a tool that insists on writing to `/tmp` fails.
   Whether jailed reads have network (even localhost TCP) is set per host by the operator's
-  pin; when a network tool fails for lack of it, the gate prints a note saying so. On a host
-  pinned `net=allow` the `systemctl`/`docker` read verbs are refused. `systemctl is-enabled`
+  pin; when a network tool fails for lack of it, the gate prints a note saying so. `systemctl is-enabled`
   is not one of them: spell it `systemctl --root=/ is-enabled <unit>` (or with
   `SYSTEMD_OFFLINE=1`), which works in the jail. A 77 with `daemon read refused` means the
   host's client or daemon socket failed the gate's ownership checks: don't retry. Hosts without the

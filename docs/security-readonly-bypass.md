@@ -27,7 +27,7 @@ moved out of `classifier.go` into `src/classify/rules_text.go`,
   processes. So a classifier miss of the kind surveyed here no longer turns
   into a write on such a host: the command runs, but inside the jail. Whether
   jailed reads get network is a per-host setting, and a few `systemctl`/`docker` read
-  commands run outside it from a fixed list. `gate doctor` on the host says
+  commands from a fixed list reach their daemon from a narrower form of the jail. `gate doctor` on the host says
   whether the jail applies; see
   [install-step-by-step.md](install-step-by-step.md#5-check-the-servers-read-jail).
 - **The security boundary for writes is unchanged:** an Ed25519 signature

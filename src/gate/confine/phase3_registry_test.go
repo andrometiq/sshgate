@@ -80,10 +80,10 @@ func phase3JailRegistry() []prot {
 			MutationSets: []harness.MutationSet{{IDs: []string{"P-L2-EXEC-NARROW"}, Legs: []harness.Leg{
 				decision(unit("U-Lane2LandlockRules")), phase3Leg("G-LANE2-PLUGIN-NOEXEC", "MUTATION-EFFECT plugin-ran")}}}},
 		{ID: "P-L2-MEMFD", Site: "buildFilter: a daemon read's memfd_create and memfd_secret are denied", Class: "multi", Partners: []string{"P-L2-EXEC-NARROW"}, DirectLeg: "U-Lane2FilterRows",
-			EffectLegs: []string{"G-L2-MEMFD-NOEXEC"},
+			EffectLegs:   []string{"G-L2-MEMFD-NOEXEC"},
 			MutationSets: []harness.MutationSet{{IDs: []string{"P-L2-MEMFD"}, Legs: []harness.Leg{decision(unit("U-Lane2FilterRows")), memfd}}, memfdNarrow}},
 		{ID: "P-L2-SOCK-SCOPE", Site: "buildSocketFilter: Unix stream sockets only in a daemon read", Class: "multi", Partners: []string{"P-LL-RESOLVE-UNIX"}, DirectLeg: "U-Lane2SocketTable",
-			EffectLegs: []string{"L-UNIX-CONNECT"},
+			EffectLegs:   []string{"L-UNIX-CONNECT"},
 			MutationSets: []harness.MutationSet{{IDs: []string{"P-L2-SOCK-SCOPE"}, Legs: []harness.Leg{decision(unit("U-Lane2SocketTable")), unixConnect}}, scopeAndResolve}},
 		{ID: "P-L2-SOCK-PIN", Site: "landlockPlan: RESOLVE_UNIX only on a daemon read's sockets", Class: "single", DirectLeg: "U-Lane2LandlockRules",
 			EffectLegs: []string{"G-L2-SOCK-PIN", "G-L2-SOCK-SWAP-AFTER-OPEN"},

@@ -163,8 +163,7 @@ command did not run, with one rare exception: if the jail fails after reporting
 itself ready, the line says the read may have started and its result is not
 trusted. A read whose session ends before the jail starts exits 143 instead. A
 damaged pin denies every read. A read that **requires confinement** — any read on
-a host pinned `net=allow` — never runs outside the jail; that is why such a host
-refuses the fixed `systemctl`/`docker` read verbs below. The fallback runs the
+a host pinned `net=allow` — never runs outside the jail. The fallback runs the
 command once, only when the attempt provably never started it: the failure came
 before the jail reported itself ready, and nothing was written.
 
@@ -194,8 +193,19 @@ write and is denied. A gate older than this verb answers it with exit 77 and no
 JSON.
 
 A small fixed list of `systemctl` and `docker` read verbs (for example
-`systemctl status`, `docker ps`, `docker logs`) **always runs outside the jail**,
-on every host, because those reads need the daemon's Unix socket. A typed
+`systemctl status`, `docker ps`, `docker logs`) needs the daemon's Unix socket,
+so these **daemon reads** run in the same `ro-v1` jail with three differences,
+all scoped to the admitted client: they may open Unix stream sockets (and from
+Landlock ABI 9 connect only to the admitted daemon sockets); only the admitted
+client and its interpreter may be executed (no plugins, hooks or pagers); and
+they may not create a `memfd`. A daemon read never has network, whatever the
+pin. Just before the client runs, the jail re-checks every admitted object
+(client, interpreter, sockets) against the inode admission held, so one
+replaced in between is refused (`jail:failed:lane2id`); a daemon restart that
+recreates its socket at that moment fails that one read. Only where a plain read
+would run classifier-only (an unpinned host whose jail is Absent, the read not
+required to run confined) does a daemon read run unjailed, shell-free, with the
+same grammar, admission and closed environment. A typed
 grammar decides what counts as one: each verb has a fixed set of flags with
 typed values and a bounded number of arguments, and any other line is an
 ordinary read. The gate then runs its own canonical command, never the agent's
@@ -235,8 +245,7 @@ make it work: a clear failure is better than a silently wrong answer.
 Signed writes and the admin verbs (`SSHGATE_REVOKE`, `SSHGATE_UPDATE`,
 `SSHGATE_XFER_*`) run exactly as before, unconfined; a jail problem never
 blocks them. Signed reads (for example an approved secret-reveal) are jailed
-like any other read. Because a daemon read runs outside the jail, it is denied
-on a host pinned `net=allow` (the read requires confinement there).
+like any other read.
 
 ### What a jailed read cannot do
 
@@ -356,9 +365,29 @@ item 1; others are outside what a read jail can promise.
   handler that root registered with a fixed interpreter runs that interpreter even
   if it lives on a hidden mount. A read can squat an abstract Unix socket name so a
   daemon starting at that moment cannot bind it.
-- **Daemon-read verbs** run outside the jail (see above); their safety rests on
-  the typed verb and flag grammar and on the installed `systemctl`/`docker`
-  client.
+- **Daemon reads talk to a root-equivalent daemon.** `docker.sock` access is
+  root-equivalent; a daemon read's safety rests on the read-only nature of the
+  allowlisted verbs and their typed grammar, not on the kernel.
+- **The loader route** (`R-L2-LOADER-ROUTE`). Inside a daemon read, the admitted
+  interpreter may run any readable ELF on an exec-capable mount
+  (`ld.so /usr/bin/id`). Reaching it needs code execution inside the client
+  first, which the agent does not get: it controls only grammar-checked
+  arguments of a fixed client that never invokes the loader on another binary,
+  and code running inside the client already holds the daemon socket. Narrow
+  `EXECUTE` exists to stop the client's own exec features. A test fails if the
+  route ever closes, so this text cannot go stale.
+- **Socket targets below Landlock ABI 9** (`R-L2-SOCKET-BELOW-ABI9`). Only from
+  ABI 9 can the jail pin which socket a daemon read connects to; below it, the
+  client may connect to any path socket the SSH user may, though its target is
+  the client's pinned endpoint, never an agent choice. **Abstract sockets below
+  ABI 6** likewise (`R-L2-ABSTRACT-BELOW-ABI6`).
+- **Root's systemctl needs both of its sockets admitted.** It tries systemd's
+  private socket first and does not fall back to the bus when Landlock denies
+  the private one; admission never produces that state, since it admits every
+  present endpoint.
+- **Unpinned hosts without a jail** still run daemon reads unjailed (the
+  classifier-only fallback), with the grammar, admission and closed
+  environment.
 - **The daemon-read client's dependency closure is trusted.** Admission refuses
   search paths, interpreters and sockets another user could replace; it does
   not certify the installed packages. The libraries the system loader finds

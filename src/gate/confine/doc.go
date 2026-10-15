@@ -16,7 +16,8 @@
 //
 // The parent re-execs /proc/self/exe as __jail with namespace clone flags. Its
 // subreaper shim starts __jailexec, which verifies namespaces, builds the mount view,
-// applies restrictions on a locked OS thread and execs /bin/sh. The command and
+// applies restrictions on a locked OS thread and execs /bin/sh, or, for a daemon
+// read (Spec.Lane2), the admitted client after re-checking its identity. The command and
 // setup report use private pipes on fd 3 and fd 4; no command travels on argv.
 // A verified fresh session isolates own-group signals and retunes. Before ABI 6,
 // seccomp permits kill only for pid zero or signal zero and denies directed

@@ -286,10 +286,11 @@ a host that lacks the jail (user namespaces off, the AppArmor restriction, no La
 classifier-only, and only when it is not pinned. A `jail-floor` file from 0.1.x with no `jail`
 pin makes the gate refuse reads until the host is re-pinned or the file is removed.
 
-**What runs outside the jail.** A short, fixed list of `systemctl` and `docker` read commands
-(such as `systemctl status` and `docker ps`) needs the daemons' Unix sockets, so it runs outside
-the jail without a shell, with a fixed grammar of flags, after the gate checks that the client
-program and the daemon socket belong to root. Signed writes and the gate's own admin commands
+**Daemon reads, and what runs outside the jail.** A short, fixed list of `systemctl` and `docker`
+read commands (such as `systemctl status` and `docker ps`) needs the daemons' Unix sockets. They
+run in a narrower form of the jail that can reach only their own daemon, run only the client
+program, and never has network, without a shell, with a fixed grammar of flags, after the gate
+checks that the client program and the daemon socket belong to root. Signed writes and the gate's own admin commands
 run exactly as before, and a jail problem never blocks them.
 
 **What it does not stop.** Network where a read is allowed it, and some narrow residual effects.

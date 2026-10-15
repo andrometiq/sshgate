@@ -282,8 +282,8 @@ the host's files read-only; its only writable space is a private 64 MiB
 scratch area at `/dev/shm` (and `/dev/null`). It cannot write files or file
 metadata on the host, connect to a local daemon over a Unix socket, or signal
 or trace other processes. A short, fixed list of `systemctl` and `docker`
-read commands runs outside the jail because they need those daemons'
-sockets. Signed writes never run in the jail.
+read commands reaches those daemons' sockets from a narrower form of the jail,
+without network. Signed writes never run in the jail.
 
 **Network.** Unsigned reads in the jail have **no network** by default: they
 cannot open TCP or UDP sockets, not even to services on localhost. A host

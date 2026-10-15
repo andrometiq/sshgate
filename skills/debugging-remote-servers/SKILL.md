@@ -100,9 +100,9 @@ itself, not just in the classifier. What this means for you:
   network, the gate prints a note saying so: don't retry, ask the user.
   Hosts without the jail run reads classifier-only, with network.
 - **No local daemons over Unix sockets.** A fixed set of `systemctl` and
-  `docker` reads still works, because the gate runs them outside the jail
-  (except on a host pinned `net=allow`, which refuses them), but only in
-  their plain form: one command, no pipe, no quotes.
+  `docker` reads still works, because the gate runs them in a narrower jail
+  that can reach their own daemon (never network), but only in their plain
+  form: one command, no pipe, no quotes.
   - `systemctl status | is-active | is-failed | list-units |
     list-unit-files | show | cat | get-default`, with display flags such as
     `--no-pager`, `-l`/`--full`, `-a`/`--all`, `--no-legend`, `--plain`,

@@ -113,8 +113,7 @@ them out instead of treating them as a generic command failure:
   and the result's `denial.verdict_class` is `read_jail_unavailable`.
   This happens when the host's jail pin is damaged (or a 0.1.x
   `jail-floor` is left with no pin), when jail setup fails, or when the
-  host has no usable jail and is pinned or the read must run confined
-  (for example a `systemctl`/`docker` read on a host pinned `net=allow`).
+  host has no usable jail and is pinned or the read must run confined.
   Do NOT retry and do NOT tell the user to add a signer: reads
   are refused the same way until the host is fixed. Ask a human to
   run `~/.sshgate-gate/gate doctor` on the host (from their own shell);

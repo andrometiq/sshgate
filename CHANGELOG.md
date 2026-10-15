@@ -11,7 +11,7 @@ published; entries are ordered newest-first by version.
 ## [Unreleased]
 
 Phase 2 of the kernel read jail (work item #22): P2.1 and P2.2, released
-together, and step P3.1 of Phase 3 (the `systemctl`/`docker` read verbs).
+together, and Phase 3 (the `systemctl`/`docker` read verbs).
 
 ### Added
 
@@ -71,9 +71,16 @@ together, and step P3.1 of Phase 3 (the `systemctl`/`docker` read verbs).
   cannot hide refuses the read), and the pin sets network. A damaged pin
   refuses every read. **Upgrading:** a leftover `jail-floor` with no `jail` pin
   refuses every read until the host is re-pinned or the file is removed.
-- **On a host pinned `net=allow`, the `systemctl`/`docker` read verbs are
-  refused** (exit 77): they run outside the jail, and such a host requires
-  confinement. They move into the jail in a later phase.
+- **The `systemctl`/`docker` read verbs now run in the read jail,** in a
+  narrower form: Unix stream sockets to their pinned daemon only (from Landlock
+  ABI 9), `EXECUTE` only on the client and its interpreter, no `memfd`, and
+  never network, whatever the pin. A host pinned `net=allow` runs them jailed
+  without network instead of refusing them. Like any read, one on a pinned host
+  whose jail is Absent or has an unmet clause, or on any host whose jail is
+  Failed, is now denied (exit 77) where before it ran outside the jail; only an
+  unpinned host without the jail runs them unjailed. A daemon restart that
+  recreates its socket between admission and the jail fails that one read
+  (exit 77, `jail:failed:lane2id:…`).
 - **Fewer lines count as `systemctl`/`docker` read verbs.** A line outside the
   new grammar is no longer one of these verbs and runs as an ordinary read
   instead (jailed, it cannot reach the daemon; on an unpinned host without the

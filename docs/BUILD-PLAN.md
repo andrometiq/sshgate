@@ -54,7 +54,8 @@ foundation (Tier-3), whose remaining release gates are tracked in [ROADMAP.md](R
 The gate runs reads inside a kernel jail with one enforced profile, `ro-v1`. On a host that meets
 the profile's floor (unprivileged user, mount and IPC namespaces, `mount_setattr`, Landlock ABI 1
 or newer, seccomp, and a `/dev/shm` directory), every command the classifier calls a read runs in
-the jail, except the fixed `systemctl`/`docker` read verbs, which still run outside it. Other
+the jail, including the fixed `systemctl`/`docker` read verbs, which run with their own narrower
+rules and label. Other
 hosts run reads classifier-only, as before. What Phase 1 built:
 
 - **Namespaces.** The command runs in new user, mount and IPC namespaces. It stays in the host
@@ -98,7 +99,6 @@ What Phase 1 does not do yet, and where it is done:
 | Gap | Step |
 |---|---|
 | Network is a host setting only; there is no per-read signed network grant | P4.2–P4.4 |
-| The fixed `systemctl`/`docker` read verbs run outside the jail | P3.2 |
 | The MCP shows only the signer tier, not the host's `SSHGATE_JAIL` capability | P5.1 |
 | No host is labelled kernel read-only; the label is compiled off | P7.1 |
 | The MCP instructions and user docs do not yet explain network permissions, pins and labels | P5.2 |
@@ -132,7 +132,9 @@ denied by default, granted per command by a signed request or per host by the op
   read is never run outside the jail, whatever the failure class.
 - **Daemon-read verbs.** The fixed allowlist of `systemctl` and `docker` read verbs that need a
   local daemon socket (`lane2` in the code). They carry their own label:
-  `daemon read, limited verbs: <binary> (not kernel read-only)`.
+  `daemon read, limited verbs: <binary> (not kernel read-only)`. From P3.2 they run inside
+  `ro-v1` with Unix stream sockets to their pinned daemon, `EXECUTE` only on the client and its
+  interpreter, no `memfd`, and never network.
 - **Protection IDs.** Each protection has an ID (`P-…`) in the registry
   (`src/gate/confine/protections_test.go`) and a hook (`jailmut.On("P-…")`) compiled only into
   mutation builds.
@@ -361,17 +363,32 @@ Status: done.
   `G-L2-INTERP-UNTRUSTED`; the fuzz target runs in `make test`.
 - *Depends:* P3.0.
 
-**P3.2 — Daemon-read verbs run inside `ro-v1`.** Status: open.
+**P3.2 — Daemon-read verbs run inside `ro-v1`.** Status: done.
 
-- *Deliverables:* `Spec.Lane2` with the canonical argv on fd 3; a closed environment
-  (`PATH=/usr/bin:/bin LANG=C SYSTEMD_COLORS=0 TERM=dumb TMPDIR=/dev/shm` plus the pinned empty
-  docker config); Unix-socket access only to the pinned sockets (Landlock `RESOLVE_UNIX` from
-  ABI 9); `EXECUTE` granted only on the checked binary and its interpreter; network off; the
-  exact daemon-read label in every pin state; the `memfd` deny if P3.0 adopted it, with its own
-  leg; fidelity rows for `systemctl status <unit>` and `docker ps`.
-- *Acceptance:* `P-L2-EXEC-NARROW` (`G-LANE2-PLUGIN-NOEXEC`) registered and mutation-proof;
-  loader, re-exec and `memfd` characterisation legs record their outcomes;
-  `make test-fidelity-smoke` includes the daemon-read rows.
+- *Deliverables:* `Spec.Lane2` (the admitted client's and interpreter's resolved paths and
+  inodes, and the pinned sockets with their inodes) with the canonical argv on fd 3; a closed
+  environment (`PATH=/usr/bin:/bin LANG=C SYSTEMD_COLORS=0 TERM=dumb TMPDIR=/dev/shm` plus the
+  pinned empty docker config); `AF_UNIX` stream sockets allowed only in a daemon-read run, with
+  Landlock `RESOLVE_UNIX` granted only on the pinned sockets from ABI 9; `EXECUTE` granted only on
+  the two inodes the worker re-checked; a failure adding a daemon-read rule is Failed, never
+  Absent; `memfd_create` and `memfd_secret` denied; network always off, whatever the pin (P4.2
+  refuses explicit network requests); the router attempts the jail for a daemon read like any
+  read and falls back to the unjailed exec only where a plain read falls back to
+  classifier-only; the exact daemon-read label in every pin state; fidelity rows for
+  `systemctl status <unit>` and `docker ps`; the mutation harness accepts named, documented
+  residuals on any case kind, from one list.
+- *Acceptance:* the residual list and per-host residual cases land first, with their own
+  harness tests; `P-L2-EXEC-NARROW` (`G-LANE2-PLUGIN-NOEXEC`), `P-L2-MEMFD`
+  (`G-L2-MEMFD-NOEXEC`), `P-L2-SOCK-SCOPE`, `P-L2-SOCK-PIN` (red at native ABI ≥ 9),
+  `P-L2-NET-OFF` with `P-L2-SPEC-NET`, `P-L2-ENV`, and `P-L2-IDENTITY` (replacement of the
+  client, its interpreter or a pinned socket between admission and the jail is refused)
+  registered and mutation-proof; a pinned socket replaced after the jail opened it stays
+  ungranted at ABI ≥ 9; `G-CONFINE-REQUIRED-LANE2` rewritten for the jailed route; the loader
+  (`C-L2-LOADER`, recorded open and accepted), re-exec and `memfd_secret` characterisation legs
+  record their outcomes; `make test-fidelity-smoke` includes the daemon-read rows; the suite and
+  mutation runs pass on Debian 12 (Landlock ABI 2) and Ubuntu 24.04 (ABI 4) as recorded runs;
+  the phase-end union passes twice, on the CI runner and on an ABI ≥ 9 VM, each judged on its
+  own host.
 - *Depends:* P3.1.
 
 ### Phase 4: the per-read network permission
@@ -507,7 +524,7 @@ Status: done.
   (`ps aux`, `top -bn1`, `ss`, `ip`, `df`, `journalctl`, `/tmp` reads, git in `/tmp`, `sqlite3`,
   `getent`, `id`, `who`, the daemon-read verbs), at native ABI and ABI 1, non-root and root.
 - *Acceptance:* every difference matches a declared category; Go CLIs (`docker`, `kubectl`)
-  are characterised below Landlock ABI 6.
+  are characterised below Landlock ABI 6, and the daemon-read verbs at ABI 5 and ABI 6.
 - *Depends:* P6.0.
 
 **P6.2 — VM matrix and CI lanes.** Status: open.
@@ -521,7 +538,10 @@ Status: done.
   configuration and lane before the run. The jail CI workflow gains a root job, a mutation job
   (path-filtered on the jail and gate packages) and a fidelity job, all in CI mode.
 - *Acceptance:* a recorded distro/configuration/lane → label table. No distro is documented as
-  read-only before this step is done.
+  read-only before this step is done. The matrix includes an ABI-5 kernel (6.10/6.11), an ABI-6
+  kernel (6.12–6.14) and an ABI ≥ 9 kernel; Debian 12 runs the daemon-read rows with `docker.io`
+  installed; RHEL 9 and Amazon Linux 2023 record their `systemctl` `RUNPATH` and interpreter
+  shapes against the admission rule.
 - *Depends:* P6.1.
 
 ### Phase 7: turn the label on

@@ -129,9 +129,11 @@ single-call indirections:
   `lane2BinDirs` (where the client is looked up), `lane2TrustedUIDs` (the owners admission
   trusts, `{0}` in production) and `lane2SystemEndpoints` (the default daemon sockets).
   `withLane2Seams` sets all three for a test (the test's binary directory, root plus the test
-  user, and test-owned listening sockets) and restores them. These are trust decisions, so
-  `TestLane2TrustDefaults` checks their initialisers in the source and fails on any assignment,
-  in-place change or address-taking of them outside `_test.go` files.
+  user, and test-owned listening sockets) and restores them. `lane2AfterAdmitHook` (in
+  `readjail.go`, nil in production) lets an identity leg replace an admitted object between
+  admission and the jail. These are trust decisions, so `TestLane2TrustDefaults` checks their
+  initialisers in the source and fails on any assignment, in-place change or address-taking of
+  them outside `_test.go` files.
 - `dialWithCtx` — `src/mcp/sign/client.go` (`var dialWithCtx`)
 - `randRead` — `src/signer/daemon.go` (`var randRead`)
 - `dialAgentSock`, `parsePrivateKey` — `src/mcp/tools/add_server.go` (package vars)
@@ -287,8 +289,12 @@ Without a jail spec, `executor.go` runs `exec.CommandContext(ctx, "/bin/sh",
 "-c", cmd)` — a real shell. With a jail spec (a read on a jail-capable host), the
 gate re-executes itself to build the jail, and the jailed worker then runs
 `/bin/sh` (`src/gate/confine/doc.go`); those paths are tested in §12, not here.
-The fixed `systemctl`/`docker` read verbs run shell-free through
-`ExecArgvWithRedaction`. `executor_test.go` genuinely shells out and depends on
+The fixed `systemctl`/`docker` read verbs run shell-free: in their own jail
+(the worker execs the admitted client with the argv from fd 3), or, as the
+unconfined fallback, through `ExecArgvWithRedaction`. Their jail legs use the C
+client `src/gate/cmd/sshgate-gate/testdata/lane2client`, never the race-built
+test binary, whose modes (`sg-<mode>.<nonce>`) report argv and env, run a
+plugin, a memfd copy or the loader, and connect to sockets the leg lists. `executor_test.go` genuinely shells out and depends on
 coreutils being present: `TestExec` runs `echo hello` and asserts stdout
 `"hello\n"`; a large-output case runs `yes x | head -c 65536`; a timeout case
 runs `sleep 10`. This is the one place the unit suite assumes a POSIX `/bin/sh`
@@ -710,7 +716,12 @@ and `TestDistGateHasNoMutationBuild` checks the committed one.
   control, the jailed attempt, the outside observation) and prints exactly one
   `PROOF-COMPLETE` line when it finishes. `PROOF-OMITTED` needs a declared reason
   (CI accepts only lane reasons) and `PROOF-RESIDUAL` must name an accepted
-  residual. `make test-jail` and `make test-jail-root` check their logs against
+  residual from `harness.DocumentedResiduals` (each tied to THREAT-MODEL). A
+  case's `ResidualABIs` fixes, on the host that judges it, which lanes report a
+  residual instead of completing: for example the daemon-read socket pin is a
+  residual in the ABI-1 lane and natively below Landlock ABI 9. A residual in any
+  other lane, a completion in a residual lane, or a residual where a mutation
+  was expected to show its effect fails the run. `make test-jail` and `make test-jail-root` check their logs against
   the case manifest, so free-text omissions give no coverage.
 - **Phase-end gate.** On a disposable runner, run both lanes in CI mode and keep
   their evidence:
