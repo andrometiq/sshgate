@@ -19,18 +19,22 @@ type Config struct {
 	Freezer         Freezer
 	SnapshotBuilder SnapshotBuilder
 	Minter          Minter
+	AuditWriter     AuditWriter // nil leaves the outbox unflushed and Claim gated.
 	XferDigests     XferDigests
 	Settings        ap.Settings
 	AssistTimeout   time.Duration
 }
 
 // Engine serializes all record mutations. Its Store must not have another writer.
-// Run drives time-based reconciliation until its context is canceled.
+// Run drives reconciliation and audit flushing until its context is canceled.
 type Engine struct {
-	mu          sync.Mutex
-	config      Config
-	epoch       string
-	projections projections
+	mu           sync.Mutex
+	running      bool
+	flushNudge   chan struct{}
+	flushWaiters map[string]*flushWaiter
+	config       Config
+	epoch        string
+	projections  projections
 }
 
 // New recovers the store before exposing the engine. The caller owns running Run.
@@ -50,7 +54,7 @@ func New(c Config) (*Engine, error) {
 	if c.AssistTimeout == 0 || c.AssistTimeout > 5*time.Second {
 		c.AssistTimeout = 5 * time.Second
 	}
-	e := &Engine{config: c, projections: newProjections()}
+	e := &Engine{config: c, projections: newProjections(), flushNudge: make(chan struct{}, 1), flushWaiters: make(map[string]*flushWaiter)}
 	if err := e.startup(); err != nil {
 		return nil, err
 	}
@@ -91,6 +95,16 @@ func (e *Engine) commitLocked(key string, before *ap.R1, cmd ap.Command, now ap.
 			return ap.R1{}, ap.Answer{}, err
 		}
 		e.projections.update(key, before, after, now, e.epoch, e.config.Settings)
+		if before == nil || after.Header.OutboxSeq > before.Header.OutboxSeq {
+			e.nudgeFlush()
+		}
+		if before != nil && after.Header.AuditedThrough > before.Header.AuditedThrough &&
+			!slices.ContainsFunc(after.Header.Outbox, func(event ap.OutboxEvent) bool { return event.Kind == ap.EventDecision }) {
+			if waiter := e.flushWaiters[key]; waiter != nil {
+				close(waiter.ready)
+				delete(e.flushWaiters, key)
+			}
+		}
 	}
 	return after, answer, nil
 }

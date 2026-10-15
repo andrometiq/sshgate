@@ -92,8 +92,44 @@ func (e *Engine) Revoke(alias string) error {
 // mint itself are resolved under the single writer lock, after Apply's guards.
 func (e *Engine) Claim(ctx context.Context, principal, requestID string, claim ap.Claim) (ap.Answer, error) {
 	e.mu.Lock()
-	defer e.mu.Unlock()
 	key := ap.RecordKey(principal, requestID)
+	answer, err := e.claimLocked(ctx, principal, key, claim)
+	if err != nil || answer.Claim != ap.ClaimNotReady {
+		e.mu.Unlock()
+		return answer, err
+	}
+	rec, err := e.load(key)
+	if err != nil || rec == nil || rec.Header.Decision == nil {
+		e.mu.Unlock()
+		return answer, err
+	}
+	waiter := e.flushWaiters[key]
+	if waiter == nil {
+		waiter = &flushWaiter{ready: make(chan struct{})}
+		e.flushWaiters[key] = waiter
+	}
+	waiter.users++
+	e.mu.Unlock()
+	timer := newClaimFlushTimer()
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+	case <-waiter.ready:
+	case <-timer.C:
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	waiter.users--
+	if waiter.users == 0 && e.flushWaiters[key] == waiter {
+		delete(e.flushWaiters, key)
+	}
+	if err := ctx.Err(); err != nil {
+		return ap.Answer{}, err
+	}
+	return e.claimLocked(ctx, principal, key, claim)
+}
+
+func (e *Engine) claimLocked(ctx context.Context, principal, key string, claim ap.Claim) (ap.Answer, error) {
 	before, err := e.load(key)
 	if err != nil {
 		return ap.Answer{}, err

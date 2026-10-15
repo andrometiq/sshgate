@@ -2,19 +2,40 @@ package lifecycle
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"time"
 
 	ap "github.com/karthikeyan5/sshgate/src/approvalplan"
 )
 
-// Run drives the due index once per second. It returns storage failures to the
-// owner; cancellation stops the runner without changing any record.
+// Run drives the due index and one independent outbox flusher. It returns
+// storage failures to the owner and joins the flusher on cancellation.
 func (e *Engine) Run(ctx context.Context) error {
+	e.mu.Lock()
+	if e.running {
+		e.mu.Unlock()
+		return errors.New("lifecycle: Run already active")
+	}
+	e.running = true
+	e.mu.Unlock()
+	ctx, cancel := context.WithCancel(ctx)
+	flushed := make(chan error, 1)
+	joined := make(chan struct{})
+	go func() { defer close(joined); flushed <- e.runFlusher(ctx) }()
+	defer func() {
+		cancel()
+		<-joined
+		e.mu.Lock()
+		e.running = false
+		e.mu.Unlock()
+	}()
 	ticker := newReconcileTicker()
 	defer ticker.Stop()
 	for {
 		select {
+		case err := <-flushed:
+			return err
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-ticker.C:
