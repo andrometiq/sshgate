@@ -186,8 +186,9 @@ bytes; answered before the key is loaded, so read-only hosts answer it too, and
 not audited) makes one jail attempt of the shell builtin `:`, with the
 environment cleared, and prints one JSON line: how reads are enforced (`kernel`,
 `classifier` or `unavailable`), whether the host is pinned, whether reads have
-network, the Landlock ABI, the read label, the reason for a denial, the mounts
-the jail cannot show, the pin's `accept_fs`, and `core_pattern`. The same caller
+network, the Landlock ABI, the read label, the reason for a denial, the unsafe
+mounts the jail could not hide (they stay visible, read-only; mounts it did hide
+are not listed), the pin's `accept_fs`, and `core_pattern`. The same caller
 could already read each of these. No byte the agent sends runs: any other line is
 an ordinary command, and on a read-only host an unknown command counts as a
 write and is denied. A gate older than this verb answers it with exit 77 and no

@@ -207,7 +207,83 @@ func TestRegistryMatchesHooks(t *testing.T) {
 	}
 }
 
+// legFile is one test file of a leg's package, parsed once: whether it is a
+// jail_e2e file, the literal names it passes to Run, and per function the
+// string literals it holds and whether it calls Run.
+type legFile struct {
+	base      string
+	jailE2E   bool
+	runNames  map[string]bool
+	functions []legFunction
+}
+
+type legFunction struct {
+	literals map[string]bool
+	hasRun   bool
+}
+
+// legFiles parses every test file in directory once.
+func legFiles(t *testing.T, directory string) []legFile {
+	t.Helper()
+	paths, err := filepath.Glob(filepath.Join(directory, "*_test.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var files []legFile
+	for _, path := range paths {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		tree, err := parser.ParseFile(token.NewFileSet(), path, data, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		file := legFile{base: filepath.Base(path), jailE2E: isJailE2E(data), runNames: map[string]bool{}}
+		for _, decl := range tree.Decls {
+			function, ok := decl.(*ast.FuncDecl)
+			if !ok || function.Body == nil {
+				continue
+			}
+			item := legFunction{literals: map[string]bool{}}
+			ast.Inspect(function.Body, func(node ast.Node) bool {
+				if literal, ok := node.(*ast.BasicLit); ok && literal.Kind == token.STRING {
+					value, _ := strconv.Unquote(literal.Value)
+					item.literals[value] = true
+				}
+				if call, ok := node.(*ast.CallExpr); ok {
+					if selector, ok := call.Fun.(*ast.SelectorExpr); ok && selector.Sel.Name == "Run" {
+						item.hasRun = true
+					}
+				}
+				return true
+			})
+			file.functions = append(file.functions, item)
+		}
+		ast.Inspect(tree, func(node ast.Node) bool {
+			call, ok := node.(*ast.CallExpr)
+			if !ok || len(call.Args) == 0 {
+				return true
+			}
+			selector, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok || selector.Sel.Name != "Run" {
+				return true
+			}
+			if literal, ok := call.Args[0].(*ast.BasicLit); ok {
+				if name, err := strconv.Unquote(literal.Value); err == nil {
+					file.runNames[name] = true
+				}
+			}
+			return true
+		})
+		files = append(files, file)
+	}
+	return files
+}
+
 func TestRegistryLegsExist(t *testing.T) {
+	// Each package's test files are parsed once, not once per leg.
+	packages := map[string][]legFile{}
 	for _, p := range registry {
 		for _, set := range p.MutationSets {
 			for _, leg := range set.Legs {
@@ -218,70 +294,29 @@ func TestRegistryLegsExist(t *testing.T) {
 					t.Fatalf("%s: package must be repository-relative: %s", leg.Name, leg.Package)
 				}
 				directory = filepath.Join("../../..", directory)
-				files, err := filepath.Glob(filepath.Join(directory, "*_test.go"))
-				if err != nil {
-					t.Fatal(err)
+				files, ok := packages[directory]
+				if !ok {
+					files = legFiles(t, directory)
+					packages[directory] = files
 				}
+				family, variant, nested := strings.Cut(leg.Name, "/")
 				found := false
-				for _, path := range files {
-					data, err := os.ReadFile(path)
-					if err != nil {
-						t.Fatal(err)
-					}
+				for _, file := range files {
 					// The executor baseline runs without jail_e2e; its namespace proof is shared with mutation runs.
-					executorProof := leg.Package == "./src/gate" && leg.Name == "L-NSVERIFY" && filepath.Base(path) == "executor_confine_test.go"
-					if !strings.HasPrefix(leg.Name, "U-") && !isJailE2E(data) && !executorProof {
+					executorProof := leg.Package == "./src/gate" && leg.Name == "L-NSVERIFY" && file.base == "executor_confine_test.go"
+					if !strings.HasPrefix(leg.Name, "U-") && !file.jailE2E && !executorProof {
 						continue
 					}
-					tree, err := parser.ParseFile(token.NewFileSet(), path, data, 0)
-					if err != nil {
-						t.Fatal(err)
-					}
-
-					if family, variant, nested := strings.Cut(leg.Name, "/"); nested {
-						for _, decl := range tree.Decls {
-							function, ok := decl.(*ast.FuncDecl)
-							if !ok || function.Body == nil {
-								continue
-							}
-							hasFamily, hasVariant, hasRun := false, false, false
-							ast.Inspect(function.Body, func(node ast.Node) bool {
-								if literal, ok := node.(*ast.BasicLit); ok && literal.Kind == token.STRING {
-									value, _ := strconv.Unquote(literal.Value)
-									hasFamily = hasFamily || value == family+"/"
-									hasVariant = hasVariant || value == variant
-								}
-								if call, ok := node.(*ast.CallExpr); ok {
-									if selector, ok := call.Fun.(*ast.SelectorExpr); ok && selector.Sel.Name == "Run" {
-										hasRun = true
-									}
-								}
-								return true
-							})
-							if hasFamily && hasVariant && hasRun {
+					if nested {
+						for _, function := range file.functions {
+							if function.literals[family+"/"] && function.literals[variant] && function.hasRun {
 								found = true
 							}
 						}
 					}
-					ast.Inspect(tree, func(node ast.Node) bool {
-						call, ok := node.(*ast.CallExpr)
-						if !ok || len(call.Args) == 0 {
-							return true
-						}
-						selector, ok := call.Fun.(*ast.SelectorExpr)
-						if !ok || selector.Sel.Name != "Run" {
-							return true
-						}
-						literal, ok := call.Args[0].(*ast.BasicLit)
-						if !ok {
-							return true
-						}
-						name, err := strconv.Unquote(literal.Value)
-						if err == nil && name == leg.Name {
-							found = true
-						}
-						return true
-					})
+					if file.runNames[leg.Name] {
+						found = true
+					}
 				}
 				if !found {
 					t.Errorf("%s: missing literal subtest %s in %s e2e files", p.ID, leg.Name, leg.Package)

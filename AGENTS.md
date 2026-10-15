@@ -105,7 +105,10 @@ have them check the host's `/var/log/auth.log` and that the key line was pasted 
   pinned `net=allow` the `systemctl`/`docker` read verbs are refused. Hosts without the
   jail run reads classifier-only, with network, unless the operator pinned the host. A read denied with 77 and `read jail unavailable` means the pin is
   damaged, or the host's jail could not be set up (or is missing on a pinned host, or for
-  a read that must run confined), so nothing ran: don't retry; a human runs
+  a read that must run confined). Nothing ran, with one exception: if that line says the read
+  may have started (the jail failed after reporting itself ready), the command may have run and
+  its result is not trusted, so pass that warning on to the user as it is. Either way, don't
+  retry; a human runs
   `~/.sshgate-gate/gate doctor` on the host, and pins it with `gate doctor --pin --net=deny`
   (or `--net=allow`). Details: `docs/THREAT-MODEL.md`.
 - `transfer` failing with `src/dest server not registered for transfer`: that endpoint has no

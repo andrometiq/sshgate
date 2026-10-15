@@ -320,24 +320,50 @@ func sameFile(a, b unix.Stat_t) bool {
 	return a.Ino == b.Ino && a.Size == b.Size && a.Mode == b.Mode && a.Nlink == b.Nlink && a.Mtim == b.Mtim && a.Ctim == b.Ctim
 }
 
-// acceptAll drains a listener: the payload of each accepted connection.
+// acceptBudget bounds one drain of a listener, and maxAccepted the
+// connections it takes: a peer that connects and never sends or closes, or
+// one that keeps connecting, cannot stall doctor (which may hold the pin lock).
+const (
+	acceptBudget = 2 * time.Second
+	maxAccepted  = 16
+)
+
+// acceptAll drains a listener: the payload of each accepted connection (empty
+// for a peer that sent nothing in time). The accepted sockets are
+// non-blocking and the whole drain takes at most acceptBudget.
 func acceptAll(listener int) ([]string, error) {
 	var payloads []string
+	deadline := time.Now().Add(acceptBudget)
 	for {
-		connection, _, err := unix.Accept4(listener, unix.SOCK_CLOEXEC)
+		connection, _, err := unix.Accept4(listener, unix.SOCK_NONBLOCK|unix.SOCK_CLOEXEC)
 		if errors.Is(err, unix.EAGAIN) {
 			return payloads, nil
 		}
 		if err != nil {
 			return payloads, err
 		}
-		buffer := make([]byte, 128)
-		poll := []unix.PollFd{{Fd: int32(connection), Events: unix.POLLIN}}
-		_, _ = unix.Poll(poll, 1000)
-		n, _ := unix.Read(connection, buffer)
-		payloads = append(payloads, string(buffer[:max(n, 0)]))
+		if len(payloads) == maxAccepted {
+			_ = unix.Close(connection)
+			return payloads, fmt.Errorf("more than %d connections", maxAccepted)
+		}
+		payloads = append(payloads, readPayload(connection, deadline))
 		_ = unix.Close(connection)
 	}
+}
+
+// readPayload reads what a peer sent, waiting for it until deadline.
+func readPayload(connection int, deadline time.Time) string {
+	wait := max(time.Until(deadline), 0)
+	poll := []unix.PollFd{{Fd: int32(connection), Events: unix.POLLIN}}
+	if n, err := unix.Poll(poll, int(min(wait, time.Second).Milliseconds())); err != nil || n == 0 {
+		return ""
+	}
+	buffer := make([]byte, 128)
+	n, err := unix.Read(connection, buffer)
+	if err != nil || n <= 0 {
+		return ""
+	}
+	return string(buffer[:n])
 }
 
 // liveness proves every fixture can show its effect: each listener accepts a

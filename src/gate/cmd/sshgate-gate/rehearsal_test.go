@@ -8,8 +8,10 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/karthikeyan5/sshgate/src/gate/confine"
+	"golang.org/x/sys/unix"
 )
 
 // TestFixtureChildNotOurChild builds the fixtures in a fresh process (no
@@ -139,4 +141,59 @@ func shortTempDir(t *testing.T) string {
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	return dir
+}
+
+// TestAcceptAllSilentPeer: a peer that connects and never sends or closes
+// cannot stall a listener drain, and neither can a flood of them.
+func TestAcceptAllSilentPeer(t *testing.T) {
+	listen := func(t *testing.T) (int, unix.Sockaddr) {
+		t.Helper()
+		fd, err := unix.Socket(unix.AF_INET, unix.SOCK_STREAM|unix.SOCK_NONBLOCK|unix.SOCK_CLOEXEC, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = unix.Close(fd) })
+		if err := unix.Bind(fd, &unix.SockaddrInet4{Addr: [4]byte{127, 0, 0, 1}}); err != nil {
+			t.Fatal(err)
+		}
+		if err := unix.Listen(fd, 64); err != nil {
+			t.Fatal(err)
+		}
+		address, err := unix.Getsockname(fd)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return fd, address
+	}
+	silentPeers := func(t *testing.T, address unix.Sockaddr, count int) {
+		t.Helper()
+		for range count {
+			peer, err := unix.Socket(unix.AF_INET, unix.SOCK_STREAM|unix.SOCK_CLOEXEC, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = unix.Close(peer) })
+			if err := unix.Connect(peer, address); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	t.Run("one silent peer", func(t *testing.T) {
+		listener, address := listen(t)
+		silentPeers(t, address, 1)
+		started := time.Now()
+		payloads, err := acceptAll(listener)
+		if elapsed := time.Since(started); err != nil || len(payloads) != 1 || payloads[0] != "" || elapsed > acceptBudget+time.Second {
+			t.Fatalf("payloads %q, err %v, after %s", payloads, err, elapsed)
+		}
+	})
+	t.Run("a flood of silent peers", func(t *testing.T) {
+		listener, address := listen(t)
+		silentPeers(t, address, maxAccepted+4)
+		started := time.Now()
+		payloads, err := acceptAll(listener)
+		if elapsed := time.Since(started); err == nil || len(payloads) != maxAccepted || elapsed > acceptBudget+time.Second {
+			t.Fatalf("%d payloads, err %v, after %s", len(payloads), err, elapsed)
+		}
+	})
 }

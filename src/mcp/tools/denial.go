@@ -161,7 +161,7 @@ func newDenial(class string) *Denial {
 	case VerdictReadJailUnavailable:
 		return &Denial{
 			VerdictClass:   VerdictReadJailUnavailable,
-			Summary:        "The gate refused to run the read: it could not confirm or set up the host's kernel read jail, so the command did not run.",
+			Summary:        "The gate refused the read: it could not confirm or set up the host's kernel read jail. Normally the command did not run; if the gate's line says the read may have started, it may have run and its result is not trusted.",
 			RequiredAction: ActionEscalateToHuman,
 			Retryable:      false,
 			HowTo: []string{

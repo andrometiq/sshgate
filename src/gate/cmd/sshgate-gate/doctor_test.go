@@ -673,7 +673,7 @@ func TestDoctorPrecheckNamesUnshownNetworkMounts(t *testing.T) {
 	code, d, _ := runDoctorJSON(t, "--pin", "--net=deny")
 	advised := 0
 	for _, advice := range d.Advice {
-		if strings.Contains(advice, "/srv/share (nfs4)") && strings.Contains(advice, "--accept-fs=network") {
+		if strings.HasPrefix(advice, "/srv/share (nfs4) is a network file system the jail must hide") && strings.Contains(advice, "--accept-fs=network") {
 			advised++
 		}
 		if strings.Contains(advice, "/srv/fuse") {

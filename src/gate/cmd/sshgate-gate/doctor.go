@@ -405,18 +405,19 @@ func nowAdvice(gateDir string, current pinState, now capability, features doctor
 		advice = append(advice, "the AppArmor userns restriction refuses the jail: each read makes one attempt, which logs one AppArmor userns_create denial; install an AppArmor profile for the gate, or accept classifier-only reads (and the log line), or pin the host to refuse reads")
 	}
 	if now.route.kernel && !current.valid && now.res.Jail != nil && len(now.res.Jail.Unmet) > 0 {
-		advice = append(advice, fmt.Sprintf("reads here are classifier-only: the read jail cannot show %s; --accept-fs=network shows network file systems, other types cannot be shown in this build", strings.Join(now.res.Jail.Unmet, ", ")))
+		advice = append(advice, fmt.Sprintf("reads here are classifier-only: the read jail could not hide %s, which stay visible to reads, read-only; a pinned read would be refused; --accept-fs=network accepts network file systems instead of hiding them, other types cannot be accepted in this build", strings.Join(now.res.Jail.Unmet, ", ")))
 	}
 	return advice
 }
 
 // unshownNetworkMounts is advice for a candidate whose jail failed: each
-// network mount the jail does not show, which --accept-fs=network would.
+// network mount the jail must hide (a pinned read is refused only if it
+// cannot), which --accept-fs=network would accept and show read-only.
 func unshownNetworkMounts(mounts []confine.MountReport) []string {
 	var advice []string
 	for _, mount := range mounts {
 		if !mount.Accepted && (mount.Class == "network" || mount.Backing == "network") {
-			advice = append(advice, fmt.Sprintf("the jail does not show %s (%s), a network file system, and a pinned read refuses an unshown mount; add --accept-fs=network to show it", mount.Point, mount.FSType))
+			advice = append(advice, fmt.Sprintf("%s (%s) is a network file system the jail must hide, and a pinned read is refused if it cannot; if that is why the candidate's jail failed, add --accept-fs=network to show it read-only instead", mount.Point, mount.FSType))
 		}
 	}
 	return advice

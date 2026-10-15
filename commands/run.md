@@ -109,7 +109,11 @@ them out instead of treating them as a generic command failure:
 
 - **77 on a read — read jail unavailable.** The gate refused to run the
   read because it could not confirm or set up the host's kernel read jail.
-  The command did not run. stderr contains `gate: read jail unavailable`
+  The command did not run, with one exception: when the line says the read
+  may have started, the jail failed after reporting itself ready, so the
+  command may have run and its result is not trusted. Keep that warning in
+  what you tell the user; never report such a read as "nothing ran".
+  stderr contains `gate: read jail unavailable`
   and the result's `denial.verdict_class` is `read_jail_unavailable`.
   This happens when the host's jail pin is damaged (or a 0.1.x
   `jail-floor` is left with no pin), when jail setup fails, or when the

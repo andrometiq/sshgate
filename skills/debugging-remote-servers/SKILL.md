@@ -129,6 +129,9 @@ If a read comes back with **exit 77 and stderr `gate: read jail unavailable`**
 (in `run`, the denial class is `read_jail_unavailable`), nothing ran: the gate
 could not confirm or set up the jail (or the host is pinned to require it and
 lacks it), and in that case it never falls back to running the read unjailed.
+The one exception is a line saying the read may have started: the jail failed
+after reporting itself ready, so the command may have run and its result is not
+trusted. Pass that warning on to the user; don't call it "nothing ran".
 Don't retry, because every read on that host fails the same
 way until it is fixed. Tell the user to run `~/.sshgate-gate/gate doctor` on
 the host. Writes are not affected.
