@@ -26,3 +26,6 @@ func EnableSubreaper() error    { return nil }
 func CleanupDescendants() error { return nil }
 
 func CheckJailedCredentials(string, bool) error { return errUnsupported }
+
+func DescribeMounts([]string) ([]MountReport, error) { return nil, errUnsupported }
+func MountOf(string, []string) (MountReport, error)  { return MountReport{}, errUnsupported }
