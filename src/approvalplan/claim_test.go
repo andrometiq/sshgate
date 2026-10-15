@@ -277,7 +277,9 @@ func TestReportedClaimSurvivesRetention(t *testing.T) {
 						r.s.FlushPass()
 					}
 					if phase == "shed" {
-						if a := r.apply(key, ap.ShedRecord{Pressure: true}); !a.Changed {
+						// An unminted record still owes Clock's window-closed event.
+						wantShed := claimed || expired
+						if a := r.apply(key, ap.ShedRecord{Pressure: true}); a.Changed != wantShed || r.rec(key).Header.Shed != wantShed {
 							t.Fatal(a)
 						}
 					}
@@ -293,5 +295,71 @@ func TestReportedClaimSurvivesRetention(t *testing.T) {
 				})
 			}
 		}
+	}
+}
+
+func TestLateReportWithOutstandingClockWrites(t *testing.T) {
+	r := newRig(t)
+	gid := st.ID(1)
+	if a := r.s.Submit(st.PrincipalA, st.GrantDraft(gid, "web-1", time.Hour, r.clock.Wall)); a.Code != "" {
+		t.Fatal(a)
+	}
+	r.approve(ap.RecordKey(st.PrincipalA, gid))
+	id := st.ID(2)
+	key := r.submit(id, ap.CoordinatorExecutor, st.Write("w", 1))
+	if h := r.rec(key).Header; h.Decision == nil || h.Decision.DecidedBy != ap.GrantDecidedPrefix+gid || h.AssistDeadline != r.clock.Wall.Add(5*time.Second) {
+		t.Fatal("not grant-approved with five-second assist deadline")
+	}
+	r.clock.Advance(time.Second)
+	if a := r.claim(key, id); a.Claim != ap.ClaimExpired {
+		t.Fatal(a)
+	}
+	r.s.FlushPass()
+	r.s.Do(key, ap.ShedRecord{Pressure: true})
+	r.s.Sink.Fail = true
+	r.clock.Advance(4 * time.Second)
+	r.s.Do(key, ap.Tick{})
+	if a := r.s.Claim(key, st.Token("invalid")); a.Code != ap.CodeInvalidClaim {
+		t.Fatal(a)
+	}
+	if a := r.s.Report(key, st.Token(id), negativeReport(1)); a.Code != "" {
+		t.Fatalf("valid late report refused: %+v", a)
+	}
+	if h := r.rec(key).Header; h.FinalReport == nil {
+		t.Fatal("report not recorded")
+	}
+	if r.view(key).Class != ap.ClassSettled {
+		t.Fatal("report not settled")
+	}
+	if a := r.s.Do(key, ap.ShedRecord{Pressure: true}); a.Changed {
+		t.Fatal("shed unflushed Clock writes")
+	}
+	r.s.Sink.Fail = false
+	r.s.FlushPass()
+	if a := r.s.Do(key, ap.ShedRecord{Pressure: true}); !a.Changed {
+		t.Fatal("did not shed after Clock writes flushed", a)
+	}
+}
+
+func TestReportedUnmintedWaitsForClockBeforeShed(t *testing.T) {
+	r := newRig(t)
+	id := st.ID(1)
+	key := r.submit(id, ap.CoordinatorExecutor, st.Write("w", 60))
+	r.approve(key)
+	if a := r.s.Report(key, st.Token(id), negativeReport(1)); a.Code != "" {
+		t.Fatal(a)
+	}
+	r.s.FlushPass()
+	if a := r.s.Do(key, ap.ShedRecord{Pressure: true}); a.Changed {
+		t.Fatal("shed reported-but-unminted record before Clock")
+	}
+	r.clock.Advance(60 * time.Second)
+	r.s.Do(key, ap.Tick{})
+	if a := r.s.Do(key, ap.ShedRecord{Pressure: true}); a.Changed {
+		t.Fatal("shed before Clock event flushed")
+	}
+	r.s.FlushPass()
+	if a := r.s.Do(key, ap.ShedRecord{Pressure: true}); !a.Changed {
+		t.Fatal("did not shed after Clock event flushed", a)
 	}
 }

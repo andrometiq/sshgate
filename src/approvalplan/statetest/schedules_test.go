@@ -130,3 +130,50 @@ func TestModelDeferredAdmission(t *testing.T) {
 		t.Fatalf("deferred admission did not close: %+v", job.Outcome)
 	}
 }
+
+func TestLateReportFailedSinkSchedule(t *testing.T) {
+	m := NewModel(0)
+	s, e := m.Signer, m.Exec
+	gid, id := ID(1), ID(2)
+	if a := s.Submit(PrincipalA, GrantDraft(gid, "web-1", time.Hour, m.Clock.Wall)); a.Code != "" {
+		t.Fatal(a)
+	}
+	m.approve(ap.RecordKey(PrincipalA, gid))
+	if code := e.Submit(JobDraft(id, ap.CoordinatorExecutor, m.Clock.Wall, Write("w", 1))); code != "" {
+		t.Fatal(code)
+	}
+	jk, key := ap.JobKey(id), ap.RecordKey(PrincipalA, id)
+	e.Drive(jk, 1)
+	if h := s.Store[key].Header; h.Decision == nil || h.Decision.DecidedBy != ap.GrantDecidedPrefix+gid || h.AssistDeadline != m.Clock.Wall.Add(5*time.Second) {
+		t.Fatal("invalid grant/assist fixture")
+	}
+	m.Clock.Advance(time.Second)
+	if a := s.Claim(key, Token(id)); a.Claim != ap.ClaimExpired {
+		t.Fatal(a)
+	}
+	s.FlushPass()
+	s.Do(key, ap.ShedRecord{Pressure: true})
+	s.Sink.Fail = true
+	m.Clock.Advance(4 * time.Second)
+	s.Do(key, ap.Tick{})
+	if a := s.Claim(key, Token("invalid")); a.Code != ap.CodeInvalidClaim {
+		t.Fatal(a)
+	}
+	e.Drive(jk, 40)
+	if h := s.Store[key].Header; h.FinalReport == nil {
+		t.Fatal("valid late report not recorded")
+	}
+	job := e.Jobs[jk]
+	if job.ReportResult == nil || job.ReportResult.State != ap.ReportAcked {
+		t.Fatalf("report not settled as acknowledged: %+v", job.ReportResult)
+	}
+	if len(e.Gate.Dispatches) != 0 {
+		t.Fatal("expired job dispatched")
+	}
+	if ap.Class(s.Store[key], m.Clock.Now(), s.Settings, false) != ap.ClassSettled {
+		t.Fatal("signer record not settled")
+	}
+	if s.Err != nil {
+		t.Fatal(s.Err)
+	}
+}

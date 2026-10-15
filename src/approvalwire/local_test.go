@@ -456,3 +456,42 @@ func TestWorstCasePagesFitOneFrame(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestClaimSignaturesRequireBothFields(t *testing.T) {
+	for _, missing := range []string{"decided_at", "signatures", "both"} {
+		for _, hosted := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/hosted=%v", missing, hosted), func(t *testing.T) {
+				answer := localResponses()["claim-signatures"]
+				if missing != "signatures" {
+					answer.resp.Claim.DecidedAt = nil
+				}
+				if missing != "decided_at" {
+					answer.resp.Claim.Signatures = nil
+				}
+				// Preserve canonical field order so validation reaches the Claim.
+				frame, err := json.Marshal(answer.resp)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if hosted {
+					_, err = approvalwire.ClassifyHostedResponse(approvalwire.KindClaim, 200, "application/json", frame)
+				} else {
+					_, err = approvalwire.DecodeLocalResponse(approvalwire.KindClaim, append(frame, '\n'))
+				}
+				if err == nil {
+					t.Fatal("incomplete signatures answer accepted")
+				}
+			})
+		}
+	}
+}
+
+func FuzzClaimResponseNoPanic(f *testing.F) {
+	for _, fields := range []string{``, `,"signatures":["x"]`, `,"decided_at":"2026-10-15T09:30:20Z"`} {
+		f.Add([]byte(`{"approval_proto":1,"ok":true,"claim":{"status":"signatures"` + fields + `}}`))
+	}
+	f.Fuzz(func(t *testing.T, body []byte) {
+		approvalwire.DecodeLocalResponse(approvalwire.KindClaim, append(bytes.Clone(body), '\n'))
+		approvalwire.ClassifyHostedResponse(approvalwire.KindClaim, 200, "application/json", body)
+	})
+}

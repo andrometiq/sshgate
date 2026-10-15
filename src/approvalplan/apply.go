@@ -640,10 +640,13 @@ func fullyAudited(h R1Header) bool { return h.AuditedThrough == h.OutboxSeq }
 
 // shedAllowed is SA-9's Shed rule: settled and fully audited at its age or
 // under payload pressure, or a fully audited awaiting_report record under
-// pressure.
+// pressure. All Clock writes must be committed and flushed first.
 func shedAllowed(rec R1, now Now, s Settings, grantLive, pressure bool) bool {
 	h := rec.Header
-	if h.Shed || h.Decision == nil || !fullyAudited(h) {
+	if h.Shed || h.Decision == nil || h.Assist == nil || !fullyAudited(h) || bytesHeld(rec) {
+		return false
+	}
+	if _, ok := ClaimEnd(rec); ok && h.Mint == nil {
 		return false
 	}
 	switch Class(rec, now, s, grantLive) {
