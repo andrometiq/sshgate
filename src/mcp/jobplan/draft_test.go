@@ -308,3 +308,26 @@ func TestDraftBlankCommands(t *testing.T) {
 		}
 	}
 }
+
+// An unparseable command is refused, not turned into a signed write the
+// operator would be asked to approve; an unknown program still asks.
+func TestDraftRefusesUnparseableCommands(t *testing.T) {
+	options, target := draftFixture()
+	for _, command := range []string{";", "|", "&&", "''"} {
+		if _, err := BuildRun(options, target, command, false); !isCode(err, approvalplan.CodeInvalidRequest) {
+			t.Errorf("BuildRun(%q) error = %v; want invalid_request", command, err)
+		}
+		if _, err := BuildBatch(options, target, []string{"touch /tmp/a", command}, nil); !isCode(err, approvalplan.CodeInvalidRequest) {
+			t.Errorf("BuildBatch(..., %q) error = %v; want invalid_request", command, err)
+		}
+	}
+	draft, err := BuildRun(options, target, "frobnicate --now", false)
+	if err != nil || draft.CommandJob.Steps[0].Route != approvalplan.RouteSignedWrite {
+		t.Fatalf("unknown program: draft %+v, err %v; want a signed write", draft, err)
+	}
+}
+
+func isCode(err error, code approvalplan.Code) bool {
+	var codeErr *approvalplan.CodeError
+	return errors.As(err, &codeErr) && codeErr.Code == code
+}

@@ -3,6 +3,7 @@ package jobplan
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"strings"
 	"time"
 
@@ -25,9 +26,12 @@ type DraftOptions struct {
 // BuildRun builds a single-command approval. Ordinary reads need no draft and
 // are rejected by the shared validator; reveal always requires approval.
 func BuildRun(options DraftOptions, target approvalplan.RouteSnapshot, command string, reveal bool) (approvalplan.ApprovalDraft, error) {
-	route := commandRoute(command)
-	if reveal {
-		route = approvalplan.RouteSignedReveal
+	route := approvalplan.RouteSignedReveal
+	if !reveal {
+		var err error
+		if route, err = commandRoute(command, 0); err != nil {
+			return approvalplan.ApprovalDraft{}, err
+		}
 	}
 	return buildCommands(options, target, []string{command}, []approvalplan.Route{route}, nil, nil)
 }
@@ -40,7 +44,11 @@ func BuildBatch(options DraftOptions, target approvalplan.RouteSnapshot, command
 	}
 	routes := make([]approvalplan.Route, len(commands))
 	for i, command := range commands {
-		routes[i] = commandRoute(command)
+		route, err := commandRoute(command, i)
+		if err != nil {
+			return approvalplan.ApprovalDraft{}, err
+		}
+		routes[i] = route
 	}
 	return buildCommands(options, target, commands, routes, stopOnError, nil)
 }
@@ -56,11 +64,16 @@ func BuildUpdate(options DraftOptions, target approvalplan.RouteSnapshot, binary
 	return buildCommands(options, target, []string{"SSHGATE_UPDATE " + binarySHA256}, []approvalplan.Route{approvalplan.RouteSignedAdmin}, nil, &display)
 }
 
-func commandRoute(command string) approvalplan.Route {
-	if classify.Classify(command) == classify.KindRead {
-		return approvalplan.RouteUnsignedRead
+// commandRoute refuses a command the classifier cannot parse (for example a
+// bare ";"), as the ordinary run tool does, instead of asking for approval.
+func commandRoute(command string, index int) (approvalplan.Route, error) {
+	switch classify.Classify(command) {
+	case classify.KindRead:
+		return approvalplan.RouteUnsignedRead, nil
+	case classify.KindUnknown:
+		return "", &approvalplan.CodeError{Code: approvalplan.CodeInvalidRequest, Field: fmt.Sprintf("steps[%d].exact_command", index), Msg: "is not a parseable command"}
 	}
-	return approvalplan.RouteSignedWrite
+	return approvalplan.RouteSignedWrite, nil
 }
 
 func buildCommands(options DraftOptions, target approvalplan.RouteSnapshot, commands []string, routes []approvalplan.Route, stopOnError *bool, display *approvalplan.TrustedDisplay) (approvalplan.ApprovalDraft, error) {
