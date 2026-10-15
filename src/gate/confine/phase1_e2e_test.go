@@ -10,6 +10,7 @@ import (
 	"golang.org/x/sys/unix"
 	"os"
 	"os/exec"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"syscall"
@@ -308,6 +309,8 @@ func legPhase1Clone(t *testing.T, spec Spec, namespace string) {
 		plan = RunPlan{Mode: LaunchFailure, Errno: syscall.EPERM, Command: "printf ran"}
 		if os.Geteuid() == 0 {
 			plan = RunPlan{Mode: ControlledHang, After: 5 * time.Second, Command: "printf ran", Release: func() error { killMappingWaiters(t); return nil }}
+			// The hung clone holds a thread in a raw syscall the GC cannot stop; a GC in the hang would deadlock the release.
+			defer debug.SetGCPercent(debug.SetGCPercent(-1))
 		}
 	} else if namespace == "MNT" && jailmut.On("P-CLONE-MNT") {
 		marker = "nsverify"
