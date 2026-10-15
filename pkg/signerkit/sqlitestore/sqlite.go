@@ -198,6 +198,7 @@ func openSQLite(path string, create, migrate, setWAL bool) (*DB, error) {
 		name := memoryDBSeq.Add(1)
 		dsn = fmt.Sprintf("file:sshgate-memory-%d?mode=memory&cache=shared&_txlock=immediate&_pragma=busy_timeout(5000)&_pragma=foreign_keys(on)&_pragma=recursive_triggers(on)", name)
 	}
+	dsn += "&_pragma=synchronous(FULL)"
 	d, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open %s: %w", path, err)

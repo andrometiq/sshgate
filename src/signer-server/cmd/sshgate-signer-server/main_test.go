@@ -346,7 +346,7 @@ func TestValidateApprovalRosterPreventsUnreachableFreshPolicy(t *testing.T) {
 		{id: "machine", role: "operator"},
 		{id: "totp-voter", role: "operator"},
 		{id: "webauthn-voter", role: "operator"},
-		{id: "wrong-role", role: "auditor"},
+		{id: "wrong-role", role: "admin"},
 		{id: "no-factor", role: "operator"},
 	}
 	for _, user := range users {

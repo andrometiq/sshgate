@@ -175,6 +175,12 @@ CREATE TABLE IF NOT EXISTS totp_replay (
 		SQL:     policyMigration6SQL,
 		Apply:   applyMigration6,
 	},
+	{
+		Version: 7,
+		Name:    "approval_lifecycle_v2",
+		SQL:     approvalMigration7SQL,
+		Apply:   applyMigration7,
+	},
 }
 
 // applyMigration2 makes the one non-idempotent part of migration 2 safe to
