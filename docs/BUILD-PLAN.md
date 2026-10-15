@@ -130,8 +130,8 @@ denied by default, granted per command by a signed request or per host by the op
 - **Strict run.** A run in which any unmet label clause aborts before `X`. A run is strict on a
   pinned host and whenever the read requires confinement.
 - **Requires confinement.** True for a read with a signed network grant, a read on a host pinned
-  `net=allow`, and a read sent in the unsigned envelope `SSHGATE_READ1 confined <cmd>`. Such a
-  read is never run outside the jail, whatever the failure class.
+  `net=allow`, and a read sent in the unsigned envelope `SSHGATE_READ1 confined[,net] <cmd>`
+  (see P4.1). Such a read is never run outside the jail, whatever the failure class.
 - **Daemon-read verbs.** The fixed allowlist of `systemctl` and `docker` read verbs that need a
   local daemon socket (`lane2` in the code). They carry their own label:
   `daemon read, limited verbs: <binary> (not kernel read-only)`.
@@ -345,7 +345,10 @@ Status: open.
 
 ### Phase 4: the per-read network permission
 
-**P4.1 — Wire review, no code.** Status: open.
+**P4.1 — Wire review, no code.** Status: done 2026-10-15 (critique pass 1: GO with 14 findings;
+independent review 2: NO-GO with 8 findings; independent review 3: NO-GO with 3 findings;
+independent review 4: GO with one wording fix; all findings written into P4.1–P4.4 and P5.2
+below).
 
 - *Goal:* settle the two wire additions before any code: the signed `Net` field and the unsigned
   `SSHGATE_READ1` envelope.
@@ -353,59 +356,193 @@ Status: open.
   (`json:"net,omitempty"`, after `Reveal`; a payload with `net=false` is byte-identical to v1;
   an older gate rejects `net` through its strict decoder, exit 65; no protocol-version bump; the
   hosted signer refuses `Net` like reveal); and the envelope `SSHGATE_READ1 <flags> <cmd>`
-  (flags from the closed set `{confined}`; an empty, unknown or duplicate flag is refused 77;
-  an older gate classifies the line as a write and denies it 77; unsigned only; it never grants
+  (flags from the closed set `{confined, net}`; `confined` is required; `net` grants nothing and
+  means "the caller expects network from the pin": the gate refuses it 77
+  (`gate: network not permitted on this host`) unless the pin is valid with `net=allow`, and
+  `net` without `confined` is refused; a daemon-read verb accepts `confined` only, and `net` on
+  one is refused 77; an empty, unknown or duplicate flag is refused 77; an
+  older gate classifies the line as a write and denies it 77; unsigned only; it never grants
   network and never authorises a write). A command prefix such as `SSHGATE_NET` was rejected: an
   older gate would run it as a signed, unconfined write.
+- *Critique pass 1 (2026-10-15), verified:* `net=false` marshals byte-identical to v1; every
+  committed release gate decodes strictly and rejects `net` with 65; the gate verifies over the
+  re-marshalled payload, so adding or stripping `net` (any letter case, `null`, duplicate keys,
+  a trailing JSON value) cannot change what a signature authorises; no version bump is needed on
+  the gate wire, the signer socket or the hosted wire; the hosted plane cannot mint `Net`; every
+  committed release gate, on both tiers, denies the envelope 77 through the classifier.
+- *Independent review 2 (2026-10-15), NO-GO, adopted:* every committed release gate's
+  `VerifySigned` checks `now < Exp` and `Exp − TS ≤ 300 s` but never `now ≥ TS`, so a payload
+  with a future `TS` is admitted until its `Exp` (fixed first in P4.2); the envelope's network
+  expectation must survive to execution against one pin snapshot; daemon reads cannot honour
+  `net`; the MCP routing needed an explicit table; capability advertisement, the socket-wire
+  omission rule, the remote-response command check and the P5.2 network wording were missing or
+  wrong. The wire shapes stand.
 - *Acceptance:* the review is GO, and any change it makes is written into P4.2–P4.4 here.
 - *Depends:* Phase 3.
 
 **P4.2 — Gate: signed network and the envelope.** Status: open.
 
-- *Deliverables:* `SigPayload.Net` with goldens; `VerifySigned` returns `Verified{Cmd, Reveal,
-  Net}`; a network grant on an admin verb, a write or an unknown command is denied 77
-  (`gate: network grant covers reads only`); a network-granted read runs jailed and strict with
-  network; the envelope parser runs before the public-key load (Tier-1 handles it), sends an
-  inner read to `execRead` with confinement required, denies an inner write or unknown 77, and
-  denies an envelope inside a signed command 77.
+- *Deliverables:*
+  - **Admission window, first.** Every committed release gate admits a signed payload whose
+    `TS` lies in the future (`VerifySigned` never checks `now ≥ TS`), so a signature can be
+    admissible for longer than its validity window. Admission now requires
+    `TS − 30 s ≤ now < Exp`, a fixed 30-second clock-skew allowance, alongside the existing
+    `Exp − TS ≤ 300 s`; a payload outside it is refused 65 (`ErrNotYetValid`). This applies to
+    every signed command, not only network reads. A signature is therefore admissible for at
+    most 330 s of gate time. Expiry limits admission only; it does not end a command that is
+    already running.
+  - `SigPayload.Net` with goldens; `VerifySigned` returns `Verified{Cmd, Reveal, Net}`.
+  - A network grant on an admin verb, a write or an unknown command is denied 77
+    (`gate: network grant covers reads only`), checked immediately after `VerifySigned`
+    succeeds and before the `SSHGATE_REVOKE` / `SSHGATE_UPDATE` / `SSHGATE_XFER_*` dispatch;
+    the inner-envelope check (a signed inner command starting with `SSHGATE_READ`, denied 77)
+    sits at the same point.
+  - Daemon-read verbs accept `confined` only. A signed `Net=true` grant or an envelope `net`
+    flag on a daemon-read verb is refused 77 with the fixed line
+    `gate: network is not available for daemon-read verbs`, whatever the pin and whether or not
+    the jail is available; an envelope with `confined` alone on a daemon-read verb runs it in
+    its P3.2 jail as usual (the envelope only requires confinement).
+  - A network-granted read runs jailed and strict with network.
+  - The envelope parser runs after `LoadPubKey` succeeds and before `IsSigned`, so Tier-1 (nil
+    pubkey) and Tier-2 both handle it, and a damaged `gate.pub` exits 70 for envelope reads as
+    for plain reads. A line starting with the bytes `SSHGATE_READ` is an envelope attempt and
+    never reaches the classifier as a whole line. Grammar, byte-exact:
+    `SSHGATE_READ1 SP flags SP cmd`, where `SP` is exactly one 0x20;
+    `flags = flag *("," flag)`; `flag = "confined" / "net"`; `cmd` is the remaining bytes
+    verbatim, at least one printable byte. Refused 77 (`gate: bad envelope`): any other version
+    digit, a missing field, a tab, CR, LF or NUL in the flags field, an empty, unknown or
+    duplicate flag, a missing `confined`, or an empty or whitespace-only `cmd`. The `net` flag
+    is refused 77 (`gate: network not permitted on this host`) unless the pin is valid with
+    `net=allow`. The inner `cmd` goes only to `classify.Classify` and then to `execRead` or a
+    77 deny (an inner write or unknown); it is never checked against `SSHGATE_VERSION`,
+    `SSHGATE_JAIL`, the empty-line probe, `IsSigned` or the admin verbs.
+  - The envelope sends an inner read to `execRead` with confinement required through a
+    separate input: `execRead` takes `readFlags{netGrant, envelope, expectNet bool}`, where
+    `expectNet` is the envelope's `net` flag and is carried separately from `netGrant`;
+    `requiresConfinement(pin, netGrant || envelope)`; `spec.Net` comes only from
+    `pin.Net || netGrant`, never from `envelope` or `expectNet`.
+  - One pin snapshot per read. Read admission loads the pin once; that snapshot is the
+    admission point, and it is used both for the `expectNet` check and for building the
+    execution Spec. Nothing after admission reloads the pin, so a read admitted with
+    `expectNet` runs with network or is refused, and never runs without network.
+  - `SSHGATE_JAIL` reports `net_grants=true` (`netGrantsSupported` turns on in this step), and
+    the capability test's expectation changes with it.
+  - Audit: executed-read and denial records gain `net_grant` and `envelope` next to
+    `requires_confinement`, so a pin-network read is told apart from a granted one.
 - *Acceptance:* `TestEncodeSigned_Golden` unchanged, `TestEncodeSigned_NetGolden`,
-  `TestDecodeV1RejectsNet`; `P-G-ENVELOPE` registered with `U-EnvelopeParse`; the
-  `P-G-CONFINE-REQUIRED` effect leg through the real signed path; `G-NET-NO-FALLBACK`,
-  `G-NET-LANE2-ABSENT`, `G-ENVELOPE-OLD-GATE`, `G-ENVELOPE-NEW-GATE`, `G-ENVELOPE-ABSENT`,
-  `G-NET-UNMET` and `G-ENVELOPE-UNMET` with their unpinned no-network twins.
+  `TestDecodeV1RejectsNet`; `P-G-ENVELOPE` registered with `U-EnvelopeParse`, whose rows include
+  a tab, a double space, CR/LF, a trailing comma, `confined,confined`, `net` without
+  `confined`, `confined,net` on a `net=deny` and on an unpinned host, an empty cmd, and inner
+  `SSHGATE_SIG:…`, `SSHGATE_JAIL` and `SSHGATE_VERSION`; `FuzzEnvelopeParse` in `make test`
+  (the parse is total; a line the parser accepts reproduces exactly from its fields);
+  protection `P-G-ENVELOPE-NO-NET` registered and mutation-proof: INET legs show no socket for
+  an envelope read on an unpinned host and on a `net=deny` pinned host (mutation: the envelope
+  sets `netGrant`); `TestNetGrantDeniedBeforeAdminDispatch`: signed `Net=true`
+  `SSHGATE_REVOKE`, `SSHGATE_UPDATE <hash>` and `SSHGATE_XFER_SEND …` each exit 77 with the
+  gate dir intact and no stdin consumed; `TestVerifyAdmissionWindow`: a payload with
+  `TS = now + 31 s` is refused 65 and one with `TS = now + 30 s` is accepted, for a signed write
+  and a signed network read alike; `TestEnvelopePinSnapshot`: with the jail available, the pin is
+  removed, or replaced with `net=deny`, between parsing and admission and after admission, and a
+  `confined,net` read is either refused 77 (`gate: network not permitted on this host`) or runs
+  with network, never without; `TestDaemonReadNetRefused`: signed `Net=true` and envelope
+  `confined,net` on `systemctl status <unit>` and `docker ps`, on a `net=allow` host with the jail
+  available, each exit 77 with the fixed line and nothing runs; `SSHGATE_JAIL` reports
+  `net_grants=true`; the `P-G-CONFINE-REQUIRED` effect leg through the
+  real signed path; `G-NET-NO-FALLBACK`, `G-NET-LANE2-ABSENT`, `G-ENVELOPE-OLD-GATE`,
+  `G-ENVELOPE-NEW-GATE`, `G-ENVELOPE-ABSENT`, `G-NET-UNMET` and `G-ENVELOPE-UNMET` with their
+  unpinned no-network twins.
 - *Depends:* P4.1.
 
 **P4.3 — Signer.** Status: open.
 
-- *Deliverables:* `Net` in the sign request and `CommandReq`; `signAll` copies it into the
-  payload; `HandleSignRequest` rejects `Net` on admin verbs; `matchGrant` never auto-signs a
-  network read (`if c.Reveal || c.Net || isAdminVerb(c.Cmd)`); the hosted signer refuses `Net`
-  before any HTTP call; the Telegram card shows
+- *Deliverables:* `Net` in the sign request and `CommandReq`, declared
+  ``Net bool `json:"net,omitempty"` `` on both socket-wire command structs (the MCP client's and
+  the daemon's), so a request without network is byte-identical to today's and an older daemon
+  still accepts it; `signAll` copies it into the
+  payload; `HandleSignRequest` rejects `Net` on admin verbs, and rejects a request where any
+  command has `Net` unless it is the sole command, has a non-empty `Reason`, and is not an
+  admin verb; it also rejects `Net` on a command `classify.Classify` calls a write; `matchGrant`
+  never auto-signs a network read (`if c.Reveal || c.Net || isAdminVerb(c.Cmd)`); the hosted
+  signer refuses `Net` before any HTTP call, with the fixed error prefix `net_unsupported:`; on
+  the remote-signature path, `respond` decodes each envelope and refuses unless the decoded
+  `Cmd`, `Host`, `Reveal` and `Net` equal the request's (the outer `Cmd` check alone does not
+  prove which command the envelope signs); the Telegram card shows
   `🌐 READ WITH NETWORK on <alias>: may connect anywhere, including services on <alias> itself
   that can change state.` followed by the reason, and the approve button reads
-  `✓ Approve READ WITH NETWORK`.
-- *Acceptance:* `TestMatchGrantNeverAutoSignsNet`, `TestHostedRefusesNet` and
-  `TestApprovalMessageNetBanner` pass; the `matchGrant` guard and the hosted refusal have
-  source-patch mutation legs.
+  `✓ Approve READ WITH NETWORK`; reveal plus network shows both banners (reveal first) and the
+  button `✓ Approve SECRET-REVEAL + NETWORK`; the reason line renders when `Reveal || Net`.
+  `THREAT-MODEL.md` states: a network grant authorises the exact command on the bound host for
+  its admission window (at most 330 s: 300 s of validity plus the 30 s skew allowance) and may
+  run more than once in it; expiry limits admission and does not end a running command.
+- *Acceptance:* `TestMatchGrantNeverAutoSignsNet`, `TestHostedRefusesNet`,
+  `TestApprovalMessageNetBanner`, `TestApprovalMessageRevealNetBanner`,
+  `TestSignRejectsNetInBatch` and `TestSignRejectsNetWithoutReason` pass; a golden shows a
+  sign request without network is unchanged on the socket wire; an old-daemon compatibility test
+  shows an older daemon's strict decoder accepts a new MCP's request without network and rejects
+  one with `net`; `TestRemoteSignatureCmdMismatch`: a remote response with the right outer `Cmd`
+  and a valid envelope for a different command is refused; the `matchGrant` guard
+  and the hosted refusal have source-patch mutation legs.
 - *Depends:* P4.2.
 
 **P4.4 — MCP: the `network` request.** Status: open.
 
-- *Deliverables:* `run` gains `network` (one read only; a reason is required;
-  `run_batch` refuses it). A cached `SSHGATE_JAIL` capability per alias, invalidated by a
-  successful `update_gate`. One routing table: a network read on a `net=allow` host is sent in
-  the `SSHGATE_READ1 confined` envelope; on any other host it is signed with `Net=true`;
-  reveal plus network is always one signed request carrying both; a network read with no
-  usable signer is refused before anything is sent. New refusals: `network_needs_reason`,
-  `network_not_permitted`, `network_unsupported_signer`, `network_unsupported_gate`,
-  `network_grant_read_only`, `network_requires_confinement`. No refusal falls back to an
-  ordinary read.
+- *Deliverables:*
+  - `run` gains `network` (one read only; a reason is required; `run_batch` refuses it). `run`
+    without `network` does not promise no network: the result carries no network claim, and the
+    P5.1 snapshot (enforcement and the pin's `net`) is what tells the user. `run` and
+    `run_batch` refuse a `command` starting with `SSHGATE_READ` before classification.
+  - A cached `SSHGATE_JAIL` capability per alias, invalidated by a successful `update_gate`, by
+    any `network_*` refusal, and by a jail-unavailable refusal (`gate: read jail unavailable`)
+    on a network-requested operation. That refusal maps to `network_requires_confinement`; the
+    result keeps the gate's diagnostic line and any "may have started" warning, and the failed
+    operation is never retried.
+  - One routing table, checked top to bottom. The command, tier and gate-capability checks run
+    locally, so their refusals happen before any sign request; the signer check cannot (the
+    socket has no capability query), so it happens before any human prompt instead:
+
+    | Request and host | Route |
+    |---|---|
+    | A write, or a daemon-read verb | refused `network_grant_read_only` |
+    | Reveal plus network on a Tier-1 host (any pin, including `net=allow`) | refused with the existing read-only refusal |
+    | Reveal plus network on a Tier-2 host | one signed request carrying `Reveal` and `Net` (signed-route conditions below) |
+    | No reveal; capability `enforcement=kernel` and pinned `net=allow` | the `SSHGATE_READ1 confined,net` envelope, on either tier and whatever the signer's state (absent, older or hosted); no sign request |
+    | No reveal; any other Tier-1 host | refused `network_not_permitted` |
+    | No reveal; any other Tier-2 host | signed with `Net=true` (signed-route conditions below) |
+
+    Every signed route requires a Tier-2 host, a capability with `net_grants=true` (otherwise,
+    or with no capability, `network_unsupported_gate`) and `enforcement=kernel` (otherwise
+    `network_requires_confinement`), all checked locally before any sign request; then exactly
+    one real `Net=true` sign request establishes signer support. An older daemon (its strict
+    decoder rejects `net`) or a hosted backend (`net_unsupported:`) rejects it before any human
+    prompt, HTTP submission or signing, and the MCP returns `network_unsupported_signer` with no
+    SSH execution and no retry.
+  - New refusals: `network_needs_reason`, `network_not_permitted`,
+    `network_unsupported_signer`, `network_unsupported_gate`, `network_grant_read_only`,
+    `network_requires_confinement`.
+  - Error identities are stable: the daemon's `net_unsupported:` prefix and an older signer's
+    strict-decode error on `net` map to `network_unsupported_signer`; the gate's new deny lines
+    are the fixed strings in P4.2 (the `net` flag's deny maps to `network_not_permitted`, the
+    daemon-read deny to `network_grant_read_only`); an older gate's 65 on `net` and its 77
+    write deny of the envelope map to `network_unsupported_gate`. The MCP never retries or
+    re-routes a network read on any response (one attempt; a refusal only invalidates the
+    cache), so forged command output can at most mislabel a refusal. No refusal falls back to
+    an ordinary read.
 - *Acceptance:* the full MCP → signer → gate path is tested with a stale capability cache and
   with the jail becoming unavailable between the capability probe and execution; the named
   cases `M-NET-CACHED-OLD-GATE` (against the committed release gate), `M-NET-PIN-REMOVED-ABSENT`
   and `M-NET-LANE2-ABSENT`, each with its mutation and its expect-green twin, and
-  `P-M-REVEAL-NET` with its legs. No network-requested command runs unconfined on any
-  interleaving.
+  `P-M-REVEAL-NET` with its legs; every row of the routing table; the envelope route on a
+  pinned `net=allow` host with an absent, an older and a hosted signer, each sending no sign
+  request; on a signed route, an older and a hosted signer each receive exactly one `Net=true`
+  sign request, reject it with no prompt, no HTTP submission and no signature, and the MCP
+  returns `network_unsupported_signer` with no SSH execution and no retry; a jail-unavailable
+  refusal on a network-requested read maps to `network_requires_confinement` with the gate's
+  diagnostic kept, invalidates the cache, and the next independent network call refreshes the
+  capability before any prompt; reveal plus network on a Tier-1 `net=allow` host refused before
+  any prompt; routing
+  tested against the real capability producer (a gate built from P4.2 answering
+  `SSHGATE_JAIL`), not only fabricated responses. No network-requested command runs unconfined
+  on any interleaving, and none runs without network without a `network_*` refusal.
 - *Depends:* P4.3.
 
 ### Phase 5: provisioning and docs
@@ -434,11 +571,24 @@ Status: open.
 
 **P5.2 — Docs and instructions.** Status: open.
 
-- *Deliverables:* rewrite the MCP server instructions (network is off by default; `network=true`
-  needs a reason and an approval; what each label means); the read-jail lines in `AGENTS.md`,
+- *Deliverables:* rewrite the MCP server instructions: describe network through effective
+  enforcement and pin or grant policy, not label prefixes. An ordinary jailed read has network
+  when the host is pinned `net=allow` or the read carries a signed network grant; a read that
+  runs unconfined (the classifier-only fallback on an unpinned host whose jail is unavailable)
+  has network; every other ordinary jailed read has none, whatever its label
+  (`kernel-jailed, network open — not read-only` has network, and either `classifier-only`
+  label can describe a jailed run without it). Jailed daemon-read verbs have no network, even on
+  a host pinned `net=allow`; their permitted unconfined fallback (unpinned host, jail absent,
+  confinement not required) keeps it. An explicit network request for a daemon-read verb is
+  refused. Gates older than
+  this release keep network for every read, including inside their Phase-1 jail.
+  `network=true` needs a reason; it needs a new approval except without reveal on a host pinned
+  `net=allow`, where the pin-authorised envelope needs no tap (reveal plus network is always a
+  signed, approved request). Say what each label means. Also: the read-jail lines in `AGENTS.md`,
   `README.md` and `ROADMAP.md`; the kernel-confinement section of `THREAT-MODEL.md`, which
   becomes the Phase-1/2 contract plus the residual list; `update_gate`'s result and hint, which
-  say that the update turns off network for unsigned reads and how to restore it; the Ubuntu
+  say that the update turns off network for unsigned reads that run in the jail on a host not
+  pinned `net=allow` (reads that fall back to classifier-only keep it), and how to restore it; the Ubuntu
   24.04 AppArmor user-namespace profile (documentation only). Everything stays generic: no hosts,
   names or paths.
 - *Acceptance:* every statement about the jail matches the built code and the label table; the
@@ -585,8 +735,12 @@ GOOS=darwin GOARCH=arm64 go build -o /dev/null ./src/signer/cmd/sshgate-signer-t
 plus the frozen wire and golden selectors (local socket and envelope goldens, `sigwire`, the
 hosted wire-frozen and ratchet tests, the MCP tool-registration and denial-shape tests), which
 must stay unchanged except where a sub-phase names the change. The gate's bytes must not change:
-no new package enters the gate's dependency closure, and the reproducible gate build hash equals
-the baseline recorded in A0. Tests are not concurrency-safe: run one test process at a time, and
+no new package enters the gate's dependency closure, and each sub-phase's gate build has the same
+sorted closure as its own base commit and an identical `.text` section and symbol table (names,
+sizes, kinds) in unstripped builds. The stripped hash itself may move when a file is added to a
+package in the closure (for example `src/redact`): the linker reorders its name table and file
+index even though no new code is linked. Sub-phases that start before #22 merges compare against
+A0a; A0b records the final baseline once it has merged. Tests are not concurrency-safe: run one test process at a time, and
 only one runner owns the Docker-backed integration suite.
 
 **Acceptance at the end of each phase:** the above, `make preflight`, and an independent review
@@ -608,10 +762,11 @@ merged; sub-phases with no dependency between them may run in parallel.
 
 | ID | Deliverable | Depends |
 |---|---|---|
-| A0 | Re-ground on the merged #22 code; record the gate build hash and dependency closures as the baseline | Work item 1 |
-| A1a | `src/approvalplan`: plan and draft types, validators, bounds, IDs and storage keys, canonical hashes, record schemas, reason validation; closure-check Makefile targets | A0 |
+| A0a | Re-ground on main before #22 Phase 2 merges; record that base's gate build hash and dependency closures | — |
+| A0b | Re-ground on the merged #22 code; record the gate build hash and dependency closures as the final baseline | Work item 1, A0a |
+| A1a | `src/approvalplan`: plan and draft types, validators, bounds, IDs and storage keys, canonical hashes, record schemas, reason validation; closure-check Makefile targets | A0a |
 | A1b | The pure state core (`View`, `Apply`, `Next`, `Decide`, `EffectivePolicy`, `GrantLive`, `JobView`, `JobNext`, the claim answer, the notify planner) with its property and model test harness | A1a |
-| A2 | `src/redact` span API; `RedactSpans(...).redacted == RedactString(...)` on every corpus | A0 |
+| A2 | `src/redact` span API; `RedactSpans(...).redacted == RedactString(...)` on every corpus | A0a |
 | A3 | `src/approvalreview`: review snapshots, neutralized text, the Telegram part packer, the hosted view model | A1a, A2 |
 | A4 | `pkg/signerkit/assist`: assessor interface, fail-closed provider input, deadline-bound runner, bounded pool, OpenAI-compatible provider | A1a, A2 |
 | A5 | `src/approvalwire` and the MCP approval client: six local socket kinds and the hosted `/v2/approvals` routes, with a closed error-code set | A1a |
@@ -634,7 +789,7 @@ path; the tool count is still eleven.
 
 | ID | Deliverable | Depends |
 |---|---|---|
-| B0 | `internal/securestate`: `ListNames`, `Remove`, `RemoveOrphanTemps` (additive) | A0 (may run during Phase A) |
+| B0 | `internal/securestate`: `ListNames`, `Remove`, `RemoveOrphanTemps` (additive) | A0a (may run during Phase A) |
 | B1 | One securestate file per approval record; exclusive directory ownership lock; startup over the file store | Phase A, B0 |
 | B2 | The restart matrix, shutdown that leaves records untouched, and the `/renotify <handle>` admin command | B1 |
 
