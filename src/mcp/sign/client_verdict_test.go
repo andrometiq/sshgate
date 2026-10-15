@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -19,8 +20,9 @@ import (
 // ErrVerdictUnknown (fail-safe: a human may have DENIED), not a generic
 // retryable read error.
 type readResultConn struct {
-	readErr error
-	closed  chan struct{}
+	readErr   error
+	closed    chan struct{}
+	closeOnce sync.Once
 }
 
 func newReadResultConn(readErr error) *readResultConn {
@@ -32,11 +34,7 @@ func (r *readResultConn) Read(b []byte) (int, error) {
 }
 func (r *readResultConn) Write(b []byte) (int, error) { return len(b), nil }
 func (r *readResultConn) Close() error {
-	select {
-	case <-r.closed:
-	default:
-		close(r.closed)
-	}
+	r.closeOnce.Do(func() { close(r.closed) })
 	return nil
 }
 func (r *readResultConn) LocalAddr() net.Addr                { return dummyAddr{} }
