@@ -42,6 +42,7 @@ type Engine struct {
 	effectErrors  chan error
 	flushNudge    chan struct{}
 	flushWaiters  map[string]*flushWaiter
+	waiters       map[string]map[chan struct{}]struct{}
 	config        Config
 	epoch         string
 	projections   projections
@@ -134,6 +135,9 @@ func (e *Engine) commitLocked(key string, before *ap.R1, cmd ap.Command, now ap.
 				delete(e.flushWaiters, key)
 			}
 		}
+	}
+	if answer.Changed || answer.Removed {
+		e.wakeWaitersLocked(key)
 	}
 	return after, answer, nil
 }
