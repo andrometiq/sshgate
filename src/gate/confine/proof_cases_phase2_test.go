@@ -37,5 +37,9 @@ func proofCasesPhase2() []harness.Case {
 	cases[len(cases)-1].NonRoot = true
 	add("G-SEAL-GUARD", "Effect", "Execute", []string{"SetupAbort"}, []string{"control:first-read", "jailed:second-read", "observe:output"}, []string{"EFFECT:second-ran"}, []string{"root-only"})
 	cases[len(cases)-1].Root = true
+	add("U-LabelContract", "Unit", "", nil, []string{"control:decision", "unit:switch"}, []string{"EFFECT:label"}, nil)
+	add("G-JAILVERB-LABEL", "Execution", "Execute", nil, []string{"jailed:verb", "observe:json"}, []string{"EFFECT:label"}, nil)
+	add("U-JailVerbNoExec", "Unit", "", nil, []string{"control:decision"}, []string{"EFFECT:exec"}, nil)
+	add("G-JAILVERB-NOEXEC", "Effect", "Execute", nil, []string{"control:payload", "jailed:verb", "observe:output"}, []string{"EFFECT:agent-bytes"}, nil)
 	return cases
 }

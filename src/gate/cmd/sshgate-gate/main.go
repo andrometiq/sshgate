@@ -164,6 +164,13 @@ func run() int {
 		return exitOK
 	}
 
+	if command, ok := jailVerbProbe(raw); ok {
+		// Unsigned host-capability probe: one jail attempt of a constant
+		// command, one JSON line. Like SSHGATE_VERSION it is not audited and
+		// is recognised before the pubkey load, so a Tier-1 gate answers it.
+		return runJailVerb(command)
+	}
+
 	// Tier 6a — resolve the gate-side authoritative audit logger from the
 	// gate dir. The level/path config files live there (owner/admin-edited
 	// only; the agent cannot reach them), and resolution NEVER fails the

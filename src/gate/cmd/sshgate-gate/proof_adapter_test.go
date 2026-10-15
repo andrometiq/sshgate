@@ -50,11 +50,15 @@ func gateProofCases() []harness.Case {
 	cases[len(cases)-1].NonRoot = true
 	add("G-SEAL-GUARD", "Effect", "Execute", []string{"SetupAbort"}, []string{"control:first-read", "jailed:second-read", "observe:output"}, []string{"EFFECT:second-ran"}, []string{"root-only"})
 	cases[len(cases)-1].Root = true
+	add("U-LabelContract", "Unit", "", nil, []string{"control:decision", "unit:switch"}, []string{"EFFECT:label"}, nil)
+	add("G-JAILVERB-LABEL", "Execution", "Execute", nil, []string{"jailed:verb", "observe:json"}, []string{"EFFECT:label"}, nil)
+	add("U-JailVerbNoExec", "Unit", "", nil, []string{"control:decision"}, []string{"EFFECT:exec"}, nil)
+	add("G-JAILVERB-NOEXEC", "Effect", "Execute", nil, []string{"control:payload", "jailed:verb", "observe:output"}, []string{"EFFECT:agent-bytes"}, nil)
 	return cases
 }
 
 // gateHooks are the protections whose mutation may show an effect here.
-var gateHooks = []string{"P-G-CONFINE-REQUIRED", "P-G-STRICT", "P-G-NET-STRICT", "P-COVERS", "P-CLONE-MNT", "P-SC-NET", "P-G-SEAL", "P-G-SEAL-GUARD"}
+var gateHooks = []string{"P-G-CONFINE-REQUIRED", "P-G-STRICT", "P-G-NET-STRICT", "P-COVERS", "P-CLONE-MNT", "P-SC-NET", "P-G-SEAL", "P-G-SEAL-GUARD", "P-G-LABEL-SWITCH", "P-G-JAILVERB-NOEXEC"}
 
 // gateProof is the gate package's proof: one case, its obligations, and the
 // markers its legs observed. Finish prints the one PROOF-COMPLETE line.
@@ -95,13 +99,14 @@ func newProof(t *testing.T, name string) *gateProof {
 	return p
 }
 
-// Control, Jailed and Observed complete an obligation; an invalid one fails
+// Control, Jailed, Unit and Observed complete an obligation; an invalid one fails
 // the leg.
 func (p *gateProof) Control(name string, valid bool) {
 	p.t.Helper()
 	p.complete("control:"+name, valid)
 }
 func (p *gateProof) Jailed(name string, valid bool) { p.t.Helper(); p.complete("jailed:"+name, valid) }
+func (p *gateProof) Unit(name string, valid bool)   { p.t.Helper(); p.complete("unit:"+name, valid) }
 func (p *gateProof) Observed(name string, valid bool) {
 	p.t.Helper()
 	p.complete("observe:"+name, valid)

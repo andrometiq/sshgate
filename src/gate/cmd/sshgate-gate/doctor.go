@@ -8,8 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-
-	"github.com/karthikeyan5/sshgate/src/gate"
 )
 
 // doctorReport is `gate doctor` output: the jail pin, the host facts, one jail
@@ -27,6 +25,7 @@ type doctorReport struct {
 	DevShm              bool     `json:"dev_shm"`
 	LSM                 []string `json:"lsm"`
 	Reads               string   `json:"reads"`
+	Label               string   `json:"label"`
 	Notes               []string `json:"notes,omitempty"`
 }
 
@@ -67,7 +66,8 @@ func runDoctor(args []string) int {
 }
 
 // doctor reports what the read router would do: it reads the pin with the
-// router's reader and routes one `:` attempt with the router's routeAttempt.
+// router's reader and takes the host capability the SSHGATE_JAIL verb reports
+// (one unsealed `:` attempt routed like a read; none for a damaged pin).
 func doctor(gateDir string) doctorReport {
 	facts := hostFactsFn()
 	d := doctorReport{
@@ -94,15 +94,9 @@ func doctor(gateDir string) doctorReport {
 		d.Notes = append(d.Notes, "jail-floor is no longer used and is ignored: the jail pin decides.")
 	}
 
-	requires := requiresConfinement(pin, false)
-	spec := readSpec(pin, requires, false)
-	res, err := executeCommand(context.Background(), ":", gate.ExecOpts{Confine: &spec})
-	var setupErr error
-	if res.ExitCode < 0 {
-		setupErr = setupErrorOf(err)
-	}
-	route := routeAttempt(pin.valid, requires, res, setupErr)
-	d.Attempt = route.reason
+	c := hostCapability(context.Background(), pin, jailProbeCommand, nil, nil)
+	route := c.route
+	d.Attempt, d.Label = route.reason, c.label()
 	if route.kernel {
 		d.Attempt = "kernel"
 	}
@@ -114,7 +108,7 @@ func doctor(gateDir string) doctorReport {
 	case pin.damaged != "":
 		reason, _ := pin.denial()
 		d.Reads = "denied (" + reason + ")"
-	case route.kernel && spec.Net:
+	case route.kernel && c.spec.Net:
 		d.Reads = "kernel-jailed, network open"
 	case route.kernel:
 		d.Reads = "kernel-jailed, no network"
@@ -152,6 +146,7 @@ func printDoctor(d doctorReport) {
 	fmt.Printf("pin:                   %s\n", pin)
 	fmt.Printf("attempt:               %s\n", d.Attempt)
 	fmt.Printf("reads:                 %s\n", d.Reads)
+	fmt.Printf("label:                 %s\n", d.Label)
 	fmt.Printf("landlock_abi:          %d\n", d.LandlockABI)
 	fmt.Printf("max_user_namespaces:   %d\n", d.MaxUserNS)
 	fmt.Printf("apparmor_userns_clamp: %s\n", yesNo(d.AppArmorUsernsClamp))

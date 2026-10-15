@@ -66,6 +66,10 @@ func phase2Registry() []prot {
 				phase2Leg("G-GATE-SEAL", "MUTATION-EFFECT gate-environ", "MUTATION-EFFECT gate-fd"))}},
 		{ID: "P-G-SEAL-GUARD", Site: "runConfined refuses a jail in a non-dumpable process", Class: "single", EffectLegs: []string{"G-SEAL-GUARD"},
 			MutationSets: []harness.MutationSet{one("P-G-SEAL-GUARD", phase2Leg("G-SEAL-GUARD", "MUTATION-EFFECT second-ran"))}},
+		{ID: "P-G-LABEL-SWITCH", Site: "Label read-only switch", Class: "direct", DirectLeg: "U-LabelContract", EffectLegs: []string{"G-JAILVERB-LABEL"},
+			MutationSets: []harness.MutationSet{one("P-G-LABEL-SWITCH", phase2Leg("U-LabelContract", "MUTATION-EFFECT label"), phase2Leg("G-JAILVERB-LABEL", "MUTATION-EFFECT label"))}},
+		{ID: "P-G-JAILVERB-NOEXEC", Site: "jailVerbProbe exact match", Class: "single", DirectLeg: "U-JailVerbNoExec", EffectLegs: []string{"G-JAILVERB-NOEXEC"},
+			MutationSets: []harness.MutationSet{one("P-G-JAILVERB-NOEXEC", phase2Leg("U-JailVerbNoExec", "MUTATION-EFFECT exec"), phase2Leg("G-JAILVERB-NOEXEC", "MUTATION-EFFECT agent-bytes"))}},
 	}
 }
 

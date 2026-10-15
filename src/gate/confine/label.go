@@ -1,5 +1,7 @@
 package confine
 
+import "github.com/karthikeyan5/sshgate/src/gate/confine/jailmut"
+
 // KernelLabelEnabled is the switch for the read-only label. While it is false,
 // a pinned kernel run reports LabelKernelNoLabel instead of
 // LabelReadOnlyKernel. Every caller of Label passes this constant.
@@ -80,7 +82,7 @@ func kernelLabel(s LabelState, effectiveNet, enabled bool) string {
 	case effectiveNet:
 		return LabelNetworkOpen
 	case s.Pinned:
-		if enabled {
+		if enabled || jailmut.On("P-G-LABEL-SWITCH") {
 			return LabelReadOnlyKernel
 		}
 		return LabelKernelNoLabel

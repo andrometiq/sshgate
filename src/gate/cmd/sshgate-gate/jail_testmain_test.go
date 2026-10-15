@@ -33,8 +33,9 @@ import (
 //     the user cache dir (read-only but visible inside the jail) so t.TempDir
 //     fixtures stay readable by the jailed child, as the gate dir and the
 //     operator's files are on a real host.
-//   - In-process reads record their seal instead of sealing (sealCalls), and
-//     the test-only __jailtest_capless sentinel runs the capless reader.
+//   - In-process reads record their seal instead of sealing (sealCalls) and
+//     the verb records its environment reset (verbEnvResets); the test-only
+//     __jailtest_capless sentinel runs the capless reader.
 func TestMain(m *testing.M) {
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
@@ -59,6 +60,7 @@ func TestMain(m *testing.M) {
 		sealCalls.Add(1)
 		return nil
 	}
+	resetVerbEnv = func() { verbEnvResets.Add(1) }
 	if os.Getenv("GORACE") == "" {
 		_ = os.Setenv("GORACE", "atexit_sleep_ms=0")
 	}
@@ -95,8 +97,9 @@ type testGateConfig struct {
 	Repeat bool
 }
 
-// sealCalls counts the seals of in-process reads.
-var sealCalls atomic.Int32
+// sealCalls counts the seals of in-process reads; verbEnvResets counts the
+// SSHGATE_JAIL environment resets, which would clear the test binary's own.
+var sealCalls, verbEnvResets atomic.Int32
 
 func testGateMain(raw string) int {
 	var config testGateConfig

@@ -146,10 +146,20 @@ func routeAfterSetupFailure(pinned, requires bool, class confine.FailureClass) b
 	return !requires || jailmut.On("P-G-CONFINE-REQUIRED")
 }
 
-// readSpec builds the jail for a read. Strict comes from a valid pin or from
-// requiring confinement; AcceptFS and Net come only from the pin (Net also
-// from a grant).
+// readSpec builds the jail for a read: readSpecBase, then the test-only
+// readSpecHook.
 func readSpec(pin pinState, requires, grant bool) confine.Spec {
+	spec := readSpecBase(pin, requires, grant)
+	if readSpecHook != nil {
+		readSpecHook(&spec)
+	}
+	return spec
+}
+
+// readSpecBase is the read jail before any test hook. Strict comes from a
+// valid pin or from requiring confinement; AcceptFS and Net come only from the
+// pin (Net also from a grant).
+func readSpecBase(pin pinState, requires, grant bool) confine.Spec {
 	spec := confine.Spec{Profile: confine.ProfileROv1}
 	if pin.valid && !jailmut.On("P-G-STRICT") {
 		spec.Strict = true
@@ -163,9 +173,6 @@ func readSpec(pin pinState, requires, grant bool) confine.Spec {
 	}
 	if grant {
 		spec.Net = true
-	}
-	if readSpecHook != nil {
-		readSpecHook(&spec)
 	}
 	return spec
 }

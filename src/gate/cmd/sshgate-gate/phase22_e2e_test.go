@@ -191,3 +191,85 @@ func legSealGuard(t *testing.T, abi string) {
 	p.Observed("output", strings.Count(out, "\n") == runs)
 	p.Finish()
 }
+
+// legJailVerbLabel: a subprocess gate pinned net=deny answers SSHGATE_JAIL
+// with a kernel run whose facts would earn the read-only label with the switch
+// on, and reports the not-enabled label while the switch is off.
+func legJailVerbLabel(t *testing.T, abi string) {
+	p := newProof(t, "G-JAILVERB-LABEL")
+	dir := t.TempDir()
+	writePin(t, dir, pinDeny, 0o600)
+	code, out := runTestGate(t, testGateConfig{Dir: dir, ABI: abi}, dir, "SSHGATE_JAIL")
+	report := decodeVerbLine(t, out)
+	p.Observed("json", true)
+	state := confine.LabelState{Pinned: report.Pinned, Strict: report.Pinned, Outcome: confine.RunKernel, Profile: report.Profile, ABI: report.LandlockABI, Unmet: report.Unmet}
+	claimable := confine.Label(state, report.Net, true) == confine.LabelReadOnlyKernel
+	abiOK := report.LandlockABI >= 1 && (abi != "abi1" || report.LandlockABI == 1)
+	p.Effect("label", report.Label == confine.LabelReadOnlyKernel)
+	p.Jailed("verb", code == exitOK && report.Enforcement == "kernel" && report.Pinned && !report.Net && abiOK && claimable &&
+		(report.Label == confine.LabelKernelNoLabel || report.Label == confine.LabelReadOnlyKernel))
+	p.Finish()
+}
+
+// legJailVerbNoExec: on a Tier-1 gate, bytes after the verb never run; the
+// line is an unknown command, a write, and is denied.
+func legJailVerbNoExec(t *testing.T, abi string) {
+	p := newProof(t, "G-JAILVERB-NOEXEC")
+	nonce := "nonce-" + randomHex(t)
+	out, err := exec.Command("/bin/sh", "-c", "printf "+nonce).Output()
+	p.Control("payload", err == nil && string(out) == nonce)
+	dir := t.TempDir()
+	code, gateOut := runTestGate(t, testGateConfig{Dir: dir, ABI: abi}, dir, "SSHGATE_JAIL printf "+nonce)
+	ran := strings.Contains(gateOut, nonce)
+	p.Effect("agent-bytes", ran)
+	p.Jailed("verb", !ran && code == exitNoPermVal && gateOut == "" || ran && code == exitOK)
+	p.Observed("output", ran || !strings.Contains(gateOut, `{"v":1,`))
+	p.Finish()
+}
+
+// TestGateBinaryJailVerb drives SSHGATE_JAIL through the real (non-race) gate
+// binary on a Tier-1 install: one JSON line, a kernel run, no audit record.
+// The verb resets the environment: with LD_PRELOAD set, a jailed read's
+// dynamic /bin/sh reports the missing preload, while the verb's does not.
+func TestGateBinaryJailVerb(t *testing.T) {
+	requireJail(t)
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "gate")
+	build := exec.Command("go", "build", "-trimpath", "-o", bin, ".")
+	build.Env = append(os.Environ(), "CGO_ENABLED=0")
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build gate: %v\n%s", err, out)
+	}
+	runGate := func(command string) (int, string, string) {
+		gate := exec.Command(bin)
+		gate.Env = append(os.Environ(), "SSH_ORIGINAL_COMMAND="+command, "LD_PRELOAD=/nonexistent")
+		var stdout, stderr bytes.Buffer
+		gate.Stdout, gate.Stderr = &stdout, &stderr
+		err := gate.Run()
+		code := 0
+		if exit, ok := err.(*exec.ExitError); ok {
+			code = exit.ExitCode()
+		} else if err != nil {
+			t.Fatalf("gate: %v", err)
+		}
+		return code, stdout.String(), stderr.String()
+	}
+	const preloadError = "cannot be preloaded"
+
+	code, out, stderr := runGate("SSHGATE_JAIL")
+	report := decodeVerbLine(t, out)
+	if code != exitOK || report.Enforcement != "kernel" || report.Pinned || report.Net || report.Label != confine.LabelPinToClaim {
+		t.Fatalf("verb: exit %d, report %+v, stderr %q", code, report, stderr)
+	}
+	if strings.Contains(stderr, preloadError) || stderr != "" {
+		t.Fatalf("the verb's shell saw the gate's environment: stderr %q", stderr)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "audit.log")); err == nil {
+		t.Fatal("the verb wrote an audit record")
+	}
+
+	code, _, stderr = runGate("true")
+	if code != exitOK || !strings.Contains(stderr, preloadError) {
+		t.Fatalf("control: a jailed read with LD_PRELOAD set: exit %d, stderr %q", code, stderr)
+	}
+}

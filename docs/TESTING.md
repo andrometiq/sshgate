@@ -115,8 +115,9 @@ single-call indirections:
 - `executeCommand` (`main.go`) and the read router's seams in
   `src/gate/cmd/sshgate-gate/readjail.go`: `forceNetGrant` (stands in for a signed network grant
   until the signed wire carries one), `readSpecHook` (forces a Landlock ABI or a setup failure),
-  `hostFactsFn`, `pinUIDFn`, `jailPinFn` and `sealFn` (the seal of a jailed read; the
-  in-process test binary records it instead of sealing itself). The gate legs that need the gate in its own process
+  `hostFactsFn`, `pinUIDFn`, `jailPinFn`, `sealFn` (the seal of a jailed read) and
+  `resetVerbEnv` (the `SSHGATE_JAIL` environment reset); the in-process test binary
+  records the last two instead of sealing itself or clearing its environment. The gate legs that need the gate in its own process
   set the same seams through the test binary's `SSHGATE_TEST_GATE` mode (`jail_testmain_test.go`);
   the gate itself never reads them from the environment.
 - `dialWithCtx` — `src/mcp/sign/client.go` (`var dialWithCtx`)
