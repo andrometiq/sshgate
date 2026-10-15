@@ -34,6 +34,8 @@ func (e *Engine) Run(ctx context.Context) error {
 	defer ticker.Stop()
 	for {
 		select {
+		case err := <-e.effectErrors:
+			return err
 		case err := <-flushed:
 			return err
 		case <-ctx.Done():

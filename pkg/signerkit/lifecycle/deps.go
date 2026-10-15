@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/karthikeyan5/sshgate/pkg/signerkit/assist"
 	"github.com/karthikeyan5/sshgate/src/approvalplan"
 )
 
@@ -95,4 +96,10 @@ type LegacyNotifier interface {
 	Prepared(instance string) (*PreparedLegacyApproval, error)
 	Deliver(context.Context, *PreparedLegacyApproval) error
 	EditStatus(context.Context, *PreparedLegacyApproval, string) error
+}
+
+// AssistInputBuilder uses assist.RedactForProvider with the adapter's redaction
+// policy and salt. An error skips the provider; raw plans must never be sent.
+type AssistInputBuilder interface {
+	BuildAssistInput(approvalplan.ApprovalPlanV1) (assist.Input, error)
 }

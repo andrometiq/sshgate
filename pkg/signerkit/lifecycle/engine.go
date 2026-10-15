@@ -9,20 +9,24 @@ import (
 	"time"
 
 	"github.com/karthikeyan5/sshgate/internal/elapsed"
+	"github.com/karthikeyan5/sshgate/pkg/signerkit/assist"
 	ap "github.com/karthikeyan5/sshgate/src/approvalplan"
 )
 
 // Config supplies the local engine's authoritative adapters and clock.
 type Config struct {
-	Store           Store
-	Clock           elapsed.Clock
-	Freezer         Freezer
-	SnapshotBuilder SnapshotBuilder
-	Minter          Minter
-	AuditWriter     AuditWriter // nil leaves the outbox unflushed and Claim gated.
-	XferDigests     XferDigests
-	Settings        ap.Settings
-	AssistTimeout   time.Duration
+	Store              Store
+	Clock              elapsed.Clock
+	Freezer            Freezer
+	SnapshotBuilder    SnapshotBuilder
+	Minter             Minter
+	AuditWriter        AuditWriter // nil leaves the outbox unflushed and Claim gated.
+	XferDigests        XferDigests
+	Settings           ap.Settings
+	AssistTimeout      time.Duration
+	AssistPool         *assist.Pool // nil leaves the slot for Clock at its deadline.
+	Assessor           assist.Assessor
+	AssistInputBuilder AssistInputBuilder
 }
 
 // Engine serializes all record mutations. Its Store must not have another writer.
@@ -30,6 +34,7 @@ type Config struct {
 type Engine struct {
 	mu           sync.Mutex
 	running      bool
+	effectErrors chan error
 	flushNudge   chan struct{}
 	flushWaiters map[string]*flushWaiter
 	config       Config
@@ -41,6 +46,9 @@ type Engine struct {
 func New(c Config) (*Engine, error) {
 	if c.Store == nil || c.Clock == nil || c.Freezer == nil || c.SnapshotBuilder == nil {
 		return nil, errors.New("lifecycle: store, clock, freezer and snapshot builder are required")
+	}
+	if c.AssistPool != nil && c.AssistInputBuilder == nil {
+		return nil, errors.New("lifecycle: assist input builder is required with pool")
 	}
 	if c.Settings.Hosted {
 		return nil, errors.New("lifecycle: hosted settings are not supported")
@@ -54,7 +62,7 @@ func New(c Config) (*Engine, error) {
 	if c.AssistTimeout == 0 || c.AssistTimeout > 5*time.Second {
 		c.AssistTimeout = 5 * time.Second
 	}
-	e := &Engine{config: c, projections: newProjections(), flushNudge: make(chan struct{}, 1), flushWaiters: make(map[string]*flushWaiter)}
+	e := &Engine{config: c, effectErrors: make(chan error, 1), projections: newProjections(), flushNudge: make(chan struct{}, 1), flushWaiters: make(map[string]*flushWaiter)}
 	if err := e.startup(); err != nil {
 		return nil, err
 	}
@@ -161,6 +169,12 @@ func (e *Engine) Submit(ctx context.Context, principal string, draft ap.Approval
 	}
 	if err := answerError(answer); err != nil {
 		return ap.Summary{}, err
+	}
+	if before == nil && answer.Changed {
+		after, err = e.startAssistLocked(key, after)
+		if err != nil {
+			return ap.Summary{}, err
+		}
 	}
 	return e.view(key, after, now), nil
 }
