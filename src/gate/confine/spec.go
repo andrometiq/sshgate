@@ -53,7 +53,53 @@ type Spec struct {
 	ForceABI int
 	// InjectFailAt forces a setup error in tests.
 	InjectFailAt string
+	// Lane2 makes this a daemon-read run: the worker execs Lane2.Binary with
+	// the argv from fd 3 and Lane2Env, instead of /bin/sh -c.
+	Lane2 *Lane2 `json:",omitempty"`
 }
+
+// Lane2 is a daemon read's admitted client: the identities the gate checked and
+// the references it holds. The files are passed to the jail as fds 5 and up,
+// in field order (binary, interpreter, sockets); Command numbers them.
+type Lane2 struct {
+	Client   string // "systemctl" or "docker": the base name argv[0] must carry
+	Binary   string // resolved absolute path the gate admitted, the exec path
+	BinaryID FileID
+	BinaryFD int
+	Interp   string // resolved PT_INTERP; "" for a static binary
+	InterpID FileID
+	InterpFD int
+	Sockets  []Endpoint // the 1..2 admitted daemon endpoints that are present
+
+	BinaryFile, InterpFile *os.File `json:"-"` // the gate's held references
+}
+
+// FileID is an inode identity.
+type FileID struct{ Dev, Ino uint64 }
+
+// Endpoint is an admitted daemon socket.
+type Endpoint struct {
+	Path string // absolute, at most 107 bytes
+	ID   FileID
+	FD   int
+	File *os.File `json:"-"` // the gate's held O_PATH reference
+}
+
+// files lists the held references in their fd order.
+func (l *Lane2) files() []*os.File {
+	files := []*os.File{l.BinaryFile}
+	if l.Interp != "" {
+		files = append(files, l.InterpFile)
+	}
+	for _, socket := range l.Sockets {
+		files = append(files, socket.File)
+	}
+	return files
+}
+
+// firstHeldFD is the child fd number of the first held reference, after the
+// command (3) and status (4) pipes.
+const firstHeldFD = 5
 
 const ForceNoLandlock = -1
 
@@ -281,7 +327,7 @@ func (j *Jailed) status() (Facts, error) {
 			return failure("report")
 		}
 	}
-	if facts.Profile != j.spec.Profile || facts.Net != j.spec.Net || facts.Lane2 || facts.ABI < 1 || j.spec.ForceABI > 0 && facts.ABI > j.spec.ForceABI || j.strict && len(facts.Unmet) > 0 {
+	if facts.Profile != j.spec.Profile || facts.Net != j.spec.Net || facts.Lane2 != (j.spec.Lane2 != nil) || facts.ABI < 1 || j.spec.ForceABI > 0 && facts.ABI > j.spec.ForceABI || j.strict && len(facts.Unmet) > 0 {
 		return failure("report")
 	}
 	tail, worker, cleanup, recordErr := splitStatusRecords(tail)
@@ -376,7 +422,8 @@ func parseFailReport(s string) (stage string, errno syscall.Errno) {
 }
 
 // Command returns a Jailed whose Cmd runs `sh -c cmd` INSIDE the jail the Spec
-// describes. It is implemented per platform; on non-linux it returns an error.
+// describes, or, for a daemon read (Spec.Lane2), the admitted client with the
+// argv EncodeArgv produced cmd from. It is implemented per platform; on non-linux it returns an error.
 // It is never called for a classifier-only read (the gate passes a nil *Spec).
 func (s Spec) Command(ctx context.Context, cmd string) (*Jailed, error) {
 	return s.command(ctx, cmd)

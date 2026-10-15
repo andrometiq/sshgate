@@ -13,6 +13,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"syscall"
 
@@ -31,6 +32,24 @@ func (s Spec) command(ctx context.Context, cmd string) (*Jailed, error) {
 		s.Cwd, cwdErr = unix.Getwd()
 		if cwdErr != nil || !filepath.IsAbs(s.Cwd) {
 			s.Cwd = "/"
+		}
+	}
+	var held []*os.File
+	if s.Lane2 != nil {
+		lane2 := *s.Lane2
+		lane2.Sockets = append([]Endpoint(nil), lane2.Sockets...)
+		held = lane2.files()
+		lane2.BinaryFD, lane2.InterpFD = firstHeldFD, 0
+		next := firstHeldFD + 1
+		if lane2.Interp != "" {
+			lane2.InterpFD, next = next, next+1
+		}
+		for i := range lane2.Sockets {
+			lane2.Sockets[i].FD, next = next, next+1
+		}
+		s.Lane2 = &lane2
+		if slices.Contains(held, nil) {
+			return nil, &SetupError{Stage: "spec", Errno: unix.EBADF}
 		}
 	}
 	if !jailmut.On("P-SPEC") && s.validate(false) != nil {
@@ -62,7 +81,9 @@ func (s Spec) command(ctx context.Context, cmd string) (*Jailed, error) {
 	if !jailmut.On("P-CWD") {
 		c.Dir = "/"
 	}
-	c.ExtraFiles = []*os.File{cmdR, statusW} // -> child fd 3 (command), fd 4 (status)
+	// -> child fd 3 (command), fd 4 (status), then a daemon read's held
+	// references from firstHeldFD.
+	c.ExtraFiles = append([]*os.File{cmdR, statusW}, held...)
 	c.SysProcAttr = cloneSysProcAttr()
 
 	return &Jailed{
@@ -142,6 +163,14 @@ func RunShim(args []string) int {
 	c := exec.Command("/proc/self/exe", append([]string{SentinelWorker}, args...)...)
 	c.Stdin, c.Stdout, c.Stderr = os.Stdin, os.Stdout, os.Stderr
 	c.ExtraFiles = []*os.File{cmdR, statusW}
+	// Forward a daemon read's held references at the same numbers. A Spec that
+	// does not decode forwards none; the worker then fails at "spec".
+	var spec Spec
+	if len(args) > 0 && decodeSpec(args[0], &spec) == nil && spec.Lane2 != nil {
+		for fd := firstHeldFD; fd < firstHeldFD+len(spec.Lane2.files()); fd++ {
+			c.ExtraFiles = append(c.ExtraFiles, os.NewFile(uintptr(fd), "held"))
+		}
+	}
 	if err := c.Start(); err != nil {
 		_, _ = io.WriteString(statusW, formatFailReport("shim", errnoOf(err)))
 		return ExitSetupFailed
@@ -153,14 +182,19 @@ func RunShim(args []string) int {
 			return ExitSetupFailed
 		}
 	}
-	// Keep the status pipe through cleanup; the worker closes it on exec.
+	// Keep the status pipe through cleanup; the worker closes it on exec. The
+	// worker holds its own copies of the daemon read's references.
 	_ = cmdR.Close()
+	for _, held := range c.ExtraFiles[2:] {
+		_ = held.Close()
+	}
 	defer statusW.Close()
 	return reap(c.Process.Pid, terminated, statusW)
 }
 
 // RunWorker is the __jailexec entrypoint: it applies every restriction on a
-// single locked OS thread and execs /bin/sh -c <cmd>. It fails closed — any
+// single locked OS thread and execs /bin/sh -c <cmd>, or a daemon read's
+// admitted client with its argv. It fails closed — any
 // setup error writes "F<stage>:<errno>" to fd 4 and exits WITHOUT execve.
 func RunWorker(args []string) int {
 	runtime.LockOSThread()
@@ -209,6 +243,16 @@ func RunWorker(args []string) int {
 		return fail("cmdread", rerr)
 	}
 	cmd := string(cmdBytes)
+	var lane2Argv []string
+	if spec.Lane2 != nil {
+		lane2Argv, err = DecodeArgv(cmd, spec.Lane2.Client)
+		if st, errno := spec.inject(); st == "lane2argv" {
+			err = errno
+		}
+		if err != nil {
+			return fail("lane2argv", err)
+		}
+	}
 
 	abi, probeErr := workerLandlockABI(spec.ForceABI, probeLandlockABI)
 	rootSSH := os.Getuid() == 0
@@ -252,6 +296,16 @@ func RunWorker(args []string) int {
 	}
 	if !jailmut.On("P-FAULT-rlimits") && err != nil {
 		return fail("rlimits", err)
+	}
+	var lane2 lane2Opened
+	if spec.Lane2 != nil {
+		lane2, err = openLane2(spec.Lane2)
+		if st, errno := spec.inject(); st == "lane2id" {
+			err = errno
+		}
+		if err != nil {
+			return fail("lane2id", err)
+		}
 	}
 	err = applyWorkerLandlock(abi, probeErr)
 	restrictedABI := 0
@@ -311,7 +365,7 @@ func RunWorker(args []string) int {
 	if !jailmut.On("P-FAULT-selfcheck") && err != nil {
 		return fail("selfcheck", err)
 	}
-	facts.Profile, facts.ABI, facts.Net = spec.Profile, restrictedABI, spec.Net
+	facts.Profile, facts.ABI, facts.Net, facts.Lane2 = spec.Profile, restrictedABI, spec.Net, spec.Lane2 != nil
 	err = establishSession()
 	if stage, errno := spec.inject(); stage == "session" {
 		err = errno
@@ -324,7 +378,17 @@ func RunWorker(args []string) int {
 	if err := writeExecReport(statusW, facts); err != nil {
 		return fail("report", err)
 	}
-	execErr := unix.Exec(execPath, []string{"sh", "-c", cmd}, jailEnv(cwd))
+	var execErr error
+	if spec.Lane2 != nil {
+		execPath = spec.Lane2.Binary
+		if st, _ := spec.inject(); st == "exec" {
+			execPath = "/nonexistent/client"
+		}
+		lane2.close()
+		execErr = unix.Exec(execPath, lane2Argv, Lane2Env())
+	} else {
+		execErr = unix.Exec(execPath, []string{"sh", "-c", cmd}, jailEnv(cwd))
+	}
 	if jailmut.On("P-FAULT-exec") {
 		return ExitSetupFailed
 	}
