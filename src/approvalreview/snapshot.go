@@ -72,6 +72,7 @@ type Build struct {
 // Step is one command of a command job, in its batch position.
 type Step struct {
 	// Reveal preserves the legacy capability independently of admin dispatch.
+	Net        bool               `json:"net,omitempty"`
 	Reveal     bool               `json:"reveal,omitempty"`
 	Ordinal    int                `json:"ordinal"`
 	Route      approvalplan.Route `json:"route"`
@@ -84,7 +85,7 @@ type Step struct {
 	IsUpdate     bool   `json:"is_update,omitempty"`
 	UpdateSHA256 string `json:"update_sha256,omitempty"`
 	Build        *Build `json:"build_metadata,omitempty"`
-	// LegacyReason is the v1 per-command reason of a reveal or update step (E8c).
+	// LegacyReason is the v1 per-command reason of a reveal, network or update step (E8c).
 	LegacyReason *Display `json:"legacy_reason,omitempty"`
 	// ExpiryWarning is K16's: the step is signed and runs after earlier work.
 	ExpiryWarning bool `json:"expiry_warning,omitempty"`
@@ -140,6 +141,7 @@ type ReviewSnapshot struct {
 	Kind              approvalplan.Kind            `json:"kind"`
 	Legacy            bool                         `json:"legacy,omitempty"`
 	RequestID         string                       `json:"request_id"`
+	SignDigest        string                       `json:"sign_digest,omitempty"`
 	PlanHash          string                       `json:"plan_hash,omitempty"`
 	Requester         string                       `json:"requester"`
 	SubmittedAt       time.Time                    `json:"submitted_at"`

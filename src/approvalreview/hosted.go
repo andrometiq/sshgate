@@ -172,6 +172,9 @@ func headlines(s ReviewSnapshot) []string {
 		if (step.Reveal || step.Route == approvalplan.RouteSignedReveal) && !slices.Contains(out, headlineReveal) {
 			out = append(out, headlineReveal)
 		}
+		if step.Net {
+			out = append(out, approvalplan.NetworkBanner(step.Target.Alias))
+		}
 		if step.IsUpdate {
 			out = append(out, fmt.Sprintf(headlineUpdate, step.Target.Alias))
 		}
@@ -196,6 +199,15 @@ func approveLabel(s ReviewSnapshot) string {
 	for _, step := range s.Steps {
 		if (step.Reveal || step.Route == approvalplan.RouteSignedReveal) && !slices.Contains(capabilities, "SECRET-REVEAL") {
 			capabilities = append(capabilities, "SECRET-REVEAL")
+		}
+		if step.Net {
+			capability := "READ WITH NETWORK"
+			if step.Reveal || step.Route == approvalplan.RouteSignedReveal {
+				capability = "NETWORK"
+			}
+			if !slices.Contains(capabilities, capability) {
+				capabilities = append(capabilities, capability)
+			}
 		}
 		if step.IsUpdate && !slices.Contains(capabilities, "GATE UPDATE") {
 			capabilities = append(capabilities, "GATE UPDATE")
@@ -288,11 +300,21 @@ func stepItems(s ReviewSnapshot) []Item {
 					QuotePrefix, renderDisplay(b.StagedBasename), renderDisplay(b.StagedVersion), renderDisplay(b.RunningVersion), b.Size))
 		}
 		if r := step.LegacyReason; r != nil {
-			label := approvalplan.LabelRevealJustification
-			if step.IsUpdate {
-				label = approvalplan.LabelBuildMetadataV1
+			var labels []string
+			switch {
+			case step.IsUpdate:
+				labels = []string{approvalplan.LabelBuildMetadataV1}
+			case step.Reveal && step.Net:
+				labels = []string{approvalplan.LabelRevealJustification, approvalplan.LabelNetworkJustification}
+			case step.Net:
+				labels = []string{approvalplan.LabelNetworkJustification}
+			default:
+				labels = []string{approvalplan.LabelRevealJustification}
 			}
-			notes = append(notes, label+":", QuotePrefix+renderDisplay(*r))
+			for _, label := range labels {
+				notes = append(notes, label+":")
+			}
+			notes = append(notes, QuotePrefix+renderDisplay(*r))
 		}
 		if step.ExpiryWarning {
 			notes = append(notes, fmt.Sprintf("⚠️ Step %d is signed and runs after earlier work; its signature may expire before it starts.", step.Ordinal))

@@ -12,6 +12,9 @@ func (s ReviewSnapshot) validate() error {
 	if s.Version != SnapshotVersion || (!s.Legacy && !approvalplan.ValidSHA256Hex(s.PlanHash)) || (s.Legacy && s.PlanHash != "") {
 		return bad()
 	}
+	if s.SignDigest != "" && (!s.Legacy || s.Kind != approvalplan.KindCommandJob || !approvalplan.ValidSHA256Hex(s.SignDigest)) {
+		return bad()
+	}
 	switch s.Origin {
 	case approvalplan.OriginAgent, approvalplan.OriginTrustedHumanCLI, approvalplan.OriginSynthesizedLegacyV1:
 	default:
@@ -40,6 +43,9 @@ func (s ReviewSnapshot) validate() error {
 			return bad()
 		}
 		for i, st := range s.Steps {
+			if st.Net && (!s.Legacy || s.SignDigest == "" || len(s.Steps) != 1 || st.LegacyReason == nil || st.LegacyReason.Bytes == 0 || (st.Route != approvalplan.RouteSignedWrite && st.Route != approvalplan.RouteSignedReveal)) {
+				return bad()
+			}
 			switch st.Route {
 			case approvalplan.RouteUnsignedRead, approvalplan.RouteSignedWrite, approvalplan.RouteSignedReveal, approvalplan.RouteSignedAdmin:
 			default:
