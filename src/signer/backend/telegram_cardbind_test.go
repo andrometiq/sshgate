@@ -172,6 +172,9 @@ func TestTelegram_StaleCardForReusedRequestIDResolvesNothing(t *testing.T) {
 			}
 			fake.pushCallback(allowedUserID, "operator", "deny:x", 1000, allowedChatID)
 			expectResult(t, a, signerkit.StatusDenied)
+			// The result is sent before the pending entry is removed; the
+			// callback answer comes after resolve returns.
+			waitFor(t, time.Second, func() bool { return len(fake.callbackAnswersSnapshot()) == 1 })
 
 			b, err := kind.call(ctx, tb, "x") // card 1001
 			if err != nil {
