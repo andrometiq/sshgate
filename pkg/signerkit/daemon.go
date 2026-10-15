@@ -703,9 +703,8 @@ func (d *Daemon) respond(conn io.Writer, req signRequest, result Result) error {
 		// Two paths:
 		//   1. Remote-signing backend (HostedServerBackend): the server
 		//      holds the key and returned the wire-formatted signatures
-		//      in Result.Signatures. We validate length + per-entry Cmd
-		//      match (defence against a server that returns signatures
-		//      for the wrong commands) and pass through verbatim.
+		//      in Result.Signatures. We validate the count, outer command
+		//      and decoded signing inputs, then pass through verbatim.
 		//   2. Local-signing backend (Telegram / Stub / Mock without
 		//      pre-canned sigs): Result.Signatures is nil, so we sign
 		//      with d.Key.
@@ -718,6 +717,14 @@ func (d *Daemon) respond(conn io.Writer, req signRequest, result Result) error {
 			for i, s := range result.Signatures {
 				if s.Cmd != req.Commands[i].Cmd {
 					return d.respondError(conn, req.RequestID, fmt.Sprintf("remote signature cmd mismatch at index %d", i))
+				}
+				_, payload, err := sigwire.DecodeSigned(s.Sig)
+				if err != nil {
+					return d.respondError(conn, req.RequestID, fmt.Sprintf("remote signature malformed at index %d", i))
+				}
+				command := req.Commands[i]
+				if payload.Cmd != command.Cmd || payload.Host != command.Host || payload.Reveal != command.Reveal || payload.Net != command.Net {
+					return d.respondError(conn, req.RequestID, fmt.Sprintf("remote signature payload mismatch at index %d", i))
 				}
 				sigs[i] = signResponseSig{Cmd: s.Cmd, Sig: s.Sig}
 			}

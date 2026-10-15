@@ -10,7 +10,7 @@
       {
         "test": "TestHostedRefusesNet",
         "markers": [
-          "MUTATION-EFFECT hosted-http-net"
+          "hosted-http-net"
         ]
       }
     ],
@@ -29,12 +29,74 @@
       {
         "test": "TestMatchGrantNeverAutoSignsNet",
         "markers": [
-          "MUTATION-EFFECT grant-autosigned-net"
+          "grant-autosigned-net"
         ]
       }
     ],
     "green": [
       "TestGrant_RevealNeverAutoSigned"
+    ]
+  },
+  {
+    "id": "P-S-REMOTE-SIGNATURE",
+    "name": "remote-signature-inputs",
+    "package": "./src/signer",
+    "file": "pkg/signerkit/daemon.go",
+    "old": "\t\t\t\t_, payload, err := sigwire.DecodeSigned(s.Sig)\n\t\t\t\tif err != nil {\n\t\t\t\t\treturn d.respondError(conn, req.RequestID, fmt.Sprintf(\"remote signature malformed at index %d\", i))\n\t\t\t\t}\n\t\t\t\tcommand := req.Commands[i]\n\t\t\t\tif payload.Cmd != command.Cmd || payload.Host != command.Host || payload.Reveal != command.Reveal || payload.Net != command.Net {\n\t\t\t\t\treturn d.respondError(conn, req.RequestID, fmt.Sprintf(\"remote signature payload mismatch at index %d\", i))\n\t\t\t\t}\n",
+    "new": "",
+    "red": [
+      {
+        "test": "TestRemoteSignatureCmdMismatch/cmd",
+        "markers": [
+          "remote-signature-cmd"
+        ]
+      },
+      {
+        "test": "TestRemoteSignatureCmdMismatch/host",
+        "markers": [
+          "remote-signature-host"
+        ]
+      },
+      {
+        "test": "TestRemoteSignatureCmdMismatch/reveal-added",
+        "markers": [
+          "remote-signature-reveal-added"
+        ]
+      },
+      {
+        "test": "TestRemoteSignatureCmdMismatch/reveal-dropped",
+        "markers": [
+          "remote-signature-reveal-dropped"
+        ]
+      },
+      {
+        "test": "TestRemoteSignatureCmdMismatch/net-added",
+        "markers": [
+          "remote-signature-net-added"
+        ]
+      },
+      {
+        "test": "TestRemoteSignatureCmdMismatch/net-dropped",
+        "markers": [
+          "remote-signature-net-dropped"
+        ]
+      },
+      {
+        "test": "TestRemoteSignatureCmdMismatch/malformed",
+        "markers": [
+          "remote-signature-malformed"
+        ]
+      },
+      {
+        "test": "TestRemoteSignatureCmdMismatch/second-command",
+        "markers": [
+          "remote-signature-second-command"
+        ]
+      }
+    ],
+    "green": [
+      "TestRemoteSignatureCmdMismatch/matching",
+      "TestRemoteSignatureCmdMismatch/matching-reveal-net"
     ]
   }
 ]

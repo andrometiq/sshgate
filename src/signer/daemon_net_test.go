@@ -3,6 +3,7 @@ package signer_test
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"encoding/json"
 	"errors"
 	"testing"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/karthikeyan5/sshgate/pkg/signerkit"
 	"github.com/karthikeyan5/sshgate/src/gate"
+	"github.com/karthikeyan5/sshgate/src/sigwire"
 )
 
 type netCountingBackend struct {
@@ -146,5 +148,99 @@ func TestDaemon_SignsNetFlag(t *testing.T) {
 		if _, _, err := gate.VerifySigned(resp.Signatures[0].Sig, pub, time.Unix(1000, 0), []string{grantHost}); !errors.Is(err, gate.ErrNetUnsupported) {
 			t.Fatalf("legacy verifier=%v", err)
 		}
+	}
+}
+
+type remoteSignatureBackend struct {
+	*signerkit.MockBackend
+	signatures []signerkit.SignedCmd
+}
+
+func (b *remoteSignatureBackend) Request(context.Context, signerkit.ApprovalRequest) (<-chan signerkit.Result, error) {
+	results := make(chan signerkit.Result, 1)
+	results <- signerkit.Result{Status: signerkit.StatusApproved, ApprovedBy: "operator", Signatures: b.signatures}
+	return results, nil
+}
+
+func TestRemoteSignatureCmdMismatch(t *testing.T) {
+	for _, name := range []string{"cmd", "host", "reveal-added", "reveal-dropped", "net-added", "net-dropped", "malformed", "second-command", "matching", "matching-reveal-net"} {
+		t.Run(name, func(t *testing.T) {
+			command := networkCommand()
+			command["net"] = name == "net-dropped" || name == "matching-reveal-net"
+			command["reveal"] = name == "reveal-dropped" || name == "matching-reveal-net"
+			payload := sigwire.SigPayload{Cmd: command["cmd"].(string), Host: grantHost, TS: 1000, Exp: 1060, Nonce: "remote-test", Reveal: command["reveal"].(bool), Net: command["net"].(bool)}
+			switch name {
+			case "cmd", "second-command":
+				payload.Cmd = "touch /tmp/unrequested"
+			case "host":
+				payload.Host = "SHA256:other-host"
+			case "reveal-added", "reveal-dropped":
+				payload.Reveal = !payload.Reveal
+			case "net-added", "net-dropped":
+				payload.Net = !payload.Net
+			}
+			key := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
+			encode := func(p sigwire.SigPayload) string {
+				t.Helper()
+				raw, err := json.Marshal(p)
+				if err != nil {
+					t.Fatal(err)
+				}
+				line, err := sigwire.EncodeSigned(ed25519.Sign(key, raw), p)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return line
+			}
+			line := encode(payload)
+			if name == "malformed" {
+				line = "SSHGATE_SIG:broken"
+			}
+			signatures := []signerkit.SignedCmd{{Cmd: command["cmd"].(string), Sig: line}}
+			commands := []map[string]any{command}
+			if name == "second-command" {
+				first := networkCommand()
+				first["net"] = false
+				first["cmd"] = "uptime"
+				valid := payload
+				valid.Cmd = "uptime"
+				signatures = append([]signerkit.SignedCmd{{Cmd: "uptime", Sig: encode(valid)}}, signatures...)
+				commands = append([]map[string]any{first}, commands...)
+			}
+			backend := &remoteSignatureBackend{MockBackend: signerkit.NewMockBackend(), signatures: signatures}
+			daemon, _, audit, path := newDaemon(t, backend)
+			defer audit.Close()
+			// Remote signing must work without the daemon holding the remote key.
+			daemon.Key = nil
+			response := signNetwork(t, daemon, "remote", commands...)
+			wantStatus := "error"
+			if name == "matching" || name == "matching-reveal-net" {
+				wantStatus = "approved"
+				if len(response.Signatures) != 1 || response.Signatures[0].Sig != line {
+					t.Fatalf("remote envelope not passed through: %+v", response)
+				}
+			} else {
+				if len(response.Signatures) != 0 {
+					t.Fatalf("MUTATION-EFFECT remote-signature-%s", name)
+				}
+				wantError := "remote signature payload mismatch at index 0"
+				if name == "malformed" {
+					wantError = "remote signature malformed at index 0"
+				}
+				if name == "second-command" {
+					wantError = "remote signature payload mismatch at index 1"
+				}
+				if response.Error != wantError {
+					t.Fatalf("error=%q, want %q", response.Error, wantError)
+				}
+			}
+			if response.Status != wantStatus {
+				t.Fatalf("response=%+v", response)
+			}
+			rows := readAudit(t, path)
+			if len(rows) != 1 || rows[0].Status != wantStatus || rows[0].RequestID != "remote" {
+				t.Fatalf("audit=%+v", rows)
+			}
+		})
 	}
 }
