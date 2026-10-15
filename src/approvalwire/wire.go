@@ -331,14 +331,15 @@ func validateClaimAnswer(c ClaimAnswer) error {
 	if !c.Status.Valid() {
 		return fmt.Errorf("claim status %q is unknown", c.Status)
 	}
-	hasReason, hasClass, hasSignatures := c.Reason != "", c.Class != "", c.DecidedAt != nil || len(c.Signatures) > 0
+	hasReason, hasClass := c.Reason != "", c.Class != ""
 	if hasReason != (c.Status == approvalplan.ClaimMaterializationError) {
 		return errors.New("claim reason is carried by materialization_error only, and always")
 	}
 	if hasClass != (c.Status == approvalplan.ClaimExecutionReported) {
 		return errors.New("claim class is carried by execution_reported only, and always")
 	}
-	if hasSignatures != (c.Status == approvalplan.ClaimSignatures) {
+	if (c.DecidedAt != nil) != (c.Status == approvalplan.ClaimSignatures) ||
+		(len(c.Signatures) > 0) != (c.Status == approvalplan.ClaimSignatures) {
 		return errors.New("decided_at and signatures are carried by signatures only, and always")
 	}
 	switch c.Status {
