@@ -372,7 +372,7 @@ below).
   committed release gate, on both tiers, denies the envelope 77 through the classifier.
 - *Independent review 2 (2026-10-15), NO-GO, adopted:* every committed release gate's
   `VerifySigned` checks `now < Exp` and `Exp − TS ≤ 300 s` but never `now ≥ TS`, so a payload
-  with a future `TS` is admitted until its `Exp` (fixed first in P4.2); the envelope's network
+  with a future `TS` is admitted until its `Exp` (fixed first, in P4.0); the envelope's network
   expectation must survive to execution against one pin snapshot; daemon reads cannot honour
   `net`; the MCP routing needed an explicit table; capability advertisement, the socket-wire
   omission rule, the remote-response command check and the P5.2 network wording were missing or
@@ -380,18 +380,49 @@ below).
 - *Acceptance:* the review is GO, and any change it makes is written into P4.2–P4.4 here.
 - *Depends:* Phase 3.
 
+**P4.0 — The wire and the admission window, before the lanes.** Status: in progress (the
+admission window is done).
+
+- *Goal:* land everything P4.2, P4.3 and P4.4 share, so the three can be built in parallel and
+  every commit and merge order fails closed.
+- *Deliverables:*
+  - **Admission window.** Every committed release gate admits a signed payload whose `TS` lies
+    in the future (`VerifySigned` never checks `now ≥ TS`), so a signature can be admissible for
+    longer than its validity window. Admission now requires `TS − 30 s ≤ now < Exp`, a fixed
+    30-second clock-skew allowance, alongside the existing `Exp − TS ≤ 300 s`; a payload outside
+    it is refused 65 (`ErrNotYetValid`). This applies to every signed command, not only network
+    reads. A signature is therefore admissible for at most 330 s of gate time. Expiry limits
+    admission only; it does not end a command that is already running.
+  - `SigPayload.Net` (`json:"net,omitempty"`, after `Reveal`). `gate.Verify` returns
+    `Verified{Cmd, Reveal, Net}`; `VerifySigned` keeps its signature and refuses a payload with
+    `Net` (65, `ErrNetUnsupported`), so no caller can run a network-granted command while
+    dropping the grant.
+  - ``Net bool `json:"net,omitempty"` `` last on both socket-wire command structs (the MCP
+    client's and the daemon's), so a request without network is byte-identical to today's and
+    an older daemon still accepts it.
+  - Interim refusals until the lanes land: the gate refuses `Net` through `VerifySigned` (65)
+    and the daemon refuses a command with `net` before any approval or signing, with the error
+    prefix `net_unsupported:`.
+  - The fixed strings the gate, signer and MCP compare (envelope bytes, deny lines, refusal
+    prefixes) live in `src/sigwire/net.go`.
+  - A source-patch mutation tool for packages without a test hook.
+- *Acceptance:* `TestVerifyAdmissionWindow` (signed write); `TestEncodeSigned_Golden`
+  unchanged, `TestEncodeSigned_NetGolden`, `TestEncodeSigned_RevealNetGolden`,
+  `TestNetFalseByteIdentical`, `TestDecodeV1RejectsNet`, `TestDecodeSignedNetVariants`,
+  `TestNetWireConstants`; `TestVerifyReturnsNet`, `TestVerifySignedRefusesNet`,
+  `TestVerifyNetTamper`; a golden shows a sign request without network is unchanged on the
+  socket wire (`TestSignRequestWireNoNetGolden`); an old-daemon compatibility test shows an
+  older daemon's strict decoder accepts a new MCP's request without network and rejects one with
+  `net` (`TestOldDaemonStrictDecoder`); `TestSignNetInterimRefused`; the source-patch tool's
+  self-tests.
+- *Depends:* P4.1.
+
 **P4.2 — Gate: signed network and the envelope.** Status: open.
 
 - *Deliverables:*
-  - **Admission window, first.** Every committed release gate admits a signed payload whose
-    `TS` lies in the future (`VerifySigned` never checks `now ≥ TS`), so a signature can be
-    admissible for longer than its validity window. Admission now requires
-    `TS − 30 s ≤ now < Exp`, a fixed 30-second clock-skew allowance, alongside the existing
-    `Exp − TS ≤ 300 s`; a payload outside it is refused 65 (`ErrNotYetValid`). This applies to
-    every signed command, not only network reads. A signature is therefore admissible for at
-    most 330 s of gate time. Expiry limits admission only; it does not end a command that is
-    already running.
-  - `SigPayload.Net` with goldens; `VerifySigned` returns `Verified{Cmd, Reveal, Net}`.
+  - The admission window moved to P4.0 (done there).
+  - The gate's signed path calls `gate.Verify` and honours `Verified.Net`; the P4.0
+    `VerifySigned` wrapper keeps refusing `Net` for every other caller.
   - A network grant on an admin verb, a write or an unknown command is denied 77
     (`gate: network grant covers reads only`), checked immediately after `VerifySigned`
     succeeds and before the `SSHGATE_REVOKE` / `SSHGATE_UPDATE` / `SSHGATE_XFER_*` dispatch;
@@ -429,8 +460,7 @@ below).
     the capability test's expectation changes with it.
   - Audit: executed-read and denial records gain `net_grant` and `envelope` next to
     `requires_confinement`, so a pin-network read is told apart from a granted one.
-- *Acceptance:* `TestEncodeSigned_Golden` unchanged, `TestEncodeSigned_NetGolden`,
-  `TestDecodeV1RejectsNet`; `P-G-ENVELOPE` registered with `U-EnvelopeParse`, whose rows include
+- *Acceptance:* `P-G-ENVELOPE` registered with `U-EnvelopeParse`, whose rows include
   a tab, a double space, CR/LF, a trailing comma, `confined,confined`, `net` without
   `confined`, `confined,net` on a `net=deny` and on an unpinned host, an empty cmd, and inner
   `SSHGATE_SIG:…`, `SSHGATE_JAIL` and `SSHGATE_VERSION`; `FuzzEnvelopeParse` in `make test`
@@ -440,8 +470,8 @@ below).
   sets `netGrant`); `TestNetGrantDeniedBeforeAdminDispatch`: signed `Net=true`
   `SSHGATE_REVOKE`, `SSHGATE_UPDATE <hash>` and `SSHGATE_XFER_SEND …` each exit 77 with the
   gate dir intact and no stdin consumed; `TestVerifyAdmissionWindow`: a payload with
-  `TS = now + 31 s` is refused 65 and one with `TS = now + 30 s` is accepted, for a signed write
-  and a signed network read alike; `TestEnvelopePinSnapshot`: with the jail available, the pin is
+  `TS = now + 31 s` is refused 65 and one with `TS = now + 30 s` is accepted, for a signed
+  network read (the signed-write half is P4.0's); `TestEnvelopePinSnapshot`: with the jail available, the pin is
   removed, or replaced with `net=deny`, between parsing and admission and after admission, and a
   `confined,net` read is either refused 77 (`gate: network not permitted on this host`) or runs
   with network, never without; `TestDaemonReadNetRefused`: signed `Net=true` and envelope
@@ -451,15 +481,12 @@ below).
   real signed path; `G-NET-NO-FALLBACK`, `G-NET-LANE2-ABSENT`, `G-ENVELOPE-OLD-GATE`,
   `G-ENVELOPE-NEW-GATE`, `G-ENVELOPE-ABSENT`, `G-NET-UNMET` and `G-ENVELOPE-UNMET` with their
   unpinned no-network twins.
-- *Depends:* P4.1.
+- *Depends:* P4.0 and Phase 3.
 
 **P4.3 — Signer.** Status: open.
 
-- *Deliverables:* `Net` in the sign request and `CommandReq`, declared
-  ``Net bool `json:"net,omitempty"` `` on both socket-wire command structs (the MCP client's and
-  the daemon's), so a request without network is byte-identical to today's and an older daemon
-  still accepts it; `signAll` copies it into the
-  payload; `HandleSignRequest` rejects `Net` on admin verbs, and rejects a request where any
+- *Deliverables:* `Net` in `CommandReq` (the socket-wire fields landed in P4.0), replacing the
+  daemon's interim refusal; `signAll` copies it into the payload; `HandleSignRequest` rejects `Net` on admin verbs, and rejects a request where any
   command has `Net` unless it is the sole command, has a non-empty `Reason`, and is not an
   admin verb; it also rejects `Net` on a command `classify.Classify` calls a write; `matchGrant`
   never auto-signs a network read (`if c.Reveal || c.Net || isAdminVerb(c.Cmd)`); the hosted
@@ -476,13 +503,11 @@ below).
   run more than once in it; expiry limits admission and does not end a running command.
 - *Acceptance:* `TestMatchGrantNeverAutoSignsNet`, `TestHostedRefusesNet`,
   `TestApprovalMessageNetBanner`, `TestApprovalMessageRevealNetBanner`,
-  `TestSignRejectsNetInBatch` and `TestSignRejectsNetWithoutReason` pass; a golden shows a
-  sign request without network is unchanged on the socket wire; an old-daemon compatibility test
-  shows an older daemon's strict decoder accepts a new MCP's request without network and rejects
-  one with `net`; `TestRemoteSignatureCmdMismatch`: a remote response with the right outer `Cmd`
+  `TestSignRejectsNetInBatch` and `TestSignRejectsNetWithoutReason` pass (the socket-wire
+  golden and the old-daemon compatibility test are P4.0's); `TestRemoteSignatureCmdMismatch`: a remote response with the right outer `Cmd`
   and a valid envelope for a different command is refused; the `matchGrant` guard
   and the hosted refusal have source-patch mutation legs.
-- *Depends:* P4.2.
+- *Depends:* P4.0.
 
 **P4.4 — MCP: the `network` request.** Status: open.
 
@@ -543,7 +568,8 @@ below).
   tested against the real capability producer (a gate built from P4.2 answering
   `SSHGATE_JAIL`), not only fabricated responses. No network-requested command runs unconfined
   on any interleaving, and none runs without network without a `network_*` refusal.
-- *Depends:* P4.3.
+- *Depends:* P4.0; the end-to-end acceptance (the `M-` cases, the real-producer routing test,
+  the full path) also on P4.2 and P4.3.
 
 ### Phase 5: provisioning and docs
 

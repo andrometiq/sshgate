@@ -1,8 +1,12 @@
 package gate
 
-import "errors"
+import (
+	"errors"
 
-// Sentinel errors returned by VerifySigned. Callers should match them
+	"github.com/karthikeyan5/sshgate/src/sigwire"
+)
+
+// Sentinel errors returned by Verify and VerifySigned. Callers should match them
 // with errors.Is rather than string-comparing the message.
 var (
 	// ErrBadFormat means the input did not parse as a well-formed
@@ -39,4 +43,9 @@ var (
 	// is enforced fail-closed: an empty binding, or an empty set of gate host
 	// keys, is a mismatch.
 	ErrHostMismatch = errors.New("signed payload host-key binding does not match this gate")
+
+	// ErrNetUnsupported means VerifySigned verified a payload that carries a
+	// signed network grant (Net). VerifySigned's callers do not honour the
+	// grant, so the command is refused rather than run without it.
+	ErrNetUnsupported = errors.New(sigwire.GateNetUnsupported)
 )

@@ -58,6 +58,16 @@ type SigPayload struct {
 	// the bool is part of the signed bytes, so it cannot be flipped on the
 	// wire without invalidating the signature.
 	Reveal bool `json:"reveal,omitempty"`
+	// Net, when true, marks this signed command as carrying a NETWORK grant:
+	// the gate may run it with network access. Like Reveal it is a capability
+	// in the SIGNED payload, so only a human approval the signer turns into a
+	// signature can set it, and flipping it on the wire breaks the signature.
+	//
+	// omitempty keeps a net=false payload byte-identical to the pre-network
+	// wire format. A gate built before this field decodes with
+	// DisallowUnknownFields, so it rejects a net-bearing payload (exit 65)
+	// rather than running it without the grant's meaning.
+	Net bool `json:"net,omitempty"`
 }
 
 // sigEncoding is the base64 alphabet used for both halves of the wire

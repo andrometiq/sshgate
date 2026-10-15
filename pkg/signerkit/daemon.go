@@ -274,6 +274,10 @@ type signRequestCmd struct {
 	// bool.
 	Reveal bool   `json:"reveal,omitempty"`
 	Reason string `json:"reason,omitempty"`
+	// Net requests a signed NETWORK grant for this command. omitempty keeps a
+	// request without network byte-identical to the pre-network wire, and a
+	// daemon built before the field rejects it as an unknown field.
+	Net bool `json:"net,omitempty"`
 }
 
 // signResponse is the wire-format response. Status is one of "approved",
@@ -542,6 +546,12 @@ func (d *Daemon) HandleSignRequest(ctx context.Context, conn io.ReadWriter) erro
 		Commands:  make([]CommandReq, len(req.Commands)),
 	}
 	for i, c := range req.Commands {
+		// Interim: this signer does not yet sign network grants. Refuse rather
+		// than sign the command without the grant the caller asked for.
+		if c.Net {
+			return d.respondError(conn, req.RequestID, fmt.Sprintf(
+				"%s commands[%d] asks for network; this signer does not sign network grants yet", sigwire.SignerNetUnsupported, i))
+		}
 		if c.Cmd == "" {
 			return d.respondError(conn, req.RequestID, fmt.Sprintf("commands[%d].cmd is empty", i))
 		}
