@@ -1,12 +1,12 @@
 === buttons: ✓ Approve all displayed commands (XFER-KEY REGISTER) | ✗ Deny
-=== part 1/1 (824 bytes)
+=== part 1/1 (807 bytes)
 🔐 SSHGate approval review — PART 1/1
 Request: a2_AAAAAAAAAAAAAAAAAAAAAA · Card: k7m2q3x4c5v6 · Plan: 558f86604a2c910a
 ⚠️ XFER-KEY REGISTER — approving this ADDS a box→box transfer trust anchor. These keys let the signer build transfer legs to/from this host. Only approve keys you provisioned.
 Requester: local-uid:0
 Submitted: 2026-10-15T09:30:00Z
 Expires: 2026-10-15T09:35:00Z
-Contents: one transfer-key registration; no bytes hidden
+Contents: one transfer-key registration
 Program-generated reason (sshgate CLI; requester not authenticated as human):
 │ Transfer-key enrollment requested via sshgate CLI
 
@@ -14,7 +14,7 @@ Transfer-key registration
 Host: db-1 fp=SHA256:nThbg6kXUpJWGl7E1IGOCspRomTxdCARLviKw6E5SY8
 Box key: sshgate-box-pub-v1\x20AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=
 ID key: sshgate-id-pub-v1\x20ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8=
-=== decision card, preparing (664 bytes)
+=== decision card, preparing (647 bytes)
 ⚠️ XFER-KEY REGISTER — approving this ADDS a box→box transfer trust anchor. These keys let the signer build transfer legs to/from this host. Only approve keys you provisioned.
 🔐 SSHGate approval — DECISION CARD
 Review the 1 numbered part(s) above before deciding; Approve covers every displayed command.
@@ -23,9 +23,9 @@ Plan hash: 558f86604a2c910a1a12f08beca03e62cd03576c2bc8f061936ffc73ddecba1e
 Requester: local-uid:0
 Submitted: 2026-10-15T09:30:00Z
 Expires: 2026-10-15T09:35:00Z
-Contents: one transfer-key registration; no bytes hidden
+Contents: one transfer-key registration
 AI advisory: preparing. Approve appears once it is ready or unavailable.
-=== decision card, ready (870 bytes)
+=== decision card, ready (853 bytes)
 ⚠️ XFER-KEY REGISTER — approving this ADDS a box→box transfer trust anchor. These keys let the signer build transfer legs to/from this host. Only approve keys you provisioned.
 🔐 SSHGate approval — DECISION CARD
 Review the 1 numbered part(s) above before deciding; Approve covers every displayed command.
@@ -34,7 +34,7 @@ Plan hash: 558f86604a2c910a1a12f08beca03e62cd03576c2bc8f061936ffc73ddecba1e
 Requester: local-uid:0
 Submitted: 2026-10-15T09:30:00Z
 Expires: 2026-10-15T09:35:00Z
-Contents: one transfer-key registration; no bytes hidden
+Contents: one transfer-key registration
 AI advisory (model output; unverified, not a check):
 Alignment: aligned
 Summary:
@@ -58,7 +58,7 @@ Effects:
   "expires_at": "2026-10-15T09:35:00Z",
   "reason_label": "Program-generated reason (sshgate CLI; requester not authenticated as human)",
   "reason": "Transfer-key enrollment requested via sshgate CLI",
-  "summary": "one transfer-key registration; no bytes hidden",
+  "summary": "one transfer-key registration",
   "items": [
     {
       "heading": "Transfer-key registration",

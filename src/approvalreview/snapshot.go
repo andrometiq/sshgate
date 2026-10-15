@@ -1,12 +1,12 @@
 // Package approvalreview is the surface-neutral approval renderer (K19, K20,
 // spec §9.1): it freezes a plan into a ReviewSnapshot, turns a snapshot into
 // the View both surfaces show, and packs that view into bounded Telegram
-// parts and a decision card.
+// parts and a decision card. Telegram output is plain text: send without parse_mode.
 //
 // The display contract: every command shows its exact bytes, escaped to
 // printable ASCII, except detector-matched secret spans, each replaced by
 // approvalplan.HiddenMarker with its byte count, next to the SHA-256 of the
-// exact original bytes. A v2 command that cannot be displayed that way is
+// exact original bytes. Any command that cannot be displayed that way is
 // refused (request_unrenderable), never shown fully hidden. All agent-, client-
 // and model-controlled text is neutralized, so renderer glyphs and line
 // structure come only from the renderer.
@@ -30,11 +30,8 @@ import (
 // SnapshotVersion is the stored snapshot encoding's version.
 const SnapshotVersion = 1
 
-// Test seams: a forced failure of either redactor must fail closed.
-var (
-	redactSpans  = redact.RedactSpans
-	redactString = redact.RedactString
-)
+// Test seam: a forced span-redactor failure must fail closed.
+var redactSpans = redact.RedactSpans
 
 // Segment is one piece of a display: visible text (already escaped or
 // neutralized to printable ASCII) or one hidden span.
@@ -52,10 +49,7 @@ type Display struct {
 	Bytes       int       `json:"bytes"`
 	HiddenBytes int       `json:"hidden_bytes"`
 	FullyHidden bool      `json:"fully_hidden,omitempty"`
-	// CountUnavailable marks a legacy v1 display built from RedactString's
-	// output because the spans could not be derived (E16).
-	CountUnavailable bool   `json:"count_unavailable,omitempty"`
-	SHA256           string `json:"sha256,omitempty"`
+	SHA256      string    `json:"sha256,omitempty"`
 }
 
 // Route is a step's target as the requester resolved it (E35).
@@ -69,10 +63,10 @@ type Route struct {
 
 // Build is an SSHGATE_UPDATE step's client-supplied build metadata (E33).
 type Build struct {
-	StagedBasename string `json:"staged_basename"`
-	StagedVersion  string `json:"staged_version"`
-	RunningVersion string `json:"running_version"`
-	Size           int64  `json:"size"`
+	StagedBasename Display `json:"staged_basename"`
+	StagedVersion  Display `json:"staged_version"`
+	RunningVersion Display `json:"running_version"`
+	Size           int64   `json:"size"`
 }
 
 // Step is one command of a command job, in its batch position.
@@ -170,9 +164,8 @@ func IsUnrenderable(err error) bool {
 // BuildSnapshot freezes a validated v2 plan into its review snapshot. salt is
 // the request's redaction salt; BuildSnapshot zeroes it before returning, on
 // every path (E37). It answers request_unrenderable when any displayed value
-// has no proven span set, when the encoded snapshot exceeds
-// approvalplan.ReviewSnapshotMax, or when the Telegram review would exceed
-// its bounds (K19: the same request must be reviewable on either surface).
+// has no proven span set. Snapshot or Telegram bounds overflow returns
+// request_too_large (K19: either surface must be able to review it).
 func BuildSnapshot(plan approvalplan.ApprovalPlanV1, salt *[32]byte, rules []redact.Rule) (ReviewSnapshot, error) {
 	if salt == nil {
 		return ReviewSnapshot{}, errors.New("approvalreview: a redaction salt is required")
@@ -223,14 +216,14 @@ func BuildSnapshot(plan approvalplan.ApprovalPlanV1, salt *[32]byte, rules []red
 }
 
 // Encode returns the snapshot's canonical JSON, the bytes R1 stores. A
-// snapshot over approvalplan.ReviewSnapshotMax is request_unrenderable.
+// snapshot over approvalplan.ReviewSnapshotMax is request_too_large.
 func (s ReviewSnapshot) Encode() (json.RawMessage, error) {
 	b, err := approvalplan.Canonical(s)
 	if err != nil {
 		return nil, err
 	}
 	if len(b) > approvalplan.ReviewSnapshotMax {
-		return nil, unrenderable("review_snapshot", "is %d bytes encoded; maximum is %d", len(b), approvalplan.ReviewSnapshotMax)
+		return nil, tooLarge("review_snapshot", "is %d bytes encoded; maximum is %d", len(b), approvalplan.ReviewSnapshotMax)
 	}
 	if err := checkASCIIStrings(b); err != nil {
 		return nil, err
@@ -262,6 +255,9 @@ func DecodeSnapshot(b []byte) (ReviewSnapshot, error) {
 		return ReviewSnapshot{}, errors.New("approvalreview: snapshot is not in canonical form")
 	}
 	if err := checkASCIIStrings(b); err != nil {
+		return ReviewSnapshot{}, err
+	}
+	if err := s.validate(); err != nil {
 		return ReviewSnapshot{}, err
 	}
 	return s, nil
@@ -296,10 +292,9 @@ func checkASCIIStrings(b []byte) error {
 // builder carries the salt and rules through one snapshot build and keeps
 // its first failure.
 type builder struct {
-	salt   [32]byte
-	rules  []redact.Rule
-	legacy bool
-	err    error
+	salt  [32]byte
+	rules []redact.Rule
+	err   error
 }
 
 func (b *builder) fail(err error) {
@@ -322,18 +317,13 @@ func (b *builder) text(field, s string) Display {
 }
 
 // display splits s at its proven hidden spans. When the spans cannot be
-// derived, a v2 build fails request_unrenderable and a legacy build falls
-// back to RedactString's output with the count unavailable (E16); no byte
-// that no rule matched is ever hidden.
+// derived, every build fails request_unrenderable; unmatched bytes are never hidden.
 func (b *builder) display(field, s string, escape func(string) string) Display {
 	result, ok := safeRedactSpans(s, b.salt, b.rules)
 	if ok {
 		ok = spansWellFormed(s, result)
 	}
 	if !ok {
-		if b.legacy {
-			return b.countUnavailable(field, s, escape)
-		}
 		b.fail(unrenderable(field, "no faithful display: the hidden spans could not be proven"))
 		return Display{}
 	}
@@ -354,19 +344,6 @@ func (b *builder) display(field, s string, escape func(string) string) Display {
 		d.Segments = append(d.Segments, Segment{Text: escape(s[at:])})
 	}
 	d.FullyHidden = len(s) > 0 && result.HiddenBytes == len(s)
-	return d
-}
-
-func (b *builder) countUnavailable(field, s string, escape func(string) string) Display {
-	redacted, ok := safeRedactString(s, b.salt, b.rules)
-	if !ok {
-		b.fail(unrenderable(field, "no faithful display: redaction failed"))
-		return Display{}
-	}
-	d := Display{Bytes: len(s), CountUnavailable: redacted != s}
-	if redacted != "" {
-		d.Segments = []Segment{{Text: escape(redacted)}}
-	}
 	return d
 }
 
@@ -393,15 +370,6 @@ func safeRedactSpans(s string, salt [32]byte, rules []redact.Rule) (result redac
 	return redactSpans(s, salt, rules)
 }
 
-func safeRedactString(s string, salt [32]byte, rules []redact.Rule) (redacted string, ok bool) {
-	defer func() {
-		if recover() != nil {
-			redacted, ok = "", false
-		}
-	}()
-	return redactString(s, salt, rules)
-}
-
 func (b *builder) steps(steps []approvalplan.Step) []Step {
 	out := make([]Step, len(steps))
 	for i, s := range steps {
@@ -420,8 +388,8 @@ func (b *builder) steps(steps []approvalplan.Step) []Step {
 		}
 		if td := s.TrustedDisplay; td != nil {
 			out[i].Build = &Build{
-				StagedBasename: NeutralizeText(td.StagedBasename), StagedVersion: NeutralizeText(td.StagedVersion),
-				RunningVersion: NeutralizeText(td.RunningVersion), Size: td.Size,
+				StagedBasename: b.display("staged_basename", td.StagedBasename, neutralizeToken), StagedVersion: b.display("staged_version", td.StagedVersion, neutralizeToken),
+				RunningVersion: b.display("running_version", td.RunningVersion, neutralizeToken), Size: td.Size,
 			}
 		}
 	}

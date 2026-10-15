@@ -1,5 +1,5 @@
 === buttons: ✓ Approve all displayed commands (SECRET-REVEAL) | ✗ Deny
-=== part 1/1 (895 bytes)
+=== part 1/1 (903 bytes)
 🔐 SSHGate approval review — PART 1/1
 Request: a2_AAAAAAAAAAAAAAAAAAAAAA · Card: k7m2q3x4c5v6 · Plan: eed51cc80135289f
 ⚠️ SECRET-REVEAL — output will NOT be redacted; raw secret values go to the agent, the AI provider, and this chat.
@@ -7,15 +7,16 @@ Requester: local-uid:1000
 Submitted: 2026-10-15T09:30:00Z
 Expires: 2026-10-16T09:30:00Z
 Synchronous request: it runs only if approved while the agent is still waiting (until 2026-10-15T09:35:10Z)
-Contents: 1 command(s): 1 signed, 0 unsigned read(s); no bytes hidden
+Contents: 1 command(s): 1 signed, 0 unsigned read(s); no command bytes hidden
 Agent-stated reason (unverified):
 │ Read the API token to configure the client
 
-Command 1/1 [signed_reveal] db-1 → deploy@db-1.example.net:22 fp=SHA256:nThbg6kXUpJWGl7E1IGOCspRomTxdCARLviKw6E5SY8 ttl=60s sha256=600fe3b968382b30700cdd9d61ddb9d962f4fef6483c1090b3403c8b44580b64
+Command 1/1 [signed_reveal] ttl=60s sha256=600fe3b968382b30700cdd9d61ddb9d962f4fef6483c1090b3403c8b44580b64
 Route (requester's registry; signer-unverified)
+db-1 → deploy@db-1.example.net:22 fp=SHA256:nThbg6kXUpJWGl7E1IGOCspRomTxdCARLviKw6E5SY8
 Exact command (no hidden bytes):
 │ cat /etc/app/token
-=== decision card, preparing (725 bytes)
+=== decision card, preparing (733 bytes)
 ⚠️ SECRET-REVEAL — output will NOT be redacted; raw secret values go to the agent, the AI provider, and this chat.
 🔐 SSHGate approval — DECISION CARD
 Review the 1 numbered part(s) above before deciding; Approve covers every displayed command.
@@ -25,9 +26,9 @@ Requester: local-uid:1000
 Submitted: 2026-10-15T09:30:00Z
 Expires: 2026-10-16T09:30:00Z
 Synchronous request: it runs only if approved while the agent is still waiting (until 2026-10-15T09:35:10Z)
-Contents: 1 command(s): 1 signed, 0 unsigned read(s); no bytes hidden
+Contents: 1 command(s): 1 signed, 0 unsigned read(s); no command bytes hidden
 AI advisory: preparing. Approve appears once it is ready or unavailable.
-=== decision card, ready (931 bytes)
+=== decision card, ready (939 bytes)
 ⚠️ SECRET-REVEAL — output will NOT be redacted; raw secret values go to the agent, the AI provider, and this chat.
 🔐 SSHGate approval — DECISION CARD
 Review the 1 numbered part(s) above before deciding; Approve covers every displayed command.
@@ -37,7 +38,7 @@ Requester: local-uid:1000
 Submitted: 2026-10-15T09:30:00Z
 Expires: 2026-10-16T09:30:00Z
 Synchronous request: it runs only if approved while the agent is still waiting (until 2026-10-15T09:35:10Z)
-Contents: 1 command(s): 1 signed, 0 unsigned read(s); no bytes hidden
+Contents: 1 command(s): 1 signed, 0 unsigned read(s); no command bytes hidden
 AI advisory (model output; unverified, not a check):
 Alignment: aligned
 Summary:
@@ -62,12 +63,13 @@ Effects:
   "sync_notice": "Synchronous request: it runs only if approved while the agent is still waiting (until 2026-10-15T09:35:10Z)",
   "reason_label": "Agent-stated reason (unverified)",
   "reason": "Read the API token to configure the client",
-  "summary": "1 command(s): 1 signed, 0 unsigned read(s); no bytes hidden",
+  "summary": "1 command(s): 1 signed, 0 unsigned read(s); no command bytes hidden",
   "items": [
     {
-      "heading": "Command 1/1 [signed_reveal] db-1 → deploy@db-1.example.net:22 fp=SHA256:nThbg6kXUpJWGl7E1IGOCspRomTxdCARLviKw6E5SY8 ttl=60s sha256=600fe3b968382b30700cdd9d61ddb9d962f4fef6483c1090b3403c8b44580b64",
+      "heading": "Command 1/1 [signed_reveal] ttl=60s sha256=600fe3b968382b30700cdd9d61ddb9d962f4fef6483c1090b3403c8b44580b64",
       "notes": [
-        "Route (requester's registry; signer-unverified)"
+        "Route (requester's registry; signer-unverified)",
+        "db-1 → deploy@db-1.example.net:22 fp=SHA256:nThbg6kXUpJWGl7E1IGOCspRomTxdCARLviKw6E5SY8"
       ],
       "text_label": "Exact command (no hidden bytes)",
       "text": "cat /etc/app/token",

@@ -1,12 +1,12 @@
 === buttons: ✓ Approve all displayed commands (STANDING GRANT) | ✗ Deny
-=== part 1/1 (1001 bytes)
+=== part 1/1 (1009 bytes)
 🔐 SSHGate approval review — PART 1/1
 Request: a2_AAAAAAAAAAAAAAAAAAAAAA · Card: k7m2q3x4c5v6 · Plan: 07aad2923772283f
 ⚠️ STANDING GRANT — approving this auto-signs the commands below for the whole window WITHOUT further taps.
 Requester: local-uid:1000
 Submitted: 2026-10-15T09:30:00Z
 Expires: 2026-10-16T09:30:00Z
-Contents: standing grant with 2 listed command(s); no bytes hidden
+Contents: standing grant with 2 listed command(s); no command bytes hidden
 Agent-stated reason (unverified):
 │ Restart the worker while I debug
 
@@ -23,7 +23,7 @@ Exact command (no hidden bytes):
 Grant command 2/2 sha256=a2480df6cd3f6db104c1daf46eeefba860d07c0025b8d8f006022fcda97916c9
 Exact command (no hidden bytes):
 │ systemctl status worker
-=== decision card, preparing (607 bytes)
+=== decision card, preparing (615 bytes)
 ⚠️ STANDING GRANT — approving this auto-signs the commands below for the whole window WITHOUT further taps.
 🔐 SSHGate approval — DECISION CARD
 Review the 1 numbered part(s) above before deciding; Approve covers every displayed command.
@@ -32,9 +32,9 @@ Plan hash: 07aad2923772283f204001638c3e7f04fb349f36810a764e8fe8cee1d697fa79
 Requester: local-uid:1000
 Submitted: 2026-10-15T09:30:00Z
 Expires: 2026-10-16T09:30:00Z
-Contents: standing grant with 2 listed command(s); no bytes hidden
+Contents: standing grant with 2 listed command(s); no command bytes hidden
 AI advisory: preparing. Approve appears once it is ready or unavailable.
-=== decision card, ready (813 bytes)
+=== decision card, ready (821 bytes)
 ⚠️ STANDING GRANT — approving this auto-signs the commands below for the whole window WITHOUT further taps.
 🔐 SSHGate approval — DECISION CARD
 Review the 1 numbered part(s) above before deciding; Approve covers every displayed command.
@@ -43,7 +43,7 @@ Plan hash: 07aad2923772283f204001638c3e7f04fb349f36810a764e8fe8cee1d697fa79
 Requester: local-uid:1000
 Submitted: 2026-10-15T09:30:00Z
 Expires: 2026-10-16T09:30:00Z
-Contents: standing grant with 2 listed command(s); no bytes hidden
+Contents: standing grant with 2 listed command(s); no command bytes hidden
 AI advisory (model output; unverified, not a check):
 Alignment: aligned
 Summary:
@@ -67,7 +67,7 @@ Effects:
   "expires_at": "2026-10-16T09:30:00Z",
   "reason_label": "Agent-stated reason (unverified)",
   "reason": "Restart the worker while I debug",
-  "summary": "standing grant with 2 listed command(s); no bytes hidden",
+  "summary": "standing grant with 2 listed command(s); no command bytes hidden",
   "items": [
     {
       "heading": "Standing grant on web-1",

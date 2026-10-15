@@ -1,20 +1,20 @@
 === buttons: ✓ Approve all displayed commands (XFER-KEY REGISTER) | ✗ Deny
-=== part 1/1 (821 bytes)
+=== part 1/1 (856 bytes)
 🔐 SSHGate approval review — PART 1/1
 Request: 9f1c2e4a7b · Card: k7m2q3x4c5v6 · Plan: none (legacy v1 request)
 ⚠️ XFER-KEY REGISTER — approving this ADDS a box→box transfer trust anchor. These keys let the signer build transfer legs to/from this host. Only approve keys you provisioned.
 Requester: local-uid:1000
 Submitted: 2026-10-15T09:30:00Z
 Expires: 2026-10-15T09:35:00Z
-Contents: one transfer-key registration; no bytes hidden
+Contents: one transfer-key registration
 Program-generated reason (sshgate CLI; requester not authenticated as human):
 │ Transfer-key enrollment requested via sshgate CLI
 
 Transfer-key registration
 Host: web-1 fp=SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU
-Box key: sshgate-box-pub-v1\x20AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=
-ID key: sshgate-id-pub-v1\x20ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8=
-=== decision card, preparing (612 bytes)
+Box key: sshgate-box-pub-v1\x20\u{27E6}hidden 43 bytes \u{00B7} sshgate-generic-high-entropy\u{27E7}=
+ID key: sshgate-id-pub-v1\x20\u{27E6}hidden 43 bytes \u{00B7} sshgate-generic-high-entropy\u{27E7}=
+=== decision card, preparing (595 bytes)
 ⚠️ XFER-KEY REGISTER — approving this ADDS a box→box transfer trust anchor. These keys let the signer build transfer legs to/from this host. Only approve keys you provisioned.
 🔐 SSHGate approval — DECISION CARD
 Review the 1 numbered part(s) above before deciding; Approve covers every displayed command.
@@ -23,9 +23,9 @@ Plan hash: none (legacy v1 request)
 Requester: local-uid:1000
 Submitted: 2026-10-15T09:30:00Z
 Expires: 2026-10-15T09:35:00Z
-Contents: one transfer-key registration; no bytes hidden
+Contents: one transfer-key registration
 AI advisory: preparing. Approve appears once it is ready or unavailable.
-=== decision card, ready (864 bytes)
+=== decision card, ready (847 bytes)
 ⚠️ XFER-KEY REGISTER — approving this ADDS a box→box transfer trust anchor. These keys let the signer build transfer legs to/from this host. Only approve keys you provisioned.
 🔐 SSHGate approval — DECISION CARD
 Review the 1 numbered part(s) above before deciding; Approve covers every displayed command.
@@ -34,7 +34,7 @@ Plan hash: none (legacy v1 request)
 Requester: local-uid:1000
 Submitted: 2026-10-15T09:30:00Z
 Expires: 2026-10-15T09:35:00Z
-Contents: one transfer-key registration; no bytes hidden
+Contents: one transfer-key registration
 AI advisory (model output; unverified, not a check):
 Alignment: not assessed (legacy request carries no agent reason)
 Summary:
@@ -57,14 +57,14 @@ Effects:
   "expires_at": "2026-10-15T09:35:00Z",
   "reason_label": "Program-generated reason (sshgate CLI; requester not authenticated as human)",
   "reason": "Transfer-key enrollment requested via sshgate CLI",
-  "summary": "one transfer-key registration; no bytes hidden",
+  "summary": "one transfer-key registration",
   "items": [
     {
       "heading": "Transfer-key registration",
       "notes": [
         "Host: web-1 fp=SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU",
-        "Box key: sshgate-box-pub-v1\\x20AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
-        "ID key: sshgate-id-pub-v1\\x20ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8="
+        "Box key: sshgate-box-pub-v1\\x20\\u{27E6}hidden 43 bytes \\u{00B7} sshgate-generic-high-entropy\\u{27E7}=",
+        "ID key: sshgate-id-pub-v1\\x20\\u{27E6}hidden 43 bytes \\u{00B7} sshgate-generic-high-entropy\\u{27E7}="
       ],
       "hidden_bytes": 0
     }

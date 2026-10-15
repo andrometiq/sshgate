@@ -42,13 +42,3 @@ func neutralizeToken(s string) string {
 func escapeCommand(s string) string {
 	return policyreview.EscapeBytes([]byte(s))
 }
-
-// isPrintableASCII reports whether s holds only bytes 0x20..0x7e.
-func isPrintableASCII(s string) bool {
-	for i := 0; i < len(s); i++ {
-		if s[i] < 0x20 || s[i] > 0x7e {
-			return false
-		}
-	}
-	return true
-}

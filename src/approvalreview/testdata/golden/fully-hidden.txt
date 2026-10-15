@@ -1,20 +1,21 @@
 === buttons: ✓ Approve all displayed commands | ✗ Deny
-=== part 1/1 (869 bytes)
+=== part 1/1 (877 bytes)
 🔐 SSHGate approval review — PART 1/1
 Request: a2_AAAAAAAAAAAAAAAAAAAAAA · Card: k7m2q3x4c5v6 · Plan: 71b54a1c8e8e665c
 Requester: local-uid:1000
 Submitted: 2026-10-15T09:30:00Z
 Expires: 2026-10-16T09:30:00Z
-Contents: 1 command(s): 1 signed, 0 unsigned read(s); 388 byte(s) hidden by display redaction
+Contents: 1 command(s): 1 signed, 0 unsigned read(s); 388 command byte(s) hidden by display redaction
 Agent-stated reason (unverified):
 │ Restart nginx after the config change
 
-Command 1/1 [signed_write] web-1 → deploy@web-1.example.net:22 fp=SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU ttl=60s sha256=dee7bdb337fa9463ecc9426f0d1e4d7e6c926f50b8ad508371105d946c3f96b6
+Command 1/1 [signed_write] ttl=60s sha256=dee7bdb337fa9463ecc9426f0d1e4d7e6c926f50b8ad508371105d946c3f96b6
 Route (requester's registry; signer-unverified)
+web-1 → deploy@web-1.example.net:22 fp=SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU
 Every byte of this value is hidden by display redaction
 Display-redacted command — signature covers undisplayed original bytes:
 │ ⟦hidden 388 bytes · gitleaks-pem-private-key,gitleaks-ssh-private-key,sshgate-generic-high-entropy⟧
-=== decision card, preparing (520 bytes)
+=== decision card, preparing (528 bytes)
 🔐 SSHGate approval — DECISION CARD
 Review the 1 numbered part(s) above before deciding; Approve covers every displayed command.
 Request: a2_AAAAAAAAAAAAAAAAAAAAAA · Card: k7m2q3x4c5v6
@@ -22,9 +23,9 @@ Plan hash: 71b54a1c8e8e665c3e628d5194c63a011405c2c6dd84672ab044f29e79039b2d
 Requester: local-uid:1000
 Submitted: 2026-10-15T09:30:00Z
 Expires: 2026-10-16T09:30:00Z
-Contents: 1 command(s): 1 signed, 0 unsigned read(s); 388 byte(s) hidden by display redaction
+Contents: 1 command(s): 1 signed, 0 unsigned read(s); 388 command byte(s) hidden by display redaction
 AI advisory: preparing. Approve appears once it is ready or unavailable.
-=== decision card, ready (726 bytes)
+=== decision card, ready (734 bytes)
 🔐 SSHGate approval — DECISION CARD
 Review the 1 numbered part(s) above before deciding; Approve covers every displayed command.
 Request: a2_AAAAAAAAAAAAAAAAAAAAAA · Card: k7m2q3x4c5v6
@@ -32,7 +33,7 @@ Plan hash: 71b54a1c8e8e665c3e628d5194c63a011405c2c6dd84672ab044f29e79039b2d
 Requester: local-uid:1000
 Submitted: 2026-10-15T09:30:00Z
 Expires: 2026-10-16T09:30:00Z
-Contents: 1 command(s): 1 signed, 0 unsigned read(s); 388 byte(s) hidden by display redaction
+Contents: 1 command(s): 1 signed, 0 unsigned read(s); 388 command byte(s) hidden by display redaction
 AI advisory (model output; unverified, not a check):
 Alignment: aligned
 Summary:
@@ -53,12 +54,13 @@ Effects:
   "expires_at": "2026-10-16T09:30:00Z",
   "reason_label": "Agent-stated reason (unverified)",
   "reason": "Restart nginx after the config change",
-  "summary": "1 command(s): 1 signed, 0 unsigned read(s); 388 byte(s) hidden by display redaction",
+  "summary": "1 command(s): 1 signed, 0 unsigned read(s); 388 command byte(s) hidden by display redaction",
   "items": [
     {
-      "heading": "Command 1/1 [signed_write] web-1 → deploy@web-1.example.net:22 fp=SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU ttl=60s sha256=dee7bdb337fa9463ecc9426f0d1e4d7e6c926f50b8ad508371105d946c3f96b6",
+      "heading": "Command 1/1 [signed_write] ttl=60s sha256=dee7bdb337fa9463ecc9426f0d1e4d7e6c926f50b8ad508371105d946c3f96b6",
       "notes": [
         "Route (requester's registry; signer-unverified)",
+        "web-1 → deploy@web-1.example.net:22 fp=SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU",
         "Every byte of this value is hidden by display redaction"
       ],
       "text_label": "Display-redacted command — signature covers undisplayed original bytes",

@@ -1,23 +1,24 @@
 === buttons: ✓ Approve all displayed commands (GATE UPDATE) | ✗ Deny
-=== part 1/1 (1047 bytes)
+=== part 1/1 (1055 bytes)
 🔐 SSHGate approval review — PART 1/1
 Request: 9f1c2e4a7b · Card: k7m2q3x4c5v6 · Plan: none (legacy v1 request)
 ⚠️ GATE BINARY UPDATE — approving this REPLACES the SSHGate gate binary on web-1. The new gate governs every future command on this server. Only approve an update you initiated.
 Requester: local-uid:1000
 Submitted: 2026-10-15T09:30:00Z
 Expires: 2026-10-15T09:35:00Z
-Contents: 1 command(s): 1 signed, 0 unsigned read(s); no bytes hidden
+Contents: 1 command(s): 1 signed, 0 unsigned read(s); no command bytes hidden
 Protocol-generated legacy intent (unverified; client supplied no reason):
 │ Legacy v1 request (reason unavailable)
 
-Command 1/1 [signed_admin] web-1 fp=SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU ttl=300s sha256=b98a72200bb1795384f4aa5b9ec4cdece93c6ff1862c83d439c420d5fe8a40f1
+Command 1/1 [signed_admin] ttl=300s sha256=b98a72200bb1795384f4aa5b9ec4cdece93c6ff1862c83d439c420d5fe8a40f1
 Route (requester's registry; signer-unverified)
+web-1 fp=SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU
 New gate SHA-256 (from the signed command bytes): <malformed hash — the gate will reject this update>
 Build metadata (v1 client-supplied):
 │ staged v0.2.0, running v0.1.4
 Exact command (no hidden bytes):
 │ SSHGATE_UPDATE zz\x0aNew gate SHA-256: 00
-=== decision card, preparing (625 bytes)
+=== decision card, preparing (633 bytes)
 ⚠️ GATE BINARY UPDATE — approving this REPLACES the SSHGate gate binary on web-1. The new gate governs every future command on this server. Only approve an update you initiated.
 🔐 SSHGate approval — DECISION CARD
 Review the 1 numbered part(s) above before deciding; Approve covers every displayed command.
@@ -26,9 +27,9 @@ Plan hash: none (legacy v1 request)
 Requester: local-uid:1000
 Submitted: 2026-10-15T09:30:00Z
 Expires: 2026-10-15T09:35:00Z
-Contents: 1 command(s): 1 signed, 0 unsigned read(s); no bytes hidden
+Contents: 1 command(s): 1 signed, 0 unsigned read(s); no command bytes hidden
 AI advisory: preparing. Approve appears once it is ready or unavailable.
-=== decision card, ready (877 bytes)
+=== decision card, ready (885 bytes)
 ⚠️ GATE BINARY UPDATE — approving this REPLACES the SSHGate gate binary on web-1. The new gate governs every future command on this server. Only approve an update you initiated.
 🔐 SSHGate approval — DECISION CARD
 Review the 1 numbered part(s) above before deciding; Approve covers every displayed command.
@@ -37,7 +38,7 @@ Plan hash: none (legacy v1 request)
 Requester: local-uid:1000
 Submitted: 2026-10-15T09:30:00Z
 Expires: 2026-10-15T09:35:00Z
-Contents: 1 command(s): 1 signed, 0 unsigned read(s); no bytes hidden
+Contents: 1 command(s): 1 signed, 0 unsigned read(s); no command bytes hidden
 AI advisory (model output; unverified, not a check):
 Alignment: not assessed (legacy request carries no agent reason)
 Summary:
@@ -60,12 +61,13 @@ Effects:
   "expires_at": "2026-10-15T09:35:00Z",
   "reason_label": "Protocol-generated legacy intent (unverified; client supplied no reason)",
   "reason": "Legacy v1 request (reason unavailable)",
-  "summary": "1 command(s): 1 signed, 0 unsigned read(s); no bytes hidden",
+  "summary": "1 command(s): 1 signed, 0 unsigned read(s); no command bytes hidden",
   "items": [
     {
-      "heading": "Command 1/1 [signed_admin] web-1 fp=SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU ttl=300s sha256=b98a72200bb1795384f4aa5b9ec4cdece93c6ff1862c83d439c420d5fe8a40f1",
+      "heading": "Command 1/1 [signed_admin] ttl=300s sha256=b98a72200bb1795384f4aa5b9ec4cdece93c6ff1862c83d439c420d5fe8a40f1",
       "notes": [
         "Route (requester's registry; signer-unverified)",
+        "web-1 fp=SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU",
         "New gate SHA-256 (from the signed command bytes): <malformed hash — the gate will reject this update>",
         "Build metadata (v1 client-supplied):",
         "│ staged v0.2.0, running v0.1.4"

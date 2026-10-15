@@ -62,23 +62,11 @@ func TestForcedSpanFailure(t *testing.T) {
 
 	req := legacyBase()
 	req.Commands = []LegacyCommand{{Server: "web-1", Command: cmd, TTLSeconds: 60}}
-	s := mustLegacy(t, req)
-	d := s.Steps[0].Command
-	redacted, _ := redact.RedactString(cmd, testSalt(), testRules)
-	if !d.CountUnavailable || renderDisplay(d) != escapeCommand(redacted) {
-		t.Fatalf("legacy display %+v, want RedactString's output count-unavailable", d)
+	salt = testSalt()
+	if _, err := BuildLegacySnapshot(req, &salt, testRules); !IsUnrenderable(err) {
+		t.Fatalf("legacy: %v", err)
 	}
-	if !strings.Contains(renderDisplay(d), "export GITHUB_TOKEN=") || !strings.HasSuffix(renderDisplay(d), " && ./deploy --verbose") {
-		t.Fatalf("an unmatched byte is hidden: %q", renderDisplay(d))
-	}
-	v, err := BuildView(s, Assist{State: approvalplan.AssistPreparing})
-	if err != nil {
-		t.Fatal(err)
-	}
-	label := v.Items[0].TextLabel
-	if !strings.Contains(label, approvalplan.LabelRedactedNoCount) || !strings.Contains(label, approvalplan.LabelRedactedDisplay) {
-		t.Fatalf("label %q", label)
-	}
+
 }
 
 func TestPanickingRedactorFailsClosed(t *testing.T) {
@@ -164,7 +152,7 @@ func TestUpdateHashComesFromTheCommandBytes(t *testing.T) {
 	if !strings.Contains(notes, "New gate SHA-256 (from the signed command bytes): "+commandHash+"\n") {
 		t.Fatalf("notes %q", notes)
 	}
-	if !strings.Contains(notes, approvalplan.LabelBuildMetadataClient+":\n"+QuotePrefix+"staged_basename=sshgate-gate sha256="+other) {
+	if !strings.Contains(notes, approvalplan.LabelBuildMetadataClient+":\n"+QuotePrefix+"staged_basename=sshgate-gate\\x20sha256="+other) {
 		t.Fatalf("the client hash is not quoted under the client-supplied label: %q", notes)
 	}
 
@@ -245,10 +233,10 @@ func TestSnapshotFitsTheR1Contract(t *testing.T) {
 	}
 }
 
-func TestOversizedSnapshotIsUnrenderable(t *testing.T) {
+func TestOversizedSnapshotIsTooLarge(t *testing.T) {
 	s := mustSnapshot(t, loadPlan(t, "write"))
 	s.Steps[0].Command.Segments = []Segment{{Text: strings.Repeat("a", approvalplan.ReviewSnapshotMax)}}
-	if _, err := s.Encode(); !IsUnrenderable(err) {
+	if _, err := s.Encode(); !isTooLarge(err) {
 		t.Fatalf("got %v", err)
 	}
 }
@@ -256,7 +244,7 @@ func TestOversizedSnapshotIsUnrenderable(t *testing.T) {
 func TestWorstCasePartCount(t *testing.T) {
 	r := render(t, mustSnapshot(t, worstCasePlan(t)), readyAssist())
 	// Pinned: a change in layout that moves the worst case must be deliberate.
-	const want = 33
+	const want = 32
 	if len(r.parts) != want {
 		t.Fatalf("worst case packs into %d parts; pinned %d", len(r.parts), want)
 	}
@@ -267,23 +255,19 @@ func TestLegacyBeyondTelegramBoundsIsRefused(t *testing.T) {
 	for range 32 {
 		req.Commands = append(req.Commands, LegacyCommand{Server: "web-1", Command: strings.Repeat("y", 4096), TTLSeconds: 60})
 	}
-	v, err := BuildView(mustLegacy(t, req), Assist{State: approvalplan.AssistPreparing})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := PackParts(v, testHandle); !IsUnrenderable(err) {
-		t.Fatalf("got %v, want request_unrenderable", err)
+	if _, err := BuildLegacySnapshot(req, saltPointer(), testRules); !isTooLarge(err) {
+		t.Fatalf("got %v, want request_too_large at freeze", err)
 	}
 }
 
 func TestLegacyNeedsExactlyOnePayload(t *testing.T) {
 	req := legacyBase()
-	if _, err := BuildLegacySnapshot(req, testSalt(), testRules); err == nil {
+	if _, err := BuildLegacySnapshot(req, saltPointer(), testRules); err == nil {
 		t.Fatal("no payload accepted")
 	}
 	req.Commands = []LegacyCommand{{Server: "a", Command: "true"}}
 	req.Grant = &LegacyGrant{Alias: "a", Scope: "all"}
-	if _, err := BuildLegacySnapshot(req, testSalt(), testRules); err == nil {
+	if _, err := BuildLegacySnapshot(req, saltPointer(), testRules); err == nil {
 		t.Fatal("two payloads accepted")
 	}
 }

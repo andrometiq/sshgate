@@ -1,34 +1,37 @@
 === buttons: ✓ Approve all displayed commands (SECRET-REVEAL) | ✗ Deny
-=== part 1/1 (1791 bytes)
+=== part 1/1 (1799 bytes)
 🔐 SSHGate approval review — PART 1/1
 Request: 9f1c2e4a7b · Card: k7m2q3x4c5v6 · Plan: none (legacy v1 request)
 ⚠️ SECRET-REVEAL — output will NOT be redacted; raw secret values go to the agent, the AI provider, and this chat.
 Requester: local-uid:1000
 Submitted: 2026-10-15T09:30:00Z
 Expires: 2026-10-15T09:35:00Z
-Contents: 3 command(s): 3 signed, 0 unsigned read(s); 16 byte(s) hidden by display redaction
+Contents: 3 command(s): 3 signed, 0 unsigned read(s); 16 command byte(s) hidden by display redaction
 Protocol-generated legacy intent (unverified; client supplied no reason):
 │ Legacy v1 request (reason unavailable)
 
-Command 1/3 [signed_write] web-1 fp=SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU ttl=60s sha256=af72e7d42dc52c5e6f1871d2a03807f14cf40683321425bf1388c7d8952928ae
+Command 1/3 [signed_write] ttl=60s sha256=af72e7d42dc52c5e6f1871d2a03807f14cf40683321425bf1388c7d8952928ae
 Route (requester's registry; signer-unverified)
+web-1 fp=SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU
 Exact command (no hidden bytes):
 │ systemctl restart nginx
 
-Command 2/3 [signed_write] web-1 fp=SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU ttl=60s sha256=2bb016a6602b454abb3d6570d5d75ad420e1d406010b5545b665c7520c9c1f40
+Command 2/3 [signed_write] ttl=60s sha256=2bb016a6602b454abb3d6570d5d75ad420e1d406010b5545b665c7520c9c1f40
 Route (requester's registry; signer-unverified)
+web-1 fp=SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU
 ⚠️ Step 2 is signed and runs after earlier work; its signature may expire before it starts.
 Display-redacted command — signature covers undisplayed original bytes:
 │ export GITHUB_TOKEN=⟦hidden 16 bytes · sshgate-sensitive-assignment⟧ && ./deploy
 
-Command 3/3 [signed_reveal] db-1 ttl=60s sha256=600fe3b968382b30700cdd9d61ddb9d962f4fef6483c1090b3403c8b44580b64
+Command 3/3 [signed_reveal] ttl=60s sha256=600fe3b968382b30700cdd9d61ddb9d962f4fef6483c1090b3403c8b44580b64
 Route (requester's registry; signer-unverified)
+db-1
 Reveal justification (agent-stated, unverified, legacy per-command field):
 │ configure the client with PASSWORD=⟦hidden 13 bytes · sshgate-password-kv,sshgate-sensitive-assignment⟧
 ⚠️ Step 3 is signed and runs after earlier work; its signature may expire before it starts.
 Exact command (no hidden bytes):
 │ cat /etc/app/token
-=== decision card, preparing (585 bytes)
+=== decision card, preparing (593 bytes)
 ⚠️ SECRET-REVEAL — output will NOT be redacted; raw secret values go to the agent, the AI provider, and this chat.
 🔐 SSHGate approval — DECISION CARD
 Review the 1 numbered part(s) above before deciding; Approve covers every displayed command.
@@ -37,9 +40,9 @@ Plan hash: none (legacy v1 request)
 Requester: local-uid:1000
 Submitted: 2026-10-15T09:30:00Z
 Expires: 2026-10-15T09:35:00Z
-Contents: 3 command(s): 3 signed, 0 unsigned read(s); 16 byte(s) hidden by display redaction
+Contents: 3 command(s): 3 signed, 0 unsigned read(s); 16 command byte(s) hidden by display redaction
 AI advisory: preparing. Approve appears once it is ready or unavailable.
-=== decision card, ready (837 bytes)
+=== decision card, ready (845 bytes)
 ⚠️ SECRET-REVEAL — output will NOT be redacted; raw secret values go to the agent, the AI provider, and this chat.
 🔐 SSHGate approval — DECISION CARD
 Review the 1 numbered part(s) above before deciding; Approve covers every displayed command.
@@ -48,7 +51,7 @@ Plan hash: none (legacy v1 request)
 Requester: local-uid:1000
 Submitted: 2026-10-15T09:30:00Z
 Expires: 2026-10-15T09:35:00Z
-Contents: 3 command(s): 3 signed, 0 unsigned read(s); 16 byte(s) hidden by display redaction
+Contents: 3 command(s): 3 signed, 0 unsigned read(s); 16 command byte(s) hidden by display redaction
 AI advisory (model output; unverified, not a check):
 Alignment: not assessed (legacy request carries no agent reason)
 Summary:
@@ -71,12 +74,13 @@ Effects:
   "expires_at": "2026-10-15T09:35:00Z",
   "reason_label": "Protocol-generated legacy intent (unverified; client supplied no reason)",
   "reason": "Legacy v1 request (reason unavailable)",
-  "summary": "3 command(s): 3 signed, 0 unsigned read(s); 16 byte(s) hidden by display redaction",
+  "summary": "3 command(s): 3 signed, 0 unsigned read(s); 16 command byte(s) hidden by display redaction",
   "items": [
     {
-      "heading": "Command 1/3 [signed_write] web-1 fp=SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU ttl=60s sha256=af72e7d42dc52c5e6f1871d2a03807f14cf40683321425bf1388c7d8952928ae",
+      "heading": "Command 1/3 [signed_write] ttl=60s sha256=af72e7d42dc52c5e6f1871d2a03807f14cf40683321425bf1388c7d8952928ae",
       "notes": [
-        "Route (requester's registry; signer-unverified)"
+        "Route (requester's registry; signer-unverified)",
+        "web-1 fp=SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU"
       ],
       "text_label": "Exact command (no hidden bytes)",
       "text": "systemctl restart nginx",
@@ -85,9 +89,10 @@ Effects:
       "hidden_bytes": 0
     },
     {
-      "heading": "Command 2/3 [signed_write] web-1 fp=SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU ttl=60s sha256=2bb016a6602b454abb3d6570d5d75ad420e1d406010b5545b665c7520c9c1f40",
+      "heading": "Command 2/3 [signed_write] ttl=60s sha256=2bb016a6602b454abb3d6570d5d75ad420e1d406010b5545b665c7520c9c1f40",
       "notes": [
         "Route (requester's registry; signer-unverified)",
+        "web-1 fp=SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU",
         "⚠️ Step 2 is signed and runs after earlier work; its signature may expire before it starts."
       ],
       "text_label": "Display-redacted command — signature covers undisplayed original bytes",
@@ -97,9 +102,10 @@ Effects:
       "hidden_bytes": 16
     },
     {
-      "heading": "Command 3/3 [signed_reveal] db-1 ttl=60s sha256=600fe3b968382b30700cdd9d61ddb9d962f4fef6483c1090b3403c8b44580b64",
+      "heading": "Command 3/3 [signed_reveal] ttl=60s sha256=600fe3b968382b30700cdd9d61ddb9d962f4fef6483c1090b3403c8b44580b64",
       "notes": [
         "Route (requester's registry; signer-unverified)",
+        "db-1",
         "Reveal justification (agent-stated, unverified, legacy per-command field):",
         "│ configure the client with PASSWORD=⟦hidden 13 bytes · sshgate-password-kv,sshgate-sensitive-assignment⟧",
         "⚠️ Step 3 is signed and runs after earlier work; its signature may expire before it starts."

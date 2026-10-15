@@ -18,9 +18,6 @@ const (
 	MaxMessages = 40
 	// MaxReviewBytes bounds the parts plus the decision card.
 	MaxReviewBytes = 128 << 10
-	// chunkTextBytes bounds one chunk of a value's display, leaving room in
-	// its part for the headers, notes and labels of its item.
-	chunkTextBytes = 2800
 )
 
 const (
@@ -32,23 +29,19 @@ const (
 // decision card (K19): each part carries the request ID, the card handle,
 // part i/N and the plan-hash prefix, and no Approve. A display longer than
 // one chunk is split into chunks that each repeat its reference and SHA-256.
-// A review over the bounds is request_unrenderable.
+// A review over the bounds is request_too_large.
 func PackParts(v View, handle string) ([]string, error) {
 	if !approvalplan.ValidCardHandle(handle) {
 		return nil, fmt.Errorf("approvalreview: invalid card handle %q", handle)
 	}
-	blocks := []string{requestBlock(v)}
-	for _, it := range v.Items {
-		blocks = append(blocks, itemBlocks(it)...)
-	}
 	identity := fmt.Sprintf("Request: %s · Card: %s · Plan: %s", v.RequestID, handle, planPrefix(v))
 	budget := PartBytes - 1 - len(fmt.Sprintf(partTitle, MaxMessages, MaxMessages)) - 1 - len(identity) - 1
-	bodies, err := packBodies(blocks, budget)
+	bodies, err := packItems(v, budget)
 	if err != nil {
 		return nil, err
 	}
 	if len(bodies)+1 > MaxMessages {
-		return nil, unrenderable("telegram", "the review needs %d parts; at most %d fit with the decision card", len(bodies), MaxMessages-1)
+		return nil, tooLarge("telegram", "the review needs %d parts; at most %d fit with the decision card", len(bodies), MaxMessages-1)
 	}
 	parts := make([]string, len(bodies))
 	total := 0
@@ -57,7 +50,7 @@ func PackParts(v View, handle string) ([]string, error) {
 		total += len(parts[i])
 	}
 	if total+PartBytes > MaxReviewBytes {
-		return nil, unrenderable("telegram", "the review is %d bytes; at most %d fit with the decision card", total, MaxReviewBytes-PartBytes)
+		return nil, tooLarge("telegram", "the review is %d bytes; at most %d fit with the decision card", total, MaxReviewBytes-PartBytes)
 	}
 	return parts, nil
 }
@@ -66,7 +59,7 @@ func planPrefix(v View) string {
 	if v.PlanHash == "" {
 		return "none (legacy v1 request)"
 	}
-	return v.PlanHash[:16]
+	return v.PlanHash[:min(16, len(v.PlanHash))]
 }
 
 func requestBlock(v View) string {
@@ -79,30 +72,105 @@ func requestBlock(v View) string {
 	return strings.Join(lines, "\n")
 }
 
-// itemBlocks is one block per chunk of the item's display.
-func itemBlocks(it Item) []string {
-	head := append([]string{it.Heading}, it.Notes...)
-	if it.TextLabel == "" {
-		return []string{strings.Join(head, "\n")}
-	}
-	chunks := chunkDisplay(it.Text, chunkTextBytes)
-	if len(chunks) == 1 {
-		return []string{strings.Join(append(head, it.TextLabel+":", QuotePrefix+it.Text), "\n")}
-	}
-	sha := ""
-	if it.SHA256 != "" {
-		sha = " sha256=" + it.SHA256
-	}
-	blocks := make([]string, len(chunks))
-	for j, chunk := range chunks {
-		chunkLine := fmt.Sprintf("↳ %s, chunk %d/%d%s", it.Ref, j+1, len(chunks), sha)
-		lines := []string{chunkLine, it.TextLabel + ":", QuotePrefix + chunk}
-		if j == 0 {
-			lines = append(head, lines...)
+// packItems fills remaining space before opening a part. Display tokens are
+// indivisible; every split repeats the item reference and original-byte hash.
+func packItems(v View, budget int) ([]string, error) {
+	bodies := []string{""}
+	remaining := func() int {
+		n := budget - len(bodies[len(bodies)-1])
+		if bodies[len(bodies)-1] != "" {
+			n -= 2
 		}
-		blocks[j] = strings.Join(lines, "\n")
+		return n
 	}
-	return blocks
+	appendBlock := func(block string) {
+		i := len(bodies) - 1
+		if bodies[i] != "" {
+			bodies[i] += "\n\n"
+		}
+		bodies[i] += block
+	}
+	addWhole := func(block string) error {
+		if len(block) > budget {
+			return tooLarge("telegram", "a review block exceeds one part")
+		}
+		if len(block) > remaining() {
+			bodies = append(bodies, "")
+		}
+		appendBlock(block)
+		return nil
+	}
+	if err := addWhole(requestBlock(v)); err != nil {
+		return nil, err
+	}
+	for _, it := range v.Items {
+		head := strings.Join(append([]string{it.Heading}, it.Notes...), "\n")
+		if it.TextLabel == "" {
+			if err := addWhole(head); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		label := it.TextLabel + ":\n" + QuotePrefix
+		whole := head + "\n" + label + it.Text
+		if len(whole) <= remaining() {
+			appendBlock(whole)
+			continue
+		}
+		type piece struct {
+			body         int
+			prefix, text string
+		}
+		var pieces []piece
+		text := it.Text
+		for len(text) > 0 || len(pieces) == 0 {
+			prefix := ""
+			if len(pieces) == 0 {
+				prefix = head + "\n"
+			}
+			line := fmt.Sprintf("↳ %s, chunk %d/99", it.Ref, len(pieces)+1)
+			if it.SHA256 != "" {
+				line += " sha256=" + it.SHA256
+			}
+			prefix += line + "\n" + label
+			available := remaining() - len(prefix)
+			end := 0
+			for end < len(text) {
+				n := tokenLen(text[end:])
+				if end+n > available {
+					break
+				}
+				end += n
+			}
+			if available < 0 || (end == 0 && len(text) > 0) {
+				if bodies[len(bodies)-1] == "" {
+					return nil, tooLarge("telegram", "an item header and display token exceed one part")
+				}
+				bodies = append(bodies, "")
+				continue
+			}
+			pieces = append(pieces, piece{len(bodies) - 1, prefix, text[:end]})
+			// Reserve the full prefix until the chunk count is known.
+			appendBlock(prefix + text[:end])
+			text = text[end:]
+			if len(text) == 0 {
+				break
+			}
+			if len(bodies) >= MaxMessages {
+				return nil, tooLarge("telegram", "too many review parts")
+			}
+			bodies = append(bodies, "")
+		}
+		for _, p := range pieces {
+			old := p.prefix + p.text
+			at := strings.LastIndex(p.prefix, ", chunk ")
+			prefix := p.prefix[:at] + strings.Replace(p.prefix[at:], "/99", fmt.Sprintf("/%d", len(pieces)), 1)
+			// Replace only the just-appended suffix, never supplied text.
+			body := bodies[p.body]
+			bodies[p.body] = body[:len(body)-len(old)] + prefix + p.text
+		}
+	}
+	return bodies, nil
 }
 
 // chunkDisplay splits a rendered display into chunks of at most max bytes,
@@ -142,25 +210,6 @@ func tokenLen(s string) int {
 	return size
 }
 
-func packBodies(blocks []string, budget int) ([]string, error) {
-	var bodies []string
-	var current strings.Builder
-	for _, block := range blocks {
-		if len(block) > budget {
-			return nil, unrenderable("telegram", "a review block of %d bytes exceeds one part", len(block))
-		}
-		if current.Len() > 0 && current.Len()+2+len(block) > budget {
-			bodies = append(bodies, current.String())
-			current.Reset()
-		}
-		if current.Len() > 0 {
-			current.WriteString("\n\n")
-		}
-		current.WriteString(block)
-	}
-	return append(bodies, current.String()), nil
-}
-
 // DecisionCard renders the card sent after every part was accepted (K19):
 // the full plan hash, the card handle and the advisory state. Advisory text
 // fills what is left of one part, in the order alignment, summary, concerns
@@ -187,12 +236,16 @@ func DecisionCard(v View, handle string, parts int) (string, error) {
 	lines = append(lines, "Contents: "+v.Summary)
 	card := strings.Join(append(lines, assistHead(v.Assist)...), "\n")
 	if len(card) >= PartBytes {
-		return "", unrenderable("telegram", "the decision card is %d bytes; it must be under %d", len(card), PartBytes)
+		return "", tooLarge("telegram", "the decision card is %d bytes; it must be under %d", len(card), PartBytes)
 	}
 	if v.Assist.State != string(approvalplan.AssistReady) {
 		return card, nil
 	}
-	return card + advisoryLines(v.Assist, PartBytes-1-len(card)), nil
+	card += advisoryLines(v.Assist, PartBytes-1-len(card))
+	if len(card) >= PartBytes {
+		return "", tooLarge("telegram", "the decision card including its omission notice exceeds one part")
+	}
+	return card, nil
 }
 
 func assistHead(a AssistView) []string {
@@ -254,4 +307,8 @@ func (s ReviewSnapshot) checkTelegramBounds() error {
 	}
 	_, err = DecisionCard(v, boundsHandle, len(parts))
 	return err
+}
+
+func tooLarge(field, format string, args ...any) error {
+	return &approvalplan.CodeError{Code: approvalplan.CodeRequestTooLarge, Field: field, Msg: fmt.Sprintf(format, args...) + "; split into smaller requests"}
 }

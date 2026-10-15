@@ -117,7 +117,7 @@ func mustSnapshot(t testing.TB, p approvalplan.ApprovalPlanV1) ReviewSnapshot {
 
 func mustLegacy(t testing.TB, req LegacyRequest) ReviewSnapshot {
 	t.Helper()
-	s, err := BuildLegacySnapshot(req, testSalt(), testRules)
+	s, err := BuildLegacySnapshot(req, saltPointer(), testRules)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -176,6 +176,11 @@ func render(t testing.TB, s ReviewSnapshot, assist Assist) rendered {
 	ready, err := DecisionCard(view, testHandle, len(parts))
 	if err != nil {
 		t.Fatal(err)
+	}
+	for _, text := range append(append([]string{string(raw), string(viewJSON(t, view)), card, ready}, parts...), preparing.Reason) {
+		if strings.Contains(text, "SSHGATE_REDACTED") {
+			t.Fatal("redactor marker reached a surface")
+		}
 	}
 	return rendered{parts: parts, preparing: card, ready: ready, view: view, viewJSON: viewJSON(t, view), snapshotRaw: raw}
 }
@@ -237,3 +242,5 @@ func forceSpans(t *testing.T, fn func(string, [32]byte, []redact.Rule) (redact.S
 	redactSpans = fn
 	t.Cleanup(func() { redactSpans = old })
 }
+
+func saltPointer() *[32]byte { s := testSalt(); return &s }

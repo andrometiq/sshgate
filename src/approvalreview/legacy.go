@@ -57,16 +57,20 @@ type LegacyRequest struct {
 
 // BuildLegacySnapshot renders a frozen v1 request. v1 carries no reason, so
 // the reason is LegacyRationaleText (or CLIRationaleText for a key
-// registration). A value whose spans cannot be derived is shown as
-// RedactString's output, labelled count-unavailable (E16); a value that
-// cannot be redacted at all is request_unrenderable. K19 does not bound v1
-// (E45): PackParts refuses what Telegram cannot carry.
-func BuildLegacySnapshot(req LegacyRequest, salt [32]byte, rules []redact.Rule) (ReviewSnapshot, error) {
-	b := &builder{salt: salt, rules: rules, legacy: true}
+// registration). Unproven spans refuse the request. The caller's salt is
+// zeroed on every path. K19 intake bounds do not apply to v1 (E45), but
+// snapshot and review bounds are checked at freeze for both surfaces.
+func BuildLegacySnapshot(req LegacyRequest, salt *[32]byte, rules []redact.Rule) (ReviewSnapshot, error) {
+	if salt == nil {
+		return ReviewSnapshot{}, errors.New("approvalreview: a redaction salt is required")
+	}
+	defer clear(salt[:])
+	b := &builder{salt: *salt, rules: rules}
 	defer clear(b.salt[:])
+
 	snap := ReviewSnapshot{
-		Version: SnapshotVersion, Legacy: true, RequestID: neutralizeToken(req.RequestID),
-		Requester: neutralizeToken(req.Requester), SubmittedAt: req.SubmittedAt.UTC(), ExpiresAt: req.ExpiresAt.UTC(),
+		Version: SnapshotVersion, Legacy: true, RequestID: b.legacyToken(req.RequestID),
+		Requester: b.legacyToken(req.Requester), SubmittedAt: req.SubmittedAt.UTC(), ExpiresAt: req.ExpiresAt.UTC(),
 		Origin: approvalplan.OriginSynthesizedLegacyV1,
 	}
 	reason := approvalplan.LegacyRationaleText
@@ -85,7 +89,7 @@ func BuildLegacySnapshot(req LegacyRequest, salt [32]byte, rules []redact.Rule) 
 	}
 	if req.Register != nil {
 		set++
-		snap.Kind, snap.Register = approvalplan.KindRegisterTransferKey, registerOf(*req.Register)
+		snap.Kind, snap.Register = approvalplan.KindRegisterTransferKey, b.legacyRegister(*req.Register)
 		snap.Origin, reason = approvalplan.OriginTrustedHumanCLI, approvalplan.CLIRationaleText
 	}
 	if set != 1 {
@@ -94,6 +98,12 @@ func BuildLegacySnapshot(req LegacyRequest, salt [32]byte, rules []redact.Rule) 
 	snap.Reason = b.text("reason", reason)
 	if b.err != nil {
 		return ReviewSnapshot{}, b.err
+	}
+	if _, err := snap.Encode(); err != nil {
+		return ReviewSnapshot{}, err
+	}
+	if err := snap.checkTelegramBounds(); err != nil {
+		return ReviewSnapshot{}, err
 	}
 	return snap, nil
 }
@@ -111,7 +121,7 @@ func (b *builder) legacySteps(cmds []LegacyCommand) []Step {
 		field := fmt.Sprintf("commands[%d]", i)
 		step := Step{
 			Ordinal: i + 1, Route: route, TTLSeconds: int(c.TTLSeconds),
-			Target:        Route{Alias: neutralizeToken(c.Server), Fingerprint: neutralizeToken(c.HostFingerprint)},
+			Target:        Route{Alias: b.legacyToken(c.Server), Fingerprint: b.legacyToken(c.HostFingerprint)},
 			Command:       b.command(field+".cmd", c.Command),
 			ExpiryWarning: i > 0,
 		}
@@ -131,7 +141,7 @@ func (b *builder) legacySteps(cmds []LegacyCommand) []Step {
 }
 
 func (b *builder) legacyGrant(g LegacyGrant) *Grant {
-	out := &Grant{Alias: neutralizeToken(g.Alias), Scope: neutralizeToken(g.Scope), DurationSeconds: int64(g.Duration / time.Second)}
+	out := &Grant{Alias: b.legacyToken(g.Alias), Scope: b.legacyToken(g.Scope), DurationSeconds: int64(g.Duration / time.Second)}
 	for i, c := range g.Commands {
 		out.Commands = append(out.Commands, b.command(fmt.Sprintf("commands[%d]", i), c))
 	}
@@ -140,14 +150,31 @@ func (b *builder) legacyGrant(g LegacyGrant) *Grant {
 
 func (b *builder) legacyTransfer(t LegacyTransfer) *Transfer {
 	return &Transfer{
-		TransferID: neutralizeToken(t.TransferID), Mode: neutralizeToken(t.Mode),
+		TransferID: b.legacyToken(t.TransferID), Mode: b.legacyToken(t.Mode),
 		Source: TransferEnd{
-			Label: neutralizeToken(t.SourceLabel), Fingerprint: neutralizeToken(t.SourceFingerprint),
+			Label: b.legacyToken(t.SourceLabel), Fingerprint: b.legacyToken(t.SourceFingerprint),
 			Path: b.text("source_path", t.SourcePath),
 		},
 		Destination: TransferEnd{
-			Label: neutralizeToken(t.DestLabel), Fingerprint: neutralizeToken(t.DestFingerprint),
+			Label: b.legacyToken(t.DestLabel), Fingerprint: b.legacyToken(t.DestFingerprint),
 			Path: b.text("dest_path", t.DestPath),
 		},
 	}
+}
+
+func (b *builder) legacyToken(s string) string {
+	d := b.display("legacy_text", s, neutralizeToken)
+	var out strings.Builder
+	for _, seg := range d.Segments {
+		if seg.Hidden > 0 {
+			out.WriteString(NeutralizeText(approvalplan.HiddenMarker(seg.Hidden, seg.RuleIDs)))
+		} else {
+			out.WriteString(seg.Text)
+		}
+	}
+	return out.String()
+}
+
+func (b *builder) legacyRegister(r approvalplan.RegisterTransferKey) *Register {
+	return &Register{HostFingerprint: b.legacyToken(r.HostFingerprint), Label: b.legacyToken(r.Label), BoxPub: b.legacyToken(r.BoxPub), IDPub: b.legacyToken(r.IDPub)}
 }

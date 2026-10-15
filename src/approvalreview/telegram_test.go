@@ -13,11 +13,13 @@ import (
 // Parity list: every line of the v1 banners (src/signer/backend/telegram.go)
 // and where it lives in the shared renderer. This table is the spec of the
 // port (r5.8 A3); "changed" rows are the intended changes.
+// E34 invariant: the signer proves that transfer leg contents match the
+// displayed paths, registry labels and recipient keys before freezing the plan.
 //
 // | v1 banner line (telegram.go)                                   | Shared renderer                                                   |
 // |----------------------------------------------------------------|-------------------------------------------------------------------|
 // | update :989 "⚠️ GATE BINARY UPDATE — approving this REPLACES…"  | headlineUpdate, part 1 and card                                   |
-// | update :998 "🔐 SSHGate GATE UPDATE — <server>"                  | changed: partTitle/cardTitle + item heading "Command 1/1 [signed_admin] <alias> …" |
+// | update :998 "🔐 SSHGate GATE UPDATE — <server>"                  | changed: partTitle/cardTitle + item heading "Command 1/1 [signed_admin] …", then the labelled route |
 // | update :1010 "New gate SHA-256: <hash>" (raw, from the command)  | note "New gate SHA-256 (from the signed command bytes): <hash>"   |
 // | update :1012 "<malformed hash — the gate will reject this update>"| same marker in that note (legacy only; v2 validates the hash)     |
 // | update :1015 "Build: <reason>" (raw)                             | changed (E8c/E33): v1 "Build metadata (v1 client-supplied)", v2 "Build metadata (client-supplied, signer-unverified)", redacted+neutralized, quoted |
@@ -25,10 +27,10 @@ import (
 // | all :1019/:1070 "Expires in <timeout>"                            | changed: absolute "Submitted: <t>" and "Expires: <t>" (spec §9.1) |
 // | reveal :1060 "⚠️ SECRET-REVEAL — output will NOT be redacted…"   | headlineReveal, part 1 and card                                   |
 // | reveal :1063 "🔓 SSHGate SECRET-REVEAL — <server>"               | changed: route "[signed_reveal]" in the item heading + approve label "(SECRET-REVEAL)" |
-// | write :1065 "🔐 SSHGate approval — <server>"                     | changed: partTitle/cardTitle; the server is in each item heading |
+// | write :1065 "🔐 SSHGate approval — <server>"                     | changed: partTitle/cardTitle; the server is in each labelled route |
 // | reveal :1080 "Reason: <c.Reason>" (raw)                          | changed (E8c): "Reveal justification (agent-stated, unverified, legacy per-command field)", redacted+neutralized, quoted |
 // | write :1084 "<n> commands queued:"                               | "Request: <n> command(s): <s> signed, <r> unsigned read(s); …"    |
-// | write :1093 "<i>. <redacted cmd>"                                | changed: "Command i/N [route] alias → user@host:port fp=… ttl=…s sha256=…", K20 or exact label, quoted escaped display with ⟦hidden N bytes · rules⟧ |
+// | write :1093 "<i>. <redacted cmd>"                                | changed: "Command i/N [route] ttl=…s sha256=…", then the labelled route, K20 or exact label, quoted escaped display with ⟦hidden N bytes · rules⟧ |
 // | write :1096 "   → <explanation>" / "(no explanation)"            | changed: AI advisory section of the card (summary, concerns by severity, effects) |
 // | write :1104 "(no explanations: <err>)"                           | card "AI advisory: unavailable. … Reason:" + quoted reason        |
 // | grant :1134 "⚠️ STANDING GRANT — approving this auto-signs …"    | v2: HeadlineGrantAutoSigns. Legacy: changed (OQ3 (b)), REPLACED by HeadlineGrantLegacy "… Older client: this grant will not auto-sign. Each write still asks for approval." |
@@ -41,7 +43,7 @@ import (
 // | grant :1155 "Approval expires in <timeout>"                      | "Expires: <t>"                                                    |
 // | transfer :1167 "⚠️ SECRET TRANSFER — approving this MOVES…" + :1168 | headlineTransfer (one line)                                      |
 // | transfer :1169 "🔐 SSHGate SECRET TRANSFER"                      | item heading "Secret transfer <xfer id>"                          |
-// | transfer :1170/:1172 "From:/To: <label> (<fp…>)"                 | changed: full fp, "From: key \"<label>\" (signer registry) fp=…"; v2 adds the route and public-key sha256 |
+// | transfer :1170/:1172 "From:/To: <label> (<fp…>)"                 | changed: registry key label and full requester-supplied, signer-validated fingerprint on separate lines; v2 adds route and public-key sha256 |
 // | transfer :1171/:1173 "<path>" "mode <m>"                         | "Source path"/"Destination path" items (redacted, neutralized; "requester-supplied, signer-validated") + "Mode: <m>" |
 // | transfer :1174 "Xfer: <id>"                                      | item heading                                                      |
 // | register :1187 "⚠️ XFER-KEY REGISTER — approving this ADDS…" + :1188 | headlineRegister (one line)                                      |
@@ -356,4 +358,14 @@ func TestNeutralizeText(t *testing.T) {
 			t.Fatalf("NeutralizeText(%q) = %q is not printable ASCII", b, out)
 		}
 	}
+}
+
+// isPrintableASCII reports whether s holds only bytes 0x20..0x7e.
+func isPrintableASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] < 0x20 || s[i] > 0x7e {
+			return false
+		}
+	}
+	return true
 }

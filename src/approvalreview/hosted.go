@@ -153,13 +153,14 @@ func renderDisplay(d Display) string {
 }
 
 // displayLabel is the label a display sits under: K20's whenever a byte is
-// hidden, E16's next to it when the count is unavailable, and otherwise
+// hidden in a command, a value label for other displays, and otherwise
 // exact, the exact-command or exact-value label.
 func displayLabel(d Display, exact string) string {
 	switch {
-	case d.CountUnavailable:
-		return approvalplan.LabelRedactedDisplay + " / " + approvalplan.LabelRedactedNoCount
 	case d.HiddenBytes > 0:
+		if exact == LabelExactValue {
+			return "Display-redacted value — hidden bytes are not shown"
+		}
 		return approvalplan.LabelRedactedDisplay
 	}
 	return exact
@@ -215,7 +216,7 @@ func summary(s ReviewSnapshot, items []Item) string {
 	for _, it := range items {
 		hidden += it.HiddenBytes
 	}
-	var what string
+	what, byteScope := "", "command"
 	switch {
 	case s.Steps != nil:
 		signed := 0
@@ -228,14 +229,14 @@ func summary(s ReviewSnapshot, items []Item) string {
 	case s.Grant != nil:
 		what = fmt.Sprintf("standing grant with %d listed command(s)", len(s.Grant.Commands))
 	case s.Transfer != nil:
-		what = "one transfer (two signed legs)"
+		what, byteScope = "one transfer (two signed legs)", "path"
 	default:
-		what = "one transfer-key registration"
+		return "one transfer-key registration"
 	}
 	if hidden == 0 {
-		return what + "; no bytes hidden"
+		return what + "; no " + byteScope + " bytes hidden"
 	}
-	return fmt.Sprintf("%s; %d byte(s) hidden by display redaction", what, hidden)
+	return fmt.Sprintf("%s; %d %s byte(s) hidden by display redaction", what, hidden, byteScope)
 }
 
 func displayItem(heading, ref, exact string, notes []string, d Display) Item {
@@ -267,9 +268,9 @@ func stepItems(s ReviewSnapshot) []Item {
 		if step.Route.Signed() {
 			ttl = "ttl=" + strconv.Itoa(step.TTLSeconds) + "s"
 		}
-		heading := fmt.Sprintf("Command %d/%d [%s] %s %s sha256=%s",
-			step.Ordinal, len(s.Steps), step.Route, routeText(step.Target), ttl, step.Command.SHA256)
-		notes := []string{LabelRoute}
+		heading := fmt.Sprintf("Command %d/%d [%s] %s sha256=%s",
+			step.Ordinal, len(s.Steps), step.Route, ttl, step.Command.SHA256)
+		notes := []string{LabelRoute, routeText(step.Target)}
 		if step.IsUpdate {
 			hash := step.UpdateSHA256
 			if hash == "" {
@@ -280,15 +281,12 @@ func stepItems(s ReviewSnapshot) []Item {
 		if b := step.Build; b != nil {
 			notes = append(notes, approvalplan.LabelBuildMetadataClient+":",
 				fmt.Sprintf("%sstaged_basename=%s staged_version=%s running_version=%s size=%d",
-					QuotePrefix, b.StagedBasename, b.StagedVersion, b.RunningVersion, b.Size))
+					QuotePrefix, renderDisplay(b.StagedBasename), renderDisplay(b.StagedVersion), renderDisplay(b.RunningVersion), b.Size))
 		}
 		if r := step.LegacyReason; r != nil {
 			label := approvalplan.LabelRevealJustification
 			if step.IsUpdate {
 				label = approvalplan.LabelBuildMetadataV1
-			}
-			if r.CountUnavailable {
-				label += " (display-redacted; hidden-byte count unavailable)"
 			}
 			notes = append(notes, label+":", QuotePrefix+renderDisplay(*r))
 		}
@@ -325,7 +323,7 @@ func grantItems(g Grant) []Item {
 
 func transferItems(t Transfer) []Item {
 	endNotes := func(dir string, e TransferEnd) []string {
-		notes := []string{fmt.Sprintf("%s: key %s (signer registry) fp=%s", dir, e.Label, e.Fingerprint)}
+		notes := []string{fmt.Sprintf("%s: key %s (signer registry)", dir, e.Label), dir + " fingerprint (" + LabelPathSupplied + "): " + e.Fingerprint}
 		if e.Target != nil {
 			notes = append(notes, fmt.Sprintf("%s route %s: %s", dir, strings.TrimPrefix(LabelRoute, "Route "), routeText(*e.Target)))
 		}
@@ -386,8 +384,10 @@ func assistView(legacy bool, a Assist) (AssistView, error) {
 // order within one severity.
 func readyView(v *AssistView, legacy bool, r approvalplan.AssistResult) {
 	v.Alignment = string(r.Alignment)
-	if legacy || r.Alignment == approvalplan.AlignmentNotAssessed {
+	if legacy {
 		v.Alignment = AlignmentLegacyMsg
+	} else if r.Alignment == approvalplan.AlignmentNotAssessed {
+		v.Alignment = "not assessed"
 	}
 	v.Summary = NeutralizeText(r.Summary)
 	for _, severity := range []approvalplan.Severity{approvalplan.SeverityHigh, approvalplan.SeverityCaution, approvalplan.SeverityInfo} {

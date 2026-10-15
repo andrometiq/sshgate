@@ -1,20 +1,22 @@
 === buttons: ✓ Approve all displayed commands (SECRET TRANSFER) | ✗ Deny
-=== part 1/1 (1500 bytes)
+=== part 1/1 (1611 bytes)
 🔐 SSHGate approval review — PART 1/1
 Request: a2_BBBBBBBBBBBBBBBBBBBBBB · Card: k7m2q3x4c5v6 · Plan: d7b647bb9c5a290e
 ⚠️ SECRET TRANSFER — approving this MOVES a secret file across hosts. The value is encrypted end-to-end; the agent only relays ciphertext.
 Requester: local-uid:1000
 Submitted: 2026-10-15T09:30:00Z
 Expires: 2026-10-16T09:30:00Z
-Contents: one transfer (two signed legs); no bytes hidden
+Contents: one transfer (two signed legs); no path bytes hidden
 Agent-stated reason (unverified):
 │ Copy the TLS key to the new database host
 
 Secret transfer x8Kq3YVvH4f2m9WqZr0B1g
-From: key web-1 (signer registry) fp=SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU
+From: key web-1 (signer registry)
+From fingerprint (requester-supplied, signer-validated): SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU
 From route (requester's registry; signer-unverified): web-1 → deploy@web-1.example.net:22
 From public key sha256=80da5e986c04717d41f47308e87db0e8d79557bc260fa5cd7ef692ff93616fb0
-To: key db-1 (signer registry) fp=SHA256:nThbg6kXUpJWGl7E1IGOCspRomTxdCARLviKw6E5SY8
+To: key db-1 (signer registry)
+To fingerprint (requester-supplied, signer-validated): SHA256:nThbg6kXUpJWGl7E1IGOCspRomTxdCARLviKw6E5SY8
 To route (requester's registry; signer-unverified): db-1 → deploy@db-1.example.net:22
 To public key sha256=1673f869fc4117c2b2139d6bb31427d49a6e0d160970911d6952027e52614d39
 Mode: 0600
@@ -28,7 +30,7 @@ Exact value (no hidden bytes):
 Destination path (requester-supplied, signer-validated)
 Exact value (no hidden bytes):
 │ /srv/secret
-=== decision card, preparing (629 bytes)
+=== decision card, preparing (634 bytes)
 ⚠️ SECRET TRANSFER — approving this MOVES a secret file across hosts. The value is encrypted end-to-end; the agent only relays ciphertext.
 🔐 SSHGate approval — DECISION CARD
 Review the 1 numbered part(s) above before deciding; Approve covers every displayed command.
@@ -37,9 +39,9 @@ Plan hash: d7b647bb9c5a290e9e542805858936259e48b2cca409041fd0cf2cfd277df476
 Requester: local-uid:1000
 Submitted: 2026-10-15T09:30:00Z
 Expires: 2026-10-16T09:30:00Z
-Contents: one transfer (two signed legs); no bytes hidden
+Contents: one transfer (two signed legs); no path bytes hidden
 AI advisory: preparing. Approve appears once it is ready or unavailable.
-=== decision card, ready (835 bytes)
+=== decision card, ready (840 bytes)
 ⚠️ SECRET TRANSFER — approving this MOVES a secret file across hosts. The value is encrypted end-to-end; the agent only relays ciphertext.
 🔐 SSHGate approval — DECISION CARD
 Review the 1 numbered part(s) above before deciding; Approve covers every displayed command.
@@ -48,7 +50,7 @@ Plan hash: d7b647bb9c5a290e9e542805858936259e48b2cca409041fd0cf2cfd277df476
 Requester: local-uid:1000
 Submitted: 2026-10-15T09:30:00Z
 Expires: 2026-10-16T09:30:00Z
-Contents: one transfer (two signed legs); no bytes hidden
+Contents: one transfer (two signed legs); no path bytes hidden
 AI advisory (model output; unverified, not a check):
 Alignment: aligned
 Summary:
@@ -72,15 +74,17 @@ Effects:
   "expires_at": "2026-10-16T09:30:00Z",
   "reason_label": "Agent-stated reason (unverified)",
   "reason": "Copy the TLS key to the new database host",
-  "summary": "one transfer (two signed legs); no bytes hidden",
+  "summary": "one transfer (two signed legs); no path bytes hidden",
   "items": [
     {
       "heading": "Secret transfer x8Kq3YVvH4f2m9WqZr0B1g",
       "notes": [
-        "From: key web-1 (signer registry) fp=SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU",
+        "From: key web-1 (signer registry)",
+        "From fingerprint (requester-supplied, signer-validated): SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU",
         "From route (requester's registry; signer-unverified): web-1 → deploy@web-1.example.net:22",
         "From public key sha256=80da5e986c04717d41f47308e87db0e8d79557bc260fa5cd7ef692ff93616fb0",
-        "To: key db-1 (signer registry) fp=SHA256:nThbg6kXUpJWGl7E1IGOCspRomTxdCARLviKw6E5SY8",
+        "To: key db-1 (signer registry)",
+        "To fingerprint (requester-supplied, signer-validated): SHA256:nThbg6kXUpJWGl7E1IGOCspRomTxdCARLviKw6E5SY8",
         "To route (requester's registry; signer-unverified): db-1 → deploy@db-1.example.net:22",
         "To public key sha256=1673f869fc4117c2b2139d6bb31427d49a6e0d160970911d6952027e52614d39",
         "Mode: 0600",

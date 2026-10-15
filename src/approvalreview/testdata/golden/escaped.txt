@@ -1,20 +1,21 @@
 === buttons: ✓ Approve all displayed commands | ✗ Deny
-=== part 1/1 (808 bytes)
+=== part 1/1 (816 bytes)
 🔐 SSHGate approval review — PART 1/1
 Request: a2_x-_0123456789abcdefghi · Card: k7m2q3x4c5v6 · Plan: 7e0685f814c4973a
 Requester: local-uid:1000
 Submitted: 2026-10-15T09:30:00Z
 Expires: 2026-10-16T09:30:00Z
 Synchronous request: it runs only if approved while the agent is still waiting (until 2026-10-15T09:35:10Z)
-Contents: 1 command(s): 1 signed, 0 unsigned read(s); no bytes hidden
+Contents: 1 command(s): 1 signed, 0 unsigned read(s); no command bytes hidden
 Agent-stated reason (unverified):
 │ Rotate <tls> & reload \u{2014} caf\u{00E9}
 
-Command 1/1 [signed_write] web-1 → deploy@web-1.example.net:22 fp=SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU ttl=30s sha256=23432e0f5134439b56db10152558c4da7a5ee079334332f410abc5a1e19b7541
+Command 1/1 [signed_write] ttl=30s sha256=23432e0f5134439b56db10152558c4da7a5ee079334332f410abc5a1e19b7541
 Route (requester's registry; signer-unverified)
+web-1 → deploy@web-1.example.net:22 fp=SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU
 Exact command (no hidden bytes):
 │ printf '<a href="x">&amp;</a>\\n' > /srv/index.html
-=== decision card, preparing (604 bytes)
+=== decision card, preparing (612 bytes)
 🔐 SSHGate approval — DECISION CARD
 Review the 1 numbered part(s) above before deciding; Approve covers every displayed command.
 Request: a2_x-_0123456789abcdefghi · Card: k7m2q3x4c5v6
@@ -23,9 +24,9 @@ Requester: local-uid:1000
 Submitted: 2026-10-15T09:30:00Z
 Expires: 2026-10-16T09:30:00Z
 Synchronous request: it runs only if approved while the agent is still waiting (until 2026-10-15T09:35:10Z)
-Contents: 1 command(s): 1 signed, 0 unsigned read(s); no bytes hidden
+Contents: 1 command(s): 1 signed, 0 unsigned read(s); no command bytes hidden
 AI advisory: preparing. Approve appears once it is ready or unavailable.
-=== decision card, ready (810 bytes)
+=== decision card, ready (818 bytes)
 🔐 SSHGate approval — DECISION CARD
 Review the 1 numbered part(s) above before deciding; Approve covers every displayed command.
 Request: a2_x-_0123456789abcdefghi · Card: k7m2q3x4c5v6
@@ -34,7 +35,7 @@ Requester: local-uid:1000
 Submitted: 2026-10-15T09:30:00Z
 Expires: 2026-10-16T09:30:00Z
 Synchronous request: it runs only if approved while the agent is still waiting (until 2026-10-15T09:35:10Z)
-Contents: 1 command(s): 1 signed, 0 unsigned read(s); no bytes hidden
+Contents: 1 command(s): 1 signed, 0 unsigned read(s); no command bytes hidden
 AI advisory (model output; unverified, not a check):
 Alignment: aligned
 Summary:
@@ -56,12 +57,13 @@ Effects:
   "sync_notice": "Synchronous request: it runs only if approved while the agent is still waiting (until 2026-10-15T09:35:10Z)",
   "reason_label": "Agent-stated reason (unverified)",
   "reason": "Rotate <tls> & reload \\u{2014} caf\\u{00E9}",
-  "summary": "1 command(s): 1 signed, 0 unsigned read(s); no bytes hidden",
+  "summary": "1 command(s): 1 signed, 0 unsigned read(s); no command bytes hidden",
   "items": [
     {
-      "heading": "Command 1/1 [signed_write] web-1 → deploy@web-1.example.net:22 fp=SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU ttl=30s sha256=23432e0f5134439b56db10152558c4da7a5ee079334332f410abc5a1e19b7541",
+      "heading": "Command 1/1 [signed_write] ttl=30s sha256=23432e0f5134439b56db10152558c4da7a5ee079334332f410abc5a1e19b7541",
       "notes": [
-        "Route (requester's registry; signer-unverified)"
+        "Route (requester's registry; signer-unverified)",
+        "web-1 → deploy@web-1.example.net:22 fp=SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU"
       ],
       "text_label": "Exact command (no hidden bytes)",
       "text": "printf '<a href=\"x\">&amp;</a>\\\\n' > /srv/index.html",

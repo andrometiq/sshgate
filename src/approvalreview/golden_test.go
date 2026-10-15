@@ -19,8 +19,8 @@ func legacyBase() LegacyRequest {
 	return LegacyRequest{RequestID: "9f1c2e4a7b", Requester: "local-uid:1000", SubmittedAt: t0, ExpiresAt: t0.Add(5 * time.Minute)}
 }
 
-// worstCasePlan is the K19 worst case for display size: 32 steps holding
-// 24 KiB of command bytes, every byte escaped four-fold.
+// worstCasePlan exercises 32 steps with 24 KiB of four-fold escaped bytes.
+// The packing sweep separately covers maximum route fields and secret expansion.
 func worstCasePlan(t testing.TB) approvalplan.ApprovalPlanV1 {
 	var specs []stepSpec
 	for range approvalplan.MaxSteps {
