@@ -507,7 +507,8 @@ smoke:
 test-fidelity-smoke:
 	@tmp=$$(mktemp -d) || exit 1; \
 	trap 'rm -rf "$$tmp"' 0; \
-	{ go test -race -count=1 -tags=jail_e2e ./src/gate/confine -v -run '^TestFidelitySmoke$$'; echo $$? > "$$tmp/status"; } 2>&1 | tee "$$tmp/log"; tee_st=$$?; \
+	{ go test -race -count=1 -tags=jail_e2e ./src/gate/confine -v -run '^TestFidelitySmoke$$' && \
+	  go test -race -count=1 -tags=jail_e2e ./src/gate/cmd/sshgate-gate -v -run '^TestFidelitySmokeDaemonRead$$'; echo $$? > "$$tmp/status"; } 2>&1 | tee "$$tmp/log"; tee_st=$$?; \
 	[ -f "$$tmp/status" ] && [ "$$(cat "$$tmp/status")" = 0 ] && [ "$$tee_st" = 0 ] || exit 1; \
 	! grep -qE -- '--- SKIP|no tests to run' "$$tmp/log" || exit 1; \
-	grep -qE '^--- PASS: TestFidelitySmoke( |$$)' "$$tmp/log"
+	grep -qE '^--- PASS: TestFidelitySmoke( |$$)' "$$tmp/log" && grep -qE '^--- PASS: TestFidelitySmokeDaemonRead( |$$)' "$$tmp/log"
