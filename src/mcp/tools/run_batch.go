@@ -8,6 +8,7 @@ import (
 
 	"github.com/karthikeyan5/sshgate/src/classify"
 	signpkg "github.com/karthikeyan5/sshgate/src/mcp/sign"
+	"github.com/karthikeyan5/sshgate/src/sigwire"
 )
 
 // RunBatchInput is the JSON input to the sshgate.run_batch tool.
@@ -151,6 +152,9 @@ func (r *Runner) RunBatch(ctx context.Context, in RunBatchInput) (RunBatchOutput
 	for i, c := range in.Commands {
 		if strings.TrimSpace(c) == "" {
 			return RunBatchOutput{}, fmt.Errorf("tools: commands[%d] is empty", i)
+		}
+		if strings.HasPrefix(c, sigwire.EnvelopePrefix) {
+			return RunBatchOutput{}, fmt.Errorf("tools: commands[%d] uses reserved command prefix SSHGATE_READ", i)
 		}
 		kinds[i], reasons[i] = classify.Explain(c)
 	}

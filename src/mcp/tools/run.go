@@ -15,6 +15,7 @@ import (
 	"github.com/karthikeyan5/sshgate/src/classify"
 	"github.com/karthikeyan5/sshgate/src/mcp/registry"
 	signpkg "github.com/karthikeyan5/sshgate/src/mcp/sign"
+	"github.com/karthikeyan5/sshgate/src/sigwire"
 )
 
 // RunInput is the JSON input to the sshgate.run tool. Schema:
@@ -230,6 +231,9 @@ func (r *Runner) Run(ctx context.Context, in RunInput) (RunOutput, error) {
 	}
 	if strings.TrimSpace(in.Command) == "" {
 		return RunOutput{}, errors.New("tools: command is empty")
+	}
+	if strings.HasPrefix(in.Command, sigwire.EnvelopePrefix) {
+		return RunOutput{}, errors.New("tools: command prefix SSHGATE_READ is reserved")
 	}
 	if in.Alias == "" {
 		return RunOutput{}, errors.New("tools: alias is empty")
