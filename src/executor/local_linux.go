@@ -15,6 +15,8 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+var errPeerRefused = errors.New("executor: peer credentials refused")
+
 // Local holds the process locks and same-user listener. Close it only after
 // handlers and stores have closed; store descriptors share its ownership lock.
 type Local struct {
@@ -143,7 +145,7 @@ func (l *Local) AcceptUnix() (*net.UnixConn, error) {
 	uid, err := l.peerUID(conn)
 	if err != nil || uid != uint32(os.Getuid()) {
 		conn.Close()
-		return nil, errors.New("executor: peer credentials refused")
+		return nil, errPeerRefused
 	}
 	return conn, nil
 }
@@ -172,7 +174,9 @@ func (l *Local) Close() error {
 	l.once.Do(func() {
 		var errs []error
 		if l.listener != nil {
-			errs = append(errs, l.listener.Close())
+			if err := l.listener.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+				errs = append(errs, err)
+			}
 		}
 		if l.directory != nil {
 			errs = append(errs, l.directory.Close())

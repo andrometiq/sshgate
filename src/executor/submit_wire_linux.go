@@ -5,6 +5,8 @@ package executor
 import (
 	"bufio"
 	"bytes"
+	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net"
@@ -17,27 +19,51 @@ import (
 // The owner controls connection lifetime and must treat returned storage errors
 // as service failures, including a fatal exit on an uncertain commit.
 func (s *Service) ServeSubmit(conn net.Conn) error {
+	return s.ServeConn(context.Background(), conn)
+}
+
+// ServeConn serves one validated request on an authenticated connection.
+func (s *Service) ServeConn(ctx context.Context, conn net.Conn) error {
 	defer conn.Close()
 	frame, err := bufio.NewReader(io.LimitReader(conn, executorwire.MaxRequestBytes+1)).ReadBytes('\n')
 	if err != nil {
 		return err
 	}
 	response := executorwire.Response{ProtoVersion: executorwire.Proto, Kind: executorwire.KindSubmit}
+	var header struct {
+		Kind string `json:"kind"`
+	}
+	if json.Unmarshal(frame, &header) == nil {
+		switch header.Kind {
+		case executorwire.KindGet, executorwire.KindAwait, executorwire.KindList:
+			response.Kind = header.Kind
+		}
+	}
 	request, err := executorwire.DecodeRequest(frame)
 	if err == nil {
-		submit, ok := request.(executorwire.SubmitRequest)
-		if !ok {
-			err = refusal("invalid_request")
-		} else {
+		switch request := request.(type) {
+		case executorwire.SubmitRequest:
+			response.Kind = executorwire.KindSubmit
 			var job executorwire.Job
-			job, err = s.Submit(submit)
+			job, err = s.Submit(request)
 			if err == nil {
-				response.OK = true
-				response.Job = &job
+				response.OK, response.Job = true, &job
 			}
+		case executorwire.GetRequest:
+			response.Kind = executorwire.KindGet
+			var job executorwire.Job
+			job, err = s.Get(request)
+			if err == nil {
+				response.OK, response.Job = true, &job
+			}
+		case executorwire.AwaitRequest:
+			response, err = s.Await(ctx, request)
+		case executorwire.ListRequest:
+			response, err = s.List(request)
 		}
 	}
 	if err != nil {
+		response.OK, response.Job, response.Items, response.NextCursor = false, nil, nil, ""
 		var wire *executorwire.WireError
 		var plan *ap.CodeError
 		switch {
