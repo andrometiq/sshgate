@@ -255,8 +255,8 @@ func TestRunNetworkDaemonRead(t *testing.T) {
 			r, _, _ := networkRunner(t, false, networkCap(true, true))
 			in := networkInput()
 			in.Command = command
-			if out, err := r.Run(context.Background(), in); err != nil {
-				t.Fatalf("argument refused: %+v %v", out, err)
+			if out, err := r.Run(context.Background(), in); err == nil || networkVerdict(out) != VerdictNetworkGrantReadOnly {
+				t.Fatalf("daemon argument not refused: %+v %v", out, err)
 			}
 		})
 	}
@@ -349,6 +349,9 @@ func TestRunNetworkProtection(t *testing.T) {
 
 func TestRunNetworkWrappedDaemon(t *testing.T) {
 	for _, command := range []string{
+		"LANG=C>&2 docker ps", "env LANG=C>&2 docker ps",
+		"watch -n 1>&2 docker ps", "env LANG=C<&0 systemctl status x",
+		`d"o"cker ps`, `do\cker ps`, "/usr/bin/docker ps", "ls /usr/bin/docker",
 		"env -- docker ps", "env -- systemctl status x",
 		"env LANG=C -- env -- docker ps",
 		"LANG=C env -- LANG=C env systemctl status x",
@@ -357,19 +360,87 @@ func TestRunNetworkWrappedDaemon(t *testing.T) {
 		"watch --interval=1 env LANG=C watch -n1 -- docker ps",
 	} {
 		t.Run(command, func(t *testing.T) {
-			if classify.Classify(command) != classify.KindRead {
+			if command != "/usr/bin/docker ps" && classify.Classify(command) != classify.KindRead {
 				t.Fatal("fixture is not an accepted read")
 			}
 			for _, envelope := range []bool{false, true} {
+				t.Run(fmt.Sprintf("envelope=%t", envelope), func(t *testing.T) {
+					r, s, ssh := networkRunner(t, false, networkCap(envelope, envelope))
+					in := networkInput()
+					in.Command = command
+					out, err := r.Run(context.Background(), in)
+					if err == nil || networkVerdict(out) != VerdictNetworkGrantReadOnly || len(s.calls) != 0 || len(ssh.calls) != 0 {
+						t.Fatalf("wrapped daemon executed: %+v %v signs=%v ssh=%v", out, err, s.calls, ssh.calls)
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestRunNetworkUnterminatedDiagnostic(t *testing.T) {
+	for _, envelope := range []bool{false, true} {
+		t.Run(fmt.Sprintf("envelope=%t", envelope), func(t *testing.T) {
+			r, s, ssh := networkRunner(t, false, networkCap(envelope, envelope))
+			ssh.exit = 77
+			ssh.stderr = "partial command stderrgate: read jail unavailable: setup failed; read may have started\ncommand output\nmore stderrgate: read jail unavailable: second warning\n"
+			in := networkInput()
+			cap := 8
+			in.MaxOutputBytes = &cap
+			out, err := r.Run(context.Background(), in)
+			if err == nil || networkVerdict(out) != VerdictNetworkRequiresConfinement {
+				t.Fatalf("missing refusal: %+v %v", out, err)
+			}
+			if out.Denial.Diagnostic != "gate: read jail unavailable: setup failed; read may have started\ngate: read jail unavailable: second warning" {
+				t.Fatalf("lost diagnostic: %+v %v", out.Denial, err)
+			}
+			signs := 1
+			if envelope {
+				signs = 0
+			}
+			want, _ := capOutput(ssh.stderr, cap)
+			if out.Stderr != want || len(ssh.calls) != 1 || len(s.calls) != signs {
+				t.Fatalf("cap or execution count changed: %+v", out)
+			}
+		})
+	}
+}
+
+func TestRunNetworkWrappedRead(t *testing.T) {
+	for _, command := range []string{
+		"env -- cat docker.log",
+		"env LANG=C -- watch -n 1 -- cat systemctl.log",
+		"watch --interval=1 env -- printf 'docker.log | systemctl.log'",
+	} {
+		t.Run(command, func(t *testing.T) {
+			r, s, ssh := networkRunner(t, false, networkCap(true, true))
+			in := networkInput()
+			in.Command = command
+			out, err := r.Run(context.Background(), in)
+			if err != nil || out.Denial != nil || len(s.calls) != 0 || !reflect.DeepEqual(ssh.calls, []string{sigwire.EnvelopeConfinedNet + command}) {
+				t.Fatalf("wrapped read refused: %+v %v signs=%v ssh=%v", out, err, s.calls, ssh.calls)
+			}
+		})
+	}
+}
+
+func TestRunNetworkReadControls(t *testing.T) {
+	for _, command := range []string{"cat /etc/hostname", "cat docker.log", "curl https://example.com"} {
+		for _, envelope := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/envelope=%t", command, envelope), func(t *testing.T) {
 				r, s, ssh := networkRunner(t, false, networkCap(envelope, envelope))
 				in := networkInput()
 				in.Command = command
 				out, err := r.Run(context.Background(), in)
-				if err == nil || networkVerdict(out) != VerdictNetworkGrantReadOnly || len(s.calls) != 0 || len(ssh.calls) != 0 {
-					t.Fatalf("wrapped daemon executed: %+v %v signs=%v ssh=%v", out, err, s.calls, ssh.calls)
+				signs, prefix := 1, "signed "
+				if envelope {
+					signs, prefix = 0, sigwire.EnvelopeConfinedNet
 				}
-			}
-		})
+				if err != nil || out.Denial != nil || len(s.calls) != signs || !reflect.DeepEqual(ssh.calls, []string{prefix + command}) {
+					t.Fatalf("read route: %+v %v signs=%v ssh=%v", out, err, s.calls, ssh.calls)
+				}
+			})
+		}
 	}
 }
 
@@ -396,24 +467,6 @@ func TestRunNetworkCappedDiagnostic(t *testing.T) {
 			want, _ := capOutput(ssh.stderr, cap)
 			if out.Stderr != want || len(ssh.calls) != 1 || len(s.calls) != signs {
 				t.Fatalf("cap or execution count changed: %+v", out)
-			}
-		})
-	}
-}
-
-func TestRunNetworkWrappedRead(t *testing.T) {
-	for _, command := range []string{
-		"env -- cat docker",
-		"env LANG=C -- watch -n 1 -- cat systemctl",
-		"watch --interval=1 env -- printf 'docker | systemctl'",
-	} {
-		t.Run(command, func(t *testing.T) {
-			r, s, ssh := networkRunner(t, false, networkCap(true, true))
-			in := networkInput()
-			in.Command = command
-			out, err := r.Run(context.Background(), in)
-			if err != nil || out.Denial != nil || len(s.calls) != 0 || !reflect.DeepEqual(ssh.calls, []string{sigwire.EnvelopeConfinedNet + command}) {
-				t.Fatalf("wrapped read refused: %+v %v signs=%v ssh=%v", out, err, s.calls, ssh.calls)
 			}
 		})
 	}

@@ -104,13 +104,12 @@ func (r *Runner) execNetwork(ctx context.Context, entry registry.Entry, command 
 	return out, nil
 }
 
-// gateLines keeps only the gate's own "gate: " lines of stderr, so the
-// refusal survives the output cap without carrying the command's output.
+// gateLines preserves recognized refusal text even after unterminated command stderr.
 func gateLines(stderr string) string {
 	var lines []string
 	for _, line := range strings.Split(stderr, "\n") {
-		if strings.HasPrefix(line, "gate: ") {
-			lines = append(lines, line)
+		if start := strings.Index(line, "gate: "); start >= 0 {
+			lines = append(lines, line[start:])
 		}
 	}
 	return strings.Join(lines, "\n")
@@ -135,78 +134,18 @@ func networkGateDenial(exit int, stderr string) *Denial {
 	return nil
 }
 
-// Scan shell words using the env/watch wrapper grammar in src/classify.
-// Classification has already excluded opaque or writing shell constructs.
+// Deliberately over-refuses: cat docker.log passes, ls /usr/bin/docker does not;
+// the gate enforces the real rule.
 func networkDaemonRead(command string) bool {
-	var word strings.Builder
-	var quote byte
-	atHead := true
-	wrapper := ""
-	skipValue := false
-	flush := func() bool {
-		token := word.String()
-		word.Reset()
-		if !atHead || token == "" {
-			return false
-		}
-		if skipValue {
-			skipValue = false
-			return false
-		}
-		if wrapper != "" && token == "--" {
-			wrapper = ""
-			return false
-		}
-		if wrapper == "watch" && strings.HasPrefix(token, "-") {
-			skipValue = token == "-n" || token == "--interval"
-			return false
-		}
-		// Other env options are rejected by Classify before this scan.
-		if strings.Contains(token, "=") && !strings.HasPrefix(token, "-") {
-			return false
-		}
-		wrapper = ""
-		if token == "env" || token == "watch" {
-			wrapper = token
-			return false
-		}
-		atHead = false
-		return path.Base(token) == "systemctl" || path.Base(token) == "docker"
-	}
-	for i := 0; i < len(command); i++ {
-		c := command[i]
-		if c == '\\' && quote != '\'' {
-			if i+1 < len(command) {
-				i++
-				word.WriteByte(command[i])
-			}
-			continue
-		}
-		if quote != 0 {
-			if c == quote {
-				quote = 0
-			} else {
-				word.WriteByte(c)
-			}
-			continue
-		}
-		switch c {
-		case '\'', '"':
-			quote = c
-		case ' ', '\t', '\r':
-			if flush() {
-				return true
-			}
-		case '|', '&', ';', '\n':
-			if flush() {
-				return true
-			}
-			atHead = true
-			wrapper = ""
-			skipValue = false
-		default:
-			word.WriteByte(c)
+	command = strings.NewReplacer("'", "", "\"", "", "\\", "").Replace(command)
+	tokens := strings.FieldsFunc(command, func(c rune) bool {
+		return !(c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z' ||
+			c >= '0' && c <= '9' || strings.ContainsRune("._/+-", c))
+	})
+	for _, token := range tokens {
+		if base := path.Base(token); base == "docker" || base == "systemctl" {
+			return true
 		}
 	}
-	return flush()
+	return false
 }
