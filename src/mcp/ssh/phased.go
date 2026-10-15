@@ -28,11 +28,19 @@ func (e *PhasedError) Error() string {
 // Signed commands require a guard, called immediately before the exec request.
 // Known exits win over cancellation. Timeout bounds only dial and handshake.
 func (c *Client) RunPhased(ctx context.Context, host, user string, port int, cmd string, stdin io.Reader, preStart func() error) ([]byte, []byte, int, error) {
+	var stdout, stderr bytes.Buffer
+	exit, err := c.RunPhasedTo(ctx, host, user, port, cmd, stdin, preStart, &stdout, &stderr)
+	return stdout.Bytes(), stderr.Bytes(), exit, err
+}
+
+// RunPhasedTo streams output to caller-owned writers, allowing bounded capture.
+// Writers must drain excess output and must not block indefinitely.
+func (c *Client) RunPhasedTo(ctx context.Context, host, user string, port int, cmd string, stdin io.Reader, preStart func() error, stdout, stderr io.Writer) (int, error) {
 	if strings.HasPrefix(cmd, "SSHGATE_SIG:") && preStart == nil {
-		return nil, nil, 0, &PhasedError{"failed_not_started", "pre_dial", "missing pre-start guard"}
+		return 0, &PhasedError{"failed_not_started", "pre_dial", "missing pre-start guard"}
 	}
 	if c.KeyPath == "" || c.KnownHostsPath == "" || host == "" || user == "" {
-		return nil, nil, 0, &PhasedError{"failed_not_started", "pre_dial", "invalid configuration"}
+		return 0, &PhasedError{"failed_not_started", "pre_dial", "invalid configuration"}
 	}
 	if port == 0 {
 		port = 22
@@ -45,7 +53,7 @@ func (c *Client) RunPhased(ctx context.Context, host, user string, port int, cmd
 
 	signer, err := loadKey(c.KeyPath)
 	if err != nil {
-		return nil, nil, 0, &PhasedError{"failed_not_started", "pre_dial", "key load failed"}
+		return 0, &PhasedError{"failed_not_started", "pre_dial", "key load failed"}
 	}
 
 	cfg := &ssh.ClientConfig{
@@ -62,7 +70,7 @@ func (c *Client) RunPhased(ctx context.Context, host, user string, port int, cmd
 	var d net.Dialer
 	conn, err := d.DialContext(dialCtx, "tcp", addr)
 	if err != nil {
-		return nil, nil, 0, &PhasedError{"failed_not_started", "dial", "dial failed"}
+		return 0, &PhasedError{"failed_not_started", "dial", "dial failed"}
 	}
 	deadline, _ := dialCtx.Deadline()
 	if !deadline.IsZero() {
@@ -72,7 +80,7 @@ func (c *Client) RunPhased(ctx context.Context, host, user string, port int, cmd
 	sshConn, chans, reqs, err := ssh.NewClientConn(conn, addr, cfg)
 	if err != nil {
 		_ = conn.Close()
-		return nil, nil, 0, &PhasedError{"failed_not_started", "handshake", "handshake failed"}
+		return 0, &PhasedError{"failed_not_started", "handshake", "handshake failed"}
 	}
 	client := ssh.NewClient(sshConn, chans, reqs)
 	defer client.Close()
@@ -91,36 +99,35 @@ func (c *Client) RunPhased(ctx context.Context, host, user string, port int, cmd
 
 	sess, err := client.NewSession()
 	if err != nil {
-		return nil, nil, 0, &PhasedError{"failed_not_started", "new_session", "new session failed"}
+		return 0, &PhasedError{"failed_not_started", "new_session", "new session failed"}
 	}
 	defer sess.Close()
 
-	var stdout, stderr bytes.Buffer
-	sess.Stdout = &stdout
-	sess.Stderr = &stderr
+	sess.Stdout = stdout
+	sess.Stderr = stderr
 	if stdin != nil {
 		sess.Stdin = stdin
 	}
 
 	if preStart != nil {
 		if preStart() != nil {
-			return nil, nil, 0, &PhasedError{"guard_refused", "pre_start", "pre-start guard refused"}
+			return 0, &PhasedError{"guard_refused", "pre_start", "pre-start guard refused"}
 		}
 	}
 	if err := sess.Start(cmd); err != nil {
 		// x/crypto exposes exec rejection only as this exact string.
 		if err.Error() == "ssh: command "+cmd+" failed" {
-			return nil, nil, 0, &PhasedError{"failed_not_started", "start", "exec request rejected"}
+			return 0, &PhasedError{"failed_not_started", "start", "exec request rejected"}
 		}
-		return nil, nil, 0, &PhasedError{"indeterminate", "start", "start i/o error"}
+		return 0, &PhasedError{"indeterminate", "start", "start i/o error"}
 	}
 	err = sess.Wait()
 	var exitError *ssh.ExitError
 	if err == nil {
-		return stdout.Bytes(), stderr.Bytes(), 0, nil
+		return 0, nil
 	}
 	if errors.As(err, &exitError) {
-		return stdout.Bytes(), stderr.Bytes(), exitError.ExitStatus(), nil
+		return exitError.ExitStatus(), nil
 	}
 	detail := "transport error after start"
 	var missing *ssh.ExitMissingError
@@ -129,5 +136,5 @@ func (c *Client) RunPhased(ctx context.Context, host, user string, port int, cmd
 	} else if errors.As(err, &missing) {
 		detail = "channel closed without exit status"
 	}
-	return stdout.Bytes(), stderr.Bytes(), -1, &PhasedError{"indeterminate", "wait", detail}
+	return -1, &PhasedError{"indeterminate", "wait", detail}
 }
