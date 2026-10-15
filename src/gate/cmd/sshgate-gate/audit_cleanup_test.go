@@ -20,7 +20,7 @@ func TestGateAuditCleanupError(t *testing.T) {
 			}
 			return gate.ExecResult{ExitCode: exit, CleanupError: "descendant cleanup exceeded deadline"}, nil
 		}
-		code := execAndAudit(newAuditLogger(), "true", "read", "unsigned", false, execPlan{confine: &confine.Spec{Profile: confine.ProfileROv1}})
+		code, _, _ := execAndAudit(newAuditLogger(), "true", "read", "unsigned", false, execPlan{confine: &confine.Spec{Profile: confine.ProfileROv1}})
 		records := auditRecords(t, dir)
 		if code != exit || len(records) != 1 || records[0]["exit_code"] != float64(exit) || records[0]["cleanup_error"] != "descendant cleanup exceeded deadline" || records[0]["approval_status"] == "denied" {
 			t.Fatalf("cleanup exit %d, audit %#v", code, records)

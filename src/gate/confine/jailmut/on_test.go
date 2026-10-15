@@ -19,3 +19,13 @@ func TestHarnessHooksOn(t *testing.T) {
 		}
 	}
 }
+
+func TestBuildFlagsCarryTheIDs(t *testing.T) {
+	previous := IDs
+	t.Cleanup(func() { IDs = previous })
+	IDs = "P-FIRST,P-SECOND"
+	want := []string{"-tags=jail_mutation", "-ldflags=-X github.com/karthikeyan5/sshgate/src/gate/confine/jailmut.IDs=P-FIRST,P-SECOND"}
+	if got := BuildFlags(); len(got) != 2 || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("BuildFlags() = %q", got)
+	}
+}

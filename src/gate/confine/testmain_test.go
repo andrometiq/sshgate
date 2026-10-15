@@ -18,7 +18,7 @@ const (
 )
 
 // TestMain dispatches the re-exec sentinels when the test binary is invoked as
-// the jail shim/worker/probe (confine re-execs /proc/self/exe, which is this test
+// the jail shim/worker (confine re-execs /proc/self/exe, which is this test
 // binary during tests). Ordinary `go test` args (-test.*) never match a sentinel,
 // so they fall through to the normal test run.
 func TestMain(m *testing.M) {
@@ -51,8 +51,6 @@ func TestMain(m *testing.M) {
 				args = []string{string(raw)}
 			}
 			os.Exit(RunWorker(args))
-		case SentinelProbe:
-			os.Exit(RunProbe(os.Args[2:]))
 		case sentinelUsernsFullTest:
 			os.Exit(usernsFullChild())
 		case sentinelHoldTest:

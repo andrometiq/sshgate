@@ -13,7 +13,7 @@ type Case struct {
 	Name, Package, Kind, Mode                                                 string
 	Names                                                                     map[string]string
 	Modes, ABIs, Markers, Obligations, Omissions, Residuals, Characterisation []string
-	Root, CIOnly, AcceptFactsABI0                                             bool
+	Root, NonRoot, CIOnly, AcceptFactsABI0                                    bool
 }
 
 func ValidateCases(cases []Case) error {
@@ -23,6 +23,9 @@ func ValidateCases(cases []Case) error {
 			return fmt.Errorf("invalid or duplicate case %q", c.Name)
 		}
 		seen[c.Name] = true
+		if c.Root && c.NonRoot {
+			return fmt.Errorf("%s: both root-only and non-root-only", c.Name)
+		}
 		abis := map[string]bool{}
 		for _, abi := range c.ABIs {
 			if abi == "" || abis[abi] || strings.ContainsAny(abi, " \t\n") {
@@ -129,7 +132,7 @@ func CheckProof(c Case, p ProofRecord, root, ci bool) error {
 			}
 		}
 	case "OMITTED":
-		lane := p.Code == "root-only" && c.Root && !root || p.Code == "ci-only" && c.CIOnly && !ci
+		lane := p.Code == "root-only" && c.Root && !root || p.Code == "nonroot-only" && c.NonRoot && root || p.Code == "ci-only" && c.CIOnly && !ci
 		if !lane && (ci || !slices.Contains(c.Omissions, p.Code)) {
 			return fmt.Errorf("%s: forbidden omission %s", c.Name, p.Code)
 		}

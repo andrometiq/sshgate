@@ -2,9 +2,13 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -140,4 +144,46 @@ func TestRunReadOnlyMode(t *testing.T) {
 			t.Errorf("stdout = %q, want SSHGATE_OK", buf.String())
 		}
 	})
+}
+
+// TestGateSentinelsAreJailOnly: the real binary dispatches only the jail's
+// shim and worker sentinels and the jailed selftest. Run unjailed, with its
+// own namespaces declared as the outer ones, the selftest refuses (77) and
+// touches nothing. The retired probe sentinel and the test binary's capless
+// reader reach the operator subcommands and are refused like any unknown one.
+func TestGateSentinelsAreJailOnly(t *testing.T) {
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "gate")
+	build := exec.Command("go", "build", "-trimpath", "-o", bin, ".")
+	build.Env = append(os.Environ(), "CGO_ENABLED=0")
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build gate: %v\n%s", err, out)
+	}
+	for _, sentinel := range []string{"__jailprobe", sentinelCaplessReader} {
+		out, err := exec.Command(bin, sentinel, "{}").CombinedOutput()
+		if exit, ok := err.(*exec.ExitError); !ok || exit.ExitCode() != exitDataErr || string(out) != "gate: unknown subcommand\n" {
+			t.Fatalf("%s: %v, output %q; want exit %d as an unknown subcommand", sentinel, err, out, exitDataErr)
+		}
+	}
+	canary := filepath.Join(dir, "canary")
+	if err := os.WriteFile(canary, []byte("orig\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	own, err := ownNamespaces()
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := []string{sentinelSelftest, fmt.Sprintf("--outer-ns=%d:%d", own[0], own[1]), "--canary=" + canary, "--fifo=" + filepath.Join(dir, "fifo"),
+		"--unix=" + filepath.Join(dir, "sock"), "--abstract=sshgate-doctor-test", "--tcp4=127.0.0.1:9", "--pid=" + strconv.Itoa(os.Getpid()),
+		"--tmp=" + canary, "--shm=sshgate-doctor-test", "--nonce=" + strings.Repeat("a", 32), "--net=deny"}
+	out, err := exec.Command(bin, args...).CombinedOutput()
+	if exit, ok := err.(*exec.ExitError); !ok || exit.ExitCode() != exitNoPermVal || len(out) != 0 {
+		t.Fatalf("unjailed selftest: %v, output %q; want exit %d and no output", err, out, exitNoPermVal)
+	}
+	if data, _ := os.ReadFile(canary); string(data) != "orig\n" {
+		t.Fatalf("the unjailed selftest changed the canary: %q", data)
+	}
+	if entries, _ := os.ReadDir(dir); len(entries) != 2 {
+		t.Fatalf("the unjailed selftest created files: %v", entries)
+	}
 }

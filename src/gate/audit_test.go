@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"syscall"
 	"testing"
@@ -274,24 +275,69 @@ func mustReadFile(t *testing.T, path string) string {
 	return string(b)
 }
 
-// TestAuditRungOmitEmpty pins the additive rung field: absent from records that
-// ran no read child (so their shape is unchanged), present when a read set it.
-func TestAuditRungOmitEmpty(t *testing.T) {
+// TestAuditReadFieldsOmitEmpty pins the read block and deny_reason: records
+// that ran no read keep exactly their old keys, an executed read carries every
+// read key, and a read-jail denial carries deny_reason and no read keys.
+func TestAuditReadFieldsOmitEmpty(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "audit.log")
 	l := gate.NewAuditLogger(gate.AuditAllMeta, path)
-	l.Record(makeRecord("deny", "write", "denied", 77, nil))
+	l.Record(makeRecord("touch /x", "write", "signed", 0, &gate.AuditMeta{}))
+	l.Record(makeRecord("touch /x", "write", "denied", 77, nil))
 	read := makeRecord("cat /etc/hostname", "read", "unsigned", 0, &gate.AuditMeta{})
-	read.Rung = "full"
+	read.ReadAudit = &gate.ReadAudit{Enforcement: "kernel", Profile: "ro-v1", LandlockABI: 6}
 	l.Record(read)
+	fallback := makeRecord("cat /etc/hostname", "read", "unsigned", 0, &gate.AuditMeta{})
+	fallback.ReadAudit = &gate.ReadAudit{
+		Enforcement: "classifier", Net: true, AcceptFS: []string{"network"},
+		JailAbsent: "clone:EACCES", LabelClauseUnmet: []string{"fs-view:fuse@/mnt/x"},
+	}
+	l.Record(fallback)
+	denied := makeRecord("cat /etc/hostname", "read", "denied", 77, nil)
+	denied.DenyReason = "jail:failed:seccomp:EIO"
+	l.Record(denied)
+
+	keys := func(record map[string]any) map[string]bool {
+		set := map[string]bool{}
+		for key := range record {
+			set[key] = true
+		}
+		return set
+	}
+	with := func(base map[string]bool, extra ...string) map[string]bool {
+		set := map[string]bool{}
+		for key := range base {
+			set[key] = true
+		}
+		for _, key := range extra {
+			set[key] = true
+		}
+		return set
+	}
 	recs := readRecords(t, path)
-	if len(recs) != 2 {
-		t.Fatalf("got %d records, want 2", len(recs))
+	if len(recs) != 5 {
+		t.Fatalf("got %d records, want 5", len(recs))
 	}
-	if _, ok := recs[0]["rung"]; ok {
-		t.Errorf("record without a rung serialised one: %v", recs[0])
+	executed, rejected := keys(recs[0]), keys(recs[1])
+	for _, key := range []string{"enforcement", "pinned", "net", "deny_reason", "jail_absent"} {
+		if executed[key] || rejected[key] {
+			t.Errorf("a record that ran no read has %q: %v / %v", key, recs[0], recs[1])
+		}
 	}
-	if recs[1]["rung"] != "full" {
-		t.Errorf("rung = %v, want full", recs[1]["rung"])
+	readKeys := []string{"enforcement", "profile", "pinned", "landlock_abi", "net", "requires_confinement", "cwd_reset"}
+	if got, want := keys(recs[2]), with(executed, readKeys...); !reflect.DeepEqual(got, want) {
+		t.Errorf("kernel read keys = %v, want %v", got, want)
+	}
+	if got, want := keys(recs[3]), with(executed, "enforcement", "pinned", "landlock_abi", "net", "requires_confinement", "cwd_reset", "accept_fs", "jail_absent", "label_clause_unmet"); !reflect.DeepEqual(got, want) {
+		t.Errorf("fallback read keys = %v, want %v", got, want)
+	}
+	if recs[3]["jail_absent"] != "clone:EACCES" || recs[3]["net"] != true || recs[3]["enforcement"] != "classifier" {
+		t.Errorf("fallback values: %v", recs[3])
+	}
+	if got, want := keys(recs[4]), with(rejected, "deny_reason"); !reflect.DeepEqual(got, want) {
+		t.Errorf("jail denial keys = %v, want %v", got, want)
+	}
+	if recs[4]["deny_reason"] != "jail:failed:seccomp:EIO" {
+		t.Errorf("deny_reason = %v", recs[4]["deny_reason"])
 	}
 }
 

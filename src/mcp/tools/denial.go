@@ -161,11 +161,11 @@ func newDenial(class string) *Denial {
 	case VerdictReadJailUnavailable:
 		return &Denial{
 			VerdictClass:   VerdictReadJailUnavailable,
-			Summary:        "The gate refused to run the read: it could not confirm or set up the host's kernel read jail, so the command did not run.",
+			Summary:        "The gate refused the read: it could not confirm or set up the host's kernel read jail. Normally the command did not run; if the gate's line says the read may have started, it may have run and its result is not trusted.",
 			RequiredAction: ActionEscalateToHuman,
 			Retryable:      false,
 			HowTo: []string{
-				"Ask a human to run `~/.sshgate-gate/gate doctor` on the host; it reports the jail level and why it is unavailable.",
+				"Ask a human to run `~/.sshgate-gate/gate doctor` on the host; it reports the jail state and the pin, and why reads are refused.",
 				"Do NOT auto-retry: the gate refuses every read the same way until the host is fixed.",
 			},
 		}

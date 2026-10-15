@@ -65,9 +65,9 @@ The short version, stated factually:
   which), the gate runs every command the classifier calls a read inside a
   kernel jail (profile `ro-v1`): the read cannot write host files or file
   metadata, connect to local daemons over Unix sockets, or signal or trace other
-  processes. Jailed reads keep TCP/UDP network access. Hosts without the jail run
-  reads classifier-only unless the operator pins a `jail-floor`, in which case
-  reads there are refused.
+  processes. Whether jailed reads get network is a per-host setting. Hosts
+  without the jail run reads classifier-only unless the operator pins the host
+  (the `jail` file), in which case reads there are refused.
 - **The signing key is isolated** under a dedicated Unix user the agent cannot
   read from. On a single machine this is a safety rail, not a hard wall: an agent
   that can escalate privileges on the host (e.g. has `sudo`) could read the key
@@ -85,14 +85,15 @@ it; the threat model spells out exactly what each layer does and does not stop.
 - A **write executing on a remote without a valid, human-approved signature**.
 - A **classifier bypass** that routes a state-changing command as a read.
 - A **read jail escape**: on a host where `gate doctor` reports `reads:
-  jailed:full`, a read that writes or changes metadata of a host file, connects
+  kernel-jailed`, a read that writes or changes metadata of a host file, connects
   to a local daemon over a Unix socket, signals or traces another process, or
   otherwise does something [`docs/THREAT-MODEL.md`](docs/THREAT-MODEL.md) says a
   jailed read cannot do.
 - A read that **runs unconfined when it should not**: on a jail-capable host, or
-  on a host with a pinned `jail-floor`, a read that runs outside the jail (other
-  than the fixed `systemctl`/`docker` read verbs), or one of those fixed verbs
-  being made to change state.
+  on a pinned host, a read that runs outside the jail (other than the fixed
+  `systemctl`/`docker` read verbs on a host not pinned `net=allow`), a jailed
+  read that opens a network socket where the host's pin does not allow it, or
+  one of those fixed verbs being made to change state.
 - Anything that lets the **agent read the signing key** or forge a signature.
 - A **signature replayed** outside its validity window or against a different
   host than approved.
@@ -102,8 +103,9 @@ it; the threat model spells out exactly what each layer does and does not stop.
 
 - The classifier being conservative (routing a harmless read to approval) — that
   is fail-closed working as intended, not a vulnerability.
-- The read jail's documented residuals: reads keeping network access, reads seeing
-  what the SSH user can read, hosts without the jail running reads unconfined,
+- The read jail's documented residuals: network where a host allows it, reads seeing
+  what the SSH user can read, unpinned hosts without the jail running reads
+  classifier-only,
   and the other phase-1 residuals listed in
   [`docs/THREAT-MODEL.md`](docs/THREAT-MODEL.md). An attack that goes further
   than a listed residual describes is in scope.

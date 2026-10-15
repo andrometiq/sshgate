@@ -37,7 +37,7 @@ func TestConfineCommandSetsCloneFlags(t *testing.T) {
 		t.Error("confined Cmd must still set Setpgid for the cancel semantics")
 	}
 	if len(sa.UidMappings) == 0 || len(sa.GidMappings) == 0 {
-		t.Error("confined rung-1 Cmd must set uid/gid mappings")
+		t.Error("confined Cmd must set uid/gid mappings")
 	}
 }
 
@@ -55,23 +55,30 @@ func TestConfineProfileAlwaysClones(t *testing.T) {
 	}
 }
 
-// requireUserns skips a test that needs a rung-1 jail when the host has no
-// unprivileged user namespace (so the suite is never "green by skip" silently on
-// a capable host, but does not fail on a restricted CI runner).
-func requireUserns(t *testing.T) {
+// requireJail attempts the jail with `:` and skips a test that needs it when
+// the host has no jail (Absent), so the suite is never green by skip on a
+// capable host (`make test-jail` fails on any skip) but does not fail on a
+// restricted CI runner. A Failed attempt fails the test.
+func requireJail(t *testing.T) {
 	t.Helper()
-	if confine.Detect().Rung != confine.Rung1Full {
-		t.Skip("host has no unprivileged userns; rung-1 ExecWithRedaction test needs it")
+	res, err := ExecWithRedaction(context.Background(), ":", ExecOpts{Confine: &confine.Spec{Profile: confine.ProfileROv1}})
+	if err == nil && res.ExitCode == 0 && res.Jail != nil {
+		return
 	}
+	var setup *confine.SetupError
+	if errors.As(err, &setup) && confine.ClassifySetupFailure(setup.Stage, setup.Errno, confine.ReadHostFacts()) == confine.Absent {
+		t.Skipf("SKIP jail: %s", confine.DenyReason(confine.Absent, setup.Stage, setup.Errno))
+	}
+	t.Fatalf("jail attempt: exit %d, %v", res.ExitCode, err)
 }
 
 // TestExecWithRedactionConfinedNamespace observes a REAL confinement effect: a
-// rung-1 jailed command runs in a fresh user namespace, so /proc/self/ns/user
+// jailed command runs in a fresh user namespace, so /proc/self/ns/user
 // differs from the gate's own. This proves ExecWithRedaction actually entered
 // the jail (not merely set SysProcAttr) — the end-to-end counterpart to the
 // SysProcAttr clobber-guard above.
 func TestExecWithRedactionConfinedNamespace(t *testing.T) {
-	requireUserns(t)
+	requireJail(t)
 	hostNS, err := os.Readlink("/proc/self/ns/user")
 	if err != nil {
 		t.Fatalf("read host user ns: %v", err)
@@ -91,11 +98,11 @@ func TestExecWithRedactionConfinedNamespace(t *testing.T) {
 	}
 }
 
-// TestExecWithRedactionConfinedEROFS observes the filesystem wall: a rung-1
+// TestExecWithRedactionConfinedEROFS observes the filesystem wall: a
 // jailed write to a file under $HOME fails and the file is unchanged, while the
 // gate itself (no Confine) could write it.
 func TestExecWithRedactionConfinedEROFS(t *testing.T) {
-	requireUserns(t)
+	requireJail(t)
 	home, err := os.UserHomeDir()
 	if err != nil {
 		t.Fatalf("home: %v", err)
@@ -132,7 +139,7 @@ func TestExecWithRedactionConfinedEROFS(t *testing.T) {
 // ExitCode -1 and a wrapped *confine.SetupError (a deny), never exit 0, and the
 // command never runs.
 func TestExecWithRedactionConfineFailClosed(t *testing.T) {
-	requireUserns(t)
+	requireJail(t)
 	spec := confine.Spec{Profile: confine.ProfileROv1, Net: true, InjectFailAt: "seccomp"}
 	res, err := ExecWithRedaction(context.Background(), "echo SHOULD_NOT_RUN",
 		ExecOpts{Confine: &spec, CaptureLimit: 4096})
@@ -156,7 +163,7 @@ func TestExecWithRedactionConfineFailClosed(t *testing.T) {
 // /etc/hostname) must NOT be visible to the jailed command. A writable inherited
 // fd would otherwise get past both the read-only mount and Landlock.
 func TestExecWithRedactionConfineClosesInheritedFDs(t *testing.T) {
-	requireUserns(t)
+	requireJail(t)
 	// Plant a non-CLOEXEC fd: syscall.Open does not add O_CLOEXEC, so it survives
 	// fork+execve into the child unless the worker closes it.
 	fd, err := syscall.Open("/etc/hostname", syscall.O_RDONLY, 0)
@@ -200,7 +207,7 @@ func TestExecWithRedactionConfineNSVerify(t *testing.T) {
 }
 
 func testExecutorNamespaceClobber(t *testing.T) {
-	requireUserns(t)
+	requireJail(t)
 	p := newProof(t, "L-NSVERIFY")
 	spec := confine.Spec{Profile: confine.ProfileROv1}
 	if p.abi == "abi1" {

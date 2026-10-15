@@ -76,7 +76,7 @@ func (s Spec) command(ctx context.Context, cmd string) (*Jailed, error) {
 	}, nil
 }
 
-// cloneSysProcAttr is the rung-1 clone policy: new user+mount+ipc
+// cloneSysProcAttr is the jail's clone policy: new user+mount+ipc
 // namespaces (the ipc one isolates host SysV IPC and POSIX message queues),
 // identity uid/gid maps (so reads of the user's own files keep correct
 // ownership), and the mount-phase capabilities carried as ambient caps so they
@@ -174,7 +174,10 @@ func RunWorker(args []string) int {
 	fail := func(stage string, err error) int {
 		// The structured report (stage + errno) goes to the parent on fd 4; the
 		// detailed message goes to the gate's stderr log channel for diagnosis.
-		if err != nil {
+		// A failure that may mean the host has no jail stays quiet: an
+		// unpinned host then runs the read classifier-only, and a deny prints
+		// its own line.
+		if err != nil && !AbsentCandidate(stage, errnoOf(err)) {
 			fmt.Fprintf(os.Stderr, "gate-jail: setup failed at %s: %v\n", stage, err)
 		}
 		_, _ = io.WriteString(statusW, formatFailReport(stage, errnoOf(err)))
@@ -421,14 +424,6 @@ func resolveCwd(cwd string) (string, bool, error) {
 }
 
 // errnoOf extracts a syscall.Errno from err, or 0 if there is none.
-func errnoOf(err error) syscall.Errno {
-	var e syscall.Errno
-	if errors.As(err, &e) {
-		return e
-	}
-	return 0
-}
-
 func clearShimCaps() error {
 	if unix.Gettid() != unix.Getpid() {
 		return unix.EINVAL

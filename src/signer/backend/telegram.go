@@ -91,8 +91,10 @@ type TelegramBackend struct {
 	runDone     chan struct{}
 	panicsTotal atomic.Int64
 
-	// Pending requests keyed by RequestID.
-	pending sync.Map // map[string]*pendingState
+	// Pending requests keyed by RequestID. A slot holds a
+	// *pendingReservation while its card is being sent, then the
+	// *pendingState for that card.
+	pending sync.Map // map[string]*pendingState | *pendingReservation
 
 	// Policy approvals use a disjoint callback namespace and a separate state
 	// machine. Ordinary approve:/deny: behavior above must remain untouched.
@@ -118,6 +120,37 @@ type pendingState struct {
 	chatID    int64  // DM chat where the request message was posted
 	messageID int    // for editing the message on resolution
 	stopTimer func() // tears down the timer + ctx-watcher goroutine
+}
+
+// pendingReservation claims a RequestID in TelegramBackend.pending
+// before the card is sent, so a second request reusing a pending
+// RequestID is refused before it can post a card or displace the first
+// request's state. The byte keeps each reservation a distinct pointer
+// (CompareAndSwap/CompareAndDelete compare by identity).
+type pendingReservation struct{ _ byte }
+
+// errDuplicateRequestID refuses a request whose RequestID is already
+// pending; the original pending request is left untouched.
+var errDuplicateRequestID = errors.New("telegram: request_id already pending — refusing duplicate")
+
+// reservePending atomically claims reqID (LoadOrStore: no check-then-store
+// window). On success the caller must either publish its pendingState with
+// publishPending or let release drop the reservation.
+func (t *TelegramBackend) reservePending(reqID string) (res *pendingReservation, release func(), err error) {
+	res = &pendingReservation{}
+	if _, loaded := t.pending.LoadOrStore(reqID, res); loaded {
+		return nil, nil, errDuplicateRequestID
+	}
+	return res, func() { t.pending.CompareAndDelete(reqID, res) }, nil
+}
+
+// publishPending swaps the caller's reservation for ps. Only the reservation
+// holder can reach this, so a failed swap is unreachable; it fails closed.
+func (t *TelegramBackend) publishPending(reqID string, res *pendingReservation, ps *pendingState) error {
+	if !t.pending.CompareAndSwap(reqID, res, ps) {
+		return errors.New("telegram: pending reservation lost")
+	}
+	return nil
 }
 
 // TelegramOptions configures a TelegramBackend.
@@ -481,15 +514,22 @@ func (t *TelegramBackend) handleCallback(cb *tgbotapi.CallbackQuery) {
 		return
 	}
 
-	raw, ok := t.pending.Load(reqID)
-	if !ok {
+	// The tap must come from the exact card posted for this pending state.
+	// request_id is caller-chosen, so it alone does not prove which card
+	// the operator read; a stale card, another chat, or a reservation whose
+	// card is still being sent resolves nothing.
+	raw, _ := t.pending.Load(reqID)
+	ps, ok := raw.(*pendingState)
+	if !ok || cb.Message == nil || cb.Message.Chat == nil || cb.Message.Chat.ID != ps.chatID || cb.Message.MessageID != ps.messageID {
+		if ok {
+			t.logger.Printf("callback for a pending request from a different message ignored")
+		}
 		ans := tgbotapi.NewCallback(cb.ID, "expired or already resolved")
 		if _, err := t.bot.Request(ans); err != nil {
 			t.logger.Printf("answer unknown-reqid callback: %s", redactToken(err))
 		}
 		return
 	}
-	ps := raw.(*pendingState)
 
 	var status signerkit.ResultStatus
 	var verbPast string
@@ -537,6 +577,12 @@ func (t *TelegramBackend) Request(ctx context.Context, req signerkit.ApprovalReq
 	if !ok {
 		return nil, errors.New("telegram: no DM chat captured yet — operator must /start the bot")
 	}
+
+	res, release, err := t.reservePending(req.RequestID)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 
 	explanations, explainErr := t.runExplainer(ctx, req.Commands)
 	text := formatApprovalMessage(req, t.reqTimeout, explanations, explainErr, t.RedactSalt, t.RedactRules)
@@ -587,9 +633,11 @@ func (t *TelegramBackend) Request(ctx context.Context, req signerkit.ApprovalReq
 	}
 	// Publish the entry BEFORE starting the timer/ctx-watcher goroutines
 	// so any goroutine that observes a pending state via the map sees
-	// fully initialised fields. (sync.Map.Store has the happens-before
-	// edges we need.)
-	t.pending.Store(req.RequestID, ps)
+	// fully initialised fields. (sync.Map.CompareAndSwap has the
+	// happens-before edges we need.)
+	if err := t.publishPending(req.RequestID, res, ps); err != nil {
+		return nil, err
+	}
 
 	// Timer + ctx watcher live in one goroutine: whichever event fires
 	// first calls timeout(); the other branches are silent no-ops via
@@ -627,6 +675,12 @@ func (t *TelegramBackend) RequestGrant(ctx context.Context, req signerkit.GrantA
 		return nil, errors.New("telegram: no DM chat captured yet — operator must /start the bot")
 	}
 
+	res, release, err := t.reservePending(req.RequestID)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+
 	text := formatGrantApprovalMessage(req, t.reqTimeout, t.RedactSalt, t.RedactRules)
 	msg := tgbotapi.NewMessage(chatID, text)
 	// A standing grant gets its own unmistakable approve label so the
@@ -662,7 +716,9 @@ func (t *TelegramBackend) RequestGrant(ctx context.Context, req signerkit.GrantA
 		messageID: sent.MessageID,
 		stopTimer: stopTimer,
 	}
-	t.pending.Store(req.RequestID, ps)
+	if err := t.publishPending(req.RequestID, res, ps); err != nil {
+		return nil, err
+	}
 
 	go func() {
 		timer := time.NewTimer(t.reqTimeout)
@@ -713,6 +769,12 @@ func (t *TelegramBackend) dispatchApproval(ctx context.Context, reqID, text, app
 		return nil, errors.New("telegram: no DM chat captured yet — operator must /start the bot")
 	}
 
+	res, release, err := t.reservePending(reqID)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+
 	msg := tgbotapi.NewMessage(chatID, text)
 	msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
@@ -740,7 +802,9 @@ func (t *TelegramBackend) dispatchApproval(ctx context.Context, reqID, text, app
 		messageID: sent.MessageID,
 		stopTimer: stopTimer,
 	}
-	t.pending.Store(reqID, ps)
+	if err := t.publishPending(reqID, res, ps); err != nil {
+		return nil, err
+	}
 
 	go func() {
 		timer := time.NewTimer(t.reqTimeout)
@@ -764,7 +828,7 @@ func (t *TelegramBackend) resolve(reqID string, ps *pendingState, r signerkit.Re
 		ps.ch <- r
 		close(ps.ch)
 		ps.stopTimer()
-		t.pending.Delete(reqID)
+		t.pending.CompareAndDelete(reqID, ps)
 	})
 }
 
@@ -777,7 +841,7 @@ func (t *TelegramBackend) timeout(reqID string, ps *pendingState) {
 		ps.ch <- signerkit.Result{Status: signerkit.StatusTimeout}
 		close(ps.ch)
 		ps.stopTimer()
-		t.pending.Delete(reqID)
+		t.pending.CompareAndDelete(reqID, ps)
 		resolved = true
 	})
 	if !resolved {

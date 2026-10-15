@@ -29,7 +29,7 @@ type Leg struct {
 	Name                 string
 	Package              string
 	Names                map[string]string
-	Root                 bool
+	Root, NonRoot        bool
 	CIOnly               bool
 	Markers              []string
 	ABIMarkers           map[string][]string
@@ -88,7 +88,7 @@ func Validate(registry []Protection) error {
 			sets[s.Name()] = s
 			names := map[string]bool{}
 			for _, leg := range s.Legs {
-				if leg.Name == "" || leg.Package == "" || names[leg.Name] {
+				if leg.Name == "" || leg.Package == "" || names[leg.Name] || leg.Root && leg.NonRoot {
 					return fmt.Errorf("%s: invalid leg %q", s.Name(), leg.Name)
 				}
 				names[leg.Name] = true
@@ -142,6 +142,8 @@ func Select(s MutationSet, root, ci bool) (legs []Leg, omitted []string) {
 		reason := ""
 		if leg.Root && !root {
 			reason = "root"
+		} else if leg.NonRoot && root {
+			reason = "non-root"
 		} else if leg.CIOnly && !ci {
 			reason = "ci-only"
 		}

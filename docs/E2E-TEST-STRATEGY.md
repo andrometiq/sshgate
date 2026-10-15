@@ -119,7 +119,7 @@ and confirm the **Tier-1 read-only** path end-to-end:
 4. `/sshgate:status` shows the signer as not configured (read-only / Tier 1)
    — that's healthy, not an error.
 5. On the server, run `~/.sshgate-gate/gate doctor` and record its `reads:`
-   line (`jailed:full` or `unconfined`), so the result says which read path
+   line (`kernel-jailed, …` or `classifier-only …`), so the result says which read path
    was tested.
 
 ## Manual pre-release exercises — required before any registry upload

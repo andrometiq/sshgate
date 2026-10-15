@@ -23,16 +23,3 @@ func TestWorkerLandlockProbeErrno(t *testing.T) {
 		t.Fatalf("forced absence: abi=%d errno=%v", abi, errno)
 	}
 }
-
-func TestDecideLandlockProbeErrno(t *testing.T) {
-	for _, errno := range []unix.Errno{unix.ENOSYS, unix.EOPNOTSUPP, unix.EPERM} {
-		rep := decide(probeFacts{landlockABI: -1, landlockErr: errno, maxUserns: 100})
-		if errno == unix.EPERM {
-			if !errors.Is(rep.ProbeErr, errno) {
-				t.Fatalf("unexpected probe error lost: %+v", rep)
-			}
-		} else if rep.ProbeErr != nil || rep.Rung != Rung3Unconfined {
-			t.Fatalf("documented absence changed: %+v", rep)
-		}
-	}
-}

@@ -132,7 +132,7 @@ Whatever client you use, the same boundary applies:
 - **Reads run free.** Reachability + diagnostics work as soon as a server is
   registered. On a host that supports it (unprivileged user namespaces and
   Landlock), the gate runs each read inside a kernel jail that cannot write to
-  the host; elsewhere reads run unconfined. See
+  the host; elsewhere reads run classifier-only unless the host is pinned. See
   [Check the server's read jail](install-step-by-step.md#5-check-the-servers-read-jail)
   for how to check a host.
 - **Writes need the signer daemon + a provisioned gate.** Set those up per

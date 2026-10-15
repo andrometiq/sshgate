@@ -216,7 +216,7 @@ func runSet(set harness.MutationSet, report *harness.Report, output io.Writer) e
 }
 
 func readRegistry() ([]harness.Protection, error) {
-	cmd := exec.Command("go", "test", "-count=1", "-run", "^TestMutationRegistryJSON$", "-v", "./src/gate/confine")
+	cmd := exec.Command("go", "test", "-count=1", "-timeout=30m", "-run", "^TestMutationRegistryJSON$", "-v", "./src/gate/confine")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return nil, fmt.Errorf("registry test: %w\n%s", err, output)
@@ -249,7 +249,8 @@ func exactPattern(name string) string {
 }
 
 func runLegProof(set harness.MutationSet, leg harness.Leg, abi string) (harness.ProofRecord, error) {
-	args := []string{"test", "-count=1", "-tags=jail_e2e,jail_mutation", "-ldflags=-X github.com/karthikeyan5/sshgate/src/gate/confine/jailmut.IDs=" + set.Name(), "-run", exactPattern(leg.Names[abi]), "-json", leg.Package}
+	// -timeout=30m: go test's 10-minute default is too short on a loaded host.
+	args := []string{"test", "-count=1", "-timeout=30m", "-tags=jail_e2e,jail_mutation", "-ldflags=-X github.com/karthikeyan5/sshgate/src/gate/confine/jailmut.IDs=" + set.Name(), "-run", exactPattern(leg.Names[abi]), "-json", leg.Package}
 	// POSIX capture keeps go's status separate from stream/logging failures. The
 	// parent reads JSON and stderr independently, never inferring red from exit 1.
 	directory, err := os.MkdirTemp("", "sshgate-jailmut-")
@@ -295,7 +296,7 @@ func runLegProof(set harness.MutationSet, leg harness.Leg, abi string) (harness.
 }
 
 func readCases() ([]harness.Case, error) {
-	command := exec.Command("go", "test", "-count=1", "-run", "^TestProofCasesJSON$", "-v", "./src/gate/confine")
+	command := exec.Command("go", "test", "-count=1", "-timeout=30m", "-run", "^TestProofCasesJSON$", "-v", "./src/gate/confine")
 	output, err := command.CombinedOutput()
 	if err != nil {
 		return nil, fmt.Errorf("proof cases: %w\n%s", err, output)

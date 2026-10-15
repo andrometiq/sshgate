@@ -16,12 +16,6 @@ func (s Spec) command(context.Context, string) (*Jailed, error) {
 	return nil, errUnsupported
 }
 
-// detect reports no kernel wall off linux (rung 3), with the reason in ProbeErr
-// so a caller fails closed rather than treating it as a usable rung.
-func detect() Report {
-	return Report{Rung: Rung3Unconfined, ProbeErr: errUnsupported}
-}
-
 // RunShim and RunWorker are never reached off linux (the sentinels are only
 // dispatched by a linux gate re-execing itself); they exist so the type surface
 // matches the linux build.
@@ -30,3 +24,8 @@ func RunWorker([]string) int { return ExitSetupFailed }
 
 func EnableSubreaper() error    { return nil }
 func CleanupDescendants() error { return nil }
+
+func CheckJailedCredentials(string, bool) error { return errUnsupported }
+
+func DescribeMounts([]string) ([]MountReport, error) { return nil, errUnsupported }
+func MountOf(string, []string) (MountReport, error)  { return MountReport{}, errUnsupported }

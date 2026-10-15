@@ -109,15 +109,20 @@ them out instead of treating them as a generic command failure:
 
 - **77 on a read — read jail unavailable.** The gate refused to run the
   read because it could not confirm or set up the host's kernel read jail.
-  The command did not run. stderr contains `gate: read jail unavailable`
+  The command did not run, with one exception: when the line says the read
+  may have started, the jail failed after reporting itself ready, so the
+  command may have run and its result is not trusted. Keep that warning in
+  what you tell the user; never report such a read as "nothing ran".
+  stderr contains `gate: read jail unavailable`
   and the result's `denial.verdict_class` is `read_jail_unavailable`.
-  This happens when the operator pinned a `jail-floor` and the host no
-  longer supports the jail, when the `jail-floor` file is damaged, when
-  the host probe fails for an unexplained reason, or when jail setup
-  fails. Do NOT retry and do NOT tell the user to add a signer: reads
+  This happens when the host's jail pin is damaged (or a 0.1.x
+  `jail-floor` is left with no pin), when jail setup fails, or when the
+  host has no usable jail and is pinned or the read must run confined
+  (for example a `systemctl`/`docker` read on a host pinned `net=allow`).
+  Do NOT retry and do NOT tell the user to add a signer: reads
   are refused the same way until the host is fixed. Ask a human to
   run `~/.sshgate-gate/gate doctor` on the host (from their own shell);
-  it reports the jail level and why reads are refused.
+  it reports the jail state and the pin, and why reads are refused.
 - **77 on a write — gate denied the write.** No signer pubkey is
   configured on the remote (read-only / Tier 1), or the write arrived
   without a signature. Check `/sshgate:status`: a `read_only` server or a

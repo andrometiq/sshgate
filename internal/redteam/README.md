@@ -55,8 +55,8 @@ happen without a signature.** Reads are deliberately allowed.
 Since v0.1.5 the gate runs reads inside a kernel jail on hosts with
 unprivileged user namespaces and Landlock (`src/gate/confine`). **The rig
 does not exercise that jail.** Under Docker's default seccomp profile the
-container cannot create user namespaces, so the gate's probe finds no jail
-and runs reads unconfined, exactly as described above. The rig therefore
+container cannot create user namespaces, so the gate's jail attempt is
+Absent and it runs reads classifier-only, exactly as described above. The rig therefore
 tests the **classifier**: whether anything it calls a read can write. That
 is the protection that matters on hosts without the jail.
 

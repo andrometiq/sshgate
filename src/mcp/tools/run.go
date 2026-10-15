@@ -401,7 +401,7 @@ func (r *Runner) runWrite(ctx context.Context, alias string, e registry.Entry, c
 	// 77 because the host's read jail is unavailable — not a signature issue.
 	if readJailDenied(exit, stderr) {
 		return RunOutput{Stdout: outStr, Stderr: errStr, ExitCode: exit, Kind: "write", Approved: true, Revealed: reveal, AuthMode: authMode, Reason: classifyReason, Denial: newDenial(VerdictReadJailUnavailable)},
-			errors.New("tools: gate refused the read (exit 77): the host's kernel read jail could not be confirmed or set up, so nothing ran; a human runs `~/.sshgate-gate/gate doctor` on the host")
+			errors.New("tools: gate refused the read (exit 77): the host's read jail could not run it (normally nothing ran; if the gate's line says the read may have started, do not trust or repeat its result); a human runs `~/.sshgate-gate/gate doctor` on the host")
 	}
 	if note := gateDenyNote(exit); note != "" {
 		return RunOutput{Stdout: outStr, Stderr: errStr, ExitCode: exit, Kind: "write", Approved: true, Revealed: reveal, AuthMode: authMode, Reason: classifyReason, Denial: denialForGateExit(exit)},
