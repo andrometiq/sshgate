@@ -235,6 +235,11 @@ func DecisionCard(v View, handle string, parts int) (string, error) {
 	}
 	lines = append(lines, "Contents: "+v.Summary)
 	card := strings.Join(append(lines, assistHead(v.Assist)...), "\n")
+	if v.Assist.State == string(approvalplan.AssistUnavailable) && len(card) >= PartBytes {
+		a := v.Assist
+		a.Reason = "[advisory reason omitted to fit this card]"
+		card = strings.Join(append(lines, assistHead(a)...), "\n")
+	}
 	if len(card) >= PartBytes {
 		return "", tooLarge("telegram", "the decision card is %d bytes; it must be under %d", len(card), PartBytes)
 	}
@@ -305,6 +310,20 @@ func (s ReviewSnapshot) checkTelegramBounds() error {
 	if err != nil {
 		return err
 	}
+	if _, err := DecisionCard(v, boundsHandle, len(parts)); err != nil {
+		return err
+	}
+	// Reserve the longest alignment and the maximum omission count.
+	alignment := "not assessed"
+	if s.Legacy {
+		alignment = AlignmentLegacyMsg
+	}
+	v.Assist = AssistView{State: string(approvalplan.AssistReady), Alignment: alignment,
+		Summary: strings.Repeat("x", PartBytes), Concerns: make([]string, approvalplan.MaxAssistConcerns), Effects: make([]string, approvalplan.MaxAssistEffects)}
+	if _, err := DecisionCard(v, boundsHandle, len(parts)); err != nil {
+		return err
+	}
+	v.Assist = AssistView{State: string(approvalplan.AssistUnavailable), Reason: strings.Repeat("x", PartBytes)}
 	_, err = DecisionCard(v, boundsHandle, len(parts))
 	return err
 }

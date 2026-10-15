@@ -1,5 +1,5 @@
 === buttons: ✓ Approve all displayed commands (STANDING GRANT) | ✗ Deny
-=== part 1/1 (1009 bytes)
+=== part 1/1 (1097 bytes)
 🔐 SSHGate approval review — PART 1/1
 Request: a2_AAAAAAAAAAAAAAAAAAAAAA · Card: k7m2q3x4c5v6 · Plan: 07aad2923772283f
 ⚠️ STANDING GRANT — approving this auto-signs the commands below for the whole window WITHOUT further taps.
@@ -13,6 +13,7 @@ Agent-stated reason (unverified):
 Standing grant on web-1
 Route (requester's registry; signer-unverified)
 Host fingerprint: SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU
+Registry entry digest: 1935ea7d0b35b9fb4af66c1de49e05180511c5c7d7ec37e72e2767517781f80c
 Scope: ONLY the 2 exact command(s) below
 Duration: 1h0m0s (3600 s), counted from approval
 
@@ -74,6 +75,7 @@ Effects:
       "notes": [
         "Route (requester's registry; signer-unverified)",
         "Host fingerprint: SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU",
+        "Registry entry digest: 1935ea7d0b35b9fb4af66c1de49e05180511c5c7d7ec37e72e2767517781f80c",
         "Scope: ONLY the 2 exact command(s) below",
         "Duration: 1h0m0s (3600 s), counted from approval"
       ],

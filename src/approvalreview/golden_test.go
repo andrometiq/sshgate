@@ -1,11 +1,14 @@
 package approvalreview
 
 import (
+	"crypto/ecdh"
+	"crypto/ed25519"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/karthikeyan5/sshgate/src/approvalplan"
+	"github.com/karthikeyan5/sshgate/src/xfer"
 )
 
 const fpWeb = "SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU"
@@ -29,6 +32,22 @@ func worstCasePlan(t testing.TB) approvalplan.ApprovalPlanV1 {
 	return withSteps(t, specs...)
 }
 
+func registrationKeys(t testing.TB, r *approvalplan.RegisterTransferKey) {
+	t.Helper()
+	var seed [32]byte
+	for i := range seed {
+		seed[i] = byte(i)
+	}
+	box, err := ecdh.X25519().NewPrivateKey(seed[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var public [32]byte
+	copy(public[:], box.PublicKey().Bytes())
+	r.BoxPub = xfer.BoxPublicText(&public)
+	r.IDPub = xfer.IDPublicText(ed25519.NewKeyFromSeed(seed[:]).Public().(ed25519.PublicKey))
+}
+
 func goldenCases(t *testing.T) []goldenCase {
 	t.Helper()
 	pem := pemKey()
@@ -50,9 +69,10 @@ func goldenCases(t *testing.T) []goldenCase {
 	register := legacyBase()
 	register.Register = &approvalplan.RegisterTransferKey{
 		HostFingerprint: fpWeb, Label: "web-1",
-		BoxPub: "sshgate-box-pub-v1 AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
-		IDPub:  "sshgate-id-pub-v1 ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8=",
 	}
+	registrationKeys(t, register.Register)
+	registerPlan := loadPlan(t, "register-key")
+	registrationKeys(t, registerPlan.RegisterTransferKey)
 	unicodePlan := withReason(t, withSteps(t,
 		signed("echo 'café' \x1b[31mred\x1b[0m \u202Eevil\u202C zero\u200Bwidth \u0430dmin ⟦hidden 0 bytes⟧ \\x41 tab\there")),
 		"Fix the d\u0435ploy \u200Bscript ⟦hidden 0 bytes⟧ ✓ Approve")
@@ -67,7 +87,7 @@ func goldenCases(t *testing.T) []goldenCase {
 		{"grant-v2-commands", mustSnapshot(t, loadPlan(t, "grant-commands"))},
 		{"grant-v2-all", mustSnapshot(t, loadPlan(t, "grant-all"))},
 		{"transfer", mustSnapshot(t, loadPlan(t, "transfer"))},
-		{"register-key", mustSnapshot(t, loadPlan(t, "register-key"))},
+		{"register-key", mustSnapshot(t, registerPlan)},
 		{"secrets-overlapping", mustSnapshot(t, withSteps(t,
 			signed("PGPASSWORD=hunter2secret psql -h db -U admin -c 'select 1'"),
 			signed("PASSWORD=AKIA1234567890ABCDEF ./deploy --token ghp_abcd1234efgh")))},

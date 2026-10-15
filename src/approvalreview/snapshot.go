@@ -71,6 +71,8 @@ type Build struct {
 
 // Step is one command of a command job, in its batch position.
 type Step struct {
+	// Reveal preserves the legacy capability independently of admin dispatch.
+	Reveal     bool               `json:"reveal,omitempty"`
 	Ordinal    int                `json:"ordinal"`
 	Route      approvalplan.Route `json:"route"`
 	Target     Route              `json:"target"`
@@ -91,12 +93,13 @@ type Step struct {
 // Grant is a standing-grant request. AutoSigns is false for a v1 grant,
 // which no longer auto-signs anything (OQ3 (b)).
 type Grant struct {
-	Alias           string    `json:"alias"`
-	Scope           string    `json:"scope"`
-	Commands        []Display `json:"commands,omitempty"`
-	DurationSeconds int64     `json:"duration_seconds"`
-	Fingerprint     string    `json:"fingerprint,omitempty"`
-	AutoSigns       bool      `json:"auto_signs"`
+	Alias               string    `json:"alias"`
+	Scope               string    `json:"scope"`
+	Commands            []Display `json:"commands,omitempty"`
+	DurationSeconds     int64     `json:"duration_seconds"`
+	Fingerprint         string    `json:"fingerprint,omitempty"`
+	RegistryEntryDigest string    `json:"registry_entry_digest,omitempty"`
+	AutoSigns           bool      `json:"auto_signs"`
 }
 
 // TransferEnd is one side of a transfer. Label and PublicKeySHA256 come
@@ -164,7 +167,8 @@ func IsUnrenderable(err error) bool {
 // BuildSnapshot freezes a validated v2 plan into its review snapshot. salt is
 // the request's redaction salt; BuildSnapshot zeroes it before returning, on
 // every path (E37). It answers request_unrenderable when any displayed value
-// has no proven span set. Snapshot or Telegram bounds overflow returns
+// has no proven span set or an identity contains a secret span. Rendered
+// rationale, snapshot or Telegram bounds overflow returns
 // request_too_large (K19: either surface must be able to review it).
 func BuildSnapshot(plan approvalplan.ApprovalPlanV1, salt *[32]byte, rules []redact.Rule) (ReviewSnapshot, error) {
 	if salt == nil {
@@ -186,7 +190,7 @@ func BuildSnapshot(plan approvalplan.ApprovalPlanV1, salt *[32]byte, rules []red
 	}
 	snap := ReviewSnapshot{
 		Version: SnapshotVersion, Kind: plan.Kind, RequestID: plan.RequestID, PlanHash: planHash,
-		Requester: requester, SubmittedAt: plan.SubmittedAt, ExpiresAt: plan.RequestExpiresAt,
+		Requester: b.identity("requester", requester), SubmittedAt: plan.SubmittedAt, ExpiresAt: plan.RequestExpiresAt,
 		Origin: plan.RationaleOrigin, Reason: b.text("reason", plan.Rationale),
 	}
 	if plan.Coordinator == approvalplan.CoordinatorInProcessSync {
@@ -201,10 +205,13 @@ func BuildSnapshot(plan approvalplan.ApprovalPlanV1, salt *[32]byte, rules []red
 	case approvalplan.KindTransfer:
 		snap.Transfer = b.transfer(plan.Transfer)
 	case approvalplan.KindRegisterTransferKey:
-		snap.Register = registerOf(*plan.RegisterTransferKey)
+		snap.Register = b.registerOf(*plan.RegisterTransferKey)
 	}
 	if b.err != nil {
 		return ReviewSnapshot{}, b.err
+	}
+	if len(renderDisplay(snap.Reason)) > approvalplan.MaxRationaleRedactedBytes {
+		return ReviewSnapshot{}, tooLarge("rationale_redacted", "rendered rationale exceeds %d bytes", approvalplan.MaxRationaleRedactedBytes)
 	}
 	if _, err := snap.Encode(); err != nil {
 		return ReviewSnapshot{}, err
@@ -377,8 +384,8 @@ func (b *builder) steps(steps []approvalplan.Step) []Step {
 		out[i] = Step{
 			Ordinal: s.Ordinal, Route: s.Route, TTLSeconds: s.SignatureTTLSeconds,
 			Target: Route{
-				Alias: target.ServerAlias, User: target.ResolvedUser, Host: target.ResolvedHost,
-				Port: target.ResolvedPort, Fingerprint: target.TrustedHostFingerprint,
+				Alias: b.identity(fmt.Sprintf("steps[%d].target.alias", i), target.ServerAlias), User: b.identity(fmt.Sprintf("steps[%d].target.user", i), target.ResolvedUser), Host: b.identity(fmt.Sprintf("steps[%d].target.host", i), target.ResolvedHost),
+				Port: target.ResolvedPort, Fingerprint: b.fingerprint(fmt.Sprintf("steps[%d].target.fingerprint", i), target.TrustedHostFingerprint),
 			},
 			Command:       b.command(fmt.Sprintf("steps[%d].exact_command", i), s.ExactCommand),
 			ExpiryWarning: i > 0 && s.Route.Signed(),
@@ -398,8 +405,8 @@ func (b *builder) steps(steps []approvalplan.Step) []Step {
 
 func (b *builder) grant(g *approvalplan.StandingGrant) *Grant {
 	out := &Grant{
-		Alias: g.Alias, Scope: string(g.Scope), DurationSeconds: int64(g.DurationSeconds),
-		Fingerprint: g.TrustedHostFingerprint, AutoSigns: true,
+		Alias: b.identity("grant.alias", g.Alias), Scope: string(g.Scope), DurationSeconds: int64(g.DurationSeconds),
+		Fingerprint: b.fingerprint("grant.fingerprint", g.TrustedHostFingerprint), RegistryEntryDigest: g.RegistryEntryDigest, AutoSigns: true,
 	}
 	for i, c := range g.Commands {
 		out.Commands = append(out.Commands, b.command(fmt.Sprintf("exact_allowed_commands[%d]", i), c))
@@ -410,9 +417,9 @@ func (b *builder) grant(g *approvalplan.StandingGrant) *Grant {
 func (b *builder) transfer(t *approvalplan.Transfer) *Transfer {
 	end := func(field string, e approvalplan.TransferEndpoint) TransferEnd {
 		return TransferEnd{
-			Label: neutralizeToken(e.KeyLabel), Fingerprint: e.Target.TrustedHostFingerprint,
+			Label: b.identity(field+".label", e.KeyLabel), Fingerprint: b.fingerprint(field+".fingerprint", e.Target.TrustedHostFingerprint),
 			Target: &Route{
-				Alias: e.Target.ServerAlias, User: e.Target.ResolvedUser, Host: e.Target.ResolvedHost,
+				Alias: b.identity(field+".alias", e.Target.ServerAlias), User: b.identity(field+".user", e.Target.ResolvedUser), Host: b.identity(field+".host", e.Target.ResolvedHost),
 				Port: e.Target.ResolvedPort,
 			},
 			Path: b.text(field+".path", e.Path), PublicKeySHA256: e.PublicKeySHA256,
@@ -424,10 +431,10 @@ func (b *builder) transfer(t *approvalplan.Transfer) *Transfer {
 	}
 }
 
-func registerOf(r approvalplan.RegisterTransferKey) *Register {
+func (b *builder) registerOf(r approvalplan.RegisterTransferKey) *Register {
 	return &Register{
-		HostFingerprint: neutralizeToken(r.HostFingerprint), Label: neutralizeToken(r.Label),
-		BoxPub: neutralizeToken(r.BoxPub), IDPub: neutralizeToken(r.IDPub),
+		HostFingerprint: b.fingerprint("register.host_fingerprint", r.HostFingerprint), Label: b.identity("register.label", r.Label),
+		BoxPub: b.publicKey("register.box_pub", r.BoxPub, true), IDPub: b.publicKey("register.id_pub", r.IDPub, false),
 	}
 }
 

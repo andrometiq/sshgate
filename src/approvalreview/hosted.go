@@ -169,11 +169,11 @@ func displayLabel(d Display, exact string) string {
 func headlines(s ReviewSnapshot) []string {
 	var out []string
 	for _, step := range s.Steps {
-		switch {
-		case step.IsUpdate:
-			out = append(out, fmt.Sprintf(headlineUpdate, step.Target.Alias))
-		case step.Route == approvalplan.RouteSignedReveal && !slices.Contains(out, headlineReveal):
+		if (step.Reveal || step.Route == approvalplan.RouteSignedReveal) && !slices.Contains(out, headlineReveal) {
 			out = append(out, headlineReveal)
+		}
+		if step.IsUpdate {
+			out = append(out, fmt.Sprintf(headlineUpdate, step.Target.Alias))
 		}
 	}
 	switch {
@@ -192,13 +192,17 @@ func headlines(s ReviewSnapshot) []string {
 // approveLabel is E46's: a kind-specific variant of "Approve all displayed
 // commands", so the operator cannot tap through on muscle memory.
 func approveLabel(s ReviewSnapshot) string {
+	var capabilities []string
 	for _, step := range s.Steps {
-		if step.IsUpdate {
-			return ApproveBase + " (GATE UPDATE)"
+		if (step.Reveal || step.Route == approvalplan.RouteSignedReveal) && !slices.Contains(capabilities, "SECRET-REVEAL") {
+			capabilities = append(capabilities, "SECRET-REVEAL")
 		}
-		if step.Route == approvalplan.RouteSignedReveal {
-			return ApproveBase + " (SECRET-REVEAL)"
+		if step.IsUpdate && !slices.Contains(capabilities, "GATE UPDATE") {
+			capabilities = append(capabilities, "GATE UPDATE")
 		}
+	}
+	if len(capabilities) > 0 {
+		return ApproveBase + " (" + strings.Join(capabilities, " + ") + ")"
 	}
 	switch {
 	case s.Grant != nil:
@@ -302,6 +306,9 @@ func grantItems(g Grant) []Item {
 	head := Item{Heading: "Standing grant on " + g.Alias, Notes: []string{LabelRoute}}
 	if g.Fingerprint != "" {
 		head.Notes = append(head.Notes, "Host fingerprint: "+g.Fingerprint)
+	}
+	if g.RegistryEntryDigest != "" {
+		head.Notes = append(head.Notes, "Registry entry digest: "+g.RegistryEntryDigest)
 	}
 	switch g.Scope {
 	case string(approvalplan.GrantScopeAll):

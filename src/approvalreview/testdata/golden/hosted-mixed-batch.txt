@@ -1,8 +1,8 @@
 === buttons: ✓ Approve all displayed commands | ✗ Deny
-=== part 1/1 (1328 bytes)
+=== part 1/1 (1331 bytes)
 🔐 SSHGate approval review — PART 1/1
 Request: a2_AAAAAAAAAAAAAAAAAAAAAA · Card: k7m2q3x4c5v6 · Plan: b0a199ebf144c39b
-Requester: machine-client sub=local-uid:1000
+Requester: machine-client\x20sub=local-uid:1000
 Submitted: 2026-10-15T09:30:00Z
 Expires: 2026-10-16T09:30:00Z
 Contents: 3 command(s): 1 signed, 2 unsigned read(s); no command bytes hidden
@@ -27,22 +27,22 @@ Route (requester's registry; signer-unverified)
 ro-1 → deploy@ro-1.example.net:22
 Exact command (no hidden bytes):
 │ df -h /var
-=== decision card, preparing (523 bytes)
+=== decision card, preparing (526 bytes)
 🔐 SSHGate approval — DECISION CARD
 Review the 1 numbered part(s) above before deciding; Approve covers every displayed command.
 Request: a2_AAAAAAAAAAAAAAAAAAAAAA · Card: k7m2q3x4c5v6
 Plan hash: b0a199ebf144c39bb467a0060e54a9e14cdd78419ef708c56114780f92ec9891
-Requester: machine-client sub=local-uid:1000
+Requester: machine-client\x20sub=local-uid:1000
 Submitted: 2026-10-15T09:30:00Z
 Expires: 2026-10-16T09:30:00Z
 Contents: 3 command(s): 1 signed, 2 unsigned read(s); no command bytes hidden
 AI advisory: preparing. Approve appears once it is ready or unavailable.
-=== decision card, ready (729 bytes)
+=== decision card, ready (732 bytes)
 🔐 SSHGate approval — DECISION CARD
 Review the 1 numbered part(s) above before deciding; Approve covers every displayed command.
 Request: a2_AAAAAAAAAAAAAAAAAAAAAA · Card: k7m2q3x4c5v6
 Plan hash: b0a199ebf144c39bb467a0060e54a9e14cdd78419ef708c56114780f92ec9891
-Requester: machine-client sub=local-uid:1000
+Requester: machine-client\x20sub=local-uid:1000
 Submitted: 2026-10-15T09:30:00Z
 Expires: 2026-10-16T09:30:00Z
 Contents: 3 command(s): 1 signed, 2 unsigned read(s); no command bytes hidden
@@ -61,7 +61,7 @@ Effects:
   "plan_hash": "b0a199ebf144c39bb467a0060e54a9e14cdd78419ef708c56114780f92ec9891",
   "kind": "command_job",
   "legacy": false,
-  "requester": "machine-client sub=local-uid:1000",
+  "requester": "machine-client\\x20sub=local-uid:1000",
   "submitted_at": "2026-10-15T09:30:00Z",
   "expires_at": "2026-10-16T09:30:00Z",
   "reason_label": "Agent-stated reason (unverified)",

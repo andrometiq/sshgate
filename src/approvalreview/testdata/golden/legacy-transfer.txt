@@ -1,5 +1,5 @@
 === buttons: ✓ Approve all displayed commands (SECRET TRANSFER) | ✗ Deny
-=== part 1/1 (1089 bytes)
+=== part 1/1 (1063 bytes)
 🔐 SSHGate approval review — PART 1/1
 Request: 9f1c2e4a7b · Card: k7m2q3x4c5v6 · Plan: none (legacy v1 request)
 ⚠️ SECRET TRANSFER — approving this MOVES a secret file across hosts. The value is encrypted end-to-end; the agent only relays ciphertext.
@@ -14,7 +14,7 @@ Secret transfer x8Kq3YVvH4f2m9WqZr0B1g
 From: key web-1 (signer registry)
 From fingerprint (requester-supplied, signer-validated): SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU
 To: key db-1 (signer registry)
-To fingerprint (requester-supplied, signer-validated): SHA256:\u{27E6}hidden 43 bytes \u{00B7} sshgate-generic-high-entropy\u{27E7}
+To fingerprint (requester-supplied, signer-validated): SHA256:nThbg6kXUpJWGl7E1IGOCspRomTxdCARLviKw6E5SY8
 Mode: 0600
 
 Source path (requester-supplied, signer-validated)
@@ -75,7 +75,7 @@ Effects:
         "From: key web-1 (signer registry)",
         "From fingerprint (requester-supplied, signer-validated): SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU",
         "To: key db-1 (signer registry)",
-        "To fingerprint (requester-supplied, signer-validated): SHA256:\\u{27E6}hidden 43 bytes \\u{00B7} sshgate-generic-high-entropy\\u{27E7}",
+        "To fingerprint (requester-supplied, signer-validated): SHA256:nThbg6kXUpJWGl7E1IGOCspRomTxdCARLviKw6E5SY8",
         "Mode: 0600"
       ],
       "hidden_bytes": 0

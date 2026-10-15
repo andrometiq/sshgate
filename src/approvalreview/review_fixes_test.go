@@ -334,6 +334,7 @@ func TestSummaryScopesHiddenByteCounts(t *testing.T) {
 	}
 	req := legacyBase()
 	req.Register = loadPlan(t, "register-key").RegisterTransferKey
+	registrationKeys(t, req.Register)
 	v, err = BuildView(mustLegacy(t, req), readyAssist())
 	if err != nil {
 		t.Fatal(err)
@@ -343,6 +344,9 @@ func TestSummaryScopesHiddenByteCounts(t *testing.T) {
 	}
 	req.Register = nil
 	req.Transfer = &LegacyTransfer{SourcePath: "/source", DestPath: "/dest", DestFingerprint: "PASSWORD=hunter2secret"}
+	_, err = BuildLegacySnapshot(req, saltPointer(), testRules)
+	assertRefusalField(t, err, "destination.fingerprint")
+	req.Transfer.DestFingerprint = fpWeb
 	v, err = BuildView(mustLegacy(t, req), readyAssist())
 	if err != nil {
 		t.Fatal(err)

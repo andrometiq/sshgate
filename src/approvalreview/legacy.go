@@ -69,8 +69,8 @@ func BuildLegacySnapshot(req LegacyRequest, salt *[32]byte, rules []redact.Rule)
 	defer clear(b.salt[:])
 
 	snap := ReviewSnapshot{
-		Version: SnapshotVersion, Legacy: true, RequestID: b.legacyToken(req.RequestID),
-		Requester: b.legacyToken(req.Requester), SubmittedAt: req.SubmittedAt.UTC(), ExpiresAt: req.ExpiresAt.UTC(),
+		Version: SnapshotVersion, Legacy: true, RequestID: b.identity("request_id", req.RequestID),
+		Requester: b.identity("requester", req.Requester), SubmittedAt: req.SubmittedAt.UTC(), ExpiresAt: req.ExpiresAt.UTC(),
 		Origin: approvalplan.OriginSynthesizedLegacyV1,
 	}
 	reason := approvalplan.LegacyRationaleText
@@ -113,15 +113,15 @@ func (b *builder) legacySteps(cmds []LegacyCommand) []Step {
 	for i, c := range cmds {
 		route := approvalplan.RouteSignedWrite
 		switch {
-		case strings.HasPrefix(c.Command, approvalplan.AdminVerbPrefix):
+		case c.Command == "SSHGATE_REVOKE" || strings.HasPrefix(c.Command, updatePrefix) || strings.HasPrefix(c.Command, approvalplan.TransferVerbPrefix):
 			route = approvalplan.RouteSignedAdmin
 		case c.Reveal:
 			route = approvalplan.RouteSignedReveal
 		}
 		field := fmt.Sprintf("commands[%d]", i)
 		step := Step{
-			Ordinal: i + 1, Route: route, TTLSeconds: int(c.TTLSeconds),
-			Target:        Route{Alias: b.legacyToken(c.Server), Fingerprint: b.legacyToken(c.HostFingerprint)},
+			Ordinal: i + 1, Route: route, Reveal: c.Reveal, TTLSeconds: int(c.TTLSeconds),
+			Target:        Route{Alias: b.identity(field+".server", c.Server), Fingerprint: b.fingerprint(field+".host_fingerprint", c.HostFingerprint)},
 			Command:       b.command(field+".cmd", c.Command),
 			ExpiryWarning: i > 0,
 		}
@@ -141,7 +141,7 @@ func (b *builder) legacySteps(cmds []LegacyCommand) []Step {
 }
 
 func (b *builder) legacyGrant(g LegacyGrant) *Grant {
-	out := &Grant{Alias: b.legacyToken(g.Alias), Scope: b.legacyToken(g.Scope), DurationSeconds: int64(g.Duration / time.Second)}
+	out := &Grant{Alias: b.identity("grant.alias", g.Alias), Scope: b.identity("grant.scope", g.Scope), DurationSeconds: int64(g.Duration / time.Second)}
 	for i, c := range g.Commands {
 		out.Commands = append(out.Commands, b.command(fmt.Sprintf("commands[%d]", i), c))
 	}
@@ -150,31 +150,18 @@ func (b *builder) legacyGrant(g LegacyGrant) *Grant {
 
 func (b *builder) legacyTransfer(t LegacyTransfer) *Transfer {
 	return &Transfer{
-		TransferID: b.legacyToken(t.TransferID), Mode: b.legacyToken(t.Mode),
+		TransferID: b.identity("transfer_id", t.TransferID), Mode: b.identity("mode", t.Mode),
 		Source: TransferEnd{
-			Label: b.legacyToken(t.SourceLabel), Fingerprint: b.legacyToken(t.SourceFingerprint),
+			Label: b.identity("source.label", t.SourceLabel), Fingerprint: b.fingerprint("source.fingerprint", t.SourceFingerprint),
 			Path: b.text("source_path", t.SourcePath),
 		},
 		Destination: TransferEnd{
-			Label: b.legacyToken(t.DestLabel), Fingerprint: b.legacyToken(t.DestFingerprint),
+			Label: b.identity("destination.label", t.DestLabel), Fingerprint: b.fingerprint("destination.fingerprint", t.DestFingerprint),
 			Path: b.text("dest_path", t.DestPath),
 		},
 	}
 }
 
-func (b *builder) legacyToken(s string) string {
-	d := b.display("legacy_text", s, neutralizeToken)
-	var out strings.Builder
-	for _, seg := range d.Segments {
-		if seg.Hidden > 0 {
-			out.WriteString(NeutralizeText(approvalplan.HiddenMarker(seg.Hidden, seg.RuleIDs)))
-		} else {
-			out.WriteString(seg.Text)
-		}
-	}
-	return out.String()
-}
-
 func (b *builder) legacyRegister(r approvalplan.RegisterTransferKey) *Register {
-	return &Register{HostFingerprint: b.legacyToken(r.HostFingerprint), Label: b.legacyToken(r.Label), BoxPub: b.legacyToken(r.BoxPub), IDPub: b.legacyToken(r.IDPub)}
+	return &Register{HostFingerprint: b.fingerprint("register.host_fingerprint", r.HostFingerprint), Label: b.identity("register.label", r.Label), BoxPub: b.publicKey("register.box_pub", r.BoxPub, true), IDPub: b.publicKey("register.id_pub", r.IDPub, false)}
 }

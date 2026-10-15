@@ -1,5 +1,5 @@
 === buttons: ✓ Approve all displayed commands (XFER-KEY REGISTER) | ✗ Deny
-=== part 1/1 (856 bytes)
+=== part 1/1 (821 bytes)
 🔐 SSHGate approval review — PART 1/1
 Request: 9f1c2e4a7b · Card: k7m2q3x4c5v6 · Plan: none (legacy v1 request)
 ⚠️ XFER-KEY REGISTER — approving this ADDS a box→box transfer trust anchor. These keys let the signer build transfer legs to/from this host. Only approve keys you provisioned.
@@ -12,8 +12,8 @@ Program-generated reason (sshgate CLI; requester not authenticated as human):
 
 Transfer-key registration
 Host: web-1 fp=SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU
-Box key: sshgate-box-pub-v1\x20\u{27E6}hidden 43 bytes \u{00B7} sshgate-generic-high-entropy\u{27E7}=
-ID key: sshgate-id-pub-v1\x20\u{27E6}hidden 43 bytes \u{00B7} sshgate-generic-high-entropy\u{27E7}=
+Box key: sshgate-xfer-box-x25519 SHA256:7t2IPaCpRRWT3Ao45YP7dw+ifbvtIJwgQE4HXmjE8Mk
+ID key: sshgate-xfer-id-ed25519 SHA256:Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw
 === decision card, preparing (595 bytes)
 ⚠️ XFER-KEY REGISTER — approving this ADDS a box→box transfer trust anchor. These keys let the signer build transfer legs to/from this host. Only approve keys you provisioned.
 🔐 SSHGate approval — DECISION CARD
@@ -63,8 +63,8 @@ Effects:
       "heading": "Transfer-key registration",
       "notes": [
         "Host: web-1 fp=SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU",
-        "Box key: sshgate-box-pub-v1\\x20\\u{27E6}hidden 43 bytes \\u{00B7} sshgate-generic-high-entropy\\u{27E7}=",
-        "ID key: sshgate-id-pub-v1\\x20\\u{27E6}hidden 43 bytes \\u{00B7} sshgate-generic-high-entropy\\u{27E7}="
+        "Box key: sshgate-xfer-box-x25519 SHA256:7t2IPaCpRRWT3Ao45YP7dw+ifbvtIJwgQE4HXmjE8Mk",
+        "ID key: sshgate-xfer-id-ed25519 SHA256:Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw"
       ],
       "hidden_bytes": 0
     }

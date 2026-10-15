@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
@@ -52,29 +53,40 @@ func TestOverlappingSecretsHideOnlyTheirUnion(t *testing.T) {
 }
 
 func TestForcedSpanFailure(t *testing.T) {
-	forceSpans(t, func(string, [32]byte, []redact.Rule) (redact.SpanResult, bool) { return redact.SpanResult{}, false })
 	cmd := "export GITHUB_TOKEN=ghp_abcd1234efgh && ./deploy --verbose"
+	forceSpans(t, func(s string, salt [32]byte, rules []redact.Rule) (redact.SpanResult, bool) {
+		if s == cmd {
+			return redact.SpanResult{}, false
+		}
+		return redact.RedactSpans(s, salt, rules)
+	})
 	salt := testSalt()
 	_, err := BuildSnapshot(withSteps(t, signed(cmd)), &salt, testRules)
-	if !IsUnrenderable(err) {
+	var ce *approvalplan.CodeError
+	if !errors.As(err, &ce) || ce.Code != approvalplan.CodeRequestUnrenderable || ce.Field != "steps[0].exact_command" {
 		t.Fatalf("v2 with ok=false: %v, want request_unrenderable", err)
 	}
 
 	req := legacyBase()
 	req.Commands = []LegacyCommand{{Server: "web-1", Command: cmd, TTLSeconds: 60}}
 	salt = testSalt()
-	if _, err := BuildLegacySnapshot(req, &salt, testRules); !IsUnrenderable(err) {
+	if _, err := BuildLegacySnapshot(req, &salt, testRules); !errors.As(err, &ce) || ce.Code != approvalplan.CodeRequestUnrenderable || ce.Field != "commands[0].cmd" {
 		t.Fatalf("legacy: %v", err)
 	}
 
 }
 
 func TestPanickingRedactorFailsClosed(t *testing.T) {
-	forceSpans(t, func(string, [32]byte, []redact.Rule) (redact.SpanResult, bool) { panic("boom") })
-	salt := testSalt()
-	if _, err := BuildSnapshot(loadPlan(t, "write"), &salt, testRules); !IsUnrenderable(err) {
-		t.Fatalf("got %v, want request_unrenderable", err)
-	}
+	plan := loadPlan(t, "write")
+	cmd := plan.CommandJob.Steps[0].ExactCommand
+	forceSpans(t, func(s string, salt [32]byte, rules []redact.Rule) (redact.SpanResult, bool) {
+		if s == cmd {
+			panic("boom")
+		}
+		return redact.RedactSpans(s, salt, rules)
+	})
+	_, err := BuildSnapshot(plan, saltPointer(), testRules)
+	assertRefusalField(t, err, "steps[0].exact_command")
 }
 
 func TestMalformedSpansFailClosed(t *testing.T) {
@@ -86,11 +98,16 @@ func TestMalformedSpansFailClosed(t *testing.T) {
 	}
 	for name, result := range cases {
 		t.Run(name, func(t *testing.T) {
-			forceSpans(t, func(string, [32]byte, []redact.Rule) (redact.SpanResult, bool) { return result, true })
-			salt := testSalt()
-			if _, err := BuildSnapshot(loadPlan(t, "write"), &salt, testRules); !IsUnrenderable(err) {
-				t.Fatalf("got %v, want request_unrenderable", err)
-			}
+			plan := loadPlan(t, "write")
+			cmd := plan.CommandJob.Steps[0].ExactCommand
+			forceSpans(t, func(s string, salt [32]byte, rules []redact.Rule) (redact.SpanResult, bool) {
+				if s == cmd {
+					return result, true
+				}
+				return redact.RedactSpans(s, salt, rules)
+			})
+			_, err := BuildSnapshot(plan, saltPointer(), testRules)
+			assertRefusalField(t, err, "steps[0].exact_command")
 		})
 	}
 }
