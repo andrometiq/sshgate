@@ -63,16 +63,21 @@ func gateProofCases() []harness.Case {
 	add("U-PinRequiresRehearsal", "Unit", "", nil, []string{"control:decision"}, []string{"EFFECT:decision"}, nil)
 	add("G-PIN-REFUSED", "Effect", "Execute", nil, []string{"control:pin", "jailed:rehearsal", "observe:pinfile"}, []string{"EFFECT:pin-written"}, nil)
 	add = in("Phase3")
-	for _, name := range []string{"U-Lane2Grammar", "U-Lane2RedirectList"} {
+	for _, name := range []string{"U-Lane2Grammar", "U-Lane2RedirectList", "U-Lane2ELFSearchTags"} {
 		add(name, "Unit", "", nil, []string{"control:decision"}, []string{"EFFECT:decision"}, nil)
 	}
 	add("G-L2-GRAMMAR", "Effect", "Execute", nil, []string{"control:argv", "jailed:lane2", "observe:output"}, []string{"EFFECT:grammar-flag"}, nil)
 	add("G-L2-REDIRECT", "Effect", "Execute", nil, []string{"control:argv", "jailed:lane2", "observe:output"}, []string{"EFFECT:redirect-flag"}, nil)
+	add("G-L2-ADMIT-WRITABLE-DIR", "Effect", "Execute", nil, []string{"control:exec", "jailed:lane2", "observe:output"}, []string{"EFFECT:untrusted-ran"}, nil)
+	for _, name := range []string{"G-L2-ADMIT-RUNPATH-ORIGIN", "G-L2-ADMIT-RUNPATH-UNTRUSTED"} {
+		add(name, "Effect", "Execute", nil, []string{"control:exec", "jailed:lane2", "observe:output"}, []string{"EFFECT:lib-ran"}, nil)
+	}
+
 	return cases
 }
 
 // gateHooks are the protections whose mutation may show an effect here.
-var gateHooks = []string{"P-G-CONFINE-REQUIRED", "P-G-STRICT", "P-G-NET-STRICT", "P-COVERS", "P-CLONE-MNT", "P-SC-NET", "P-G-SEAL", "P-G-SEAL-GUARD", "P-G-LABEL-SWITCH", "P-G-JAILVERB-NOEXEC", "P-G-SELFTEST-JAILED", "P-G-PIN-REHEARSAL", "P-L2-GRAMMAR", "P-L2-REDIRECT"}
+var gateHooks = []string{"P-G-CONFINE-REQUIRED", "P-G-STRICT", "P-G-NET-STRICT", "P-COVERS", "P-CLONE-MNT", "P-SC-NET", "P-G-SEAL", "P-G-SEAL-GUARD", "P-G-LABEL-SWITCH", "P-G-JAILVERB-NOEXEC", "P-G-SELFTEST-JAILED", "P-G-PIN-REHEARSAL", "P-L2-GRAMMAR", "P-L2-REDIRECT", "P-L2-ADMIT"}
 
 // gateProof is the gate package's proof: one case, its obligations, and the
 // markers its legs observed. Finish prints the one PROOF-COMPLETE line.

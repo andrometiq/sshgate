@@ -25,6 +25,14 @@ func phase3Leg(name string, markers ...string) harness.Leg {
 func phase3Registry() []prot {
 	both := harness.MutationSet{IDs: []string{"P-L2-GRAMMAR", "P-L2-REDIRECT"}, Legs: []harness.Leg{phase3Leg("G-L2-REDIRECT", "MUTATION-EFFECT redirect-flag")}}
 	return []prot{
+		{ID: "P-L2-ADMIT", Site: "lane2Plan admission trust verdict", Class: "single", DirectLeg: "U-Lane2ELFSearchTags",
+			EffectLegs: []string{"G-L2-ADMIT-WRITABLE-DIR", "G-L2-ADMIT-RUNPATH-ORIGIN", "G-L2-ADMIT-RUNPATH-UNTRUSTED"},
+			MutationSets: []harness.MutationSet{{IDs: []string{"P-L2-ADMIT"}, Legs: []harness.Leg{
+				phase3Leg("U-Lane2ELFSearchTags", "MUTATION-EFFECT decision"),
+				phase3Leg("G-L2-ADMIT-WRITABLE-DIR", "MUTATION-EFFECT untrusted-ran"),
+				phase3Leg("G-L2-ADMIT-RUNPATH-ORIGIN", "MUTATION-EFFECT lib-ran"),
+				phase3Leg("G-L2-ADMIT-RUNPATH-UNTRUSTED", "MUTATION-EFFECT lib-ran"),
+			}}}},
 		{ID: "P-L2-GRAMMAR", Site: "lane2Parse refuses a non-grammar token", Class: "multi", Partners: []string{"P-L2-REDIRECT"}, DirectLeg: "U-Lane2Grammar",
 			EffectLegs: []string{"G-L2-GRAMMAR"},
 			MutationSets: []harness.MutationSet{{IDs: []string{"P-L2-GRAMMAR"}, Legs: []harness.Leg{

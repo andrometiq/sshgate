@@ -179,6 +179,7 @@ func TestPhase3Tables(t *testing.T) {
 		t.Run(abi, func(t *testing.T) {
 			t.Run("U-Lane2Grammar", testLane2Grammar)
 			t.Run("U-Lane2RedirectList", testLane2RedirectList)
+			t.Run("U-Lane2ELFSearchTags", testLane2ELFSearchTags)
 		})
 	}
 }

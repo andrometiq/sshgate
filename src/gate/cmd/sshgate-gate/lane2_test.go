@@ -31,12 +31,12 @@ func withLane2Bins(t *testing.T) string {
 			t.Fatalf("symlink %s: %v", name, err)
 		}
 	}
-	prev, prevRules := lane2BinDirs, redactRules
-	lane2BinDirs = []string{dir}
+	withLane2Seams(t, dir)
+	prevRules := redactRules
 	// The child's report carries random temp paths the production redactor
 	// would scrub as high-entropy; compare it raw.
 	redactRules = []redact.Rule{}
-	t.Cleanup(func() { lane2BinDirs, redactRules = prev, prevRules })
+	t.Cleanup(func() { redactRules = prevRules })
 	return dir
 }
 
@@ -273,4 +273,11 @@ func TestRunLane2OutputRedacted(t *testing.T) {
 	if len(recs) != 1 || recs[0]["enforcement"] != "daemon-read" {
 		t.Errorf("audit = %v, want one daemon-read record", recs)
 	}
+}
+
+// lane2Argv keeps the canonical argv assertions focused while exercising admission.
+func lane2Argv(cmd string) ([]string, bool) {
+	plan, matched, refusal := lane2Plan(cmd, pinState{})
+	defer plan.Close()
+	return plan.argv, matched && refusal == ""
 }

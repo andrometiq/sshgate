@@ -254,17 +254,19 @@ func ExecWithRedaction(ctx context.Context, cmd string, opts ExecOpts) (res Exec
 // env as the child's environment, through the same stdout/stderr redaction,
 // counting, /dev/null stdin and process-group plumbing as ExecWithRedaction.
 // It is the shell-free exec for the gate's Lane-2 daemon-read allowlist: argv[0]
-// must be an absolute path (never a $PATH lookup), a nil env yields an EMPTY
+// and execPath must be absolute paths (never a $PATH lookup). execPath selects
+// the file while argv[0] preserves the admitted client name. A nil env yields an EMPTY
 // environment, never the gate's inherited one, and the child's cwd is /. opts.Confine must be nil — this
 // door is unjailed by design. Return values follow ExecWithRedaction.
-func ExecArgvWithRedaction(ctx context.Context, argv, env []string, opts ExecOpts) (ExecResult, error) {
-	if len(argv) == 0 || !filepath.IsAbs(argv[0]) {
-		return ExecResult{ExitCode: -1}, errors.New("exec: argv[0] must be an absolute path")
+func ExecArgvWithRedaction(ctx context.Context, execPath string, argv, env []string, opts ExecOpts) (ExecResult, error) {
+	if len(argv) == 0 || !filepath.IsAbs(argv[0]) || !filepath.IsAbs(execPath) {
+		return ExecResult{ExitCode: -1}, errors.New("exec: exec path and argv[0] must be absolute paths")
 	}
 	if opts.Confine != nil {
 		return ExecResult{ExitCode: -1}, errors.New("exec: argv exec is never confined")
 	}
-	c := exec.CommandContext(ctx, argv[0], argv[1:]...)
+	c := exec.CommandContext(ctx, execPath, argv[1:]...)
+	c.Args = append([]string(nil), argv...)
 	c.Env = append([]string{}, env...) // non-nil: os/exec inherits the gate's env only for a nil Env
 	c.Dir = "/"
 	c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}

@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"errors"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -26,6 +27,9 @@ func TestJailMatrixPhase3(t *testing.T) {
 	}
 	for _, abi := range []string{"native", "abi1"} {
 		t.Run(abi, func(t *testing.T) {
+			t.Run("G-L2-ADMIT-WRITABLE-DIR", func(t *testing.T) { legLane2Admit(t, abi, "G-L2-ADMIT-WRITABLE-DIR") })
+			t.Run("G-L2-ADMIT-RUNPATH-ORIGIN", func(t *testing.T) { legLane2Admit(t, abi, "G-L2-ADMIT-RUNPATH-ORIGIN") })
+			t.Run("G-L2-ADMIT-RUNPATH-UNTRUSTED", func(t *testing.T) { legLane2Admit(t, abi, "G-L2-ADMIT-RUNPATH-UNTRUSTED") })
 			t.Run("G-L2-GRAMMAR", func(t *testing.T) { legLane2Unadmitted(t, abi, "G-L2-GRAMMAR", "--sg-unlisted", "grammar-flag") })
 			t.Run("G-L2-REDIRECT", func(t *testing.T) { legLane2Unadmitted(t, abi, "G-L2-REDIRECT", "--user", "redirect-flag") })
 		})
@@ -54,5 +58,42 @@ func legLane2Unadmitted(t *testing.T, abi, name, flag, effect string) {
 	jailed := len(recs) == 1 && recs[0]["enforcement"] == "kernel" && recs[0]["profile"] == "ro-v1"
 	p.Jailed("lane2", passed && code == exitOK && daemonRead || !passed && jailed)
 	p.Observed("output", passed || !strings.Contains(out, mode))
+	p.Finish()
+}
+
+func legLane2Admit(t *testing.T, abi, name string) {
+	p := newProof(t, name)
+	dir := buildLane2Fixtures(t)
+	gateDir := t.TempDir()
+	withGateDir(t, gateDir)
+	withReadSpec(t, abi, nil)
+	mode := lane2Mode(t, "report")
+	effect, reason, marker := "untrusted-ran", "binary", mode
+	switch name {
+	case "G-L2-ADMIT-WRITABLE-DIR":
+		if err := os.Chmod(dir, 0777); err != nil {
+			t.Fatal(err)
+		}
+	case "G-L2-ADMIT-RUNPATH-ORIGIN":
+		effect, reason = "lib-ran", "search-tag"
+		marker = "LIB-RAN " + lane2BuildSearch(t, dir, "$ORIGIN/lib", false)
+	case "G-L2-ADMIT-RUNPATH-UNTRUSTED":
+		effect, reason = "lib-ran", "search-tag"
+		library := filepath.Join(dir, "lib")
+		marker = "LIB-RAN " + lane2BuildSearch(t, dir, library, true)
+		if err := os.Chmod(library, 0777); err != nil {
+			t.Fatal(err)
+		}
+	}
+	direct, err := exec.Command(filepath.Join(dir, "systemctl"), "status", mode).CombinedOutput()
+	p.Control("exec", err == nil && strings.Contains(string(direct), marker))
+	code, out, stderr := runWith(t, "systemctl status "+mode)
+	ran := strings.Contains(out, marker)
+	p.Effect(effect, ran)
+	records := auditRecords(t, gateDir)
+	denied := len(records) == 1 && records[0]["deny_reason"] == "lane2:admit:"+reason
+	executed := len(records) == 1 && records[0]["enforcement"] == "daemon-read"
+	p.Jailed("lane2", ran && code == 0 && executed || !ran && code == exitNoPermVal && denied && strings.Contains(stderr, "nothing ran"))
+	p.Observed("output", ran || out == "")
 	p.Finish()
 }

@@ -408,7 +408,7 @@ func execChild(cmd string, reveal bool, captureLimit int, plan execPlan) (rc int
 	var err error
 	switch {
 	case plan.argv != nil:
-		res, err = gate.ExecArgvWithRedaction(ctx, plan.argv, confine.Lane2Env(), opts)
+		res, err = gate.ExecArgvWithRedaction(ctx, plan.execPath, plan.argv, confine.Lane2Env(), opts)
 	default:
 		opts.Confine = plan.confine
 		if plan.confine != nil {
@@ -580,9 +580,10 @@ func execAndAudit(audit *gate.AuditLogger, cmd, classification, approval string,
 // one of argv (Lane 2, shell-free) or confine (the jail); a read with neither
 // is a classifier-only run.
 type execPlan struct {
-	argv    []string
-	confine *confine.Spec
-	read    *gate.ReadAudit
+	execPath string
+	argv     []string
+	confine  *confine.Spec
+	read     *gate.ReadAudit
 }
 
 // auditReadDenied records a read the read jail refused, with its deny

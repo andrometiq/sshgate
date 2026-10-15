@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -47,9 +48,10 @@ func buildLane2Fixtures(t *testing.T) string {
 	if err := os.Chmod(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	previousDirs, previousRules := lane2BinDirs, redactRules
-	lane2BinDirs, redactRules = []string{dir}, []redact.Rule{}
-	t.Cleanup(func() { lane2BinDirs, redactRules = previousDirs, previousRules })
+	withLane2Seams(t, dir)
+	previousRules := redactRules
+	redactRules = []redact.Rule{}
+	t.Cleanup(func() { redactRules = previousRules })
 	return dir
 }
 
@@ -76,4 +78,33 @@ func lane2Reported(output []byte, mode string, args ...string) bool {
 		}
 	}
 	return true
+}
+
+func withLane2Seams(t *testing.T, dir string) {
+	t.Helper()
+	previousDirs, previousUIDs, previousEndpoints := lane2BinDirs, lane2TrustedUIDs, lane2SystemEndpoints
+	lane2BinDirs, lane2TrustedUIDs = []string{dir}, []uint32{0, uint32(os.Getuid())}
+	lane2SystemEndpoints = map[string][]string{}
+	// Unix socket paths are limited to 108 bytes; proof subtest names make
+	// t.TempDir paths too long under the jail-visible test cache.
+	socketDir, err := os.MkdirTemp("", "l2-sockets-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(socketDir) })
+	if err := os.Chmod(socketDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	for _, client := range []string{"docker", "systemctl"} {
+		path := filepath.Join(socketDir, client)
+		listener, err := net.Listen("unix", path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { listener.Close() })
+		lane2SystemEndpoints[client] = []string{path}
+	}
+	t.Cleanup(func() {
+		lane2BinDirs, lane2TrustedUIDs, lane2SystemEndpoints = previousDirs, previousUIDs, previousEndpoints
+	})
 }

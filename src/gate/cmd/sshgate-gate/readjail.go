@@ -196,14 +196,21 @@ func execRead(audit *gate.AuditLogger, cmd, approval string, reveal bool) int {
 	}
 	grant := forceNetGrant
 	requires := requiresConfinement(pin, grant)
-	if argv, ok := lane2Argv(cmd); ok {
+	plan, matched, refusal := lane2Plan(cmd, pin)
+	defer plan.Close()
+	if matched {
+		if refusal != "" {
+			logf("daemon read refused: %s; nothing ran", refusal)
+			auditReadDenied(audit, cmd, "lane2:admit:"+refusal, exitNoPermVal)
+			return exitNoPermVal
+		}
 		if !routeBeforeAttempt(requires) {
-			logf("read jail unavailable: this read must run confined and %s cannot run in the jail yet; nothing ran", filepath.Base(argv[0]))
+			logf("read jail unavailable: this read must run confined and %s cannot run in the jail yet; nothing ran", filepath.Base(plan.argv[0]))
 			auditReadDenied(audit, cmd, "confine:required", exitNoPermVal)
 			return exitNoPermVal
 		}
 		read := &gate.ReadAudit{Enforcement: "daemon-read", Pinned: pin.valid, Net: true}
-		rc, _, _ := execAndAudit(audit, cmd, "read", approval, reveal, execPlan{argv: argv, read: read})
+		rc, _, _ := execAndAudit(audit, cmd, "read", approval, reveal, execPlan{argv: plan.argv, execPath: plan.binary.path, read: read})
 		return rc
 	}
 	spec := readSpec(pin, requires, grant)

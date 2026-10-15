@@ -223,6 +223,7 @@ type AuditRecord struct {
 	// other record.
 	*ReadAudit
 	// DenyReason says why the read jail refused a read: "pin:damaged",
+	// "lane2:admit:<check>" for daemon-read admission,
 	// "pin:legacy-floor", "confine:required", "jail:absent:<stage>[:<ERRNO>]",
 	// "jail:failed:<stage>[:<ERRNO>]" (with ":after-start" when the read may
 	// have started before the jail failed), or "cancelled" when the session ended
