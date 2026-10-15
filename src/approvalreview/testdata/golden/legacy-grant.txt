@@ -1,0 +1,110 @@
+=== buttons: ✓ Approve all displayed commands (STANDING GRANT) | ✗ Deny
+=== part 1/1 (964 bytes)
+🔐 SSHGate approval review — PART 1/1
+Request: 9f1c2e4a7b · Card: k7m2q3x4c5v6 · Plan: none (legacy v1 request)
+⚠️ STANDING GRANT — Older client: this grant will not auto-sign. Each write still asks for approval.
+Requester: local-uid:1000
+Submitted: 2026-10-15T09:30:00Z
+Expires: 2026-10-15T09:35:00Z
+Contents: standing grant with 2 listed command(s); no bytes hidden
+Protocol-generated legacy intent (unverified; client supplied no reason):
+│ Legacy v1 request (reason unavailable)
+
+Standing grant on web-1
+Route (requester's registry; signer-unverified)
+Scope: ONLY the 2 exact command(s) below
+Duration: 1h0m0s (3600 s), counted from approval
+
+Grant command 1/2 sha256=a564063a570ac4ab64b7b5e76fa472347de4131b89a4ce5f5214ccafeffeb95c
+Exact command (no hidden bytes):
+│ systemctl restart worker
+
+Grant command 2/2 sha256=a2480df6cd3f6db104c1daf46eeefba860d07c0025b8d8f006022fcda97916c9
+Exact command (no hidden bytes):
+│ systemctl status worker
+=== decision card, preparing (545 bytes)
+⚠️ STANDING GRANT — Older client: this grant will not auto-sign. Each write still asks for approval.
+🔐 SSHGate approval — DECISION CARD
+Review the 1 numbered part(s) above before deciding; Approve covers every displayed command.
+Request: 9f1c2e4a7b · Card: k7m2q3x4c5v6
+Plan hash: none (legacy v1 request)
+Requester: local-uid:1000
+Submitted: 2026-10-15T09:30:00Z
+Expires: 2026-10-15T09:35:00Z
+Contents: standing grant with 2 listed command(s); no bytes hidden
+AI advisory: preparing. Approve appears once it is ready or unavailable.
+=== decision card, ready (797 bytes)
+⚠️ STANDING GRANT — Older client: this grant will not auto-sign. Each write still asks for approval.
+🔐 SSHGate approval — DECISION CARD
+Review the 1 numbered part(s) above before deciding; Approve covers every displayed command.
+Request: 9f1c2e4a7b · Card: k7m2q3x4c5v6
+Plan hash: none (legacy v1 request)
+Requester: local-uid:1000
+Submitted: 2026-10-15T09:30:00Z
+Expires: 2026-10-15T09:35:00Z
+Contents: standing grant with 2 listed command(s); no bytes hidden
+AI advisory (model output; unverified, not a check):
+Alignment: not assessed (legacy request carries no agent reason)
+Summary:
+│ Restarts the service named in the reason.
+Concerns (by severity):
+│ [high] No config test before the restart.
+│ [info] Brief downtime.
+Effects:
+│ 1. Restarts nginx; open connections drop.
+=== hosted view, ready
+{
+  "request_id": "9f1c2e4a7b",
+  "kind": "standing_grant",
+  "legacy": true,
+  "headlines": [
+    "⚠️ STANDING GRANT — Older client: this grant will not auto-sign. Each write still asks for approval."
+  ],
+  "requester": "local-uid:1000",
+  "submitted_at": "2026-10-15T09:30:00Z",
+  "expires_at": "2026-10-15T09:35:00Z",
+  "reason_label": "Protocol-generated legacy intent (unverified; client supplied no reason)",
+  "reason": "Legacy v1 request (reason unavailable)",
+  "summary": "standing grant with 2 listed command(s); no bytes hidden",
+  "items": [
+    {
+      "heading": "Standing grant on web-1",
+      "notes": [
+        "Route (requester's registry; signer-unverified)",
+        "Scope: ONLY the 2 exact command(s) below",
+        "Duration: 1h0m0s (3600 s), counted from approval"
+      ],
+      "hidden_bytes": 0
+    },
+    {
+      "heading": "Grant command 1/2 sha256=a564063a570ac4ab64b7b5e76fa472347de4131b89a4ce5f5214ccafeffeb95c",
+      "text_label": "Exact command (no hidden bytes)",
+      "text": "systemctl restart worker",
+      "ref": "grant command 1",
+      "sha256": "a564063a570ac4ab64b7b5e76fa472347de4131b89a4ce5f5214ccafeffeb95c",
+      "hidden_bytes": 0
+    },
+    {
+      "heading": "Grant command 2/2 sha256=a2480df6cd3f6db104c1daf46eeefba860d07c0025b8d8f006022fcda97916c9",
+      "text_label": "Exact command (no hidden bytes)",
+      "text": "systemctl status worker",
+      "ref": "grant command 2",
+      "sha256": "a2480df6cd3f6db104c1daf46eeefba860d07c0025b8d8f006022fcda97916c9",
+      "hidden_bytes": 0
+    }
+  ],
+  "assist": {
+    "state": "ready",
+    "alignment": "not assessed (legacy request carries no agent reason)",
+    "summary": "Restarts the service named in the reason.",
+    "concerns": [
+      "[high] No config test before the restart.",
+      "[info] Brief downtime."
+    ],
+    "effects": [
+      "Restarts nginx; open connections drop."
+    ]
+  },
+  "approve_label": "✓ Approve all displayed commands (STANDING GRANT)",
+  "deny_label": "✗ Deny"
+}
