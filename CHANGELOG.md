@@ -10,16 +10,41 @@ published; entries are ordered newest-first by version.
 
 ## [Unreleased]
 
-Phase 2 of the kernel read jail (work item #22). This entry covers P2.1; it
-ships together with P2.2 (`SSHGATE_JAIL`, the rewritten `gate doctor` and
-`--pin`), with no release between them.
+Phase 2 of the kernel read jail (work item #22): P2.1 and P2.2, released
+together.
+
+### Added
+
+- **`gate doctor --pin --net=allow|deny [--accept-fs=network[,autofs]]`** pins
+  a host after a rehearsal: doctor builds test fixtures (a file, a named pipe,
+  Unix and TCP listeners, a running process, a `/tmp` file), runs a fixed probe
+  menu inside the exact read jail the pin would give, checks every effect from
+  outside, and writes the `jail` pin (0600, atomically) only if every check
+  passed; otherwise it exits 77 and writes nothing. A matching pin is left
+  unchanged. `--pin` also repairs a damaged pin or a leftover `jail-floor`.
+- **`SSHGATE_JAIL`**, an unsigned, unaudited verb that read-only hosts answer
+  too: one jail attempt of `:` and one JSON line saying how reads are enforced,
+  whether the host is pinned, whether reads have network, the Landlock ABI, the
+  read label and any denial reason. No byte the agent sends runs.
+- **The read label.** Doctor and the verb report what a read here is:
+  `classifier-only (jail available; pin to claim)` on an unpinned host with the
+  jail, `kernel-jailed (read-only label not enabled in this build)` on a pinned
+  one, `kernel-jailed, network open — not read-only` with `net=allow`, and so on.
+
+### Security
+
+- **The gate seals itself while a jailed read runs.** It becomes
+  non-dumpable right after the read's jail starts, so another process of the
+  same user outside the jail can no longer read its environment or redaction
+  key, or inject bytes into the client's output, through `/proc`. A gate binary
+  its owner cannot read refuses every jailed read; doctor says so.
 
 ### Changed
 
 - **Network is off by default for unsigned reads.** On a host where the
   kernel jail runs, an unsigned read can no longer open a TCP or UDP socket,
   not even to localhost. Turn it back on per host by pinning the host
-  `net=allow` (`gate doctor --pin`, from P2.2); a per-read signed network grant
+  `net=allow` (`gate doctor --pin --net=allow`); a per-read signed network grant
   is planned. A jailed network tool that fails for this reason gets one note on
   stderr. Hosts without a usable jail run reads classifier-only, as before, and
   keep network.
@@ -30,8 +55,8 @@ ships together with P2.2 (`SSHGATE_JAIL`, the rewritten `gate doctor` and
   failure is *Failed* and refuses the read (exit 77), as does any failure on a
   pinned host. A command the jail may have started is never run again.
 - **The `jail` pin replaces `jail-floor`.** A `jail` file in the gate
-  directory (`profile=ro-v1`, `net=allow|deny`, optional `accept_fs=`) pins the
-  host: reads never run outside the jail, runs are strict (a mount the jail
+  directory (`profile=ro-v1`, `net=allow|deny`, optional `accept_fs=`), written
+  by `gate doctor --pin`, pins the host: reads never run outside the jail, runs are strict (a mount the jail
   cannot hide refuses the read), and the pin sets network. A damaged pin
   refuses every read. **Upgrading:** a leftover `jail-floor` with no `jail` pin
   refuses every read until the host is re-pinned or the file is removed.
@@ -46,8 +71,11 @@ ships together with P2.2 (`SSHGATE_JAIL`, the rewritten `gate doctor` and
   `landlock_abi`, `net`, `accept_fs`, `requires_confinement`, `cwd_reset`,
   `jail_absent` and `label_clause_unmet`; jail denials record `deny_reason`.
   The `rung` field is gone.
-- **`gate doctor`** (interim, until P2.2) reports the pin, the host facts, one
-  jail attempt and what an unsigned read would do; `--pin` is refused.
+- **`gate doctor`** is rewritten: it reports the read label, the host's jail
+  features with the errnos of its attempts, every mount and whether the jail
+  shows it, the rehearsal, the pin and advice. A host whose gate directory the
+  jail cannot show (FUSE, ZFS, `overlay`, a block device behind LVM, LUKS, md,
+  a loop device or device-mapper) cannot be pinned in this build.
 
 ## [0.1.5]
 

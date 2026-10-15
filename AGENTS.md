@@ -106,7 +106,8 @@ have them check the host's `/var/log/auth.log` and that the key line was pasted 
   jail run reads classifier-only, with network, unless the operator pinned the host. A read denied with 77 and `read jail unavailable` means the pin is
   damaged, or the host's jail could not be set up (or is missing on a pinned host, or for
   a read that must run confined), so nothing ran: don't retry; a human runs
-  `~/.sshgate-gate/gate doctor` on the host. Details: `docs/THREAT-MODEL.md`.
+  `~/.sshgate-gate/gate doctor` on the host, and pins it with `gate doctor --pin --net=deny`
+  (or `--net=allow`). Details: `docs/THREAT-MODEL.md`.
 - `transfer` failing with `src/dest server not registered for transfer`: that endpoint has no
   transfer key on the signer. The user runs `sshgate xfer-register <alias>`, then you retry.
 

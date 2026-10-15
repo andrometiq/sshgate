@@ -3,11 +3,12 @@
 // SSHGate dedicated key; the forwarded command from the client arrives
 // in $SSH_ORIGINAL_COMMAND.
 //
-// Exit codes (BSD sysexits where applicable):
+// Exit codes (BSD sysexits where applicable), forced-command path:
 //
 //	0  — success (also: empty SSH_ORIGINAL_COMMAND, the post-install
 //	     verification probe, prints SSHGATE_OK; the unsigned SSHGATE_VERSION
-//	     probe, prints the running gate's build revision; and a completed
+//	     probe, prints the running gate's build revision; the unsigned
+//	     SSHGATE_JAIL verb, prints exactly one JSON line; and a completed
 //	     SSHGATE_UPDATE, prints SSHGATE_UPDATED)
 //	1  — generic runtime failure or non-zero from /bin/sh -c on the
 //	     non-pass-through paths
@@ -17,15 +18,26 @@
 //	     non-ELF/wrong-arch binary — nothing is written)
 //	70 — EX_SOFTWARE: pubkey file unreadable, corrupt, or has insecure
 //	     mode; also a SSHGATE_UPDATE filesystem/replace failure (old gate
-//	     left intact)
+//	     left intact), and SSHGATE_JAIL could not open its output
 //	77 — EX_NOPERM: write command without a verified SSHGATE_SIG prefix;
 //	     also a read refused by the read jail, with "gate: read jail
 //	     unavailable" on stderr: the jail pin is damaged (or a jail-floor
 //	     from an earlier release is left with no jail pin), the read must run
-//	     confined and cannot, the jail failed to set up, or the host has no
-//	     usable jail and is pinned
-//	143 — a signed admin verb, or a read whose jail never started, cancelled
-//	     before it ran
+//	     confined and cannot, the jail failed to set up (or failed after the
+//	     read may have started), or the host has no usable jail and is pinned
+//	143 — a signed admin verb, a read whose jail never started, or
+//	     SSHGATE_JAIL, cancelled before it ran
+//
+// Exit codes of the argv subcommands, reached only from a plain shell:
+//
+//	genkeys        — 0, 65 usage, 70 failure
+//	doctor         — 0 report (with --pin: written or unchanged), 65 usage,
+//	                 70 internal error or a gate binary that is not the running
+//	                 one, 75 another doctor --pin holds the lock, 77 --pin
+//	                 refused (rehearsal skipped or failed, wrong user, unsafe
+//	                 gate directory)
+//	__jailselftest — 0 inside the jail, 65 bad arguments, 77 anywhere else
+//	shim, worker   — the jail's own sentinels; 70 when setup fails
 //
 // Exit codes from the executed inner command are passed through
 // directly (so /bin/sh -c 'exit 42' makes gate exit 42).

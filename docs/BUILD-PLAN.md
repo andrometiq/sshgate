@@ -99,7 +99,7 @@ What Phase 1 does not do yet, and where it is done:
 |---|---|
 | Network is a host setting only; there is no per-read signed network grant | P4.2–P4.4 |
 | The fixed `systemctl`/`docker` read verbs run outside the jail | P3.2 |
-| No `SSHGATE_JAIL` capability verb; the MCP shows only the signer tier | P2.2, P5.1 |
+| The MCP shows only the signer tier, not the host's `SSHGATE_JAIL` capability | P5.1 |
 | No host is labelled kernel read-only; the label is compiled off | P7.1 |
 | The MCP instructions and user docs do not yet explain network permissions, pins and labels | P5.2 |
 | A read the jail refuses inside `run_batch` returns exit 77 and stderr but no structured `denial` object (`run` has one) | P5.1 |
@@ -272,7 +272,7 @@ Status: done.
 - *Release note:* any release containing P2.1 states that unsigned reads lost network and how
   to restore it (P5.2 wording).
 
-**P2.2 — `SSHGATE_JAIL`, `gate doctor`, and the label function.** Status: open.
+**P2.2 — `SSHGATE_JAIL`, `gate doctor`, and the label function.** Status: done.
 
 - *Goal:* let operators and the MCP see host capability, and pin a host after a full rehearsal.
 - *Deliverables:*
@@ -294,8 +294,11 @@ Status: done.
     While the switch is off, `doctor --pin` still writes the pin and reports
     `kernel-jailed (read-only label not enabled in this build)`.
   - The exit-code header comment in the gate's `main.go`.
-- *Acceptance:* `P-G-SELFTEST-JAILED`, `P-G-JAILVERB-NOEXEC` and `P-G-LABEL-SWITCH` registered and
-  mutation-proof; the gate half of `U-LabelContract` asserts every label string at both switch
+- *Acceptance:* `P-G-SELFTEST-JAILED`, `P-G-JAILVERB-NOEXEC`, `P-G-LABEL-SWITCH`,
+  `P-G-PIN-REHEARSAL` (a pin is written only after a passed rehearsal), `P-G-SEAL` (the gate is
+  non-dumpable while a jailed read runs; red in the non-root lane, since a capless root process
+  cannot reach even an unsealed root gate) and `P-G-SEAL-GUARD` (a non-dumpable process starts no
+  jail; red in the root lane, where its clone would succeed) registered and mutation-proof; the gate half of `U-LabelContract` asserts every label string at both switch
   values, that nothing emits `read-only (kernel)` while the switch is off, and that any non-empty
   `unmet` never yields it; `gate doctor --json` reports
   `classifier-only (jail available; pin to claim)` before `--pin`;

@@ -642,7 +642,10 @@ binary's read-path tests in `src/gate/cmd/sshgate-gate` (for example
 `TestGateBinaryJailedRead`, which drives a forced-command read through the real
 gate binary and checks that an unpinned jailed read gets no INET socket), the
 read router's decision tables (`TestPhase2Tables`) and its gate legs
-(`TestJailMatrixPhase2`, `TestGateBinaryNetworkPin`). The two tests that prove
+(`TestJailMatrixPhase2`, `TestGateBinaryNetworkPin`), the in-process read's
+recorded seal (`TestInProcessReadLeavesDumpable`), the `SSHGATE_JAIL` verb through
+the real binary (`TestGateBinaryJailVerb`), and the real binary's `gate doctor`
+rehearsal and `--pin` on the host (`TestDoctorRehearsalRealHost`). The two tests that prove
 classifier-only reads on a host with Ubuntu's AppArmor userns restriction
 (`TestRunReadClampHostRunsClassifierOnly`, `TestGateBinaryClampHostClassifierOnly`) are not
 in this target, which needs a working jail; `make test` runs them, and CI requires them to pass

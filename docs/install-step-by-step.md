@@ -300,8 +300,12 @@ registered, and run:
 ~/.sshgate-gate/gate doctor
 ```
 
-It makes one jail attempt and prints the verdict for an unsigned read on its
-`reads:` line:
+It changes nothing. It prints the verdict for an unsigned read on its `reads:`
+line and the read label on its `label:` line, then rehearses the jail: it runs
+a fixed probe menu inside the jail against test files, sockets and a process
+it creates in the gate directory, `/tmp` and `/dev/shm`, checks from outside
+that nothing changed, and removes them. The `rehearsal:` line says whether
+that passed. The `reads:` line is one of:
 
 - `kernel-jailed, no network` or `kernel-jailed, network open` — reads run in
   the jail.
@@ -310,7 +314,9 @@ It makes one jail attempt and prints the verdict for an unsigned read on its
   guarded by the classifier only. The `attempt:` line names the failing step.
 - `denied (<reason>)` — the gate is refusing reads (see below).
 
-`--json` prints the same report as JSON.
+`--json` prints the full report as JSON: the same fields the `SSHGATE_JAIL`
+verb returns, the host's jail features, every mount and whether the jail shows
+it, the rehearsal's rows, the pin, and advice.
 
 On Ubuntu 23.10 and newer, `apparmor_userns_clamp: yes` means the default
 AppArmor restriction blocks the namespaces the jail needs, so reads run
@@ -326,27 +332,34 @@ host, so weigh that before you do it.
 kernel or sysctl change) goes back to classifier-only reads. A pin makes the
 gate refuse reads instead (exit 77, `gate: read jail unavailable`; the agent
 is told to ask you to run `gate doctor`), and sets the host's network for
-reads. The pin is the file `~/.sshgate-gate/jail`:
+reads. Pin with doctor, as the same user:
 
-```text
-profile=ro-v1
-net=deny
+```bash
+~/.sshgate-gate/gate doctor --pin --net=deny
 ```
 
-`net=allow` gives jailed reads network; on such a host the fixed
-`systemctl`/`docker` list is refused, because it cannot run in the jail. The
-optional `accept_fs=network[,autofs]` line accepts those mounts instead of
-hiding them. The file must be a regular file (not a symlink) with one link,
-at most 4 KiB, owned by the gate's user and not group- or world-writable, and
-must hold only these lines; anything else makes it *damaged*, and a damaged
-pin refuses every read. A pin installed by config management as a symlink
-therefore refuses every read. `gate doctor --pin` writes
-it after rehearsing the jail; that option arrives with the next build step
-([BUILD-PLAN.md](BUILD-PLAN.md) P2.2). To remove the pin, delete the file.
+Doctor rehearses the jail the pin would give and writes the pin only if the
+rehearsal passed; otherwise it exits 77 and writes nothing. Running it again
+leaves the pin unchanged. `--net=allow` gives jailed reads network; on such a
+host the fixed `systemctl`/`docker` list is refused, because it cannot run in
+the jail. `--accept-fs=network` (or `network,autofs`) makes the jail show those
+mounts instead of hiding them.
+
+The host can be pinned only if the jail shows the gate directory. If the gate
+directory is on a network file system, add `--accept-fs=network`. If it is on
+FUSE, ZFS, `overlay`, or a block device behind LVM, LUKS, md, a loop device or
+device-mapper, this build cannot pin the host: doctor says so, and reads there
+stay classifier-only.
+
+The pin is the file `~/.sshgate-gate/jail`, mode 0600. It must stay a regular
+file (not a symlink) with one link, at most 4 KiB, owned by the gate's user and
+not group- or world-writable; anything else makes it *damaged*, and a damaged
+pin refuses every read. `gate doctor --pin` repairs a damaged pin. To remove
+the pin, delete the file.
 
 **Upgrading from 0.1.x.** The older `jail-floor` file is no longer read as a
 floor. If it is present and there is no `jail` pin, the gate refuses every
-read until you re-pin the host or delete `jail-floor`.
+read until you pin the host with `gate doctor --pin` or delete `jail-floor`.
 
 Even without a pin, the gate never re-runs a read the jail may have started:
 a jail that fails to set up for an unexplained reason refuses the read with

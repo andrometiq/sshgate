@@ -278,10 +278,10 @@ installed for, and run:
 The `reads:` line says what happens to an unsigned read on that host: `kernel-jailed, no network`,
 `kernel-jailed, network open`, `classifier-only (no usable jail)`, or `denied (<reason>)`.
 
-**Pin a host.** A `jail` file next to the gate pins the host: reads are then never run outside the
-jail (exit 77, "read jail unavailable", when it cannot be set up), and the pin says whether reads
-get network. `gate doctor --pin` writes it after a rehearsal ([docs/BUILD-PLAN.md](docs/BUILD-PLAN.md)
-P2.2). A jail that fails to set up for an unexplained reason is always refused, pinned or not; only
+**Pin a host.** `~/.sshgate-gate/gate doctor --pin --net=deny` (or `--net=allow`) pins the host:
+reads are then never run outside the jail (exit 77, "read jail unavailable", when it cannot be set
+up), and the pin says whether reads get network. Doctor first rehearses the jail the pin would give,
+checking every effect from outside, and writes the pin only if the rehearsal passed. A jail that fails to set up for an unexplained reason is always refused, pinned or not; only
 a host that lacks the jail (user namespaces off, the AppArmor restriction, no Landlock) runs reads
 classifier-only, and only when it is not pinned. A `jail-floor` file from 0.1.x with no `jail`
 pin makes the gate refuse reads until the host is re-pinned or the file is removed.

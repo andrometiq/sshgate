@@ -128,14 +128,30 @@ two classes before the command ever starts:
 - **Failed:** anything else, including every failure after the jail's own
   checks start and every unexplained errno.
 
-An operator can **pin** a host by writing a `jail` file in the gate directory
-(`profile=ro-v1` and `net=allow` or `net=deny`, optionally `accept_fs=`). The pin
-is static config, like `gate.pub`: the read path only reads it, and it must be a
-regular file owned by the gate's user, not group- or world-writable, with one
-link and at most 4 KiB. A pin that fails any check, or holds an unknown key or
-value, is *damaged*. Run `~/.sshgate-gate/gate doctor` on the host (from a normal
-shell, not through SSHGate) to see the pin, one jail attempt and what a read
-would do.
+An operator **pins** a host with `~/.sshgate-gate/gate doctor --pin --net=deny`
+(or `--net=allow`, optionally `--accept-fs=network` or `--accept-fs=network,autofs`),
+run as the gate's user from a normal shell, not through SSHGate. Doctor first
+**rehearses** the pin: it builds fixtures in the gate directory (a file, a named
+pipe, Unix and TCP listeners, a running process that is not its child, a file in
+`/tmp`), runs a fixed probe menu inside the exact read jail the pin would give,
+and checks every effect from outside. It writes the `jail` pin, mode 0600 and
+atomically, only if every check passed; otherwise it exits 77 and writes nothing.
+Run again with the same flags, it leaves the pin unchanged. The flags decide, not
+the pin in place, so `--pin` also repairs a damaged pin or replaces a leftover
+`jail-floor`. Without `--pin`, `gate doctor` reports the pin, the host's jail
+features, its mounts, the rehearsal and what a read would do.
+
+The pin is static config, like `gate.pub`: the read path only reads it, and it
+must be a regular file owned by the gate's user, not group- or world-writable,
+with one link and at most 4 KiB. Besides doctor, only a human-approved signed
+write can change it. A pin that fails any check, or holds an unknown key or
+value, is *damaged*.
+
+A host can be pinned only if the read jail shows the gate directory. On a network
+file system that needs `--accept-fs=network`. A gate directory on FUSE, ZFS,
+`overlay`, or a block device behind LVM, LUKS, md, a loop device or device-mapper
+cannot be pinned in this build: doctor says so, and reads there stay
+classifier-only.
 
 | | Absent | Failed |
 |---|---|---|
@@ -164,6 +180,18 @@ clone, so unsigned reads there run classifier-only, and each read logs one
 AppArmor `userns_create` denial in the kernel audit log. Install an AppArmor
 profile for the gate, accept classifier-only reads, or pin the host to refuse
 them.
+
+**Asking a host what reads get.** The unsigned `SSHGATE_JAIL` verb (those exact
+bytes; answered before the key is loaded, so read-only hosts answer it too, and
+not audited) makes one jail attempt of the shell builtin `:`, with the
+environment cleared, and prints one JSON line: how reads are enforced (`kernel`,
+`classifier` or `unavailable`), whether the host is pinned, whether reads have
+network, the Landlock ABI, the read label, the reason for a denial, the mounts
+the jail cannot show, the pin's `accept_fs`, and `core_pattern`. The same caller
+could already read each of these. No byte the agent sends runs: any other line is
+an ordinary command, and on a read-only host an unknown command counts as a
+write and is denied. A gate older than this verb answers it with exit 77 and no
+JSON.
 
 A small fixed list of `systemctl` and `docker` read verbs (for example
 `systemctl status`, `docker ps`, `docker logs`) **always runs outside the jail**,
@@ -198,6 +226,15 @@ and refuses the read if any check fails. With that, a jailed read **cannot**:
   cannot see which process holds a file or socket);
 - change mounts, namespaces or sysctls, or use any capability in the host's
   user namespace.
+
+The gate itself is also shielded while a jailed read runs: right after the
+read's jail starts, the gate makes itself non-dumpable. Its client pipes, its
+environment and the session's redaction key in memory then need
+`CAP_SYS_PTRACE` to reach through `/proc`, so another process of the same user
+outside the jail (a classifier-only read, another SSH session, a signed write)
+can neither read them nor inject bytes into the client's output. A gate binary
+its owner cannot read is not dumpable from the start; such a gate refuses every
+jailed read, and doctor says so.
 
 ### What a jailed read can still do
 
@@ -294,7 +331,9 @@ item 1; others are outside what a read jail can promise.
 - **Proof gaps.** Every jail protection has a test that fails when the protection
   is removed (`TESTING.md` §12), but a few are proved only by the error the kernel
   returns, not by observing the effect (for example the page-migration calls,
-  which need a machine with two NUMA nodes to observe).
+  which need a machine with two NUMA nodes to observe). Race-detector builds
+  never run under the jail's seccomp filter: the tests run the rehearsal's
+  selftest from a separate non-race build.
 
 ## What SSHGate does NOT protect against (be honest)
 
