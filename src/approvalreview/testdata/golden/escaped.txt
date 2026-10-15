@@ -1,0 +1,89 @@
+=== buttons: ✓ Approve all displayed commands | ✗ Deny
+=== part 1/1 (816 bytes)
+🔐 SSHGate approval review — PART 1/1
+Request: a2_x-_0123456789abcdefghi · Card: k7m2q3x4c5v6 · Plan: 7e0685f814c4973a
+Requester: local-uid:1000
+Submitted: 2026-10-15T09:30:00Z
+Expires: 2026-10-16T09:30:00Z
+Synchronous request: it runs only if approved while the agent is still waiting (until 2026-10-15T09:35:10Z)
+Contents: 1 command(s): 1 signed, 0 unsigned read(s); no command bytes hidden
+Agent-stated reason (unverified):
+│ Rotate <tls> & reload \u{2014} caf\u{00E9}
+
+Command 1/1 [signed_write] ttl=30s sha256=23432e0f5134439b56db10152558c4da7a5ee079334332f410abc5a1e19b7541
+Route (requester's registry; signer-unverified)
+web-1 → deploy@web-1.example.net:22 fp=SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU
+Exact command (no hidden bytes):
+│ printf '<a href="x">&amp;</a>\\n' > /srv/index.html
+=== decision card, preparing (612 bytes)
+🔐 SSHGate approval — DECISION CARD
+Review the 1 numbered part(s) above before deciding; Approve covers every displayed command.
+Request: a2_x-_0123456789abcdefghi · Card: k7m2q3x4c5v6
+Plan hash: 7e0685f814c4973a260d82ed8e5752d2adf65282986d0be3e32b474157730539
+Requester: local-uid:1000
+Submitted: 2026-10-15T09:30:00Z
+Expires: 2026-10-16T09:30:00Z
+Synchronous request: it runs only if approved while the agent is still waiting (until 2026-10-15T09:35:10Z)
+Contents: 1 command(s): 1 signed, 0 unsigned read(s); no command bytes hidden
+AI advisory: preparing. Approve appears once it is ready or unavailable.
+=== decision card, ready (818 bytes)
+🔐 SSHGate approval — DECISION CARD
+Review the 1 numbered part(s) above before deciding; Approve covers every displayed command.
+Request: a2_x-_0123456789abcdefghi · Card: k7m2q3x4c5v6
+Plan hash: 7e0685f814c4973a260d82ed8e5752d2adf65282986d0be3e32b474157730539
+Requester: local-uid:1000
+Submitted: 2026-10-15T09:30:00Z
+Expires: 2026-10-16T09:30:00Z
+Synchronous request: it runs only if approved while the agent is still waiting (until 2026-10-15T09:35:10Z)
+Contents: 1 command(s): 1 signed, 0 unsigned read(s); no command bytes hidden
+AI advisory (model output; unverified, not a check):
+Alignment: aligned
+Summary:
+│ Restarts the service named in the reason.
+Concerns (by severity):
+│ [high] No config test before the restart.
+│ [info] Brief downtime.
+Effects:
+│ 1. Restarts nginx; open connections drop.
+=== hosted view, ready
+{
+  "request_id": "a2_x-_0123456789abcdefghi",
+  "plan_hash": "7e0685f814c4973a260d82ed8e5752d2adf65282986d0be3e32b474157730539",
+  "kind": "command_job",
+  "legacy": false,
+  "requester": "local-uid:1000",
+  "submitted_at": "2026-10-15T09:30:00Z",
+  "expires_at": "2026-10-16T09:30:00Z",
+  "sync_notice": "Synchronous request: it runs only if approved while the agent is still waiting (until 2026-10-15T09:35:10Z)",
+  "reason_label": "Agent-stated reason (unverified)",
+  "reason": "Rotate <tls> & reload \\u{2014} caf\\u{00E9}",
+  "summary": "1 command(s): 1 signed, 0 unsigned read(s); no command bytes hidden",
+  "items": [
+    {
+      "heading": "Command 1/1 [signed_write] ttl=30s sha256=23432e0f5134439b56db10152558c4da7a5ee079334332f410abc5a1e19b7541",
+      "notes": [
+        "Route (requester's registry; signer-unverified)",
+        "web-1 → deploy@web-1.example.net:22 fp=SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU"
+      ],
+      "text_label": "Exact command (no hidden bytes)",
+      "text": "printf '<a href=\"x\">&amp;</a>\\\\n' > /srv/index.html",
+      "ref": "command 1",
+      "sha256": "23432e0f5134439b56db10152558c4da7a5ee079334332f410abc5a1e19b7541",
+      "hidden_bytes": 0
+    }
+  ],
+  "assist": {
+    "state": "ready",
+    "alignment": "aligned",
+    "summary": "Restarts the service named in the reason.",
+    "concerns": [
+      "[high] No config test before the restart.",
+      "[info] Brief downtime."
+    ],
+    "effects": [
+      "Restarts nginx; open connections drop."
+    ]
+  },
+  "approve_label": "✓ Approve all displayed commands",
+  "deny_label": "✗ Deny"
+}

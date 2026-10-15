@@ -1,0 +1,166 @@
+{
+  "plan": {
+    "version": 1,
+    "kind": "command_job",
+    "request_id": "a2_AAAAAAAAAAAAAAAAAAAAAA",
+    "requester_principal": "local-uid:1000",
+    "submitted_at": "2026-10-15T09:30:00Z",
+    "request_expires_at": "2026-10-16T09:30:00Z",
+    "reason": "Vacuum the database, then restart nginx",
+    "rationale_origin": "agent",
+    "executor_claim_token_hash": "0a42db07a74695c5a018d57a383b68f36d0ac4a6bec4eee382ee104818699bdc",
+    "submit_not_after": "2026-10-15T10:30:00Z",
+    "coordinator": "executor",
+    "command_job": {
+      "steps": [
+        {
+          "ordinal": 1,
+          "route": "unsigned_read",
+          "target": {
+            "server_alias": "web-1",
+            "resolved_host": "web-1.example.net",
+            "resolved_port": 22,
+            "resolved_user": "deploy",
+            "trusted_host_fingerprint": "SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU",
+            "read_only": false,
+            "added_at": "2026-09-01T08:00:00Z"
+          },
+          "registry_entry_digest": "1935ea7d0b35b9fb4af66c1de49e05180511c5c7d7ec37e72e2767517781f80c",
+          "exact_command": "df -h /var",
+          "command_sha256": "630c3a85cfdd89adfe9a05593f070d629a26cf7c49bb3880ecfe6d3a63b339f5",
+          "signature_ttl_seconds": 0
+        },
+        {
+          "ordinal": 2,
+          "route": "signed_write",
+          "target": {
+            "server_alias": "web-1",
+            "resolved_host": "web-1.example.net",
+            "resolved_port": 22,
+            "resolved_user": "deploy",
+            "trusted_host_fingerprint": "SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU",
+            "read_only": false,
+            "added_at": "2026-09-01T08:00:00Z"
+          },
+          "registry_entry_digest": "1935ea7d0b35b9fb4af66c1de49e05180511c5c7d7ec37e72e2767517781f80c",
+          "exact_command": "PGPASSWORD=hunter2secret psql -h db -U admin -c 'vacuum'",
+          "command_sha256": "8e1e5a33e3fe5d2a3a3486b1772a5b1ce32ec523f82b1fabf572779d85a616d8",
+          "signature_ttl_seconds": 60
+        },
+        {
+          "ordinal": 3,
+          "route": "signed_write",
+          "target": {
+            "server_alias": "web-1",
+            "resolved_host": "web-1.example.net",
+            "resolved_port": 22,
+            "resolved_user": "deploy",
+            "trusted_host_fingerprint": "SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU",
+            "read_only": false,
+            "added_at": "2026-09-01T08:00:00Z"
+          },
+          "registry_entry_digest": "1935ea7d0b35b9fb4af66c1de49e05180511c5c7d7ec37e72e2767517781f80c",
+          "exact_command": "systemctl restart nginx",
+          "command_sha256": "af72e7d42dc52c5e6f1871d2a03807f14cf40683321425bf1388c7d8952928ae",
+          "signature_ttl_seconds": 60
+        }
+      ],
+      "stop_policy": "class_default_writes_only",
+      "max_output_bytes": 262144
+    }
+  },
+  "review_snapshot": "{\"version\":1,\"kind\":\"command_job\",\"request_id\":\"a2_AAAAAAAAAAAAAAAAAAAAAA\",\"plan_hash\":\"4b9577bf269adf884e6f300f247a20520b7b5ad497ce2daa16b7db9174945e52\",\"requester\":\"local-uid:1000\",\"submitted_at\":\"2026-10-15T09:30:00Z\",\"expires_at\":\"2026-10-16T09:30:00Z\",\"rationale_origin\":\"agent\",\"reason\":{\"segments\":[{\"text\":\"Vacuum the database, then restart nginx\"}],\"bytes\":39,\"hidden_bytes\":0},\"steps\":[{\"ordinal\":1,\"route\":\"unsigned_read\",\"target\":{\"alias\":\"web-1\",\"user\":\"deploy\",\"host\":\"web-1.example.net\",\"port\":22,\"fingerprint\":\"SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU\"},\"ttl_seconds\":0,\"command\":{\"segments\":[{\"text\":\"df -h /var\"}],\"bytes\":10,\"hidden_bytes\":0,\"sha256\":\"630c3a85cfdd89adfe9a05593f070d629a26cf7c49bb3880ecfe6d3a63b339f5\"}},{\"ordinal\":2,\"route\":\"signed_write\",\"target\":{\"alias\":\"web-1\",\"user\":\"deploy\",\"host\":\"web-1.example.net\",\"port\":22,\"fingerprint\":\"SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU\"},\"ttl_seconds\":60,\"command\":{\"segments\":[{\"text\":\"PGPASSWORD=\"},{\"hidden\":13,\"rule_ids\":[\"sshgate-pgpassword\"]},{\"text\":\" psql -h db -U admin -c 'vacuum'\"}],\"bytes\":56,\"hidden_bytes\":13,\"sha256\":\"8e1e5a33e3fe5d2a3a3486b1772a5b1ce32ec523f82b1fabf572779d85a616d8\"},\"expiry_warning\":true},{\"ordinal\":3,\"route\":\"signed_write\",\"target\":{\"alias\":\"web-1\",\"user\":\"deploy\",\"host\":\"web-1.example.net\",\"port\":22,\"fingerprint\":\"SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU\"},\"ttl_seconds\":60,\"command\":{\"segments\":[{\"text\":\"systemctl restart nginx\"}],\"bytes\":23,\"hidden_bytes\":0,\"sha256\":\"af72e7d42dc52c5e6f1871d2a03807f14cf40683321425bf1388c7d8952928ae\"},\"expiry_warning\":true}]}",
+  "assist_result": {
+    "alignment": "aligned",
+    "summary": "Restarts the service named in the reason.",
+    "effects": [
+      "Restarts nginx; open connections drop."
+    ],
+    "concerns": [
+      {
+        "severity": "info",
+        "text": "Brief downtime."
+      },
+      {
+        "severity": "high",
+        "text": "No config test before the restart."
+      }
+    ],
+    "model": "test-model",
+    "prompt_version": "assist-v1",
+    "input_digest": "abababababababababababababababababababababababababababababababab",
+    "generated_at": "2026-10-15T09:30:00Z"
+  },
+  "card_handle": "k7m2q3x4c5v6",
+  "telegram_parts": [
+    "🔐 SSHGate approval review — PART 1/1\nRequest: a2_AAAAAAAAAAAAAAAAAAAAAA · Card: k7m2q3x4c5v6 · Plan: 4b9577bf269adf88\nRequester: local-uid:1000\nSubmitted: 2026-10-15T09:30:00Z\nExpires: 2026-10-16T09:30:00Z\nContents: 3 command(s): 2 signed, 1 unsigned read(s); 13 command byte(s) hidden by display redaction\nAgent-stated reason (unverified):\n│ Vacuum the database, then restart nginx\n\nCommand 1/3 [unsigned_read] unsigned sha256=630c3a85cfdd89adfe9a05593f070d629a26cf7c49bb3880ecfe6d3a63b339f5\nRoute (requester's registry; signer-unverified)\nweb-1 → deploy@web-1.example.net:22 fp=SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU\nExact command (no hidden bytes):\n│ df -h /var\n\nCommand 2/3 [signed_write] ttl=60s sha256=8e1e5a33e3fe5d2a3a3486b1772a5b1ce32ec523f82b1fabf572779d85a616d8\nRoute (requester's registry; signer-unverified)\nweb-1 → deploy@web-1.example.net:22 fp=SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU\n⚠️ Step 2 is signed and runs after earlier work; its signature may expire before it starts.\nDisplay-redacted command — signature covers undisplayed original bytes:\n│ PGPASSWORD=⟦hidden 13 bytes · sshgate-pgpassword⟧ psql -h db -U admin -c 'vacuum'\n\nCommand 3/3 [signed_write] ttl=60s sha256=af72e7d42dc52c5e6f1871d2a03807f14cf40683321425bf1388c7d8952928ae\nRoute (requester's registry; signer-unverified)\nweb-1 → deploy@web-1.example.net:22 fp=SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU\n⚠️ Step 3 is signed and runs after earlier work; its signature may expire before it starts.\nExact command (no hidden bytes):\n│ systemctl restart nginx"
+  ],
+  "decision_card_preparing": "🔐 SSHGate approval — DECISION CARD\nReview the 1 numbered part(s) above before deciding; Approve covers every displayed command.\nRequest: a2_AAAAAAAAAAAAAAAAAAAAAA · Card: k7m2q3x4c5v6\nPlan hash: 4b9577bf269adf884e6f300f247a20520b7b5ad497ce2daa16b7db9174945e52\nRequester: local-uid:1000\nSubmitted: 2026-10-15T09:30:00Z\nExpires: 2026-10-16T09:30:00Z\nContents: 3 command(s): 2 signed, 1 unsigned read(s); 13 command byte(s) hidden by display redaction\nAI advisory: preparing. Approve appears once it is ready or unavailable.",
+  "decision_card_ready": "🔐 SSHGate approval — DECISION CARD\nReview the 1 numbered part(s) above before deciding; Approve covers every displayed command.\nRequest: a2_AAAAAAAAAAAAAAAAAAAAAA · Card: k7m2q3x4c5v6\nPlan hash: 4b9577bf269adf884e6f300f247a20520b7b5ad497ce2daa16b7db9174945e52\nRequester: local-uid:1000\nSubmitted: 2026-10-15T09:30:00Z\nExpires: 2026-10-16T09:30:00Z\nContents: 3 command(s): 2 signed, 1 unsigned read(s); 13 command byte(s) hidden by display redaction\nAI advisory (model output; unverified, not a check):\nAlignment: aligned\nSummary:\n│ Restarts the service named in the reason.\nConcerns (by severity):\n│ [high] No config test before the restart.\n│ [info] Brief downtime.\nEffects:\n│ 1. Restarts nginx; open connections drop.",
+  "hosted_view": {
+    "request_id": "a2_AAAAAAAAAAAAAAAAAAAAAA",
+    "plan_hash": "4b9577bf269adf884e6f300f247a20520b7b5ad497ce2daa16b7db9174945e52",
+    "kind": "command_job",
+    "legacy": false,
+    "requester": "local-uid:1000",
+    "submitted_at": "2026-10-15T09:30:00Z",
+    "expires_at": "2026-10-16T09:30:00Z",
+    "reason_label": "Agent-stated reason (unverified)",
+    "reason": "Vacuum the database, then restart nginx",
+    "summary": "3 command(s): 2 signed, 1 unsigned read(s); 13 command byte(s) hidden by display redaction",
+    "items": [
+      {
+        "heading": "Command 1/3 [unsigned_read] unsigned sha256=630c3a85cfdd89adfe9a05593f070d629a26cf7c49bb3880ecfe6d3a63b339f5",
+        "notes": [
+          "Route (requester's registry; signer-unverified)",
+          "web-1 → deploy@web-1.example.net:22 fp=SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU"
+        ],
+        "text_label": "Exact command (no hidden bytes)",
+        "text": "df -h /var",
+        "ref": "command 1",
+        "sha256": "630c3a85cfdd89adfe9a05593f070d629a26cf7c49bb3880ecfe6d3a63b339f5",
+        "hidden_bytes": 0
+      },
+      {
+        "heading": "Command 2/3 [signed_write] ttl=60s sha256=8e1e5a33e3fe5d2a3a3486b1772a5b1ce32ec523f82b1fabf572779d85a616d8",
+        "notes": [
+          "Route (requester's registry; signer-unverified)",
+          "web-1 → deploy@web-1.example.net:22 fp=SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU",
+          "⚠️ Step 2 is signed and runs after earlier work; its signature may expire before it starts."
+        ],
+        "text_label": "Display-redacted command — signature covers undisplayed original bytes",
+        "text": "PGPASSWORD=⟦hidden 13 bytes · sshgate-pgpassword⟧ psql -h db -U admin -c 'vacuum'",
+        "ref": "command 2",
+        "sha256": "8e1e5a33e3fe5d2a3a3486b1772a5b1ce32ec523f82b1fabf572779d85a616d8",
+        "hidden_bytes": 13
+      },
+      {
+        "heading": "Command 3/3 [signed_write] ttl=60s sha256=af72e7d42dc52c5e6f1871d2a03807f14cf40683321425bf1388c7d8952928ae",
+        "notes": [
+          "Route (requester's registry; signer-unverified)",
+          "web-1 → deploy@web-1.example.net:22 fp=SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU",
+          "⚠️ Step 3 is signed and runs after earlier work; its signature may expire before it starts."
+        ],
+        "text_label": "Exact command (no hidden bytes)",
+        "text": "systemctl restart nginx",
+        "ref": "command 3",
+        "sha256": "af72e7d42dc52c5e6f1871d2a03807f14cf40683321425bf1388c7d8952928ae",
+        "hidden_bytes": 0
+      }
+    ],
+    "assist": {
+      "state": "ready",
+      "alignment": "aligned",
+      "summary": "Restarts the service named in the reason.",
+      "concerns": [
+        "[high] No config test before the restart.",
+        "[info] Brief downtime."
+      ],
+      "effects": [
+        "Restarts nginx; open connections drop."
+      ]
+    },
+    "approve_label": "✓ Approve all displayed commands",
+    "deny_label": "✗ Deny"
+  }
+}

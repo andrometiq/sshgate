@@ -1,0 +1,85 @@
+=== buttons: ✓ Approve all displayed commands | ✗ Deny
+=== part 1/1 (875 bytes)
+🔐 SSHGate approval review — PART 1/1
+Request: a2_AAAAAAAAAAAAAAAAAAAAAA · Card: k7m2q3x4c5v6 · Plan: 8b25512824811650
+Requester: local-uid:1000
+Submitted: 2026-10-15T09:30:00Z
+Expires: 2026-10-16T09:30:00Z
+Contents: 1 command(s): 1 signed, 0 unsigned read(s); 388 command byte(s) hidden by display redaction
+Agent-stated reason (unverified):
+│ Restart nginx after the config change
+
+Command 1/1 [signed_write] ttl=60s sha256=679b6325519c7fb6beff99b091d49c78b21f012609b5d3bfb8f126dc36674e53
+Route (requester's registry; signer-unverified)
+web-1 → deploy@web-1.example.net:22 fp=SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU
+Display-redacted command — signature covers undisplayed original bytes:
+│ cat > /root/.ssh/id <<'EOF'\x0a⟦hidden 388 bytes · gitleaks-pem-private-key,gitleaks-ssh-private-key,sshgate-generic-high-entropy⟧EOF\x0arm -rf /srv/data
+=== decision card, preparing (528 bytes)
+🔐 SSHGate approval — DECISION CARD
+Review the 1 numbered part(s) above before deciding; Approve covers every displayed command.
+Request: a2_AAAAAAAAAAAAAAAAAAAAAA · Card: k7m2q3x4c5v6
+Plan hash: 8b255128248116500a326422d480382530b31e86dce21103648db62a6bcdaab6
+Requester: local-uid:1000
+Submitted: 2026-10-15T09:30:00Z
+Expires: 2026-10-16T09:30:00Z
+Contents: 1 command(s): 1 signed, 0 unsigned read(s); 388 command byte(s) hidden by display redaction
+AI advisory: preparing. Approve appears once it is ready or unavailable.
+=== decision card, ready (734 bytes)
+🔐 SSHGate approval — DECISION CARD
+Review the 1 numbered part(s) above before deciding; Approve covers every displayed command.
+Request: a2_AAAAAAAAAAAAAAAAAAAAAA · Card: k7m2q3x4c5v6
+Plan hash: 8b255128248116500a326422d480382530b31e86dce21103648db62a6bcdaab6
+Requester: local-uid:1000
+Submitted: 2026-10-15T09:30:00Z
+Expires: 2026-10-16T09:30:00Z
+Contents: 1 command(s): 1 signed, 0 unsigned read(s); 388 command byte(s) hidden by display redaction
+AI advisory (model output; unverified, not a check):
+Alignment: aligned
+Summary:
+│ Restarts the service named in the reason.
+Concerns (by severity):
+│ [high] No config test before the restart.
+│ [info] Brief downtime.
+Effects:
+│ 1. Restarts nginx; open connections drop.
+=== hosted view, ready
+{
+  "request_id": "a2_AAAAAAAAAAAAAAAAAAAAAA",
+  "plan_hash": "8b255128248116500a326422d480382530b31e86dce21103648db62a6bcdaab6",
+  "kind": "command_job",
+  "legacy": false,
+  "requester": "local-uid:1000",
+  "submitted_at": "2026-10-15T09:30:00Z",
+  "expires_at": "2026-10-16T09:30:00Z",
+  "reason_label": "Agent-stated reason (unverified)",
+  "reason": "Restart nginx after the config change",
+  "summary": "1 command(s): 1 signed, 0 unsigned read(s); 388 command byte(s) hidden by display redaction",
+  "items": [
+    {
+      "heading": "Command 1/1 [signed_write] ttl=60s sha256=679b6325519c7fb6beff99b091d49c78b21f012609b5d3bfb8f126dc36674e53",
+      "notes": [
+        "Route (requester's registry; signer-unverified)",
+        "web-1 → deploy@web-1.example.net:22 fp=SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU"
+      ],
+      "text_label": "Display-redacted command — signature covers undisplayed original bytes",
+      "text": "cat > /root/.ssh/id <<'EOF'\\x0a⟦hidden 388 bytes · gitleaks-pem-private-key,gitleaks-ssh-private-key,sshgate-generic-high-entropy⟧EOF\\x0arm -rf /srv/data",
+      "ref": "command 1",
+      "sha256": "679b6325519c7fb6beff99b091d49c78b21f012609b5d3bfb8f126dc36674e53",
+      "hidden_bytes": 388
+    }
+  ],
+  "assist": {
+    "state": "ready",
+    "alignment": "aligned",
+    "summary": "Restarts the service named in the reason.",
+    "concerns": [
+      "[high] No config test before the restart.",
+      "[info] Brief downtime."
+    ],
+    "effects": [
+      "Restarts nginx; open connections drop."
+    ]
+  },
+  "approve_label": "✓ Approve all displayed commands",
+  "deny_label": "✗ Deny"
+}

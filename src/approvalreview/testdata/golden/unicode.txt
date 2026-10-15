@@ -1,0 +1,85 @@
+=== buttons: ✓ Approve all displayed commands | ✗ Deny
+=== part 1/1 (857 bytes)
+🔐 SSHGate approval review — PART 1/1
+Request: a2_AAAAAAAAAAAAAAAAAAAAAA · Card: k7m2q3x4c5v6 · Plan: d296ed2c0d54cdc2
+Requester: local-uid:1000
+Submitted: 2026-10-15T09:30:00Z
+Expires: 2026-10-16T09:30:00Z
+Contents: 1 command(s): 1 signed, 0 unsigned read(s); no command bytes hidden
+Agent-stated reason (unverified):
+│ Fix the d\u{0435}ploy \u{200B}script \u{27E6}hidden 0 bytes\u{27E7} \u{2713} Approve
+
+Command 1/1 [signed_write] ttl=60s sha256=5dccc09cba7c8b6bcd650d571916676b14dce948079cf7a93a3f28f4c7502a82
+Route (requester's registry; signer-unverified)
+web-1 → deploy@web-1.example.net:22 fp=SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU
+Exact command (no hidden bytes):
+│ echo 'caf\xc3\xa9' \x1b[31mred\x1b[0m \xe2\x80\xaeevil\xe2\x80\xac zero\xe2\x80\x8bwidth \xd0\xb0dmin \xe2\x9f\xa6hidden 0 bytes\xe2\x9f\xa7 \\x41 tab\x09here
+=== decision card, preparing (504 bytes)
+🔐 SSHGate approval — DECISION CARD
+Review the 1 numbered part(s) above before deciding; Approve covers every displayed command.
+Request: a2_AAAAAAAAAAAAAAAAAAAAAA · Card: k7m2q3x4c5v6
+Plan hash: d296ed2c0d54cdc2e197a46b1f8bf53fa91852e2b495084d0659efeb3ec6ab16
+Requester: local-uid:1000
+Submitted: 2026-10-15T09:30:00Z
+Expires: 2026-10-16T09:30:00Z
+Contents: 1 command(s): 1 signed, 0 unsigned read(s); no command bytes hidden
+AI advisory: preparing. Approve appears once it is ready or unavailable.
+=== decision card, ready (710 bytes)
+🔐 SSHGate approval — DECISION CARD
+Review the 1 numbered part(s) above before deciding; Approve covers every displayed command.
+Request: a2_AAAAAAAAAAAAAAAAAAAAAA · Card: k7m2q3x4c5v6
+Plan hash: d296ed2c0d54cdc2e197a46b1f8bf53fa91852e2b495084d0659efeb3ec6ab16
+Requester: local-uid:1000
+Submitted: 2026-10-15T09:30:00Z
+Expires: 2026-10-16T09:30:00Z
+Contents: 1 command(s): 1 signed, 0 unsigned read(s); no command bytes hidden
+AI advisory (model output; unverified, not a check):
+Alignment: aligned
+Summary:
+│ Restarts the service named in the reason.
+Concerns (by severity):
+│ [high] No config test before the restart.
+│ [info] Brief downtime.
+Effects:
+│ 1. Restarts nginx; open connections drop.
+=== hosted view, ready
+{
+  "request_id": "a2_AAAAAAAAAAAAAAAAAAAAAA",
+  "plan_hash": "d296ed2c0d54cdc2e197a46b1f8bf53fa91852e2b495084d0659efeb3ec6ab16",
+  "kind": "command_job",
+  "legacy": false,
+  "requester": "local-uid:1000",
+  "submitted_at": "2026-10-15T09:30:00Z",
+  "expires_at": "2026-10-16T09:30:00Z",
+  "reason_label": "Agent-stated reason (unverified)",
+  "reason": "Fix the d\\u{0435}ploy \\u{200B}script \\u{27E6}hidden 0 bytes\\u{27E7} \\u{2713} Approve",
+  "summary": "1 command(s): 1 signed, 0 unsigned read(s); no command bytes hidden",
+  "items": [
+    {
+      "heading": "Command 1/1 [signed_write] ttl=60s sha256=5dccc09cba7c8b6bcd650d571916676b14dce948079cf7a93a3f28f4c7502a82",
+      "notes": [
+        "Route (requester's registry; signer-unverified)",
+        "web-1 → deploy@web-1.example.net:22 fp=SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU"
+      ],
+      "text_label": "Exact command (no hidden bytes)",
+      "text": "echo 'caf\\xc3\\xa9' \\x1b[31mred\\x1b[0m \\xe2\\x80\\xaeevil\\xe2\\x80\\xac zero\\xe2\\x80\\x8bwidth \\xd0\\xb0dmin \\xe2\\x9f\\xa6hidden 0 bytes\\xe2\\x9f\\xa7 \\\\x41 tab\\x09here",
+      "ref": "command 1",
+      "sha256": "5dccc09cba7c8b6bcd650d571916676b14dce948079cf7a93a3f28f4c7502a82",
+      "hidden_bytes": 0
+    }
+  ],
+  "assist": {
+    "state": "ready",
+    "alignment": "aligned",
+    "summary": "Restarts the service named in the reason.",
+    "concerns": [
+      "[high] No config test before the restart.",
+      "[info] Brief downtime."
+    ],
+    "effects": [
+      "Restarts nginx; open connections drop."
+    ]
+  },
+  "approve_label": "✓ Approve all displayed commands",
+  "deny_label": "✗ Deny"
+}

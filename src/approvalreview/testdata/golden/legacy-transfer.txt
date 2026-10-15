@@ -1,0 +1,112 @@
+=== buttons: ✓ Approve all displayed commands (SECRET TRANSFER) | ✗ Deny
+=== part 1/1 (1063 bytes)
+🔐 SSHGate approval review — PART 1/1
+Request: 9f1c2e4a7b · Card: k7m2q3x4c5v6 · Plan: none (legacy v1 request)
+⚠️ SECRET TRANSFER — approving this MOVES a secret file across hosts. The value is encrypted end-to-end; the agent only relays ciphertext.
+Requester: local-uid:1000
+Submitted: 2026-10-15T09:30:00Z
+Expires: 2026-10-15T09:35:00Z
+Contents: one transfer (two signed legs); no path bytes hidden
+Protocol-generated legacy intent (unverified; client supplied no reason):
+│ Legacy v1 request (reason unavailable)
+
+Secret transfer x8Kq3YVvH4f2m9WqZr0B1g
+From: key web-1 (signer registry)
+From fingerprint (requester-supplied, signer-validated): SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU
+To: key db-1 (signer registry)
+To fingerprint (requester-supplied, signer-validated): SHA256:nThbg6kXUpJWGl7E1IGOCspRomTxdCARLviKw6E5SY8
+Mode: 0600
+
+Source path (requester-supplied, signer-validated)
+Exact value (no hidden bytes):
+│ /etc/secret
+
+Destination path (requester-supplied, signer-validated)
+Exact value (no hidden bytes):
+│ /srv/secret
+=== decision card, preparing (579 bytes)
+⚠️ SECRET TRANSFER — approving this MOVES a secret file across hosts. The value is encrypted end-to-end; the agent only relays ciphertext.
+🔐 SSHGate approval — DECISION CARD
+Review the 1 numbered part(s) above before deciding; Approve covers every displayed command.
+Request: 9f1c2e4a7b · Card: k7m2q3x4c5v6
+Plan hash: none (legacy v1 request)
+Requester: local-uid:1000
+Submitted: 2026-10-15T09:30:00Z
+Expires: 2026-10-15T09:35:00Z
+Contents: one transfer (two signed legs); no path bytes hidden
+AI advisory: preparing. Approve appears once it is ready or unavailable.
+=== decision card, ready (831 bytes)
+⚠️ SECRET TRANSFER — approving this MOVES a secret file across hosts. The value is encrypted end-to-end; the agent only relays ciphertext.
+🔐 SSHGate approval — DECISION CARD
+Review the 1 numbered part(s) above before deciding; Approve covers every displayed command.
+Request: 9f1c2e4a7b · Card: k7m2q3x4c5v6
+Plan hash: none (legacy v1 request)
+Requester: local-uid:1000
+Submitted: 2026-10-15T09:30:00Z
+Expires: 2026-10-15T09:35:00Z
+Contents: one transfer (two signed legs); no path bytes hidden
+AI advisory (model output; unverified, not a check):
+Alignment: not assessed (legacy request carries no agent reason)
+Summary:
+│ Restarts the service named in the reason.
+Concerns (by severity):
+│ [high] No config test before the restart.
+│ [info] Brief downtime.
+Effects:
+│ 1. Restarts nginx; open connections drop.
+=== hosted view, ready
+{
+  "request_id": "9f1c2e4a7b",
+  "kind": "transfer",
+  "legacy": true,
+  "headlines": [
+    "⚠️ SECRET TRANSFER — approving this MOVES a secret file across hosts. The value is encrypted end-to-end; the agent only relays ciphertext."
+  ],
+  "requester": "local-uid:1000",
+  "submitted_at": "2026-10-15T09:30:00Z",
+  "expires_at": "2026-10-15T09:35:00Z",
+  "reason_label": "Protocol-generated legacy intent (unverified; client supplied no reason)",
+  "reason": "Legacy v1 request (reason unavailable)",
+  "summary": "one transfer (two signed legs); no path bytes hidden",
+  "items": [
+    {
+      "heading": "Secret transfer x8Kq3YVvH4f2m9WqZr0B1g",
+      "notes": [
+        "From: key web-1 (signer registry)",
+        "From fingerprint (requester-supplied, signer-validated): SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU",
+        "To: key db-1 (signer registry)",
+        "To fingerprint (requester-supplied, signer-validated): SHA256:nThbg6kXUpJWGl7E1IGOCspRomTxdCARLviKw6E5SY8",
+        "Mode: 0600"
+      ],
+      "hidden_bytes": 0
+    },
+    {
+      "heading": "Source path (requester-supplied, signer-validated)",
+      "text_label": "Exact value (no hidden bytes)",
+      "text": "/etc/secret",
+      "ref": "source path",
+      "hidden_bytes": 0
+    },
+    {
+      "heading": "Destination path (requester-supplied, signer-validated)",
+      "text_label": "Exact value (no hidden bytes)",
+      "text": "/srv/secret",
+      "ref": "destination path",
+      "hidden_bytes": 0
+    }
+  ],
+  "assist": {
+    "state": "ready",
+    "alignment": "not assessed (legacy request carries no agent reason)",
+    "summary": "Restarts the service named in the reason.",
+    "concerns": [
+      "[high] No config test before the restart.",
+      "[info] Brief downtime."
+    ],
+    "effects": [
+      "Restarts nginx; open connections drop."
+    ]
+  },
+  "approve_label": "✓ Approve all displayed commands (SECRET TRANSFER)",
+  "deny_label": "✗ Deny"
+}

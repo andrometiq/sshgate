@@ -1,0 +1,123 @@
+=== buttons: ✓ Approve all displayed commands | ✗ Deny
+=== part 1/1 (1331 bytes)
+🔐 SSHGate approval review — PART 1/1
+Request: a2_AAAAAAAAAAAAAAAAAAAAAA · Card: k7m2q3x4c5v6 · Plan: b0a199ebf144c39b
+Requester: machine-client\x20sub=local-uid:1000
+Submitted: 2026-10-15T09:30:00Z
+Expires: 2026-10-16T09:30:00Z
+Contents: 3 command(s): 1 signed, 2 unsigned read(s); no command bytes hidden
+Agent-stated reason (unverified):
+│ Rotate logs and check disk
+
+Command 1/3 [unsigned_read] unsigned sha256=630c3a85cfdd89adfe9a05593f070d629a26cf7c49bb3880ecfe6d3a63b339f5
+Route (requester's registry; signer-unverified)
+web-1 → deploy@web-1.example.net:22 fp=SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU
+Exact command (no hidden bytes):
+│ df -h /var
+
+Command 2/3 [signed_write] ttl=60s sha256=29bff0e9ec299fefc5b2469851ca5af8bd0574c95d43c1f12c0ea6cbed3b8614
+Route (requester's registry; signer-unverified)
+web-1 → deploy@web-1.example.net:22 fp=SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU
+⚠️ Step 2 is signed and runs after earlier work; its signature may expire before it starts.
+Exact command (no hidden bytes):
+│ logrotate -f /etc/logrotate.conf
+
+Command 3/3 [unsigned_read] unsigned sha256=630c3a85cfdd89adfe9a05593f070d629a26cf7c49bb3880ecfe6d3a63b339f5
+Route (requester's registry; signer-unverified)
+ro-1 → deploy@ro-1.example.net:22
+Exact command (no hidden bytes):
+│ df -h /var
+=== decision card, preparing (526 bytes)
+🔐 SSHGate approval — DECISION CARD
+Review the 1 numbered part(s) above before deciding; Approve covers every displayed command.
+Request: a2_AAAAAAAAAAAAAAAAAAAAAA · Card: k7m2q3x4c5v6
+Plan hash: b0a199ebf144c39bb467a0060e54a9e14cdd78419ef708c56114780f92ec9891
+Requester: machine-client\x20sub=local-uid:1000
+Submitted: 2026-10-15T09:30:00Z
+Expires: 2026-10-16T09:30:00Z
+Contents: 3 command(s): 1 signed, 2 unsigned read(s); no command bytes hidden
+AI advisory: preparing. Approve appears once it is ready or unavailable.
+=== decision card, ready (732 bytes)
+🔐 SSHGate approval — DECISION CARD
+Review the 1 numbered part(s) above before deciding; Approve covers every displayed command.
+Request: a2_AAAAAAAAAAAAAAAAAAAAAA · Card: k7m2q3x4c5v6
+Plan hash: b0a199ebf144c39bb467a0060e54a9e14cdd78419ef708c56114780f92ec9891
+Requester: machine-client\x20sub=local-uid:1000
+Submitted: 2026-10-15T09:30:00Z
+Expires: 2026-10-16T09:30:00Z
+Contents: 3 command(s): 1 signed, 2 unsigned read(s); no command bytes hidden
+AI advisory (model output; unverified, not a check):
+Alignment: aligned
+Summary:
+│ Restarts the service named in the reason.
+Concerns (by severity):
+│ [high] No config test before the restart.
+│ [info] Brief downtime.
+Effects:
+│ 1. Restarts nginx; open connections drop.
+=== hosted view, ready
+{
+  "request_id": "a2_AAAAAAAAAAAAAAAAAAAAAA",
+  "plan_hash": "b0a199ebf144c39bb467a0060e54a9e14cdd78419ef708c56114780f92ec9891",
+  "kind": "command_job",
+  "legacy": false,
+  "requester": "machine-client\\x20sub=local-uid:1000",
+  "submitted_at": "2026-10-15T09:30:00Z",
+  "expires_at": "2026-10-16T09:30:00Z",
+  "reason_label": "Agent-stated reason (unverified)",
+  "reason": "Rotate logs and check disk",
+  "summary": "3 command(s): 1 signed, 2 unsigned read(s); no command bytes hidden",
+  "items": [
+    {
+      "heading": "Command 1/3 [unsigned_read] unsigned sha256=630c3a85cfdd89adfe9a05593f070d629a26cf7c49bb3880ecfe6d3a63b339f5",
+      "notes": [
+        "Route (requester's registry; signer-unverified)",
+        "web-1 → deploy@web-1.example.net:22 fp=SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU"
+      ],
+      "text_label": "Exact command (no hidden bytes)",
+      "text": "df -h /var",
+      "ref": "command 1",
+      "sha256": "630c3a85cfdd89adfe9a05593f070d629a26cf7c49bb3880ecfe6d3a63b339f5",
+      "hidden_bytes": 0
+    },
+    {
+      "heading": "Command 2/3 [signed_write] ttl=60s sha256=29bff0e9ec299fefc5b2469851ca5af8bd0574c95d43c1f12c0ea6cbed3b8614",
+      "notes": [
+        "Route (requester's registry; signer-unverified)",
+        "web-1 → deploy@web-1.example.net:22 fp=SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU",
+        "⚠️ Step 2 is signed and runs after earlier work; its signature may expire before it starts."
+      ],
+      "text_label": "Exact command (no hidden bytes)",
+      "text": "logrotate -f /etc/logrotate.conf",
+      "ref": "command 2",
+      "sha256": "29bff0e9ec299fefc5b2469851ca5af8bd0574c95d43c1f12c0ea6cbed3b8614",
+      "hidden_bytes": 0
+    },
+    {
+      "heading": "Command 3/3 [unsigned_read] unsigned sha256=630c3a85cfdd89adfe9a05593f070d629a26cf7c49bb3880ecfe6d3a63b339f5",
+      "notes": [
+        "Route (requester's registry; signer-unverified)",
+        "ro-1 → deploy@ro-1.example.net:22"
+      ],
+      "text_label": "Exact command (no hidden bytes)",
+      "text": "df -h /var",
+      "ref": "command 3",
+      "sha256": "630c3a85cfdd89adfe9a05593f070d629a26cf7c49bb3880ecfe6d3a63b339f5",
+      "hidden_bytes": 0
+    }
+  ],
+  "assist": {
+    "state": "ready",
+    "alignment": "aligned",
+    "summary": "Restarts the service named in the reason.",
+    "concerns": [
+      "[high] No config test before the restart.",
+      "[info] Brief downtime."
+    ],
+    "effects": [
+      "Restarts nginx; open connections drop."
+    ]
+  },
+  "approve_label": "✓ Approve all displayed commands",
+  "deny_label": "✗ Deny"
+}

@@ -1,0 +1,89 @@
+=== buttons: ✓ Approve all displayed commands | ✗ Deny
+=== part 1/1 (757 bytes)
+🔐 SSHGate approval review — PART 1/1
+Request: a2_AAAAAAAAAAAAAAAAAAAAAA · Card: k7m2q3x4c5v6 · Plan: 8a816cd12d025510
+Requester: local-uid:1000
+Submitted: 2026-10-15T09:30:00Z
+Expires: 2026-10-16T09:30:00Z
+Synchronous request: it runs only if approved while the agent is still waiting (until 2026-10-15T09:35:10Z)
+Contents: 1 command(s): 1 signed, 0 unsigned read(s); no command bytes hidden
+Agent-stated reason (unverified):
+│ Decommission this host
+
+Command 1/1 [signed_admin] ttl=60s sha256=5f1f056963a8f27b98d61400a8c7b51a2b35b5f08398479486f890275db7adaf
+Route (requester's registry; signer-unverified)
+db-1 → deploy@db-1.example.net:22 fp=SHA256:nThbg6kXUpJWGl7E1IGOCspRomTxdCARLviKw6E5SY8
+Exact command (no hidden bytes):
+│ SSHGATE_REVOKE
+=== decision card, preparing (612 bytes)
+🔐 SSHGate approval — DECISION CARD
+Review the 1 numbered part(s) above before deciding; Approve covers every displayed command.
+Request: a2_AAAAAAAAAAAAAAAAAAAAAA · Card: k7m2q3x4c5v6
+Plan hash: 8a816cd12d0255109ca0c25318b6deda9314466840ea7aa22236ab6e0e1c3d9c
+Requester: local-uid:1000
+Submitted: 2026-10-15T09:30:00Z
+Expires: 2026-10-16T09:30:00Z
+Synchronous request: it runs only if approved while the agent is still waiting (until 2026-10-15T09:35:10Z)
+Contents: 1 command(s): 1 signed, 0 unsigned read(s); no command bytes hidden
+AI advisory: preparing. Approve appears once it is ready or unavailable.
+=== decision card, ready (818 bytes)
+🔐 SSHGate approval — DECISION CARD
+Review the 1 numbered part(s) above before deciding; Approve covers every displayed command.
+Request: a2_AAAAAAAAAAAAAAAAAAAAAA · Card: k7m2q3x4c5v6
+Plan hash: 8a816cd12d0255109ca0c25318b6deda9314466840ea7aa22236ab6e0e1c3d9c
+Requester: local-uid:1000
+Submitted: 2026-10-15T09:30:00Z
+Expires: 2026-10-16T09:30:00Z
+Synchronous request: it runs only if approved while the agent is still waiting (until 2026-10-15T09:35:10Z)
+Contents: 1 command(s): 1 signed, 0 unsigned read(s); no command bytes hidden
+AI advisory (model output; unverified, not a check):
+Alignment: aligned
+Summary:
+│ Restarts the service named in the reason.
+Concerns (by severity):
+│ [high] No config test before the restart.
+│ [info] Brief downtime.
+Effects:
+│ 1. Restarts nginx; open connections drop.
+=== hosted view, ready
+{
+  "request_id": "a2_AAAAAAAAAAAAAAAAAAAAAA",
+  "plan_hash": "8a816cd12d0255109ca0c25318b6deda9314466840ea7aa22236ab6e0e1c3d9c",
+  "kind": "command_job",
+  "legacy": false,
+  "requester": "local-uid:1000",
+  "submitted_at": "2026-10-15T09:30:00Z",
+  "expires_at": "2026-10-16T09:30:00Z",
+  "sync_notice": "Synchronous request: it runs only if approved while the agent is still waiting (until 2026-10-15T09:35:10Z)",
+  "reason_label": "Agent-stated reason (unverified)",
+  "reason": "Decommission this host",
+  "summary": "1 command(s): 1 signed, 0 unsigned read(s); no command bytes hidden",
+  "items": [
+    {
+      "heading": "Command 1/1 [signed_admin] ttl=60s sha256=5f1f056963a8f27b98d61400a8c7b51a2b35b5f08398479486f890275db7adaf",
+      "notes": [
+        "Route (requester's registry; signer-unverified)",
+        "db-1 → deploy@db-1.example.net:22 fp=SHA256:nThbg6kXUpJWGl7E1IGOCspRomTxdCARLviKw6E5SY8"
+      ],
+      "text_label": "Exact command (no hidden bytes)",
+      "text": "SSHGATE_REVOKE",
+      "ref": "command 1",
+      "sha256": "5f1f056963a8f27b98d61400a8c7b51a2b35b5f08398479486f890275db7adaf",
+      "hidden_bytes": 0
+    }
+  ],
+  "assist": {
+    "state": "ready",
+    "alignment": "aligned",
+    "summary": "Restarts the service named in the reason.",
+    "concerns": [
+      "[high] No config test before the restart.",
+      "[info] Brief downtime."
+    ],
+    "effects": [
+      "Restarts nginx; open connections drop."
+    ]
+  },
+  "approve_label": "✓ Approve all displayed commands",
+  "deny_label": "✗ Deny"
+}

@@ -1,0 +1,101 @@
+=== buttons: ✓ Approve all displayed commands (GATE UPDATE) | ✗ Deny
+=== part 1/1 (1284 bytes)
+🔐 SSHGate approval review — PART 1/1
+Request: a2_AAAAAAAAAAAAAAAAAAAAAA · Card: k7m2q3x4c5v6 · Plan: 114e489b49ad5798
+⚠️ GATE BINARY UPDATE — approving this REPLACES the SSHGate gate binary on web-1. The new gate governs every future command on this server. Only approve an update you initiated.
+Requester: local-uid:1000
+Submitted: 2026-10-15T09:30:00Z
+Expires: 2026-10-16T09:30:00Z
+Synchronous request: it runs only if approved while the agent is still waiting (until 2026-10-15T09:35:10Z)
+Contents: 1 command(s): 1 signed, 0 unsigned read(s); no command bytes hidden
+Agent-stated reason (unverified):
+│ Upgrade the gate to v0.2.0
+
+Command 1/1 [signed_admin] ttl=300s sha256=fe351faa4f9fe40e966dddc3d7569bdc5b1e49030d1db0dfa68655910e23acbe
+Route (requester's registry; signer-unverified)
+web-1 → deploy@web-1.example.net:22 fp=SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU
+New gate SHA-256 (from the signed command bytes): abababababababababababababababababababababababababababababababab
+Build metadata (client-supplied, signer-unverified):
+│ staged_basename=sshgate-gate-linux-amd64 staged_version=v0.2.0 running_version=v0.1.4 size=6291456
+Exact command (no hidden bytes):
+│ SSHGATE_UPDATE abababababababababababababababababababababababababababababababab
+=== decision card, preparing (796 bytes)
+⚠️ GATE BINARY UPDATE — approving this REPLACES the SSHGate gate binary on web-1. The new gate governs every future command on this server. Only approve an update you initiated.
+🔐 SSHGate approval — DECISION CARD
+Review the 1 numbered part(s) above before deciding; Approve covers every displayed command.
+Request: a2_AAAAAAAAAAAAAAAAAAAAAA · Card: k7m2q3x4c5v6
+Plan hash: 114e489b49ad579879cff517600cf9985e357816df9a065fe2d751586d14e8ce
+Requester: local-uid:1000
+Submitted: 2026-10-15T09:30:00Z
+Expires: 2026-10-16T09:30:00Z
+Synchronous request: it runs only if approved while the agent is still waiting (until 2026-10-15T09:35:10Z)
+Contents: 1 command(s): 1 signed, 0 unsigned read(s); no command bytes hidden
+AI advisory: preparing. Approve appears once it is ready or unavailable.
+=== decision card, ready (1002 bytes)
+⚠️ GATE BINARY UPDATE — approving this REPLACES the SSHGate gate binary on web-1. The new gate governs every future command on this server. Only approve an update you initiated.
+🔐 SSHGate approval — DECISION CARD
+Review the 1 numbered part(s) above before deciding; Approve covers every displayed command.
+Request: a2_AAAAAAAAAAAAAAAAAAAAAA · Card: k7m2q3x4c5v6
+Plan hash: 114e489b49ad579879cff517600cf9985e357816df9a065fe2d751586d14e8ce
+Requester: local-uid:1000
+Submitted: 2026-10-15T09:30:00Z
+Expires: 2026-10-16T09:30:00Z
+Synchronous request: it runs only if approved while the agent is still waiting (until 2026-10-15T09:35:10Z)
+Contents: 1 command(s): 1 signed, 0 unsigned read(s); no command bytes hidden
+AI advisory (model output; unverified, not a check):
+Alignment: aligned
+Summary:
+│ Restarts the service named in the reason.
+Concerns (by severity):
+│ [high] No config test before the restart.
+│ [info] Brief downtime.
+Effects:
+│ 1. Restarts nginx; open connections drop.
+=== hosted view, ready
+{
+  "request_id": "a2_AAAAAAAAAAAAAAAAAAAAAA",
+  "plan_hash": "114e489b49ad579879cff517600cf9985e357816df9a065fe2d751586d14e8ce",
+  "kind": "command_job",
+  "legacy": false,
+  "headlines": [
+    "⚠️ GATE BINARY UPDATE — approving this REPLACES the SSHGate gate binary on web-1. The new gate governs every future command on this server. Only approve an update you initiated."
+  ],
+  "requester": "local-uid:1000",
+  "submitted_at": "2026-10-15T09:30:00Z",
+  "expires_at": "2026-10-16T09:30:00Z",
+  "sync_notice": "Synchronous request: it runs only if approved while the agent is still waiting (until 2026-10-15T09:35:10Z)",
+  "reason_label": "Agent-stated reason (unverified)",
+  "reason": "Upgrade the gate to v0.2.0",
+  "summary": "1 command(s): 1 signed, 0 unsigned read(s); no command bytes hidden",
+  "items": [
+    {
+      "heading": "Command 1/1 [signed_admin] ttl=300s sha256=fe351faa4f9fe40e966dddc3d7569bdc5b1e49030d1db0dfa68655910e23acbe",
+      "notes": [
+        "Route (requester's registry; signer-unverified)",
+        "web-1 → deploy@web-1.example.net:22 fp=SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU",
+        "New gate SHA-256 (from the signed command bytes): abababababababababababababababababababababababababababababababab",
+        "Build metadata (client-supplied, signer-unverified):",
+        "│ staged_basename=sshgate-gate-linux-amd64 staged_version=v0.2.0 running_version=v0.1.4 size=6291456"
+      ],
+      "text_label": "Exact command (no hidden bytes)",
+      "text": "SSHGATE_UPDATE abababababababababababababababababababababababababababababababab",
+      "ref": "command 1",
+      "sha256": "fe351faa4f9fe40e966dddc3d7569bdc5b1e49030d1db0dfa68655910e23acbe",
+      "hidden_bytes": 0
+    }
+  ],
+  "assist": {
+    "state": "ready",
+    "alignment": "aligned",
+    "summary": "Restarts the service named in the reason.",
+    "concerns": [
+      "[high] No config test before the restart.",
+      "[info] Brief downtime."
+    ],
+    "effects": [
+      "Restarts nginx; open connections drop."
+    ]
+  },
+  "approve_label": "✓ Approve all displayed commands (GATE UPDATE)",
+  "deny_label": "✗ Deny"
+}
