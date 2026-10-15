@@ -14,6 +14,7 @@ func phase3Leg(name string, markers ...string) harness.Leg {
 		if c.Name == name {
 			leg.Omissions = append([]string(nil), c.Omissions...)
 			leg.Root, leg.NonRoot = c.Root, c.NonRoot
+			leg.ResidualABIs = c.ResidualABIs
 		}
 	}
 	return leg

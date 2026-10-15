@@ -5,6 +5,7 @@ package harness
 import (
 	"fmt"
 	"reflect"
+	"slices"
 	"strings"
 )
 
@@ -34,6 +35,7 @@ type Leg struct {
 	Markers              []string
 	ABIMarkers           map[string][]string
 	Omissions, Residuals []string
+	ResidualABIs         map[string]string // as Case.ResidualABIs
 }
 
 func (l Leg) ExpectedMarkers(abi string) []string {
@@ -103,6 +105,9 @@ func Validate(registry []Protection) error {
 					}
 					if strings.HasPrefix(leg.Name, "L-") && !strings.HasSuffix(prefix, "/"+abi) {
 						return fmt.Errorf("%s: %s full name does not identify its ABI", leg.Name, abi)
+					}
+					if code := leg.ResidualABIs[abi]; code != "" && !slices.Contains(DocumentedResiduals, code) {
+						return fmt.Errorf("%s: undocumented residual %s", leg.Name, code)
 					}
 					markers := map[string]bool{}
 					for _, marker := range leg.ExpectedMarkers(abi) {

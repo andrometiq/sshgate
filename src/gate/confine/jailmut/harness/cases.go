@@ -8,11 +8,15 @@ import (
 	"strings"
 )
 
+// Case is one proof leg's declaration. Residuals is the legacy Residual-kind
+// list (any lane may report one of its codes); ResidualABIs maps an ABI name to
+// the one residual code that lane must report instead of completing.
 type Case struct {
 	CharacterisationOutcome                                                   string
 	Name, Package, Kind, Mode                                                 string
 	Names                                                                     map[string]string
 	Modes, ABIs, Markers, Obligations, Omissions, Residuals, Characterisation []string
+	ResidualABIs                                                              map[string]string
 	Root, NonRoot, CIOnly, AcceptFactsABI0                                    bool
 }
 
@@ -25,6 +29,9 @@ func ValidateCases(cases []Case) error {
 		seen[c.Name] = true
 		if c.Root && c.NonRoot {
 			return fmt.Errorf("%s: both root-only and non-root-only", c.Name)
+		}
+		if slices.Contains(c.Omissions, "root-only") && !c.Root || slices.Contains(c.Omissions, "nonroot-only") && !c.NonRoot {
+			return fmt.Errorf("%s: a lane omission without its lane mark", c.Name)
 		}
 		abis := map[string]bool{}
 		for _, abi := range c.ABIs {
@@ -44,8 +51,16 @@ func ValidateCases(cases []Case) error {
 			}
 		}
 		for _, residual := range c.Residuals {
-			if residual != "R-NUMA-EFFECT" {
+			if !slices.Contains(DocumentedResiduals, residual) {
 				return fmt.Errorf("%s: unknown proof residual %s", c.Name, residual)
+			}
+		}
+		if (len(c.Residuals) > 0) != (c.Kind == "Residual") || c.Kind == "Residual" && len(c.ResidualABIs) > 0 {
+			return fmt.Errorf("%s: Residuals belong to a Residual-kind case, ResidualABIs to any other", c.Name)
+		}
+		for abi, code := range c.ResidualABIs {
+			if !abis[abi] || !slices.Contains(DocumentedResiduals, code) {
+				return fmt.Errorf("%s: invalid residual %s for ABI %q", c.Name, code, abi)
 			}
 		}
 		counts := map[string]int{}
@@ -126,6 +141,9 @@ func CheckProof(c Case, p ProofRecord, root, ci bool) error {
 	}
 	switch p.Outcome {
 	case "COMPLETE":
+		if c.ResidualABIs[p.ABI] != "" {
+			return fmt.Errorf("%s: completed in %s, whose lane reports %s", c.Name, p.ABI, c.ResidualABIs[p.ABI])
+		}
 		for _, m := range p.Markers {
 			if !slices.Contains(c.Markers, m) {
 				return fmt.Errorf("%s: undeclared marker %s", c.Name, m)
@@ -137,8 +155,9 @@ func CheckProof(c Case, p ProofRecord, root, ci bool) error {
 			return fmt.Errorf("%s: forbidden omission %s", c.Name, p.Code)
 		}
 	case "RESIDUAL":
-		if !slices.Contains(c.Residuals, p.Code) {
-			return fmt.Errorf("%s: undeclared residual %s", c.Name, p.Code)
+		// The lane's outcome is fixed by the declaration, never the leg's choice.
+		if !slices.Contains(c.Residuals, p.Code) && c.ResidualABIs[p.ABI] != p.Code {
+			return fmt.Errorf("%s: undeclared residual %s in %s", c.Name, p.Code, p.ABI)
 		}
 	default:
 		return fmt.Errorf("invalid proof outcome")
@@ -210,7 +229,8 @@ func CheckCaseUnion(cases []Case, registry []Protection, reports []Report) error
 					if err := CheckProof(c, proof, report.Root, report.CI); err != nil {
 						return err
 					}
-					covered = covered || proof.Outcome == "COMPLETE" || proof.Outcome == "RESIDUAL" && len(c.Residuals) > 0
+					// CheckProof admitted a residual only where the case declares it.
+					covered = covered || proof.Outcome == "COMPLETE" || proof.Outcome == "RESIDUAL"
 				}
 			}
 			if !covered {
@@ -226,7 +246,13 @@ func CheckCaseUnion(cases []Case, registry []Protection, reports []Report) error
 							continue
 						}
 						for _, abi := range c.ABIs {
-							for _, registered := range leg.ExpectedMarkers(abi) {
+							// A residual lane expects no marker on this host, but the
+							// leg's markers are what it shows wherever the gap is closed.
+							registeredMarkers := leg.ExpectedMarkers(abi)
+							if leg.ResidualABIs[abi] != "" {
+								registeredMarkers = leg.Markers
+							}
+							for _, registered := range registeredMarkers {
 								parts := strings.Fields(registered)
 								if len(parts) == 2 && strings.TrimPrefix(parts[0], "MUTATION-")+":"+parts[1] == marker {
 									expected = true

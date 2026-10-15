@@ -3,6 +3,7 @@ package confine
 import (
 	"fmt"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -216,7 +217,11 @@ func (p *proof) record(kind, leg, marker string) {
 	}
 	p.t.Fatalf("SETUP: undeclared marker %s", key)
 }
-func (p *proof) Finish() {
+
+// evidenceComplete is the evidence contract every finalization meets: each
+// declared obligation done, all jailed evidence consumed, and the observers
+// healthy and stopped. It reports whether the leg may still finalize.
+func (p *proof) evidenceComplete() bool {
 	p.t.Helper()
 	if p.finished {
 		p.t.Fatal("SETUP: duplicate proof finalization")
@@ -232,7 +237,12 @@ func (p *proof) Finish() {
 		}
 	}
 	p.stopObservers()
-	if p.t.Failed() {
+	return !p.t.Failed()
+}
+
+func (p *proof) Finish() {
+	p.t.Helper()
+	if !p.evidenceComplete() {
 		return
 	}
 	markers := make([]string, 0, len(p.markers))
@@ -276,22 +286,26 @@ func (p *proof) Omit(code string) {
 	p.finished = true
 	p.t.Logf("PROOF-OMITTED %s %s %s", p.caseDef.Name, p.abi, code)
 }
+
+// Residual finalizes the leg with the residual its lane declares. A legacy
+// Residual-kind case reports one of its Residuals with no evidence; any other
+// case reports its ABI's ResidualABIs code only after the same evidence Finish
+// requires, and never with markers.
 func (p *proof) Residual(code string) {
 	p.t.Helper()
-	if p.finished || p.caseDef.Kind != "Residual" || len(p.markers) > 0 {
+	if p.finished || len(p.markers) > 0 {
 		p.t.Fatal("SETUP: invalid residual")
 	}
-	allowed := false
-	for _, item := range p.caseDef.Residuals {
-		if item == code {
-			allowed = true
+	legacy := p.caseDef.Kind == "Residual"
+	if legacy && !slices.Contains(p.caseDef.Residuals, code) || !legacy && (code == "" || p.caseDef.ResidualABIs[p.abi] != code) {
+		p.t.Fatalf("SETUP: undeclared residual %s in %s", code, p.abi)
+	}
+	if legacy {
+		p.stopObservers()
+		if p.t.Failed() {
+			return
 		}
-	}
-	if !allowed || code != "R-NUMA-EFFECT" {
-		p.t.Fatalf("SETUP: undeclared residual %s", code)
-	}
-	p.stopObservers()
-	if p.t.Failed() {
+	} else if !p.evidenceComplete() {
 		return
 	}
 	p.finished = true

@@ -146,7 +146,11 @@ func TestProofCaseMarkerCoverage(t *testing.T) {
 	report := harness.Report{Root: true, CI: true}
 	for _, c := range legCases {
 		for _, abi := range c.ABIs {
-			report.Proofs = append(report.Proofs, harness.ProofRecord{Outcome: "COMPLETE", Leg: c.Name, ABI: abi})
+			proof := harness.ProofRecord{Outcome: "COMPLETE", Leg: c.Name, ABI: abi}
+			if code := c.ResidualABIs[abi]; code != "" {
+				proof = harness.ProofRecord{Outcome: "RESIDUAL", Leg: c.Name, ABI: abi, Code: code}
+			}
+			report.Proofs = append(report.Proofs, proof)
 		}
 	}
 	if err := harness.CheckCaseUnion(legCases, completeRegistry(), []harness.Report{report}); err != nil {

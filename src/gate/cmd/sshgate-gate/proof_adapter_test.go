@@ -73,6 +73,7 @@ func gateProofCases() []harness.Case {
 		add(name, "Effect", "Execute", nil, []string{"control:exec", "jailed:lane2", "observe:output"}, []string{"EFFECT:lib-ran"}, nil)
 	}
 	add("G-L2-ADMIT-ENDPOINT", "Effect", "Execute", nil, []string{"control:connect", "jailed:lane2", "observe:listener"}, []string{"EFFECT:endpoint-accepted"}, []string{"root-only"})
+	cases[len(cases)-1].Root = true
 	add("G-L2-INTERP-UNTRUSTED", "Effect", "Execute", nil, []string{"control:exec", "jailed:lane2", "observe:output"}, []string{"EFFECT:interp-ran"}, nil)
 	return cases
 }
@@ -157,6 +158,33 @@ func (p *gateProof) mark(marker string, observed bool) {
 func (p *gateProof) Omit(code string) {
 	p.t.Helper()
 	line := "PROOF-OMITTED " + p.caseDef.Name + " " + p.abi + " " + code
+	record, err := harness.ParseProof(line)
+	if err == nil {
+		err = harness.CheckProof(p.caseDef, record, os.Getuid() == 0, os.Getenv("SSHGATE_JAIL_CI") == "1")
+	}
+	if err != nil {
+		p.t.Fatal(err)
+	}
+	p.finished = true
+	p.t.Log(line)
+}
+
+// Residual finishes the case with the residual its lane declares, after the
+// same evidence Finish requires and with no markers.
+func (p *gateProof) Residual(code string) {
+	p.t.Helper()
+	if p.finished || len(p.markers) > 0 || code == "" || p.caseDef.ResidualABIs[p.abi] != code {
+		p.t.Fatalf("SETUP: undeclared residual %s in %s", code, p.abi)
+	}
+	for _, key := range p.caseDef.Obligations {
+		if !p.done[key] {
+			p.t.Fatalf("SETUP: unfinished obligation %s", key)
+		}
+	}
+	if p.t.Failed() {
+		return
+	}
+	line := "PROOF-RESIDUAL " + p.caseDef.Name + " " + p.abi + " " + code
 	record, err := harness.ParseProof(line)
 	if err == nil {
 		err = harness.CheckProof(p.caseDef, record, os.Getuid() == 0, os.Getenv("SSHGATE_JAIL_CI") == "1")
