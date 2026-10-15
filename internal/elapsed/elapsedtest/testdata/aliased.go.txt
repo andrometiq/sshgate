@@ -1,0 +1,7 @@
+package holder
+
+import (
+	stdtime "time"
+)
+
+var read = stdtime.Since

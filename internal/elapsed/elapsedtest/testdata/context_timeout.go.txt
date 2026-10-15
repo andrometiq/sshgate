@@ -1,0 +1,18 @@
+package holder
+
+import (
+	"context"
+	"time"
+)
+
+func wait(ctx context.Context) {
+	ctx, cancel := context.WithTimeout(ctx, time.Second)
+	defer cancel()
+	<-ctx.Done()
+}
+
+func wakeUp(ctx context.Context) {
+	ctx, cancel := context.WithTimeout(ctx, time.Second)
+	defer cancel()
+	<-ctx.Done()
+}
