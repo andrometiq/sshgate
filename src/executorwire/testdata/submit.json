@@ -1,0 +1,1 @@
+{"proto_version":1,"kind":"exec_submit","input":{"request_id":"a2_ABEiM0RVZneImaq7zN3u_w","submit_not_after":"2026-01-02T03:04:05Z","tool":"run","server":"example","command":"touch /tmp/example","reason":"Create the example file","max_output_bytes":1024},"input_hash":"f079310f06ede5fd91031e184b626448b48ddf38e7add74745c05da99a35e88d"}

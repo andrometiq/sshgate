@@ -1,0 +1,1 @@
+{"proto_version":1,"kind":"exec_submit","input":{"request_id":"a2_ABEiM0RVZneImaq7zN3u_w","submit_not_after":"2026-01-02T03:04:05Z","tool":"run_batch","server":"example","commands":["ls /tmp","touch /tmp/example"],"stop_on_error":false,"reason":"Create the example file","max_output_bytes":1024},"input_hash":"7cbd185d805a43d805cf74d9345a8fc26ba6759646d329907ff598b49a7cb77d"}
