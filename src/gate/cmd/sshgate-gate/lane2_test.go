@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/karthikeyan5/sshgate/src/gate/confine"
 	"github.com/karthikeyan5/sshgate/src/redact"
 )
 
@@ -45,17 +46,17 @@ func TestLane2Argv(t *testing.T) {
 
 	match := map[string][]string{
 		"systemctl status sshd":                           {sc, "--no-pager", "status", "sshd"},
-		"systemctl status\t nginx.service  --no-pager":    {sc, "--no-pager", "status", "nginx.service", "--no-pager"},
-		"systemctl status -l -n 50 getty@tty1.service":    {sc, "--no-pager", "status", "-l", "-n", "50", "getty@tty1.service"},
-		"systemctl list-units --type=service,socket -a":   {sc, "--no-pager", "list-units", "--type=service,socket", "-a"},
-		"systemctl show -p ActiveState sshd":              {sc, "--no-pager", "show", "-p", "ActiveState", "sshd"},
-		"systemctl is-active -q sshd":                     {sc, "--no-pager", "is-active", "-q", "sshd"},
+		"systemctl status\t nginx.service  --no-pager":    {sc, "--no-pager", "status", "nginx.service"},
+		"systemctl status -l -n 50 getty@tty1.service":    {sc, "--no-pager", "status", "--full", "--lines=50", "getty@tty1.service"},
+		"systemctl list-units --type=service -a":          {sc, "--no-pager", "list-units", "--all", "--type=service"},
+		"systemctl show -p ActiveState sshd":              {sc, "--no-pager", "show", "--property=ActiveState", "sshd"},
+		"systemctl is-active -q sshd":                     {sc, "--no-pager", "is-active", "--quiet", "sshd"},
 		"systemctl get-default":                           {sc, "--no-pager", "get-default"},
-		"docker ps -a":                                    {dk, "ps", "-a"},
-		"docker ps --filter status=running --format json": {dk, "ps", "--filter", "status=running", "--format", "json"},
-		"docker logs --tail 100 --since 1h web":           {dk, "logs", "--tail", "100", "--since", "1h", "web"},
+		"docker ps -a":                                    {dk, "ps", "--all"},
+		"docker ps --filter status=running --format json": {dk, "ps", "--filter=status=running", "--format={{json .}}"},
+		"docker logs --tail 100 --since 1h web":           {dk, "logs", "--tail=100", "--since=1h", "web"},
 		"docker stats --no-stream":                        {dk, "stats", "--no-stream"},
-		"docker inspect --format=json web":                {dk, "inspect", "--format=json", "web"},
+		"docker inspect --format=json web":                {dk, "inspect", "--format={{json .}}", "web"},
 		"docker top web":                                  {dk, "top", "web"},
 		"docker version":                                  {dk, "version"},
 	}
@@ -90,23 +91,27 @@ func TestLane2Argv(t *testing.T) {
 		"systemctl status sshd\nid":             "newline",
 		"systemctl status (sshd)":               "subshell",
 		"DOCKER_HOST=tcp://evil:2375 docker ps": "env assignment prefix",
-		// Not on the allowlist.
-		"systemctl restart sshd":          "write verb",
-		"systemctl edit sshd":             "edit verb",
-		"systemctl --no-pager":            "no verb",
-		"systemctl":                       "bare binary",
-		"journalctl -u sshd":              "other binary",
-		"/usr/bin/systemctl status sshd":  "absolute argv0",
-		"docker run alpine":               "docker write verb",
-		"docker exec web id":              "docker exec",
-		"docker logs -f web":              "follow flag",
-		"docker stats":                    "stats without --no-stream",
-		"docker ps -aq":                   "bundled short flags",
-		"systemctl status -n":             "value flag without value",
-		"systemctl status -n --all":       "value flag followed by a flag",
-		"systemctl status --full=yes":     "inline value on a boolean flag",
-		"systemctl status --root=/x sshd": "offline-root flag",
-		"systemctl status --user":         "unlisted flag",
+		// Not in the grammar.
+		"systemctl restart sshd":                     "write verb",
+		"systemctl edit sshd":                        "edit verb",
+		"systemctl is-enabled sshd":                  "is-enabled is an ordinary read",
+		"systemctl --no-pager":                       "no verb",
+		"systemctl":                                  "bare binary",
+		"journalctl -u sshd":                         "other binary",
+		"/usr/bin/systemctl status sshd":             "absolute argv0",
+		"docker run alpine":                          "docker write verb",
+		"docker exec web id":                         "docker exec",
+		"docker info":                                "docker info runs plugins",
+		"docker logs -f web":                         "follow flag",
+		"docker stats":                               "stats without --no-stream",
+		"docker ps -aq":                              "bundled short flags",
+		"docker top web aux":                         "top takes one container",
+		"systemctl status -n":                        "value flag without value",
+		"systemctl status -n --all":                  "value flag followed by a flag",
+		"systemctl status --full=yes":                "inline value on a boolean flag",
+		"systemctl list-units --type=service,socket": "list value",
+		"systemctl status --root=/x sshd":            "offline-root flag",
+		"systemctl status --user":                    "user manager",
 		// Daemon-redirecting flags, in every spelling.
 		"systemctl -H root@evil status sshd": "-H before verb",
 		"systemctl status -H root@evil sshd": "-H",
@@ -131,15 +136,15 @@ func TestLane2Argv(t *testing.T) {
 // path no one can create, so no config.json (context switch, CLI hooks) and no
 // user cli-plugins/ dir can ever be read by a Lane-2 docker read.
 func TestLane2DockerConfigCannotExist(t *testing.T) {
-	if !slices.Contains(lane2Env, "DOCKER_CONFIG="+lane2NoDockerConfig) {
-		t.Fatalf("lane2Env = %q does not pin DOCKER_CONFIG", lane2Env)
+	if !slices.Contains(confine.Lane2Env(), "DOCKER_CONFIG="+confine.Lane2NoDockerConfig) {
+		t.Fatalf("Lane2Env = %q does not pin DOCKER_CONFIG", confine.Lane2Env())
 	}
-	if _, err := os.Stat(lane2NoDockerConfig); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("stat %s: %v, want not-exist", lane2NoDockerConfig, err)
+	if _, err := os.Stat(confine.Lane2NoDockerConfig); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stat %s: %v, want not-exist", confine.Lane2NoDockerConfig, err)
 	}
-	if err := os.Mkdir(lane2NoDockerConfig, 0o700); err == nil {
-		_ = os.Remove(lane2NoDockerConfig)
-		t.Fatalf("created %s; the pinned docker config dir must be uncreatable", lane2NoDockerConfig)
+	if err := os.Mkdir(confine.Lane2NoDockerConfig, 0o700); err == nil {
+		_ = os.Remove(confine.Lane2NoDockerConfig)
+		t.Fatalf("created %s; the pinned docker config dir must be uncreatable", confine.Lane2NoDockerConfig)
 	}
 }
 
@@ -156,9 +161,10 @@ func TestLane2BinaryAbsentFallsThrough(t *testing.T) {
 }
 
 // TestRunLane2ExecShellFreeClosedEnv drives run() end to end: an exact Lane-2
-// read execs the fixed binary directly (no /bin/sh), with the closed four-var
-// environment — a planted DOCKER_HOST/DOCKER_TLS_VERIFY and every other
-// inherited variable are absent — and /dev/null stdin, and is audited as lane2.
+// read execs the fixed binary directly (no /bin/sh) with the canonical argv,
+// the closed environment (a planted DOCKER_HOST/DOCKER_TLS_VERIFY and every
+// other inherited variable are absent), cwd / and /dev/null stdin, and is
+// audited as lane2.
 func TestRunLane2ExecShellFreeClosedEnv(t *testing.T) {
 	bin := withLane2Bins(t)
 	for _, kv := range [][2]string{
@@ -179,7 +185,7 @@ func TestRunLane2ExecShellFreeClosedEnv(t *testing.T) {
 		approval string
 		wantArgs []string
 	}{
-		{"docker ps -a", "unsigned", []string{filepath.Join(bin, "docker"), "ps", "-a"}},
+		{"docker ps -a", "unsigned", []string{filepath.Join(bin, "docker"), "ps", "--all"}},
 		{"systemctl status sshd", "unsigned", []string{filepath.Join(bin, "systemctl"), "--no-pager", "status", "sshd"}},
 	} {
 		t.Run(tc.cmd, func(t *testing.T) {
@@ -199,11 +205,14 @@ func TestRunLane2ExecShellFreeClosedEnv(t *testing.T) {
 			if !reflect.DeepEqual(rep.Args, tc.wantArgs) {
 				t.Errorf("argv = %q, want %q (exact, shell-free)", rep.Args, tc.wantArgs)
 			}
-			if !reflect.DeepEqual(rep.Env, lane2Env) {
-				t.Errorf("child env = %q, want exactly %q", rep.Env, lane2Env)
+			if !reflect.DeepEqual(rep.Env, confine.Lane2Env()) {
+				t.Errorf("child env = %q, want exactly %q", rep.Env, confine.Lane2Env())
+			}
+			if rep.Cwd != "/" {
+				t.Errorf("child cwd = %q, want /", rep.Cwd)
 			}
 			for _, kv := range rep.Env {
-				if strings.HasPrefix(kv, "DOCKER_") && kv != "DOCKER_CONFIG="+lane2NoDockerConfig {
+				if strings.HasPrefix(kv, "DOCKER_") && kv != "DOCKER_CONFIG="+confine.Lane2NoDockerConfig {
 					t.Errorf("planted %s reached the Lane-2 child", kv)
 				}
 			}

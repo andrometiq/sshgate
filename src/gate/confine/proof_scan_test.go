@@ -212,7 +212,7 @@ func TestLegsUseProofAPI(t *testing.T) {
 		}
 	}
 	// A declaration removed from its body cannot escape the scan simply by deleting newProof.
-	for _, name := range []string{"TestJailMatrixPhase1", "TestPhase1Tables", "TestJailMatrixCovers", "legCoverWalkDenied", "legSelfcheckDeniedSafe", "TestJailMatrixPhase2", "TestPhase2Tables"} {
+	for _, name := range []string{"TestJailMatrixPhase1", "TestPhase1Tables", "TestJailMatrixCovers", "legCoverWalkDenied", "legSelfcheckDeniedSafe", "TestJailMatrixPhase2", "TestPhase2Tables", "TestJailMatrixPhase3", "TestPhase3Tables"} {
 		roots[name] = true
 	}
 	for _, violation := range proofLaunchViolations(fs, functions, roots, proofLaunchExceptions) {

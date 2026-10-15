@@ -38,6 +38,18 @@ func TestExecArgvWithRedaction(t *testing.T) {
 		}
 	})
 
+	t.Run("the child's cwd is /", func(t *testing.T) {
+		t.Chdir(t.TempDir())
+		out := captureStdout(t, func() {
+			if _, err := gate.ExecArgvWithRedaction(ctx, []string{"/bin/pwd", "-P"}, nil, gate.ExecOpts{}); err != nil {
+				t.Errorf("err = %v", err)
+			}
+		})
+		if out != "/\n" {
+			t.Errorf("child cwd = %q, want /", out)
+		}
+	})
+
 	t.Run("env is exactly the passed env, never inherited", func(t *testing.T) {
 		t.Setenv("DOCKER_HOST", "tcp://attacker.invalid:2375")
 		out := captureStdout(t, func() {

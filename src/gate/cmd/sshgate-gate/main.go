@@ -408,7 +408,7 @@ func execChild(cmd string, reveal bool, captureLimit int, plan execPlan) (rc int
 	var err error
 	switch {
 	case plan.argv != nil:
-		res, err = gate.ExecArgvWithRedaction(ctx, plan.argv, lane2Env, opts)
+		res, err = gate.ExecArgvWithRedaction(ctx, plan.argv, confine.Lane2Env(), opts)
 	default:
 		opts.Confine = plan.confine
 		if plan.confine != nil {

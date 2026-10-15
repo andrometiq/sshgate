@@ -16,21 +16,24 @@ import (
 const gateProofPackage = "./src/gate/cmd/sshgate-gate"
 
 // gateProofCases is a literal copy of the confine manifest's cases for this
-// package (proofCasesPhase2); TestGateProofCasesMatchManifest keeps the two
-// equal.
+// package (proofCasesPhase2, proofCasesPhase3); TestGateProofCasesMatchManifest
+// keeps the two equal.
 func gateProofCases() []harness.Case {
 	var cases []harness.Case
-	add := func(name, kind, mode string, modes, obligations, markers, omissions []string) {
-		root := "TestJailMatrixPhase2/"
-		if kind == "Unit" {
-			root = "TestPhase2Tables/"
+	in := func(phase string) func(name, kind, mode string, modes, obligations, markers, omissions []string) {
+		return func(name, kind, mode string, modes, obligations, markers, omissions []string) {
+			root := "TestJailMatrix" + phase + "/"
+			if kind == "Unit" {
+				root = "Test" + phase + "Tables/"
+			}
+			cases = append(cases, harness.Case{
+				Name: name, Package: gateProofPackage, Kind: kind, Mode: mode, Modes: modes, ABIs: []string{"native", "abi1"},
+				Names:       map[string]string{"native": root + "native/" + name, "abi1": root + "abi1/" + name},
+				Obligations: obligations, Markers: markers, Omissions: omissions,
+			})
 		}
-		cases = append(cases, harness.Case{
-			Name: name, Package: gateProofPackage, Kind: kind, Mode: mode, Modes: modes, ABIs: []string{"native", "abi1"},
-			Names:       map[string]string{"native": root + "native/" + name, "abi1": root + "abi1/" + name},
-			Obligations: obligations, Markers: markers, Omissions: omissions,
-		})
 	}
+	add := in("Phase2")
 	for _, name := range []string{"U-ExecReadConfineRequired", "U-SpecStrictSources"} {
 		add(name, "Unit", "", nil, []string{"control:decision"}, []string{"EFFECT:decision"}, nil)
 	}
@@ -59,11 +62,17 @@ func gateProofCases() []harness.Case {
 	add("G-SELFTEST-JAILED", "Execution", "Execute", nil, []string{"jailed:selftest", "observe:fixtures"}, nil, nil)
 	add("U-PinRequiresRehearsal", "Unit", "", nil, []string{"control:decision"}, []string{"EFFECT:decision"}, nil)
 	add("G-PIN-REFUSED", "Effect", "Execute", nil, []string{"control:pin", "jailed:rehearsal", "observe:pinfile"}, []string{"EFFECT:pin-written"}, nil)
+	add = in("Phase3")
+	for _, name := range []string{"U-Lane2Grammar", "U-Lane2RedirectList"} {
+		add(name, "Unit", "", nil, []string{"control:decision"}, []string{"EFFECT:decision"}, nil)
+	}
+	add("G-L2-GRAMMAR", "Effect", "Execute", nil, []string{"control:argv", "jailed:lane2", "observe:output"}, []string{"EFFECT:grammar-flag"}, nil)
+	add("G-L2-REDIRECT", "Effect", "Execute", nil, []string{"control:argv", "jailed:lane2", "observe:output"}, []string{"EFFECT:redirect-flag"}, nil)
 	return cases
 }
 
 // gateHooks are the protections whose mutation may show an effect here.
-var gateHooks = []string{"P-G-CONFINE-REQUIRED", "P-G-STRICT", "P-G-NET-STRICT", "P-COVERS", "P-CLONE-MNT", "P-SC-NET", "P-G-SEAL", "P-G-SEAL-GUARD", "P-G-LABEL-SWITCH", "P-G-JAILVERB-NOEXEC", "P-G-SELFTEST-JAILED", "P-G-PIN-REHEARSAL"}
+var gateHooks = []string{"P-G-CONFINE-REQUIRED", "P-G-STRICT", "P-G-NET-STRICT", "P-COVERS", "P-CLONE-MNT", "P-SC-NET", "P-G-SEAL", "P-G-SEAL-GUARD", "P-G-LABEL-SWITCH", "P-G-JAILVERB-NOEXEC", "P-G-SELFTEST-JAILED", "P-G-PIN-REHEARSAL", "P-L2-GRAMMAR", "P-L2-REDIRECT"}
 
 // gateProof is the gate package's proof: one case, its obligations, and the
 // markers its legs observed. Finish prints the one PROOF-COMPLETE line.

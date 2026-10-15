@@ -307,7 +307,7 @@ Status: done.
 
 ### Phase 3: daemon-read verbs inside the jail
 
-**P3.0 — Characterise the daemon-read verbs.** Status: open.
+**P3.0 — Characterise the daemon-read verbs.** Status: done.
 
 - *Goal:* evidence for the grammar and fidelity expectations before the verbs move.
 - *Deliverables:* throwaway probes, kept out of the repository, on a development host and the

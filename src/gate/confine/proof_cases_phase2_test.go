@@ -2,22 +2,28 @@ package confine
 
 import "github.com/karthikeyan5/sshgate/src/gate/confine/jailmut/harness"
 
-// proofCasesPhase2 are the gate's read-routing cases. The gate's proof adapter
-// (src/gate/cmd/sshgate-gate) holds a literal copy, checked equal by
-// TestGateProofCasesMatchManifest there.
-func proofCasesPhase2() []harness.Case {
-	var cases []harness.Case
-	add := func(name, kind, mode string, modes, obligations, markers, omissions []string) {
-		root := "TestJailMatrixPhase2/"
+// gateCaseAdder appends a gate case of one phase to cases: a Unit case runs
+// under Test<phase>Tables, any other under TestJailMatrix<phase>.
+func gateCaseAdder(cases *[]harness.Case, phase string) func(name, kind, mode string, modes, obligations, markers, omissions []string) {
+	return func(name, kind, mode string, modes, obligations, markers, omissions []string) {
+		root := "TestJailMatrix" + phase + "/"
 		if kind == "Unit" {
-			root = "TestPhase2Tables/"
+			root = "Test" + phase + "Tables/"
 		}
-		cases = append(cases, harness.Case{
+		*cases = append(*cases, harness.Case{
 			Name: name, Package: phase2Package, Kind: kind, Mode: mode, Modes: modes, ABIs: []string{"native", "abi1"},
 			Names:       map[string]string{"native": root + "native/" + name, "abi1": root + "abi1/" + name},
 			Obligations: obligations, Markers: markers, Omissions: omissions,
 		})
 	}
+}
+
+// proofCasesPhase2 are the gate's read-routing cases. The gate's proof adapter
+// (src/gate/cmd/sshgate-gate) holds a literal copy, checked equal by
+// TestGateProofCasesMatchManifest there.
+func proofCasesPhase2() []harness.Case {
+	var cases []harness.Case
+	add := gateCaseAdder(&cases, "Phase2")
 	for _, name := range []string{"U-ExecReadConfineRequired", "U-SpecStrictSources"} {
 		add(name, "Unit", "", nil, []string{"control:decision"}, []string{"EFFECT:decision"}, nil)
 	}

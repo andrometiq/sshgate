@@ -254,8 +254,8 @@ func ExecWithRedaction(ctx context.Context, cmd string, opts ExecOpts) (res Exec
 // env as the child's environment, through the same stdout/stderr redaction,
 // counting, /dev/null stdin and process-group plumbing as ExecWithRedaction.
 // It is the shell-free exec for the gate's Lane-2 daemon-read allowlist: argv[0]
-// must be an absolute path (never a $PATH lookup), and a nil env yields an EMPTY
-// environment, never the gate's inherited one. opts.Confine must be nil — this
+// must be an absolute path (never a $PATH lookup), a nil env yields an EMPTY
+// environment, never the gate's inherited one, and the child's cwd is /. opts.Confine must be nil — this
 // door is unjailed by design. Return values follow ExecWithRedaction.
 func ExecArgvWithRedaction(ctx context.Context, argv, env []string, opts ExecOpts) (ExecResult, error) {
 	if len(argv) == 0 || !filepath.IsAbs(argv[0]) {
@@ -266,6 +266,7 @@ func ExecArgvWithRedaction(ctx context.Context, argv, env []string, opts ExecOpt
 	}
 	c := exec.CommandContext(ctx, argv[0], argv[1:]...)
 	c.Env = append([]string{}, env...) // non-nil: os/exec inherits the gate's env only for a nil Env
+	c.Dir = "/"
 	c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	return runRedacted(ctx, c, nil, argv[0], opts)
 }

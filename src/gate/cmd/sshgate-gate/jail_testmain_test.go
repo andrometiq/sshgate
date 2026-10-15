@@ -243,6 +243,7 @@ type execReport struct {
 	Path       string   `json:"path"`
 	Args       []string `json:"args"`
 	Env        []string `json:"env"`
+	Cwd        string   `json:"cwd"`
 	StdinIsNul bool     `json:"stdin_is_devnull"`
 }
 
@@ -259,11 +260,12 @@ func reportExec() int {
 		return 0
 	}
 	exe, _ := os.Readlink("/proc/self/exe")
+	cwd, _ := os.Getwd()
 	var st, nul unix.Stat_t
 	stdinNul := unix.Fstat(0, &st) == nil && unix.Stat("/dev/null", &nul) == nil &&
 		st.Rdev == nul.Rdev && st.Mode&unix.S_IFMT == unix.S_IFCHR
 	_ = json.NewEncoder(os.Stdout).Encode(execReport{
-		Path: exe, Args: os.Args, Env: os.Environ(), StdinIsNul: stdinNul,
+		Path: exe, Args: os.Args, Env: os.Environ(), Cwd: cwd, StdinIsNul: stdinNul,
 	})
 	return 0
 }
