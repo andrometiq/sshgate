@@ -157,6 +157,9 @@ func (e *Engine) Delete(principal, requestID string, pressure bool) (ap.Answer, 
 }
 
 func (e *Engine) reclaimLocked(key string, cmd ap.Command) (ap.Answer, error) {
+	if e.stopping {
+		return ap.Answer{}, unavailable()
+	}
 	rec, err := e.load(key)
 	if err != nil {
 		return ap.Answer{}, err

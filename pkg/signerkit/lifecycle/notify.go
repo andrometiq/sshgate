@@ -20,7 +20,7 @@ type notifyActor struct {
 }
 
 func (e *Engine) nudgeNotifyLocked(key string) {
-	if e.config.Notifier == nil || e.notifyContext == nil || e.notifyContext.Err() != nil {
+	if e.stopping || e.config.Notifier == nil || e.notifyContext == nil || e.notifyContext.Err() != nil {
 		return
 	}
 	a := e.notifyActors[key]
@@ -56,6 +56,9 @@ func (a *notifyActor) read(ctx context.Context) (*ap.R1, ap.NotifyStep, error) {
 	e := a.engine
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	if e.stopping {
+		return nil, ap.NotifyStep{}, unavailable()
+	}
 	if err := ctx.Err(); err != nil {
 		return nil, ap.NotifyStep{}, err
 	}
@@ -81,6 +84,9 @@ func (a *notifyActor) commit(ctx context.Context, cmd ap.Command) (ap.R1, ap.Ans
 	e := a.engine
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	if e.stopping {
+		return ap.R1{}, ap.Answer{}, unavailable()
+	}
 	if err := ctx.Err(); err != nil {
 		return ap.R1{}, ap.Answer{}, err
 	}
@@ -133,6 +139,9 @@ func (a *notifyActor) run(ctx context.Context) error {
 		}
 		switch step.Kind {
 		case ap.NotifyBurst, ap.NotifyCard:
+			if err := a.engine.checkAvailable(); err != nil {
+				return err
+			}
 			if err := a.engine.config.Notifier.Burst(ctx, func(session BurstSession) error {
 				return a.burst(ctx, session)
 			}); err != nil {
@@ -162,8 +171,11 @@ func (a *notifyActor) run(ctx context.Context) error {
 			if a.edit.Challenge == "" || next.Handle != a.edit.Handle {
 				return errors.New("lifecycle: missing edit challenge")
 			}
+			if err := a.engine.checkAvailable(); err != nil {
+				return err
+			}
 			outcome, _ := a.engine.config.Notifier.EditCard(ctx, next.MsgID, a.edit)
-			if err := ctx.Err(); err != nil {
+			if err := a.engine.checkAvailable(); err != nil {
 				return err
 			}
 			if outcome == EditPossible {
@@ -180,6 +192,9 @@ func (a *notifyActor) run(ctx context.Context) error {
 				}
 			}
 		case ap.NotifyStatus:
+			if err := a.engine.checkAvailable(); err != nil {
+				return err
+			}
 			_ = a.engine.config.Notifier.EditStatus(ctx, step.MsgID, step.State)
 			if _, _, err := a.commit(ctx, ap.StatusEdited{State: step.State}); err != nil {
 				return err
@@ -244,6 +259,9 @@ func (a *notifyActor) burst(ctx context.Context, session BurstSession) error {
 			if rec == nil || rec.Payload == nil || rec.Header.Decision != nil {
 				return nil
 			}
+			if err := a.engine.checkAvailable(); err != nil {
+				return err
+			}
 			ids, sendErr := session.SendParts(ctx, notification(*rec))
 			if _, _, err := a.commit(ctx, ap.BurstDone{PartMsgIDs: ids, Failed: sendErr != nil}); err != nil {
 				return err
@@ -266,6 +284,9 @@ func (a *notifyActor) burst(ctx context.Context, session BurstSession) error {
 			if rec == nil || rec.Payload == nil || rec.Header.Decision != nil {
 				return nil
 			}
+			if err := a.engine.checkAvailable(); err != nil {
+				return err
+			}
 			id, sendErr := session.SendCard(ctx, n)
 			if id <= 0 && sendErr == nil {
 				sendErr = errors.New("lifecycle: invalid card message ID")
@@ -286,6 +307,9 @@ func (a *notifyActor) burst(ctx context.Context, session BurstSession) error {
 func (a *notifyActor) incomplete(ctx context.Context, ids []int64) error {
 	for _, id := range ids {
 		if _, _, err := a.read(ctx); err != nil {
+			return err
+		}
+		if err := a.engine.checkAvailable(); err != nil {
 			return err
 		}
 		_ = a.engine.config.Notifier.MarkIncomplete(ctx, id)

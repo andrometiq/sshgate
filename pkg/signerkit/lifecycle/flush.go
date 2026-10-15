@@ -91,6 +91,9 @@ func (e *Engine) flushPass(ctx context.Context) (bool, error) {
 			if err := ctx.Err(); err != nil {
 				return false, err
 			}
+			if err := e.checkAvailable(); err != nil {
+				return false, err
+			}
 			if err := e.config.AuditWriter.WriteApproval(ctx, auditMetadata(key, rec.Header, event)); err != nil {
 				return true, nil
 			}

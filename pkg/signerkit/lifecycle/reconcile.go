@@ -10,14 +10,21 @@ import (
 )
 
 // Run drives the due index, outbox flusher and per-record notifier actors.
-// It returns storage failures to the owner and joins effects on cancellation.
+// Cancellation or a storage failure permanently stops this instance and joins
+// its effects. Recovery requires a new Engine over the store.
 func (e *Engine) Run(ctx context.Context) error {
 	e.mu.Lock()
+	if e.stopping {
+		e.mu.Unlock()
+		return unavailable()
+	}
 	if e.running {
 		e.mu.Unlock()
 		return errors.New("lifecycle: Run already active")
 	}
-	ctx, cancel := context.WithCancel(ctx)
+	caller := ctx
+	ctx = e.effectContext
+	e.runDone = make(chan struct{})
 	e.running = true
 	e.notifyContext = ctx
 	if e.notifyActors == nil {
@@ -34,14 +41,19 @@ func (e *Engine) Run(ctx context.Context) error {
 	joined := make(chan struct{})
 	go func() { defer close(joined); flushed <- e.runFlusher(ctx) }()
 	defer func() {
-		cancel()
+		e.stop()
 		<-joined
 		e.mu.Lock()
 		e.notifyContext = nil
 		e.mu.Unlock()
 		e.notifyJoined.Wait()
+		if e.config.AssistPool != nil {
+			e.config.AssistPool.Close()
+		}
+		e.waitJoined.Wait()
 		e.mu.Lock()
 		e.running = false
+		close(e.runDone)
 		e.mu.Unlock()
 	}()
 	ticker := newReconcileTicker()
@@ -52,6 +64,8 @@ func (e *Engine) Run(ctx context.Context) error {
 			return err
 		case err := <-flushed:
 			return err
+		case <-caller.Done():
+			return caller.Err()
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-ticker.C:
@@ -70,6 +84,9 @@ func (e *Engine) Run(ctx context.Context) error {
 func (e *Engine) Reconcile() error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	if e.stopping {
+		return unavailable()
+	}
 	now := e.now()
 	e.projections.expireGrants(now)
 	for _, key := range e.dueKeys(now) {

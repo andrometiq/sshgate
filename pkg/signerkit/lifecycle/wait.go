@@ -41,6 +41,8 @@ func (e *Engine) WaitMany(ctx context.Context, principal string, requestIDs []st
 	if wait == 0 {
 		return WaitResult{Summaries: summaries, WaitElapsed: true}, nil
 	}
+	e.waitJoined.Add(1)
+	defer e.waitJoined.Done()
 	ready := make(chan struct{}, 1)
 	if e.waiters == nil {
 		e.waiters = make(map[string]map[chan struct{}]struct{})
@@ -64,6 +66,7 @@ func (e *Engine) WaitMany(ctx context.Context, principal string, requestIDs []st
 	e.mu.Unlock()
 	elapsed := false
 	select {
+	case <-e.effectContext.Done():
 	case <-ready:
 	case <-timer.C:
 		elapsed = true
@@ -87,6 +90,9 @@ func (e *Engine) WaitMany(ctx context.Context, principal string, requestIDs []st
 }
 
 func (e *Engine) waitSummariesLocked(keys []string) ([]ap.Summary, error) {
+	if e.stopping {
+		return nil, unavailable()
+	}
 	summaries := make([]ap.Summary, 0, len(keys))
 	now := e.now()
 	for _, key := range keys {

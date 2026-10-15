@@ -26,16 +26,21 @@ type Config struct {
 	Caps               Caps // Zero fields use the local defaults.
 	Settings           ap.Settings
 	AssistTimeout      time.Duration
-	AssistPool         *assist.Pool // nil leaves the slot for Clock at its deadline.
+	AssistPool         *assist.Pool // Owned by Engine; nil leaves the slot for Clock.
 	Assessor           assist.Assessor
 	AssistInputBuilder AssistInputBuilder
 }
 
 // Engine serializes all record mutations. Its Store must not have another writer.
-// Run drives reconciliation, audit flushing and notifier actors until canceled.
+// Run drives effects; Close cancels and joins them before the store may be closed.
 type Engine struct {
 	mu            sync.Mutex
 	running       bool
+	stopping      bool
+	effectContext context.Context
+	cancelEffects context.CancelFunc
+	runDone       chan struct{}
+	waitJoined    sync.WaitGroup
 	notifyContext context.Context
 	notifyActors  map[string]*notifyActor
 	notifyJoined  sync.WaitGroup
@@ -72,7 +77,9 @@ func New(c Config) (*Engine, error) {
 		return nil, err
 	}
 	e := &Engine{config: c, effectErrors: make(chan error, 1), projections: newProjections(), flushNudge: make(chan struct{}, 1), flushWaiters: make(map[string]*flushWaiter)}
+	e.effectContext, e.cancelEffects = context.WithCancel(context.Background())
 	if err := e.startup(); err != nil {
+		e.cancelEffects()
 		return nil, err
 	}
 	return e, nil
@@ -99,6 +106,9 @@ func (e *Engine) load(key string) (*ap.R1, error) {
 // commitLocked is the only record writer. Callers hold mu from the owner-scoped
 // load through impure input resolution and this confirmed projection update.
 func (e *Engine) commitLocked(key string, before *ap.R1, cmd ap.Command, now ap.Now, in ap.Inputs) (ap.R1, ap.Answer, error) {
+	if e.stopping {
+		return ap.R1{}, ap.Answer{}, unavailable()
+	}
 	// Apply's Delete checks the stored record without Clock. Persist any due
 	// slots first so deletion cannot bypass their outbox's flush gate.
 	if _, deleting := cmd.(ap.Delete); deleting && before != nil {
@@ -154,6 +164,9 @@ func answerError(answer ap.Answer) error {
 func (e *Engine) Submit(ctx context.Context, principal string, draft ap.ApprovalDraft) (ap.Summary, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	if e.stopping {
+		return ap.Summary{}, unavailable()
+	}
 	key := ap.RecordKey(principal, draft.RequestID)
 	before, err := e.load(key)
 	if err != nil {
@@ -244,6 +257,9 @@ func (e *Engine) view(key string, rec ap.R1, now ap.Now) ap.Summary {
 func (e *Engine) Get(principal, requestID string) (ap.Summary, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	if e.stopping {
+		return ap.Summary{}, unavailable()
+	}
 	key := ap.RecordKey(principal, requestID)
 	rec, err := e.load(key)
 	if err != nil {
@@ -259,6 +275,9 @@ func (e *Engine) Get(principal, requestID string) (ap.Summary, error) {
 func (e *Engine) List(principal string) ([]ap.Summary, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	if e.stopping {
+		return nil, unavailable()
+	}
 	now := e.now()
 	keys := make([]string, 0)
 	for key, charge := range e.projections.records {
