@@ -13,6 +13,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/karthikeyan5/sshgate/src/sigwire"
 )
 
 // HostedServerBackend speaks the v2 wire protocol against a hosted
@@ -144,6 +146,9 @@ func (h *HostedServerBackend) Request(ctx context.Context, req ApprovalRequest) 
 	// only once the wire structs + web UI carry the reason and the scary
 	// approval banner end-to-end (that is the v2 feature work, out of scope).
 	for _, c := range req.Commands {
+		if c.Net {
+			return nil, errors.New(sigwire.SignerNetUnsupported + " network grants are not supported on the hosted signer")
+		}
 		if c.Reveal {
 			return nil, errors.New("hosted: secret-reveal is not supported on the hosted (Tier-3) signer backend yet; use the local Telegram signer")
 		}

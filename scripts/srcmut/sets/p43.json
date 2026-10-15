@@ -1,0 +1,21 @@
+[
+  {
+    "id": "P-S-HOSTED-NET",
+    "name": "hosted-net-refusal",
+    "package": "./src/signer/backend",
+    "file": "pkg/signerkit/hosted.go",
+    "old": "\t\tif c.Net {\n\t\t\treturn nil, errors.New(sigwire.SignerNetUnsupported + \" network grants are not supported on the hosted signer\")\n\t\t}\n",
+    "new": "\t\t_ = sigwire.SignerNetUnsupported\n",
+    "red": [
+      {
+        "test": "TestHostedRefusesNet",
+        "markers": [
+          "MUTATION-EFFECT hosted-http-net"
+        ]
+      }
+    ],
+    "green": [
+      "TestHostedServerBackend_RejectsReveal"
+    ]
+  }
+]
