@@ -11,10 +11,12 @@ import (
 	"io/fs"
 	"os"
 	"strings"
+	"sync"
 
 	"github.com/karthikeyan5/sshgate/src/classify"
 	"github.com/karthikeyan5/sshgate/src/mcp/registry"
 	signpkg "github.com/karthikeyan5/sshgate/src/mcp/sign"
+	"github.com/karthikeyan5/sshgate/src/sigwire"
 )
 
 // RunInput is the JSON input to the sshgate.run tool. Schema:
@@ -30,6 +32,7 @@ import (
 //	  }
 //	}
 type RunInput struct {
+	Network bool   `json:"network,omitempty" jsonschema:"request network for this one read; requires reason; refused for writes and daemon-read verbs"`
 	Alias   string `json:"alias" jsonschema:"registered server alias (run sshgate.list_servers to see options)"`
 	Command string `json:"command" jsonschema:"shell command to run on the remote host"`
 	// Reveal requests a SECRET-REVEAL for THIS single command: its output is
@@ -40,8 +43,8 @@ type RunInput struct {
 	// provider and the approval chat. Default false.
 	Reveal bool `json:"reveal,omitempty" jsonschema:"request SECRET-REVEAL: run this one command's output WITHOUT redaction (raw secrets reach the agent). Requires reason. Single command only. Default false."`
 	// Reason is the mandatory human-readable justification shown in the
-	// reveal approval. Required when reveal is true; ignored otherwise.
-	Reason string `json:"reason,omitempty" jsonschema:"why this secret must be revealed (required when reveal=true; shown to the human approver)"`
+	// reveal or network approval. Required for either capability.
+	Reason string `json:"reason,omitempty" jsonschema:"why this reveal or network access is needed (required when reveal=true or network=true; shown to the human approver)"`
 	// MaxOutputBytes optionally overrides the per-command output byte cap for
 	// THIS call. Each of stdout and stderr is independently truncated to this
 	// many bytes (a truncation marker naming the dropped/total byte counts is
@@ -140,6 +143,10 @@ type TransferClient interface {
 // non-nil before calling Run; the MCP entry point sets them at
 // startup.
 type Runner struct {
+	capMu         sync.Mutex
+	caps          map[string]*hostCap
+	capGeneration map[string]uint64
+
 	Servers *registry.Servers
 	Sign    SignClient
 	SSH     SSHRunner
@@ -222,7 +229,7 @@ func (r *Runner) Run(ctx context.Context, in RunInput) (RunOutput, error) {
 	if r.Servers == nil {
 		return RunOutput{}, errors.New("tools: Servers is nil")
 	}
-	if r.Sign == nil {
+	if r.Sign == nil && !in.Network {
 		return RunOutput{}, errors.New("tools: Sign is nil")
 	}
 	if r.SSH == nil {
@@ -230,6 +237,9 @@ func (r *Runner) Run(ctx context.Context, in RunInput) (RunOutput, error) {
 	}
 	if strings.TrimSpace(in.Command) == "" {
 		return RunOutput{}, errors.New("tools: command is empty")
+	}
+	if strings.HasPrefix(in.Command, sigwire.EnvelopePrefix) {
+		return RunOutput{}, errors.New("tools: command prefix SSHGATE_READ is reserved")
 	}
 	if in.Alias == "" {
 		return RunOutput{}, errors.New("tools: alias is empty")
@@ -243,6 +253,10 @@ func (r *Runner) Run(ctx context.Context, in RunInput) (RunOutput, error) {
 	// Resolve the output cap once for this call (explicit override, else the
 	// Runner default). Applied to the STRUCTURED stdout/stderr below.
 	cap := r.effectiveOutputCap(in.MaxOutputBytes)
+
+	if in.Network {
+		return r.runNetwork(ctx, in, entry, cap)
+	}
 
 	// SECRET-REVEAL is signed-only: a reveal must carry a human approval that
 	// the signer turns into a reveal=true signature, so it ALWAYS routes

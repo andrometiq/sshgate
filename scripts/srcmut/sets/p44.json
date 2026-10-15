@@ -1,0 +1,173 @@
+[
+  {
+    "id": "P-M-REVEAL-NET",
+    "name": "reveal-net-drop-net",
+    "package": "./src/mcp/tools",
+    "file": "src/mcp/tools/netroute.go",
+    "old": "Reveal: in.Reveal, Net: true, Reason: in.Reason",
+    "new": "Reveal: in.Reveal, Net: !in.Reveal, Reason: in.Reason",
+    "red": [
+      {
+        "test": "TestRunNetworkProtection/combined-net",
+        "markers": [
+          "combined-net"
+        ]
+      }
+    ],
+    "green": [
+      "TestRunNetworkProtection/ordinary"
+    ]
+  },
+  {
+    "id": "P-M-REVEAL-NET",
+    "name": "reveal-net-via-envelope",
+    "package": "./src/mcp/tools",
+    "file": "src/mcp/tools/netroute.go",
+    "old": "if !in.Reveal && capability != nil",
+    "new": "if capability != nil",
+    "red": [
+      {
+        "test": "TestRunNetworkProtection/combined-reveal",
+        "markers": [
+          "combined-reveal"
+        ]
+      }
+    ],
+    "green": [
+      "TestRunNetworkProtection/ordinary"
+    ]
+  },
+  {
+    "id": "P-M-NET-ENVELOPE",
+    "name": "net-envelope-plain",
+    "package": "./src/mcp/tools",
+    "file": "src/mcp/tools/netroute.go",
+    "old": "sigwire.EnvelopeConfinedNet+in.Command",
+    "new": "in.Command",
+    "red": [
+      {
+        "test": "TestRunNetworkProtection/envelope-missing",
+        "markers": [
+          "envelope-missing"
+        ]
+      }
+    ],
+    "green": [
+      "TestRunNetworkProtection/ordinary"
+    ]
+  },
+  {
+    "id": "P-M-NET-NO-FALLBACK",
+    "name": "net-refusal-fallback",
+    "package": "./src/mcp/tools",
+    "file": "src/mcp/tools/run.go",
+    "old": "return r.runNetwork(ctx, in, entry, cap)",
+    "new": "out, err := r.runNetwork(ctx, in, entry, cap)\n\t\tif err != nil { return r.runRead(ctx, entry, in.Command, cap) }\n\t\treturn out, err",
+    "red": [
+      {
+        "test": "TestRunNetworkProtection/fallback-ran",
+        "markers": [
+          "fallback-ran"
+        ]
+      }
+    ],
+    "green": [
+      "TestRunNetworkProtection/ordinary"
+    ]
+  },
+  {
+    "id": "P-M-NET-REASON",
+    "name": "net-reason-omitted",
+    "package": "./src/mcp/tools",
+    "file": "src/mcp/tools/netroute.go",
+    "old": "if strings.TrimSpace(in.Reason) == \"\" {",
+    "new": "if false {",
+    "red": [
+      {
+        "test": "TestRunNetworkProtection/reason",
+        "markers": [
+          "reason"
+        ]
+      }
+    ],
+    "green": [
+      "TestRunNetworkProtection/ordinary"
+    ]
+  },
+  {
+    "id": "P-M-NET-TIER1",
+    "name": "net-tier1-sign",
+    "package": "./src/mcp/tools",
+    "file": "src/mcp/tools/netroute.go",
+    "old": "if entry.ReadOnly {",
+    "new": "if false {",
+    "red": [
+      {
+        "test": "TestRunNetworkProtection/tier1",
+        "markers": [
+          "tier1"
+        ]
+      }
+    ],
+    "green": [
+      "TestRunNetworkProtection/ordinary"
+    ]
+  },
+  {
+    "id": "P-M-NET-BATCH",
+    "name": "net-batch-allowed",
+    "package": "./src/mcp/tools",
+    "file": "src/mcp/tools/run_batch.go",
+    "old": "if in.Network {",
+    "new": "if false {",
+    "red": [
+      {
+        "test": "TestRunNetworkProtection/batch",
+        "markers": [
+          "batch"
+        ]
+      }
+    ],
+    "green": [
+      "TestRunNetworkProtection/ordinary"
+    ]
+  },
+  {
+    "id": "P-M-NET-DAEMON-READ",
+    "name": "net-daemon-allowed",
+    "package": "./src/mcp/tools",
+    "file": "src/mcp/tools/netroute.go",
+    "old": " || networkDaemonRead(in.Command)",
+    "new": "",
+    "red": [
+      {
+        "test": "TestRunNetworkProtection/daemon",
+        "markers": [
+          "daemon"
+        ]
+      }
+    ],
+    "green": [
+      "TestRunNetworkProtection/ordinary"
+    ]
+  },
+  {
+    "id": "P-M-REVEAL-NET",
+    "name": "reveal-net-via-reveal-branch",
+    "package": "./src/mcp/tools",
+    "file": "src/mcp/tools/run.go",
+    "old": "if in.Network {",
+    "new": "if in.Network && !in.Reveal {",
+    "red": [
+      {
+        "test": "TestRunNetworkProtection/reveal-branch",
+        "markers": [
+          "reveal-branch"
+        ]
+      }
+    ],
+    "green": [
+      "TestRunNetworkProtection/ordinary"
+    ]
+  }
+]

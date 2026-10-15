@@ -8,6 +8,7 @@ import (
 
 	"github.com/karthikeyan5/sshgate/src/classify"
 	signpkg "github.com/karthikeyan5/sshgate/src/mcp/sign"
+	"github.com/karthikeyan5/sshgate/src/sigwire"
 )
 
 // RunBatchInput is the JSON input to the sshgate.run_batch tool.
@@ -26,6 +27,7 @@ import (
 // caller value always wins, in both directions (and aborts on ANY non-zero
 // exit when set true).
 type RunBatchInput struct {
+	Network     bool     `json:"network,omitempty" jsonschema:"network is single-read only; true is refused; use run with a reason"`
 	Alias       string   `json:"alias" jsonschema:"registered server alias"`
 	Commands    []string `json:"commands" jsonschema:"shell commands to run on the remote host, in order"`
 	StopOnError *bool    `json:"stop_on_error,omitempty" jsonschema:"abort the sequence at the first non-zero exit. When omitted the default is chosen by batch class: true for a batch containing any write (ordering matters), false (continue) for an all-read batch. Set explicitly to override."`
@@ -120,6 +122,9 @@ const BatchWriteTTLSec = 60
 //     simple and predictable).
 //   - Empty Commands → empty Results, no calls.
 func (r *Runner) RunBatch(ctx context.Context, in RunBatchInput) (RunBatchOutput, error) {
+	if in.Network {
+		return RunBatchOutput{}, errors.New("tools: network is single-read only; use run with a reason")
+	}
 	if r.Servers == nil {
 		return RunBatchOutput{}, errors.New("tools: Servers is nil")
 	}
@@ -151,6 +156,9 @@ func (r *Runner) RunBatch(ctx context.Context, in RunBatchInput) (RunBatchOutput
 	for i, c := range in.Commands {
 		if strings.TrimSpace(c) == "" {
 			return RunBatchOutput{}, fmt.Errorf("tools: commands[%d] is empty", i)
+		}
+		if strings.HasPrefix(c, sigwire.EnvelopePrefix) {
+			return RunBatchOutput{}, fmt.Errorf("tools: commands[%d] uses reserved command prefix SSHGATE_READ", i)
 		}
 		kinds[i], reasons[i] = classify.Explain(c)
 	}
