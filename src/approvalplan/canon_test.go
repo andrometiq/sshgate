@@ -243,3 +243,62 @@ func TestNoDirectTimeReads(t *testing.T) {
 	}
 	elapsedtest.AssertNoDirectTimeReads(t, src)
 }
+
+func TestCheckCanonicalJSON(t *testing.T) {
+	esc := `\u`
+	accepted := []string{
+		`{}`, `{"a":{"b":[1,-2,0,"x` + esc + `003c",true,false,null,{}]},"c":[]}`,
+		`{"segments":[{"text":"caf` + "é" + `","spans":[{"start":0,"rules":["a","b"]}]}]}`,
+	}
+	for _, s := range accepted {
+		if err := checkCanonicalJSON([]byte(s)); err != nil {
+			t.Errorf("%s: %v", s, err)
+		}
+	}
+	refused := map[string]string{
+		"top duplicate":      `{"a":1,"a":2}`,
+		"nested duplicate":   `{"a":{"k":1,"k":2}}`,
+		"duplicate in array": `{"a":[{"k":1,"k":1}]}`,
+		"alternate escape":   `{"a":["` + esc + `0061"]}`,
+		"raw html":           `{"a":{"b":"<"}}`,
+		"invalid utf-8":      "{\"a\":[\"\xff\"]}",
+		"invalid utf-8 key":  "{\"\xff\":1}",
+		"whitespace":         `{"a": 1}`,
+		"float":              `{"a":1.0}`,
+		"exponent":           `{"a":1e2}`,
+		"negative zero":      `{"a":-0}`,
+		"leading zero":       `{"a":01}`,
+		"trailing data":      `{"a":1}{}`,
+		"escaped slash":      `{"a":"` + "\\" + `/"}`,
+		"truncated":          `{"a":[1,2}`,
+	}
+	for name, s := range refused {
+		if err := checkCanonicalJSON([]byte(s)); err == nil {
+			t.Errorf("%s: %s accepted", name, s)
+		}
+	}
+}
+
+func TestReviewSnapshotIsCanonicalAtEveryDepth(t *testing.T) {
+	esc := `\u`
+	for _, review := range []string{
+		`{"reason":"a","reason":"b"}`,
+		`{"s":"` + esc + `0061"}`,
+		"{\"segments\":[{\"text\":\"\xff\"}]}",
+		`{"segments":[{"spans":[{"rules":["a"],"rules":["b"]}]}]}`,
+	} {
+		rec := frozenR1(t, fixtures()[0].plan, 1, "x", json.RawMessage(review))
+		if _, err := EncodeR1(rec); fieldOf(err) != "payload.review_snapshot" {
+			t.Errorf("%q: EncodeR1 = %v", review, err)
+		}
+		rec.Payload.ReviewSnapshot = reviewOK
+		good, err := EncodeR1(rec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		bad := bytes.Replace(good, []byte(reviewOK), []byte(review), 1)
+		if _, err := DecodeR1(bad); codeOf(err) != CodeRecordCorrupt {
+			t.Errorf("%q: DecodeR1 = %v", review, err)
+		}
+	}
+}

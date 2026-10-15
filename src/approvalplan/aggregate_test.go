@@ -98,3 +98,19 @@ func TestAggregateProperties(t *testing.T) {
 		}
 	}
 }
+
+func TestWellFormedSteps(t *testing.T) {
+	S, F, K, N, A := StepSucceeded, StepFailed, StepSkipped, StepNotRun, StepExpiredUnexecuted
+	ok := [][]StepStatus{{S}, {F, S}, {A}, {A, N, N}, {S, StepIndeterminate}, {F, K, K}, {S, F, K}, {S, StepFailedNotStarted, N}}
+	bad := [][]StepStatus{{N}, {K}, {S, K}, {S, N}, {A, S}, {A, K}, {F, K, N}, {A, A}, {F, K, S}, {"bogus"}}
+	for _, s := range ok {
+		if !WellFormedSteps(s) {
+			t.Errorf("%v refused", s)
+		}
+	}
+	for _, s := range bad {
+		if WellFormedSteps(s) {
+			t.Errorf("%v accepted", s)
+		}
+	}
+}

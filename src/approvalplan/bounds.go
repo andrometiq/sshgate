@@ -81,8 +81,8 @@ const (
 	// LocalPayloadBudget is the byte budget that full-payload records reserve
 	// against at R1Reservation. r5.8 named 32 MiB and told A1a to raise it if
 	// 256 small live records reserve more than half of it; they reserve about
-	// 37.6 MiB (TestR1ReservationSmallRecordBudget), so it is 80 MiB.
-	LocalPayloadBudget = 80 << 20
+	// 41.8 MiB (TestR1ReservationSmallRecordBudget), so it is 96 MiB.
+	LocalPayloadBudget = 96 << 20
 	LocalRecordsTotal  = 65536
 	HostedFullRows     = 4096
 	HostedRows         = 200000
@@ -263,7 +263,7 @@ func grownR1(rec R1) R1 {
 	h.ClaimCount = worstInt64
 	h.RenotifyGen = MaxBursts + 1
 	h.OutboxSeq, h.AuditedThrough, h.NoiseDropped = math.MaxUint64, math.MaxUint64, math.MaxUint64
-	h.Outbox = worstOutbox(voteCap+NoiseFold, 1, outboxFixedEvents-1, h.RequiredApprovals)
+	h.Outbox = worstOutbox(voteCap+outboxFixedEvents+NoiseFold, h.RequiredApprovals)
 	h.Shed = false
 	grown := R1{Header: h}
 	if p := rec.Payload; p != nil {
@@ -281,26 +281,19 @@ func grownR1(rec R1) R1 {
 	return grown
 }
 
-// worstOutbox: operator events (votes and noise), decision events (which also
-// carry decided_by), and plain events.
-func worstOutbox(operatorEvents, decisionEvents, plainEvents, requiredApprovals int) []OutboxEvent {
-	base := OutboxEvent{
-		Seq: math.MaxUint64, Kind: plain(MaxEventKindBytes), Replay: true, Decision: plain(MaxDecisionBytes),
-		Detail: plain(MaxDetailBytes), Assist: &worstBound, NoiseDropped: math.MaxUint64,
+// worstOutbox is n events with every field the validator admits at its
+// longest, decided_by on the one event that may carry it.
+func worstOutbox(n, requiredApprovals int) []OutboxEvent {
+	event := OutboxEvent{
+		Seq: math.MaxUint64, Kind: plain(MaxEventKindBytes), Replay: true, Operator: plain(MaxOperatorIDBytes),
+		Decision: plain(MaxDecisionBytes), Detail: plain(MaxDetailBytes), Assist: &worstBound, NoiseDropped: math.MaxUint64,
 	}
-	withOperator := base
-	withOperator.Operator = plain(MaxOperatorIDBytes)
-	decision := withOperator
-	decision.DecidedBy = plain(maxDecidedBy(requiredApprovals))
-	out := make([]OutboxEvent, 0, operatorEvents+decisionEvents+plainEvents)
-	for range operatorEvents {
-		out = append(out, withOperator)
+	out := make([]OutboxEvent, n)
+	for i := range out {
+		out[i] = event
 	}
-	for range decisionEvents {
-		out = append(out, decision)
-	}
-	for range plainEvents {
-		out = append(out, base)
+	if n > 0 {
+		out[0].DecidedBy = plain(maxDecidedBy(requiredApprovals))
 	}
 	return out
 }

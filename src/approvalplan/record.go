@@ -17,7 +17,7 @@ const (
 // which is what securestate stores and limits. Each is derived from a
 // worst-case record that the tests build and measure:
 //   - R1Max: the worst K19-legal R1 record grown to every set and slot bound
-//     encodes to about 1.09 MiB (TestR1WorstCaseWithinBound); R1Max keeps at
+//     encodes to about 1.10 MiB (TestR1WorstCaseWithinBound); R1Max keeps at
 //     least 20% margin over it, rounded up to 64 KiB. r5.8 named 512 KiB and
 //     told A1a to raise it if the measured record needed more.
 //   - ShedMax: the worst shed R1 record, with one late report event and one
@@ -27,7 +27,7 @@ const (
 //     218 KiB (TestR2WorstCaseWithinBound); plus 20%, rounded up to 64 KiB.
 //   - R2BodyOverhead: field names, quotes and base64 padding for 64 bodies.
 const (
-	R1Max          = 1344 << 10
+	R1Max          = 1408 << 10
 	ShedMax        = 192 << 10
 	R2NonBodyMax   = 320 << 10
 	R2BodyOverhead = 4 << 10
@@ -350,10 +350,27 @@ func EncodeR1(rec R1) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if len(b) > R1Max {
-		return nil, codeErr(CodeRequestTooLarge, "r1", "is %d bytes encoded; maximum is %d", len(b), R1Max)
+	if err := checkR1Size(rec, len(b)); err != nil {
+		return nil, codeErr(CodeRequestTooLarge, "r1", "%s", err.Msg)
 	}
 	return b, nil
+}
+
+// checkR1Size enforces the encoded bounds at the codec: R1Max always, ShedMax
+// for a shed record, and for a full record its own R1Reservation, so a record
+// can never hold more bytes than the payload budget charged for it.
+func checkR1Size(rec R1, n int) *CodeError {
+	limit, name := R1Max, "R1Max"
+	switch {
+	case rec.Header.Shed:
+		limit, name = ShedMax, "ShedMax"
+	case n <= R1Max:
+		limit, name = R1Reservation(rec), "its R1Reservation"
+	}
+	if n > limit {
+		return codeErr(CodeRecordCorrupt, "r1", "is %d bytes encoded; %s is %d", n, name, limit)
+	}
+	return nil
 }
 
 // DecodeR1 decodes and validates one stored R1 record. Any failure means the
@@ -368,6 +385,9 @@ func DecodeR1(b []byte) (R1, error) {
 	}
 	if err := rec.validate(); err != nil {
 		return R1{}, corrupt("r1", err)
+	}
+	if err := checkR1Size(rec, len(b)); err != nil {
+		return R1{}, err
 	}
 	return rec, nil
 }
@@ -496,6 +516,9 @@ func (rec R1) validate() error {
 	}
 	if h.Shed != (rec.Payload == nil) {
 		return invalid("shed", "a record has a payload exactly when it is not shed")
+	}
+	if h.Shed && len(h.Outbox) > 1+ShedNoiseFold {
+		return invalid("outbox", "a shed record holds at most a late report event and %d noise event", ShedNoiseFold)
 	}
 	if rec.Payload != nil {
 		return within("payload", rec.Payload.validate(h))
@@ -733,18 +756,26 @@ func (f FinalReport) validate(stepCount int) error {
 	if len(f.Steps) != stepCount {
 		return invalid("steps", "%d steps; the record has %d", len(f.Steps), stepCount)
 	}
+	statuses := make([]StepStatus, len(f.Steps))
 	for i, s := range f.Steps {
 		if s.Ordinal != i+1 || !s.Status.Valid() {
 			return invalid(fmt.Sprintf("steps[%d]", i), "ordinal must be %d and status valid", i+1)
 		}
+		ran := s.Status != StepNotRun && s.Status != StepSkipped
+		if !ran && (s.ExitCode != nil || s.StdoutBytes != nil || s.StderrBytes != nil || s.Truncated != nil) {
+			return invalid(fmt.Sprintf("steps[%d]", i), "a step with no result carries only its status (E38)")
+		}
 		if s.StdoutBytes != nil && *s.StdoutBytes < 0 || s.StderrBytes != nil && *s.StderrBytes < 0 {
 			return invalid(fmt.Sprintf("steps[%d]", i), "byte counts are non-negative")
 		}
+		statuses[i] = s.Status
 	}
-	for _, o := range f.ExecutedOrdinals {
-		if o < 1 || o > stepCount {
-			return invalid("executed_ordinals", "ordinal %d is outside 1..%d", o, stepCount)
-		}
+	if !WellFormedSteps(statuses) {
+		return invalid("steps", "are not in E29's shape")
+	}
+	if f.Class != AggregateJobClass(statuses) || f.Partial != Partial(statuses) ||
+		!slices.Equal(f.ExecutedOrdinals, ExecutedOrdinals(statuses)) && !(len(f.ExecutedOrdinals) == 0 && len(ExecutedOrdinals(statuses)) == 0) {
+		return invalid("class", "class, executed_ordinals and partial must equal the values derived from the steps")
 	}
 	if !ValidSHA256Hex(f.ResultDigest) || !ValidSHA256Hex(f.BodyDigest) {
 		return invalid("result_digest", "result_digest and body_digest must be 64 lowercase hex")
@@ -774,6 +805,9 @@ func (p *R1Payload) validate(h R1Header) error {
 	}
 	if len(p.ReviewSnapshot) < 2 || p.ReviewSnapshot[0] != '{' || len(p.ReviewSnapshot) > ReviewSnapshotMax {
 		return invalid("review_snapshot", "must be a JSON object of at most %d bytes", ReviewSnapshotMax)
+	}
+	if err := checkCanonicalJSON(p.ReviewSnapshot); err != nil {
+		return invalid("review_snapshot", "%v", err)
 	}
 	if p.AssistResult != nil {
 		if err := within("assist_result", ValidateAssist(*p.AssistResult)); err != nil {
@@ -910,8 +944,8 @@ func (job R2) validateSlots() error {
 				return invalid("outcome", "%s carries no code or class", o.Kind)
 			}
 		case OutcomeJobError:
-			if o.Code != "" && !o.Code.Valid() || o.Class != "" {
-				return invalid("outcome", "error carries at most a known code")
+			if o.Code != "" && !definitive(o.Code) || o.Class != "" {
+				return invalid("outcome", "error carries at most a definitive code")
 			}
 		case OutcomeAdopted:
 			if !o.Class.Valid() || o.Code != "" {
@@ -922,8 +956,8 @@ func (job R2) validateSlots() error {
 		}
 	}
 	if r := job.ReportResult; r != nil {
-		if !(r.State == ReportAcked && r.Code == "" || r.State == ReportRefused && r.Code.Valid()) {
-			return invalid("report_result", "must be acked, or refused with a code")
+		if !(r.State == ReportAcked && r.Code == "" || r.State == ReportRefused && definitive(r.Code)) {
+			return invalid("report_result", "must be acked, or refused with a definitive code")
 		}
 	}
 	if job.BodiesRemoved != nil && !isEventToken(job.BodiesRemoved.Cause, MaxReasonTokenBytes) {
@@ -1001,3 +1035,8 @@ func isRouteTokenOrSpaced(s string, max int) bool {
 	return len(s) >= 1 && len(s) <= max && s[0] != ' ' && s[len(s)-1] != ' ' &&
 		allBytes(s, func(c byte) bool { return c == ' ' || isPlainByte(c) })
 }
+
+// definitive reports whether c is a known code that settles work for good.
+// A transient code never becomes a stored refusal or outcome: the work stays
+// owed and retryable (SA-5).
+func definitive(c Code) bool { return c.Valid() && !c.Retryable() }

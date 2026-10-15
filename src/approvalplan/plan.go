@@ -7,6 +7,7 @@ import (
 	"math"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // Version numbers of the stored encodings.
@@ -501,7 +502,7 @@ func (e TransferEndpoint) validate(frozen bool) error {
 		return invalid("registry_entry_digest", "does not match target")
 	}
 	if !validTransferPath(e.Path) {
-		return invalid("path", "must be an absolute path of at most %d bytes without NUL, CR or LF", MaxTransferPathBytes)
+		return invalid("path", "must be an absolute UTF-8 path of at most %d bytes without NUL, CR or LF", MaxTransferPathBytes)
 	}
 	keyFields := e.KeyLabel + e.PublicKey + e.PublicKeySHA256 + e.KeyEntryDigest
 	if !frozen {
@@ -541,9 +542,13 @@ func (r *RegisterTransferKey) validate() error {
 	return nil
 }
 
-// validTransferPath mirrors xferwire.ValidPath (src/xferwire/xferwire.go:334).
+// validTransferPath mirrors xferwire.ValidPath (src/xferwire/xferwire.go:334)
+// and also requires valid UTF-8: canonical JSON would replace an invalid byte
+// with U+FFFD, so two distinct paths would share one draft_hash and the stored
+// path would differ from the approved one.
 func validTransferPath(p string) bool {
-	return p != "" && len(p) <= MaxTransferPathBytes && strings.HasPrefix(p, "/") && !strings.ContainsAny(p, "\x00\r\n")
+	return p != "" && len(p) <= MaxTransferPathBytes && strings.HasPrefix(p, "/") &&
+		utf8.ValidString(p) && !strings.ContainsAny(p, "\x00\r\n")
 }
 
 // validKeyText accepts the "<tag> <base64>" shape of xfer's public key text

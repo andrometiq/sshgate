@@ -628,3 +628,34 @@ func FuzzDecodeDraft(f *testing.F) {
 		}
 	})
 }
+
+func TestTransferPathsMustBeUTF8(t *testing.T) {
+	withPath := func(p string) ApprovalDraft {
+		d := *fixtures()[8].draft
+		tr := *d.Transfer
+		tr.Source.Path = p
+		d.Transfer = &tr
+		return d
+	}
+	// Both encode to "/" U+FFFD, so they would share one draft_hash.
+	a, b := withPath("/\xff"), withPath("/\xfe")
+	ha, _ := DraftHash(a)
+	hb, _ := DraftHash(b)
+	if ha != hb {
+		t.Fatal("expected the lossy encoding to collide; the regression no longer reproduces")
+	}
+	for _, d := range []ApprovalDraft{a, b} {
+		if err := d.Validate(); fieldOf(err) != "transfer.source.path" {
+			t.Errorf("path %q: Validate = %v", d.Transfer.Source.Path, err)
+		}
+	}
+	path := "/srv/café <x> & y" + "\u2028" + "z/日本"
+	d := withPath(path)
+	if err := d.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	back, err := DecodeDraft(mustCanon(t, d))
+	if err != nil || back.Transfer.Source.Path != path {
+		t.Fatalf("path did not round-trip byte-exactly: %q, %v", back.Transfer.Source.Path, err)
+	}
+}

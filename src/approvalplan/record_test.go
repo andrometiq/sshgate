@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"math/rand/v2"
 	"strings"
 	"testing"
 	"time"
@@ -91,10 +92,16 @@ func grown(t testing.TB, frozen R1) R1 {
 		for _, leg := range signedLegs(payload.Plan) {
 			payload.Signatures = append(payload.Signatures, strings.Repeat("A", maxSignatureLen(leg.command, leg.host)))
 		}
-		h.FinalReport = &FinalReport{Class: ClassFailed, Partial: true, ResultDigest: digestA, BodyDigest: digestA}
+		// Every step executed, the last one indeterminate: the longest
+		// report E29's shape admits.
+		h.FinalReport = &FinalReport{Class: ClassIndeterminate, ResultDigest: digestA, BodyDigest: digestA}
 		exit, out, trunc := math.MinInt32, int64(math.MaxInt64), true
 		for i := 1; i <= h.StepCount; i++ {
-			h.FinalReport.Steps = append(h.FinalReport.Steps, StepReport{Ordinal: i, Status: StepExpiredUnexecuted, ExitCode: &exit, StdoutBytes: &out, StderrBytes: &out, Truncated: &trunc})
+			status := StepFailed
+			if i == h.StepCount {
+				status = StepIndeterminate
+			}
+			h.FinalReport.Steps = append(h.FinalReport.Steps, StepReport{Ordinal: i, Status: status, ExitCode: &exit, StdoutBytes: &out, StderrBytes: &out, Truncated: &trunc})
 			h.FinalReport.ExecutedOrdinals = append(h.FinalReport.ExecutedOrdinals, i)
 		}
 	} else {
@@ -111,9 +118,7 @@ func grown(t testing.TB, frozen R1) R1 {
 			Decision: strings.Repeat("d", MaxDecisionBytes), Detail: strings.Repeat("x", MaxDetailBytes), Assist: &bound,
 			NoiseDropped: math.MaxUint64,
 		}
-		if i < voteCap+NoiseFold+1 {
-			e.Operator = ops[i%voteCap]
-		}
+		e.Operator = ops[i%voteCap]
 		if i == voteCap+NoiseFold {
 			e.DecidedBy = h.Decision.DecidedBy
 		}
@@ -254,7 +259,7 @@ func TestShedMaxCoversWorstShedRecord(t *testing.T) {
 		g := grown(t, frozen)
 		shed := Shed(g)
 		h := &shed.Header
-		report := OutboxEvent{Seq: h.OutboxSeq - 1, Kind: strings.Repeat("k", MaxEventKindBytes), Decision: strings.Repeat("d", MaxDecisionBytes),
+		report := OutboxEvent{Seq: h.OutboxSeq - 1, Kind: strings.Repeat("k", MaxEventKindBytes), Operator: strings.Repeat("o", MaxOperatorIDBytes), Decision: strings.Repeat("d", MaxDecisionBytes),
 			Detail: strings.Repeat("x", MaxDetailBytes), Assist: h.Decision.AssistBound.ptr(), NoiseDropped: math.MaxUint64}
 		noise := report
 		noise.Seq, noise.Replay, noise.Operator = h.OutboxSeq, true, strings.Repeat("o", MaxOperatorIDBytes)
@@ -451,7 +456,7 @@ func worstJob(t testing.TB) R2 {
 	job := R2{
 		Version: R2Version, RequestID: d.RequestID, InputHash: digestA, Draft: d, DraftHash: draftHash, CreatedAt: t0,
 		Reservation: int64(R2Reservation(d, MaxJobOutputBytes)), ClaimToken: digestA, SignerAck: digestA,
-		Outcome: &JobOutcome{Kind: OutcomeJobError, Code: CodeLifecycleUnavailable}, ReportResult: &ReportResult{State: ReportRefused, Code: CodeLifecycleUnavailable},
+		Outcome: &JobOutcome{Kind: OutcomeJobError, Code: CodeRequestUnrenderable}, ReportResult: &ReportResult{State: ReportRefused, Code: CodeRequestUnrenderable},
 		FirstDeliveredAt: &final, BodiesRemoved: &BodiesRemoved{Cause: strings.Repeat("c", MaxReasonTokenBytes)}, FinalAt: &final,
 	}
 	for i := 1; i <= len(d.CommandJob.Steps); i++ {
@@ -557,5 +562,157 @@ func TestR2ReservationScalesWithOutput(t *testing.T) {
 	}
 	if R2Reservation(d, -1) != full || R2Reservation(d, MaxJobOutputBytes+1) != full {
 		t.Fatal("an out-of-range output cap must reserve the maximum")
+	}
+}
+
+func TestFinalReportMatchesItsSteps(t *testing.T) {
+	encode := func(f func(*FinalReport)) error {
+		rec := stateR1(t)
+		fr := *rec.Header.FinalReport
+		fr.Steps = append([]StepReport{}, fr.Steps...)
+		f(&fr)
+		rec.Header.FinalReport = &fr
+		_, err := EncodeR1(rec)
+		return err
+	}
+	if err := encode(func(*FinalReport) {}); err != nil {
+		t.Fatal(err)
+	}
+	many := make([]int, 100000)
+	for i := range many {
+		many[i] = 1
+	}
+	refused := map[string]func(*FinalReport){
+		"100000 copies of ordinal 1": func(f *FinalReport) { f.ExecutedOrdinals = many },
+		"duplicate ordinal":          func(f *FinalReport) { f.ExecutedOrdinals = []int{1, 1} },
+		"missing ordinal":            func(f *FinalReport) { f.ExecutedOrdinals = nil },
+		"wrong class":                func(f *FinalReport) { f.Class = ClassFailed },
+		"wrong partial":              func(f *FinalReport) { f.Partial = true },
+		"not_run with an exit code": func(f *FinalReport) {
+			exit := 0
+			f.Steps[0] = StepReport{Ordinal: 1, Status: StepNotRun, ExitCode: &exit}
+			f.Class, f.ExecutedOrdinals = ClassSucceeded, nil
+		},
+		"skipped first": func(f *FinalReport) {
+			f.Steps[0] = StepReport{Ordinal: 1, Status: StepSkipped}
+			f.Class, f.ExecutedOrdinals = ClassSucceeded, nil
+		},
+	}
+	for name, f := range refused {
+		if err := encode(f); fieldOf(err) == "" || codeOf(err) != CodeInvalidRequest {
+			t.Errorf("%s: EncodeR1 = %v", name, err)
+		}
+	}
+	// The same record arriving as bytes is quarantined.
+	good, err := EncodeR1(stateR1(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	bad := bytes.Replace(good, []byte(`"executed_ordinals":[1]`), []byte(`"executed_ordinals":[1,1,1,1]`), 1)
+	if _, err := DecodeR1(bad); codeOf(err) != CodeRecordCorrupt {
+		t.Fatalf("DecodeR1 with a repeated mask = %v", err)
+	}
+}
+
+func TestShedLimitsAtTheCodec(t *testing.T) {
+	rec := Shed(stateR1(t))
+	h := &rec.Header
+	h.Outbox = []OutboxEvent{{Seq: 7, Kind: "report"}, {Seq: 8, Kind: "invalid_report", Replay: true}, {Seq: 9, Kind: "invalid_report", Replay: true}}
+	h.AuditedThrough = 6
+	if _, err := EncodeR1(rec); fieldOf(err) != "outbox" {
+		t.Fatalf("a shed record with three unflushed events: %v", err)
+	}
+	if err := checkR1Size(rec, ShedMax+1); err == nil {
+		t.Fatal("a shed record over ShedMax passed the codec")
+	}
+	full := stateR1(t)
+	if err := checkR1Size(full, R1Reservation(full)+1); err == nil {
+		t.Fatal("a full record over its reservation passed the codec")
+	}
+	if err := checkR1Size(full, R1Max+1); err == nil {
+		t.Fatal("a record over R1Max passed the codec")
+	}
+}
+
+// TestR1ReservationCoversVariedFields varies every event and set field the
+// validators admit independently (present at its bound or absent), and
+// checks that each such record still encodes, which the codec allows only
+// within its reservation.
+func TestR1ReservationCoversVariedFields(t *testing.T) {
+	rng := rand.New(rand.NewPCG(7, 11))
+	frozens := []R1{frozenR1(t, fixtures()[0].plan, 1, "x", reviewOK), frozenR1(t, fixtures()[8].plan, 3, "x", reviewOK)}
+	for name, f := range worstR1s(t) {
+		if name == "command_job" {
+			frozens = append(frozens, f)
+		}
+	}
+	for _, frozen := range frozens {
+		reservation := R1Reservation(frozen)
+		for range 40 {
+			g := grown(t, frozen)
+			h := &g.Header
+			for i := range h.Outbox {
+				e := &h.Outbox[i]
+				pick := func() bool { return rng.IntN(2) == 0 }
+				if pick() {
+					e.Operator = ""
+				}
+				if pick() {
+					e.Decision = ""
+				}
+				if pick() {
+					e.Detail = ""
+				}
+				if pick() {
+					e.Assist = nil
+				}
+				e.Replay = pick()
+				if pick() {
+					e.NoiseDropped = 0
+				}
+			}
+			if rng.IntN(3) == 0 {
+				h.Outbox = h.Outbox[:rng.IntN(len(h.Outbox))]
+			}
+			p := g.Payload
+			p.CardEntries = p.CardEntries[:rng.IntN(len(p.CardEntries)+1)]
+			p.Bursts = p.Bursts[:rng.IntN(len(p.Bursts)+1)]
+			h.Votes = h.Votes[:rng.IntN(len(h.Votes)+1)]
+			b, err := EncodeR1(g)
+			if err != nil {
+				t.Fatalf("%s: a varied valid record does not encode: %v", frozen.Header.Kind, err)
+			}
+			if len(b) > reservation {
+				t.Fatalf("%s: %d bytes over reservation %d", frozen.Header.Kind, len(b), reservation)
+			}
+		}
+	}
+}
+
+func TestR2RefusesTransientCodesAsSettlement(t *testing.T) {
+	base := func() R2 {
+		d := *fixtures()[0].draft
+		h, _ := DraftHash(d)
+		final := t0.Add(time.Minute)
+		return R2{Version: R2Version, RequestID: d.RequestID, InputHash: digestA, Draft: d, DraftHash: h, CreatedAt: t0,
+			Reservation: int64(R2Reservation(d, 0)), FinalAt: &final, Steps: []JobStep{{Ordinal: 1}}}
+	}
+	for _, c := range AllCodes {
+		for context, set := range map[string]func(*R2){
+			"report_result": func(j *R2) { j.ReportResult = &ReportResult{State: ReportRefused, Code: c} },
+			"outcome":       func(j *R2) { j.Outcome = &JobOutcome{Kind: OutcomeJobError, Code: c} },
+		} {
+			j := base()
+			set(&j)
+			_, err := EncodeR2(j)
+			if c.Retryable() != (err != nil) {
+				t.Errorf("%s with %s (retryable=%v): EncodeR2 = %v", context, c, c.Retryable(), err)
+			}
+		}
+	}
+	j := base()
+	j.Outcome = &JobOutcome{Kind: OutcomeJobError}
+	if _, err := EncodeR2(j); err != nil {
+		t.Fatalf("an error outcome without a code: %v", err)
 	}
 }

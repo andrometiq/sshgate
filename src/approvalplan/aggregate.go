@@ -43,3 +43,32 @@ func Partial(steps []StepStatus) bool {
 	}
 	return executed && notExecuted
 }
+
+// WellFormedSteps reports whether a full step list has E29's shape (E25): a
+// prefix of succeeded and failed steps, then either one abort status followed
+// only by not_run, or, when the prefix ends in failed, only skipped steps.
+// Every report and stored final report has this shape.
+func WellFormedSteps(steps []StepStatus) bool {
+	i := 0
+	for i < len(steps) && (steps[i] == StepSucceeded || steps[i] == StepFailed) {
+		i++
+	}
+	if i == len(steps) {
+		return true
+	}
+	var tail StepStatus
+	switch {
+	case steps[i].Abort():
+		tail, i = StepNotRun, i+1
+	case steps[i] == StepSkipped && i > 0 && steps[i-1] == StepFailed:
+		tail = StepSkipped
+	default:
+		return false
+	}
+	for ; i < len(steps); i++ {
+		if steps[i] != tail {
+			return false
+		}
+	}
+	return true
+}

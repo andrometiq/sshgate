@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 )
 
@@ -161,11 +162,98 @@ func (r RouteSnapshot) Digest() string {
 }
 
 // mustCanonical encodes a value whose encoding cannot fail: strings, integers,
-// booleans and byte slices only.
+// booleans, nil and byte slices only.
 func mustCanonical(v any) []byte {
 	b, err := json.Marshal(v)
 	if err != nil {
 		panic("approvalplan: canonical encoding of a fixed shape failed: " + err.Error())
 	}
 	return b
+}
+
+// checkCanonicalJSON requires b to be one JSON value in the exact form
+// json.Marshal gives a Go struct holding it: no whitespace, no duplicate key in
+// any object, every string valid UTF-8 with Go's escapes, and every number a
+// canonical integer. It keeps the member order, which a struct fixes, so a
+// value whose schema another package owns can still be held to the canonical
+// contract at every depth.
+func checkCanonicalJSON(b []byte) error {
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.UseNumber()
+	var out bytes.Buffer
+	if err := canonicalValue(dec, &out); err != nil {
+		return err
+	}
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		return errors.New("trailing data after the JSON value")
+	}
+	if !bytes.Equal(out.Bytes(), b) {
+		return errors.New("not in canonical form")
+	}
+	return nil
+}
+
+// canonicalValue reads one value from dec and writes its canonical form.
+func canonicalValue(dec *json.Decoder, out *bytes.Buffer) error {
+	tok, err := dec.Token()
+	if err != nil {
+		return err
+	}
+	switch v := tok.(type) {
+	case json.Delim:
+		return canonicalContainer(dec, out, v)
+	case string:
+		out.Write(mustCanonical(v))
+	case json.Number:
+		if !isCanonicalInteger(string(v)) {
+			return fmt.Errorf("number %s is not a canonical integer", v)
+		}
+		out.WriteString(string(v))
+	case bool, nil:
+		out.Write(mustCanonical(v))
+	default:
+		return fmt.Errorf("unexpected token %v", tok)
+	}
+	return nil
+}
+
+func canonicalContainer(dec *json.Decoder, out *bytes.Buffer, open json.Delim) error {
+	isObject := open == '{'
+	out.WriteByte(byte(open))
+	seen := map[string]bool{}
+	for first := true; dec.More(); first = false {
+		if !first {
+			out.WriteByte(',')
+		}
+		if isObject {
+			tok, err := dec.Token()
+			if err != nil {
+				return err
+			}
+			key := tok.(string)
+			if seen[key] {
+				return fmt.Errorf("duplicate key %q", key)
+			}
+			seen[key] = true
+			out.Write(mustCanonical(key))
+			out.WriteByte(':')
+		}
+		if err := canonicalValue(dec, out); err != nil {
+			return err
+		}
+	}
+	end, err := dec.Token()
+	if err != nil {
+		return err
+	}
+	out.WriteByte(byte(end.(json.Delim)))
+	return nil
+}
+
+func isCanonicalInteger(s string) bool {
+	digits := strings.TrimPrefix(s, "-")
+	if digits == "0" {
+		return s == "0"
+	}
+	return digits != "" && digits[0] != '0' && allBytes(digits, isDigit)
 }
