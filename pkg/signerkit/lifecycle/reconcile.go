@@ -9,23 +9,37 @@ import (
 	ap "github.com/karthikeyan5/sshgate/src/approvalplan"
 )
 
-// Run drives the due index and one independent outbox flusher. It returns
-// storage failures to the owner and joins the flusher on cancellation.
+// Run drives the due index, outbox flusher and per-record notifier actors.
+// It returns storage failures to the owner and joins effects on cancellation.
 func (e *Engine) Run(ctx context.Context) error {
 	e.mu.Lock()
 	if e.running {
 		e.mu.Unlock()
 		return errors.New("lifecycle: Run already active")
 	}
-	e.running = true
-	e.mu.Unlock()
 	ctx, cancel := context.WithCancel(ctx)
+	e.running = true
+	e.notifyContext = ctx
+	if e.notifyActors == nil {
+		e.notifyActors = make(map[string]*notifyActor)
+	}
+	for _, actor := range e.notifyActors {
+		e.startNotifyLocked(actor)
+	}
+	for key := range e.projections.work {
+		e.nudgeNotifyLocked(key)
+	}
+	e.mu.Unlock()
 	flushed := make(chan error, 1)
 	joined := make(chan struct{})
 	go func() { defer close(joined); flushed <- e.runFlusher(ctx) }()
 	defer func() {
 		cancel()
 		<-joined
+		e.mu.Lock()
+		e.notifyContext = nil
+		e.mu.Unlock()
+		e.notifyJoined.Wait()
 		e.mu.Lock()
 		e.running = false
 		e.mu.Unlock()
@@ -105,6 +119,7 @@ func (e *Engine) reconcileLocked(key string, now ap.Now) error {
 	}
 	// A report horizon can pass without a commit; it must still leave the index.
 	e.projections.schedule(key, *rec, now, e.epoch, e.config.Settings)
+	e.nudgeNotifyLocked(key)
 	return nil
 }
 

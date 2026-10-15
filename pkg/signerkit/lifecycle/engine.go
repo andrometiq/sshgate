@@ -20,6 +20,7 @@ type Config struct {
 	Freezer            Freezer
 	SnapshotBuilder    SnapshotBuilder
 	Minter             Minter
+	Notifier           Notifier
 	AuditWriter        AuditWriter // nil leaves the outbox unflushed and Claim gated.
 	XferDigests        XferDigests
 	Settings           ap.Settings
@@ -30,16 +31,19 @@ type Config struct {
 }
 
 // Engine serializes all record mutations. Its Store must not have another writer.
-// Run drives reconciliation and audit flushing until its context is canceled.
+// Run drives reconciliation, audit flushing and notifier actors until canceled.
 type Engine struct {
-	mu           sync.Mutex
-	running      bool
-	effectErrors chan error
-	flushNudge   chan struct{}
-	flushWaiters map[string]*flushWaiter
-	config       Config
-	epoch        string
-	projections  projections
+	mu            sync.Mutex
+	running       bool
+	notifyContext context.Context
+	notifyActors  map[string]*notifyActor
+	notifyJoined  sync.WaitGroup
+	effectErrors  chan error
+	flushNudge    chan struct{}
+	flushWaiters  map[string]*flushWaiter
+	config        Config
+	epoch         string
+	projections   projections
 }
 
 // New recovers the store before exposing the engine. The caller owns running Run.
@@ -103,6 +107,7 @@ func (e *Engine) commitLocked(key string, before *ap.R1, cmd ap.Command, now ap.
 			return ap.R1{}, ap.Answer{}, err
 		}
 		e.projections.update(key, before, after, now, e.epoch, e.config.Settings)
+		e.nudgeNotifyLocked(key)
 		if before == nil || after.Header.OutboxSeq > before.Header.OutboxSeq {
 			e.nudgeFlush()
 		}
