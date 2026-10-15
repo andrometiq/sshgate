@@ -137,13 +137,20 @@ func TestPreparedSignCapabilities(t *testing.T) {
 		if !reflect.DeepEqual(r.view.Headlines, headlines) {
 			t.Fatalf("headlines %q", r.view.Headlines)
 		}
-		if !strings.Contains(strings.Join(r.view.Items[0].Notes, "\n"), approvalplan.LabelNetworkJustification+":\n"+QuotePrefix+input.Reason) {
-			t.Fatal("network justification missing")
+		justification := approvalplan.LabelNetworkJustification + ":\n" + QuotePrefix + input.Reason
+		if reveal {
+			justification = approvalplan.LabelRevealJustification + ":\n" + justification
+		}
+		if !strings.Contains(strings.Join(r.view.Items[0].Notes, "\n"), justification) {
+			t.Fatalf("justification labels wrong: %q", r.view.Items[0].Notes)
 		}
 		for _, text := range []string{r.parts[0], r.ready} {
 			if !strings.Contains(text, approvalplan.NetworkBanner("web-1")) {
 				t.Fatal("network banner missing from Telegram")
 			}
+		}
+		if reveal && !strings.Contains(r.parts[0], approvalplan.LabelRevealJustification) {
+			t.Fatal("reveal justification missing from Telegram")
 		}
 	}
 	input := networkInput()

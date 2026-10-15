@@ -300,14 +300,21 @@ func stepItems(s ReviewSnapshot) []Item {
 					QuotePrefix, renderDisplay(b.StagedBasename), renderDisplay(b.StagedVersion), renderDisplay(b.RunningVersion), b.Size))
 		}
 		if r := step.LegacyReason; r != nil {
-			label := approvalplan.LabelRevealJustification
-			if step.Net {
-				label = approvalplan.LabelNetworkJustification
+			var labels []string
+			switch {
+			case step.IsUpdate:
+				labels = []string{approvalplan.LabelBuildMetadataV1}
+			case step.Reveal && step.Net:
+				labels = []string{approvalplan.LabelRevealJustification, approvalplan.LabelNetworkJustification}
+			case step.Net:
+				labels = []string{approvalplan.LabelNetworkJustification}
+			default:
+				labels = []string{approvalplan.LabelRevealJustification}
 			}
-			if step.IsUpdate {
-				label = approvalplan.LabelBuildMetadataV1
+			for _, label := range labels {
+				notes = append(notes, label+":")
 			}
-			notes = append(notes, label+":", QuotePrefix+renderDisplay(*r))
+			notes = append(notes, QuotePrefix+renderDisplay(*r))
 		}
 		if step.ExpiryWarning {
 			notes = append(notes, fmt.Sprintf("⚠️ Step %d is signed and runs after earlier work; its signature may expire before it starts.", step.Ordinal))
