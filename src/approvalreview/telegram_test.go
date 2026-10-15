@@ -27,6 +27,7 @@ import (
 // | all :1019/:1070 "Expires in <timeout>"                            | changed: absolute "Submitted: <t>" and "Expires: <t>" (spec §9.1) |
 // | reveal :1060 "⚠️ SECRET-REVEAL — output will NOT be redacted…"   | headlineReveal, part 1 and card                                   |
 // | reveal :1063 "🔓 SSHGate SECRET-REVEAL — <server>"               | changed: route "[signed_reveal]" in the item heading + approve label "(SECRET-REVEAL)" |
+// | network READ WITH NETWORK banner, reason and button | NetworkBanner after reveal, LabelNetworkJustification (redacted and quoted), E46 READ WITH NETWORK / SECRET-REVEAL + NETWORK suffix |
 // | write :1065 "🔐 SSHGate approval — <server>"                     | changed: partTitle/cardTitle; the server is in each labelled route |
 // | reveal :1080 "Reason: <c.Reason>" (raw)                          | changed (E8c): "Reveal justification (agent-stated, unverified, legacy per-command field)", redacted+neutralized, quoted |
 // | write :1084 "<n> commands queued:"                               | "Request: <n> command(s): <s> signed, <r> unsigned read(s); …"    |

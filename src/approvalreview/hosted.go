@@ -172,6 +172,9 @@ func headlines(s ReviewSnapshot) []string {
 		if (step.Reveal || step.Route == approvalplan.RouteSignedReveal) && !slices.Contains(out, headlineReveal) {
 			out = append(out, headlineReveal)
 		}
+		if step.Net {
+			out = append(out, approvalplan.NetworkBanner(step.Target.Alias))
+		}
 		if step.IsUpdate {
 			out = append(out, fmt.Sprintf(headlineUpdate, step.Target.Alias))
 		}
@@ -196,6 +199,15 @@ func approveLabel(s ReviewSnapshot) string {
 	for _, step := range s.Steps {
 		if (step.Reveal || step.Route == approvalplan.RouteSignedReveal) && !slices.Contains(capabilities, "SECRET-REVEAL") {
 			capabilities = append(capabilities, "SECRET-REVEAL")
+		}
+		if step.Net {
+			capability := "READ WITH NETWORK"
+			if step.Reveal || step.Route == approvalplan.RouteSignedReveal {
+				capability = "NETWORK"
+			}
+			if !slices.Contains(capabilities, capability) {
+				capabilities = append(capabilities, capability)
+			}
 		}
 		if step.IsUpdate && !slices.Contains(capabilities, "GATE UPDATE") {
 			capabilities = append(capabilities, "GATE UPDATE")
@@ -289,6 +301,9 @@ func stepItems(s ReviewSnapshot) []Item {
 		}
 		if r := step.LegacyReason; r != nil {
 			label := approvalplan.LabelRevealJustification
+			if step.Net {
+				label = approvalplan.LabelNetworkJustification
+			}
 			if step.IsUpdate {
 				label = approvalplan.LabelBuildMetadataV1
 			}
