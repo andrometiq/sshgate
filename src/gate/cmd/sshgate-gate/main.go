@@ -84,6 +84,7 @@ const (
 	exitGeneric   = 1
 	exitDataErr   = 65  // EX_DATAERR
 	exitSoftware  = 70  // EX_SOFTWARE
+	exitTempFail  = 75  // EX_TEMPFAIL: doctor --pin found the gate dir locked
 	exitNoPermVal = 77  // EX_NOPERM
 	exitCancelled = 143 // 128+SIGTERM: cancelled before an admin verb ran
 )

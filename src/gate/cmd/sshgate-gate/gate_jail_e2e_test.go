@@ -196,7 +196,7 @@ func TestGateBinaryNetworkPin(t *testing.T) {
 		return code, stdout.String(), stderr.String()
 	}
 	for _, pin := range []string{pinDeny, pinAllow} {
-		writePin(t, dir, pin, 0o644)
+		plantPin(t, dir, pin, 0o644)
 		for _, network := range []string{"tcp4", "tcp6"} {
 			t.Run(strings.TrimSpace(strings.Split(pin, "\n")[1])+"/"+network, func(t *testing.T) {
 				address, operation := "127.0.0.1:0", "dial-inet"
@@ -229,7 +229,7 @@ func TestGateBinaryNetworkPin(t *testing.T) {
 			})
 		}
 	}
-	writePin(t, dir, pinDeny, 0o644)
+	plantPin(t, dir, pinDeny, 0o644)
 	code, _, stderr := runGate(t, "curl dial-inet 1")
 	if code != 1 || !strings.Contains(stderr, "gate: "+networkHintLine) {
 		unexpected(t, "network hint: exit %d, stderr %q", code, stderr)

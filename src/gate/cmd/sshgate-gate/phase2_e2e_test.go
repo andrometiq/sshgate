@@ -50,6 +50,7 @@ func TestJailMatrixPhase2(t *testing.T) {
 			t.Run("G-JAILVERB-NOEXEC", func(t *testing.T) { legJailVerbNoExec(t, abi) })
 			t.Run("G-SELFTEST-JAILED", func(t *testing.T) { legSelftestJailed(t, abi) })
 			t.Run("G-SELFTEST-UNJAILED", func(t *testing.T) { legSelftestUnjailed(t, abi) })
+			t.Run("G-PIN-REFUSED", func(t *testing.T) { legPinRefused(t, abi) })
 		})
 	}
 }
@@ -130,7 +131,7 @@ func legConfineRequiredLane2(t *testing.T) {
 	bin := withLane2Bins(t)
 	dir := t.TempDir()
 	withGateDir(t, dir)
-	writePin(t, dir, pinAllow, 0o644)
+	plantPin(t, dir, pinAllow, 0o644)
 	out, err := exec.Command(filepath.Join(bin, "docker"), "ps").Output()
 	p.Control("lane2", err == nil && strings.Contains(string(out), `"path"`))
 
@@ -160,7 +161,7 @@ func legUnmetFuse(t *testing.T, abi, name, pin string, grant bool) {
 	dir := t.TempDir()
 	withGateDir(t, dir)
 	if pin != "" {
-		writePin(t, dir, pin, 0o644)
+		plantPin(t, dir, pin, 0o644)
 	}
 	mark := fixture.mark(t)
 	code, out := runTestGate(t, testGateConfig{Dir: dir, ABI: abi, Grant: grant}, tools.bin, "cat fuse-ioctl "+fixture.point+"/f 0x40085301 42")
@@ -251,7 +252,7 @@ func legFault(t *testing.T, abi string) {
 			dir := t.TempDir()
 			withGateDir(t, dir)
 			if pinned {
-				writePin(t, dir, pinDeny, 0o644)
+				plantPin(t, dir, pinDeny, 0o644)
 			}
 			withReadSpec(t, abi, func(spec *confine.Spec) { spec.InjectFailAt = stage })
 			counts := countAttempts(t)
@@ -283,7 +284,7 @@ func legFaultAbsent(t *testing.T, abi string) {
 			dir := t.TempDir()
 			withGateDir(t, dir)
 			if pinned {
-				writePin(t, dir, pinDeny, 0o644)
+				plantPin(t, dir, pinDeny, 0o644)
 			}
 			withReadSpec(t, abi, func(spec *confine.Spec) { spec.InjectFailAt = inject })
 			target := seedTarget(t, dir)
@@ -378,7 +379,7 @@ func legInet(t *testing.T, abi, name string) {
 			dir := t.TempDir()
 			withGateDir(t, dir)
 			if pin != "" {
-				writePin(t, dir, pin, 0o644)
+				plantPin(t, dir, pin, 0o644)
 			}
 			withReadSpec(t, abi, nil)
 			code, out, _ := runWith(t, "cat "+operation+" "+port)

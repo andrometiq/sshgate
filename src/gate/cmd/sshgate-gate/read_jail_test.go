@@ -201,7 +201,7 @@ func TestRunReadJailSetupFailureDenies(t *testing.T) {
 			dir := t.TempDir()
 			withGateDir(t, dir)
 			if tc.pin != "" {
-				writePin(t, dir, tc.pin, 0o644)
+				plantPin(t, dir, tc.pin, 0o644)
 			}
 			readSpecHook = func(spec *confine.Spec) { spec.InjectFailAt, spec.ForceABI = tc.inject, tc.abi }
 			t.Cleanup(func() { readSpecHook = nil })

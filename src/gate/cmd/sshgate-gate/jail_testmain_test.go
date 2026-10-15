@@ -105,6 +105,10 @@ type testGateConfig struct {
 	Rehearse       *confine.Pin
 	Unjailed       bool
 	SelftestBinary string
+	// Args runs these operator subcommand arguments (doctor) instead of a
+	// read. FailRow makes the rehearsal report that row as failed.
+	Args    []string
+	FailRow string
 }
 
 // sealCalls counts the seals of in-process reads; verbEnvResets counts the
@@ -126,8 +130,23 @@ func testGateMain(raw string) int {
 	if config.NoSeal {
 		sealFn = func() error { return nil }
 	}
+	if config.SelftestBinary != "" {
+		selftestBinaryFn = func() (string, error) { return config.SelftestBinary, nil }
+	}
+	if config.FailRow != "" {
+		rehearsalObserveHook = func(r *rehearsalResult) {
+			for i := range r.Rows {
+				if r.Rows[i].Name == config.FailRow {
+					r.Rows[i].Pass = false
+				}
+			}
+		}
+	}
 	if config.Rehearse != nil {
 		return testRehearsalMain(config)
+	}
+	if len(config.Args) > 0 {
+		return runLocalSubcommand(config.Args)
 	}
 	if config.Repeat {
 		if code := run(); code != exitOK {
@@ -261,7 +280,6 @@ type testRehearsal struct {
 // attempt, runs the rehearsal (sealed, as doctor does) or the unjailed
 // selftest, and prints the result.
 func testRehearsalMain(config testGateConfig) int {
-	selftestBinaryFn = func() (string, error) { return config.SelftestBinary, nil }
 	fx, err := buildFixtures(config.Dir)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "TestMain: fixtures:", err)

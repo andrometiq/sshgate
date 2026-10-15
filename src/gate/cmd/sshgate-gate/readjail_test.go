@@ -26,8 +26,8 @@ const (
 	pinAllow = "profile=ro-v1\nnet=allow\n"
 )
 
-// writePin writes the jail pin into dir with exactly mode.
-func writePin(t *testing.T, dir, content string, mode os.FileMode) string {
+// plantPin writes the jail pin into dir with exactly mode.
+func plantPin(t *testing.T, dir, content string, mode os.FileMode) string {
 	t.Helper()
 	path := filepath.Join(dir, confine.PinFile)
 	if err := os.WriteFile(path, []byte(content), mode); err != nil {
@@ -106,10 +106,10 @@ func TestReadJailPin(t *testing.T) {
 		damaged string // substring; "" with !valid means absent
 	}{
 		{name: "absent", setup: func(*testing.T, string) {}},
-		{name: "valid", setup: func(t *testing.T, dir string) { writePin(t, dir, pinAllow, 0o644) }, valid: true},
-		{name: "read-only", setup: func(t *testing.T, dir string) { writePin(t, dir, pinDeny, 0o400) }, valid: true},
+		{name: "valid", setup: func(t *testing.T, dir string) { plantPin(t, dir, pinAllow, 0o644) }, valid: true},
+		{name: "read-only", setup: func(t *testing.T, dir string) { plantPin(t, dir, pinDeny, 0o400) }, valid: true},
 		{name: "symlink", setup: func(t *testing.T, dir string) {
-			target := writePin(t, t.TempDir(), pinDeny, 0o644)
+			target := plantPin(t, t.TempDir(), pinDeny, 0o644)
 			if err := os.Symlink(target, filepath.Join(dir, confine.PinFile)); err != nil {
 				t.Fatal(err)
 			}
@@ -125,27 +125,27 @@ func TestReadJailPin(t *testing.T) {
 			}
 		}, damaged: "not a regular file"},
 		{name: "other owner", setup: func(t *testing.T, dir string) {
-			writePin(t, dir, pinDeny, 0o644)
+			plantPin(t, dir, pinDeny, 0o644)
 			previous := pinUIDFn
 			pinUIDFn = func() int { return previous() + 1 }
 			t.Cleanup(func() { pinUIDFn = previous })
 		}, damaged: "owned by uid"},
-		{name: "group-writable", setup: func(t *testing.T, dir string) { writePin(t, dir, pinDeny, 0o664) }, damaged: "group- or world-writable"},
-		{name: "world-writable", setup: func(t *testing.T, dir string) { writePin(t, dir, pinDeny, 0o646) }, damaged: "group- or world-writable"},
+		{name: "group-writable", setup: func(t *testing.T, dir string) { plantPin(t, dir, pinDeny, 0o664) }, damaged: "group- or world-writable"},
+		{name: "world-writable", setup: func(t *testing.T, dir string) { plantPin(t, dir, pinDeny, 0o646) }, damaged: "group- or world-writable"},
 		{name: "hard link", setup: func(t *testing.T, dir string) {
-			path := writePin(t, dir, pinDeny, 0o644)
+			path := plantPin(t, dir, pinDeny, 0o644)
 			if err := os.Link(path, filepath.Join(dir, "other")); err != nil {
 				t.Fatal(err)
 			}
 		}, damaged: "has 2 links"},
 		{name: "4096 bytes", setup: func(t *testing.T, dir string) {
-			writePin(t, dir, pinDeny+"#"+strings.Repeat("x", confine.MaxPinBytes-len(pinDeny)-2)+"\n", 0o644)
+			plantPin(t, dir, pinDeny+"#"+strings.Repeat("x", confine.MaxPinBytes-len(pinDeny)-2)+"\n", 0o644)
 		}, valid: true},
 		{name: "4097 bytes", setup: func(t *testing.T, dir string) {
-			writePin(t, dir, pinDeny+"#"+strings.Repeat("x", confine.MaxPinBytes-len(pinDeny)-1)+"\n", 0o644)
+			plantPin(t, dir, pinDeny+"#"+strings.Repeat("x", confine.MaxPinBytes-len(pinDeny)-1)+"\n", 0o644)
 		}, damaged: "larger than 4096 bytes"},
-		{name: "bad content", setup: func(t *testing.T, dir string) { writePin(t, dir, "profile=ro-v1\nnet=maybe\n", 0o644) }, damaged: `bad value for "net"`},
-		{name: "old floor content", setup: func(t *testing.T, dir string) { writePin(t, dir, "full\n", 0o644) }, damaged: "not key=value"},
+		{name: "bad content", setup: func(t *testing.T, dir string) { plantPin(t, dir, "profile=ro-v1\nnet=maybe\n", 0o644) }, damaged: `bad value for "net"`},
+		{name: "old floor content", setup: func(t *testing.T, dir string) { plantPin(t, dir, "full\n", 0o644) }, damaged: "not key=value"},
 		{name: "leftover jail-floor, no pin", setup: func(t *testing.T, dir string) {
 			if err := os.WriteFile(filepath.Join(dir, jailFloorFile), nil, 0o644); err != nil {
 				t.Fatal(err)
@@ -157,7 +157,7 @@ func TestReadJailPin(t *testing.T) {
 			}
 		}, damaged: "jail-floor present"},
 		{name: "jail pin wins over jail-floor", setup: func(t *testing.T, dir string) {
-			writePin(t, dir, pinDeny, 0o644)
+			plantPin(t, dir, pinDeny, 0o644)
 			if err := os.WriteFile(filepath.Join(dir, jailFloorFile), []byte("full\n"), 0o644); err != nil {
 				t.Fatal(err)
 			}
@@ -176,7 +176,7 @@ func TestReadJailPin(t *testing.T) {
 	t.Run("unreadable", func(t *testing.T) {
 		dir := t.TempDir()
 		withGateDir(t, dir)
-		writePin(t, dir, pinDeny, 0o000)
+		plantPin(t, dir, pinDeny, 0o000)
 		got := readJailPin()
 		if os.Getuid() == 0 {
 			if !got.valid {
@@ -197,7 +197,7 @@ func TestReadJailPin(t *testing.T) {
 	t.Run("parsed", func(t *testing.T) {
 		dir := t.TempDir()
 		withGateDir(t, dir)
-		writePin(t, dir, pinAllow+"accept_fs=network\n", 0o644)
+		plantPin(t, dir, pinAllow+"accept_fs=network\n", 0o644)
 		want := confine.Pin{Profile: confine.ProfileROv1, Net: true, AcceptFS: []string{"network"}}
 		if got := readJailPin(); !got.valid || !reflect.DeepEqual(got.pin, want) {
 			t.Fatalf("readJailPin = %+v", got)
@@ -262,6 +262,7 @@ func TestPhase2Tables(t *testing.T) {
 			t.Run("U-LabelContract", func(t *testing.T) { unitLabelContract(t) })
 			t.Run("U-JailVerbNoExec", func(t *testing.T) { unitJailVerbNoExec(t) })
 			t.Run("U-SelftestRefusesUnjailed", func(t *testing.T) { unitSelftestRefusesUnjailed(t) })
+			t.Run("U-PinRequiresRehearsal", func(t *testing.T) { unitPinRequiresRehearsal(t) })
 		})
 	}
 }
@@ -306,8 +307,8 @@ func TestRunReadDeniedDamagedPin(t *testing.T) {
 		name string
 		pin  func(t *testing.T, dir string)
 	}{
-		{"insecure mode", func(t *testing.T, dir string) { writePin(t, dir, pinDeny, 0o666) }},
-		{"bad content", func(t *testing.T, dir string) { writePin(t, dir, "profile=ro-v1\n", 0o644) }},
+		{"insecure mode", func(t *testing.T, dir string) { plantPin(t, dir, pinDeny, 0o666) }},
+		{"bad content", func(t *testing.T, dir string) { plantPin(t, dir, "profile=ro-v1\n", 0o644) }},
 		{"directory", func(t *testing.T, dir string) { _ = os.Mkdir(filepath.Join(dir, confine.PinFile), 0o755) }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -353,7 +354,7 @@ func TestRunReadLegacyFloorDenies(t *testing.T) {
 		t.Fatalf("a leftover floor still attempted the read: %+v", fake)
 	}
 
-	writePin(t, dir, pinDeny, 0o644)
+	plantPin(t, dir, pinDeny, 0o644)
 	_ = os.Remove(filepath.Join(dir, "audit.log"))
 	if code, _, _ := runWith(t, "stat "+target+" ran"); code != exitNoPermVal || fake.confined != 1 {
 		t.Fatalf("under a jail pin: exit %d, executor %+v", code, fake)
@@ -379,7 +380,7 @@ func TestRunReadFailedSetupDenies(t *testing.T) {
 				dir := t.TempDir()
 				withGateDir(t, dir)
 				if pinned {
-					writePin(t, dir, pinDeny, 0o644)
+					plantPin(t, dir, pinDeny, 0o644)
 				}
 				fake := withFakeAttempt(t, gate.ExecResult{}, nil)
 				fake.result, fake.err = setupFailure(tc.stage, tc.errno)
@@ -455,7 +456,7 @@ func TestRunReadAbsentPinnedDenies(t *testing.T) {
 			dir := t.TempDir()
 			withGateDir(t, dir)
 			if tc.pin != "" {
-				writePin(t, dir, tc.pin, 0o644)
+				plantPin(t, dir, tc.pin, 0o644)
 			}
 			forceNetGrant = tc.grant
 			t.Cleanup(func() { forceNetGrant = false })
@@ -618,7 +619,7 @@ func TestJailUnavailableNeverBlocksWritesOrAdmin(t *testing.T) {
 		dir := t.TempDir()
 		pub, priv := genKey(t)
 		seedPub(t, dir, pub, 0o644)
-		writePin(t, dir, pinDeny, 0o666)
+		plantPin(t, dir, pinDeny, 0o666)
 		withGateDir(t, dir)
 		pinReads, fake.confined = 0, 0
 		return dir, priv
@@ -685,7 +686,7 @@ func TestLane2DeniedWhenConfinementRequired(t *testing.T) {
 	withLane2Bins(t)
 	dir := t.TempDir()
 	withGateDir(t, dir)
-	writePin(t, dir, pinAllow, 0o644)
+	plantPin(t, dir, pinAllow, 0o644)
 	code, out, stderr := runWith(t, "docker ps")
 	if code != exitNoPermVal || out != "" || stderr != "gate: read jail unavailable: this read must run confined and docker cannot run in the jail yet; nothing ran\n" {
 		t.Fatalf("exit = %d, stdout = %q, stderr = %q", code, out, stderr)

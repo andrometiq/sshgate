@@ -201,7 +201,7 @@ func legSealGuard(t *testing.T, abi string) {
 func legJailVerbLabel(t *testing.T, abi string) {
 	p := newProof(t, "G-JAILVERB-LABEL")
 	dir := t.TempDir()
-	writePin(t, dir, pinDeny, 0o600)
+	plantPin(t, dir, pinDeny, 0o600)
 	code, out := runTestGate(t, testGateConfig{Dir: dir, ABI: abi}, dir, "SSHGATE_JAIL")
 	report := decodeVerbLine(t, out)
 	p.Observed("json", true)
@@ -350,7 +350,113 @@ func legSelftestUnjailed(t *testing.T, abi string) {
 		changed = changed || strings.HasPrefix(failure, "the canary") || strings.HasPrefix(failure, "the child")
 	}
 	p.Effect("selftest-unjailed", changed)
-	p.Jailed("selftest", r.Ran && (r.Exit == exitNoPermVal && len(r.Failures) == 0 || r.Exit == exitOK && changed))
+	refused := r.Ran && (r.Exit == exitNoPermVal && len(r.Failures) == 0 || r.Exit == exitOK && changed)
+	if !refused {
+		t.Logf("unjailed selftest: %+v", r)
+	}
+	p.Jailed("selftest", refused)
 	p.Observed("fixtures", r.Skipped == "")
 	p.Finish()
+}
+
+// legPinRefused: doctor --pin in its own process writes the pin after a real
+// rehearsal; when the rehearsal ran but a row failed, it refuses (77) and
+// writes nothing.
+func legPinRefused(t *testing.T, abi string) {
+	p := newProof(t, "G-PIN-REFUSED")
+	binary := buildSelftestBinary(t)
+	doctorPin := func(failRow string) (int, doctorReport, string) {
+		dir := shortTempDir(t)
+		config := testGateConfig{Dir: dir, ABI: abi, Args: []string{"doctor", "--json", "--pin", "--net=deny"}, SelftestBinary: binary, FailRow: failRow}
+		code, out := runTestGate(t, config, dir, "")
+		var d doctorReport
+		if err := json.Unmarshal([]byte(out), &d); err != nil {
+			t.Fatalf("SETUP: doctor output %q: %v", out, err)
+		}
+		content, _ := readPinFile(t, dir)
+		return code, d, content
+	}
+	code, d, content := doctorPin("")
+	abiOK := d.Rehearsal.ABI >= 1 && (abi != "abi1" || d.Rehearsal.ABI == 1)
+	p.Control("pin", code == exitOK && d.Rehearsal.Passed && abiOK && d.Pin.Result == "written" && content == canonicalDeny)
+	code, d, content = doctorPin("canary-write")
+	written := content != ""
+	p.Effect("pin-written", written)
+	p.Jailed("rehearsal", d.Rehearsal.Ran && !d.Rehearsal.Passed && len(d.Rehearsal.Failures) == 0 &&
+		(written && code == exitOK || !written && code == exitNoPermVal && d.Pin.Result == "refused"))
+	p.Observed("pinfile", written || content == "")
+	p.Finish()
+}
+
+// TestDoctorRehearsalRealHost runs the real gate binary's doctor on this host:
+// before pinning, reads are "pin to claim" and the rehearsal passes; --pin
+// writes the pin and a second --pin leaves it unchanged; the verb then reports
+// the not-enabled kernel label; a damaged pin denies until --pin repairs it;
+// and --net=allow pins network open.
+func TestDoctorRehearsalRealHost(t *testing.T) {
+	requireJail(t)
+	dir := shortTempDir(t)
+	bin := filepath.Join(dir, "gate")
+	build := exec.Command("go", "build", "-trimpath", "-o", bin, ".")
+	build.Env = append(os.Environ(), "CGO_ENABLED=0")
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build gate: %v\n%s", err, out)
+	}
+	doctor := func(args ...string) (int, doctorReport) {
+		t.Helper()
+		command := exec.Command(bin, append([]string{"doctor", "--json"}, args...)...)
+		var stdout, stderr bytes.Buffer
+		command.Stdout, command.Stderr = &stdout, &stderr
+		err := command.Run()
+		code := 0
+		if exit, ok := err.(*exec.ExitError); ok {
+			code = exit.ExitCode()
+		} else if err != nil {
+			t.Fatalf("doctor: %v", err)
+		}
+		var d doctorReport
+		if err := json.Unmarshal(stdout.Bytes(), &d); err != nil {
+			t.Fatalf("doctor %v: exit %d, stdout %q, stderr %q", args, code, stdout.String(), stderr.String())
+		}
+		return code, d
+	}
+	verbLabel := func() string {
+		t.Helper()
+		command := exec.Command(bin)
+		command.Env = append(os.Environ(), "SSH_ORIGINAL_COMMAND=SSHGATE_JAIL")
+		out, err := command.Output()
+		if err != nil {
+			t.Fatalf("verb: %v", err)
+		}
+		return decodeVerbLine(t, string(out)).Label
+	}
+
+	code, d := doctor()
+	if code != exitOK || d.Label != confine.LabelPinToClaim || !d.Rehearsal.Passed || d.Pin.Result != "not-requested" || d.Pin.LabelAfter != confine.LabelKernelNoLabel {
+		t.Fatalf("before --pin: exit %d, %+v", code, d)
+	}
+	if code, d = doctor("--pin", "--net=deny"); code != exitOK || d.Pin.Result != "written" {
+		t.Fatalf("--pin: exit %d, %+v", code, d.Pin)
+	}
+	if code, d = doctor("--pin", "--net=deny"); code != exitOK || d.Pin.Result != "unchanged" {
+		t.Fatalf("second --pin: exit %d, %+v", code, d.Pin)
+	}
+	if label := verbLabel(); label != confine.LabelKernelNoLabel {
+		t.Fatalf("pinned verb label %q", label)
+	}
+	if err := os.Chmod(filepath.Join(dir, confine.PinFile), 0o666); err != nil {
+		t.Fatal(err)
+	}
+	if label := verbLabel(); label != confine.LabelDenied {
+		t.Fatalf("damaged-pin verb label %q", label)
+	}
+	if code, d = doctor("--pin", "--net=deny"); code != exitOK || d.Pin.State != "damaged" || d.Pin.Result != "written" {
+		t.Fatalf("repair: exit %d, %+v", code, d.Pin)
+	}
+	if code, d = doctor("--pin", "--net=allow"); code != exitOK || d.Pin.Result != "written" || d.Pin.LabelAfter != confine.LabelNetworkOpen {
+		t.Fatalf("--net=allow: exit %d, %+v", code, d.Pin)
+	}
+	if label := verbLabel(); label != confine.LabelNetworkOpen {
+		t.Fatalf("network verb label %q", label)
+	}
 }

@@ -44,5 +44,7 @@ func proofCasesPhase2() []harness.Case {
 	add("U-SelftestRefusesUnjailed", "Unit", "", nil, []string{"control:decision"}, []string{"EFFECT:decision"}, nil)
 	add("G-SELFTEST-UNJAILED", "Effect", "Execute", nil, []string{"control:write", "jailed:selftest", "observe:fixtures"}, []string{"EFFECT:selftest-unjailed"}, nil)
 	add("G-SELFTEST-JAILED", "Execution", "Execute", nil, []string{"jailed:selftest", "observe:fixtures"}, nil, nil)
+	add("U-PinRequiresRehearsal", "Unit", "", nil, []string{"control:decision"}, []string{"EFFECT:decision"}, nil)
+	add("G-PIN-REFUSED", "Effect", "Execute", nil, []string{"control:pin", "jailed:rehearsal", "observe:pinfile"}, []string{"EFFECT:pin-written"}, nil)
 	return cases
 }

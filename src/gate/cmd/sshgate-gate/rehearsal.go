@@ -430,19 +430,13 @@ func (f *fixtures) rehearse(ctx context.Context, cand confine.Pin, seal func() e
 	for _, arg := range f.selftestArgs(outer, cand.Net) {
 		words = append(words, shellQuote(arg))
 	}
-	devNull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
-	if err != nil {
-		r.Skipped = "could not run: " + err.Error()
-		return r
-	}
-	defer devNull.Close()
-	sink, err := gate.NewClientSink(ctx, devNull, devNull)
+	sink, closeSink, err := devNullSink(ctx)
 	if err != nil {
 		r.Skipped = "could not run: " + err.Error()
 		return r
 	}
 	res, err := executeCommand(ctx, strings.Join(words, " "), gate.ExecOpts{Confine: &spec, Seal: seal, CaptureLimit: 64 << 10, ClientSink: sink})
-	_ = sink.Close()
+	closeSink()
 	r.Ran = true
 	f.checkRun(&r, spec, res, err)
 	r.Rows = f.attest(&r, res.Stdout)
@@ -529,7 +523,10 @@ func (f *fixtures) observe(r *rehearsalResult, before fixtureState) {
 			r.fail("the %s listener accepted %d connection(s): %v", name, len(accepted), err)
 		}
 	}
-	if err := unix.PidfdSendSignal(f.pidfd, 0, nil, 0); err != nil || after.child != before.child || strings.ContainsAny(after.child.state, "TtZ") {
+	// The state letter is not compared: the child may still be running when
+	// the "before" snapshot is taken. Stopped, traced or dead is the effect.
+	unchanged := after.child.nice == before.child.nice && after.child.tracer == before.child.tracer && after.child.ppid == before.child.ppid
+	if err := unix.PidfdSendSignal(f.pidfd, 0, nil, 0); err != nil || !unchanged || after.child.state == "" || strings.ContainsAny(after.child.state, "TtZX") {
 		r.fail("the child changed: %+v, was %+v", after.child, before.child)
 	}
 	if after.tmp != before.tmp || !sameFile(after.tmpStat, before.tmpStat) {
@@ -582,4 +579,19 @@ func (f *fixtures) teardown() error {
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// devNullSink is a client sink that discards: a doctor attempt's output is
+// not the operator's.
+func devNullSink(ctx context.Context) (*gate.ClientSink, func(), error) {
+	devNull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+	if err != nil {
+		return nil, nil, err
+	}
+	sink, err := gate.NewClientSink(ctx, devNull, devNull)
+	if err != nil {
+		_ = devNull.Close()
+		return nil, nil, err
+	}
+	return sink, func() { _ = sink.Close(); _ = devNull.Close() }, nil
 }

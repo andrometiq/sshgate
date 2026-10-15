@@ -3,12 +3,14 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"strings"
 
 	"github.com/karthikeyan5/sshgate/src/gate"
 	"github.com/karthikeyan5/sshgate/src/gate/confine"
 	"github.com/karthikeyan5/sshgate/src/gate/confine/jailmut"
+	"golang.org/x/sys/unix"
 )
 
 // jailProbeCommand is the only command a capability probe runs: a shell
@@ -34,10 +36,11 @@ var resetVerbEnv = func() {
 // the read Spec, one jail attempt of the probe command, and how the read
 // router routes that attempt. A damaged pin makes no attempt.
 type capability struct {
-	pin   pinState
-	spec  confine.Spec
-	res   gate.ExecResult
-	route attemptRoute
+	pin      pinState
+	spec     confine.Spec
+	res      gate.ExecResult
+	setupErr error
+	route    attemptRoute
 }
 
 // hostCapability makes the probe's one jail attempt under the read Spec (with
@@ -53,13 +56,40 @@ func hostCapability(ctx context.Context, pin pinState, command string, sink *gat
 	c.spec = readSpec(pin, requires, false)
 	c.spec.Cwd = "/"
 	res, err := executeCommand(ctx, command, gate.ExecOpts{Confine: &c.spec, Seal: seal, ClientSink: sink})
-	var setupErr error
 	if res.ExitCode < 0 {
-		setupErr = setupErrorOf(err)
+		c.setupErr = setupErrorOf(err)
 	}
 	c.res = res
-	c.route = routeAttempt(pin.valid, requires, res, setupErr)
+	c.route = routeAttempt(pin.valid, requires, res, c.setupErr)
 	return c
+}
+
+// attemptFacts are a jail attempt's stage, errno and class, for doctor.
+type attemptFacts struct {
+	Attempted bool   `json:"attempted"`
+	Route     string `json:"route"` // kernel, or the router's reason
+	Stage     string `json:"stage,omitempty"`
+	Errno     string `json:"errno,omitempty"`
+	Class     string `json:"class,omitempty"`
+}
+
+func newAttemptFacts(attempted bool, route attemptRoute, res gate.ExecResult, setupErr error) attemptFacts {
+	facts := attemptFacts{Attempted: attempted, Route: route.reason}
+	if route.kernel {
+		facts.Route = "kernel"
+	}
+	var setup *confine.SetupError
+	if errors.As(setupErr, &setup) {
+		facts.Stage, facts.Class = setup.Stage, attemptClass(setup, res).String()
+		if setup.Errno != 0 {
+			facts.Errno = unix.ErrnoName(setup.Errno)
+		}
+	}
+	return facts
+}
+
+func (c capability) attemptFacts() attemptFacts {
+	return newAttemptFacts(c.pin.damaged == "", c.route, c.res, c.setupErr)
 }
 
 // jailNet reports whether the jail gave the probe network.

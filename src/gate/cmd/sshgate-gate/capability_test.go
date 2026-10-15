@@ -118,7 +118,7 @@ func setUpVerbState(t *testing.T, s verbState) (string, *[]verbCall) {
 	withGateDir(t, dir)
 	withHostFacts(t, s.facts)
 	if s.pin != "" {
-		writePin(t, dir, s.pin, s.pinMode)
+		plantPin(t, dir, s.pin, s.pinMode)
 	}
 	if s.floor {
 		if err := os.WriteFile(filepath.Join(dir, jailFloorFile), []byte("full\n"), 0o644); err != nil {

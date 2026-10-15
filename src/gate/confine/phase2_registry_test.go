@@ -72,6 +72,8 @@ func phase2Registry() []prot {
 			MutationSets: []harness.MutationSet{one("P-G-JAILVERB-NOEXEC", phase2Leg("U-JailVerbNoExec", "MUTATION-EFFECT exec"), phase2Leg("G-JAILVERB-NOEXEC", "MUTATION-EFFECT agent-bytes"))}},
 		{ID: "P-G-SELFTEST-JAILED", Site: "selftestAllowed jailed credentials and namespaces", Class: "single", DirectLeg: "U-SelftestRefusesUnjailed", EffectLegs: []string{"G-SELFTEST-UNJAILED"},
 			MutationSets: []harness.MutationSet{one("P-G-SELFTEST-JAILED", phase2Leg("U-SelftestRefusesUnjailed", "MUTATION-EFFECT decision"), phase2Leg("G-SELFTEST-UNJAILED", "MUTATION-EFFECT selftest-unjailed"))}},
+		{ID: "P-G-PIN-REHEARSAL", Site: "pinAllowed requires a passed rehearsal", Class: "single", DirectLeg: "U-PinRequiresRehearsal", EffectLegs: []string{"G-PIN-REFUSED"},
+			MutationSets: []harness.MutationSet{one("P-G-PIN-REHEARSAL", phase2Leg("U-PinRequiresRehearsal", "MUTATION-EFFECT decision"), phase2Leg("G-PIN-REFUSED", "MUTATION-EFFECT pin-written"))}},
 	}
 }
 

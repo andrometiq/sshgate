@@ -57,11 +57,13 @@ func gateProofCases() []harness.Case {
 	add("U-SelftestRefusesUnjailed", "Unit", "", nil, []string{"control:decision"}, []string{"EFFECT:decision"}, nil)
 	add("G-SELFTEST-UNJAILED", "Effect", "Execute", nil, []string{"control:write", "jailed:selftest", "observe:fixtures"}, []string{"EFFECT:selftest-unjailed"}, nil)
 	add("G-SELFTEST-JAILED", "Execution", "Execute", nil, []string{"jailed:selftest", "observe:fixtures"}, nil, nil)
+	add("U-PinRequiresRehearsal", "Unit", "", nil, []string{"control:decision"}, []string{"EFFECT:decision"}, nil)
+	add("G-PIN-REFUSED", "Effect", "Execute", nil, []string{"control:pin", "jailed:rehearsal", "observe:pinfile"}, []string{"EFFECT:pin-written"}, nil)
 	return cases
 }
 
 // gateHooks are the protections whose mutation may show an effect here.
-var gateHooks = []string{"P-G-CONFINE-REQUIRED", "P-G-STRICT", "P-G-NET-STRICT", "P-COVERS", "P-CLONE-MNT", "P-SC-NET", "P-G-SEAL", "P-G-SEAL-GUARD", "P-G-LABEL-SWITCH", "P-G-JAILVERB-NOEXEC", "P-G-SELFTEST-JAILED"}
+var gateHooks = []string{"P-G-CONFINE-REQUIRED", "P-G-STRICT", "P-G-NET-STRICT", "P-COVERS", "P-CLONE-MNT", "P-SC-NET", "P-G-SEAL", "P-G-SEAL-GUARD", "P-G-LABEL-SWITCH", "P-G-JAILVERB-NOEXEC", "P-G-SELFTEST-JAILED", "P-G-PIN-REHEARSAL"}
 
 // gateProof is the gate package's proof: one case, its obligations, and the
 // markers its legs observed. Finish prints the one PROOF-COMPLETE line.
