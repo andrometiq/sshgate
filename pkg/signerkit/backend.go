@@ -200,6 +200,8 @@ type CommandReq struct {
 	Cmd    string
 	TTLSec int64
 	Reveal bool
+	// Net requests network access for a read and requires distinct approval.
+	Net    bool
 	Reason string
 	// HostKeyFP is the target server's SSH host-key fingerprint
 	// ("SHA256:..."), sourced by the MCP from its TRUSTED registry (never an
