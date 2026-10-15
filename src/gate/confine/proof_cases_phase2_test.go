@@ -41,5 +41,8 @@ func proofCasesPhase2() []harness.Case {
 	add("G-JAILVERB-LABEL", "Execution", "Execute", nil, []string{"jailed:verb", "observe:json"}, []string{"EFFECT:label"}, nil)
 	add("U-JailVerbNoExec", "Unit", "", nil, []string{"control:decision"}, []string{"EFFECT:exec"}, nil)
 	add("G-JAILVERB-NOEXEC", "Effect", "Execute", nil, []string{"control:payload", "jailed:verb", "observe:output"}, []string{"EFFECT:agent-bytes"}, nil)
+	add("U-SelftestRefusesUnjailed", "Unit", "", nil, []string{"control:decision"}, []string{"EFFECT:decision"}, nil)
+	add("G-SELFTEST-UNJAILED", "Effect", "Execute", nil, []string{"control:write", "jailed:selftest", "observe:fixtures"}, []string{"EFFECT:selftest-unjailed"}, nil)
+	add("G-SELFTEST-JAILED", "Execution", "Execute", nil, []string{"jailed:selftest", "observe:fixtures"}, nil, nil)
 	return cases
 }

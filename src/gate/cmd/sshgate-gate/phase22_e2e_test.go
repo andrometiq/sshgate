@@ -9,16 +9,19 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/karthikeyan5/sshgate/src/gate/confine"
+	"github.com/karthikeyan5/sshgate/src/gate/confine/jailmut"
 	"golang.org/x/sys/unix"
 )
 
@@ -272,4 +275,82 @@ func TestGateBinaryJailVerb(t *testing.T) {
 	if code != exitOK || !strings.Contains(stderr, preloadError) {
 		t.Fatalf("control: a jailed read with LD_PRELOAD set: exit %d, stderr %q", code, stderr)
 	}
+}
+
+var selftestBuild struct {
+	once sync.Once
+	path string
+	err  error
+}
+
+// buildSelftestBinary builds the gate once per test process without -race
+// and with this build's mutation hooks, into the jail-visible TMPDIR: the
+// rehearsal runs it under the jail's seccomp filter.
+func buildSelftestBinary(t *testing.T) string {
+	t.Helper()
+	selftestBuild.once.Do(func() {
+		dir, err := os.MkdirTemp("", "selftest-")
+		if err != nil {
+			selftestBuild.err = err
+			return
+		}
+		selftestBuild.path = filepath.Join(dir, "gate")
+		args := append(append([]string{"build", "-trimpath"}, jailmut.BuildFlags()...), "-o", selftestBuild.path, ".")
+		build := exec.Command("go", args...)
+		build.Env = append(os.Environ(), "CGO_ENABLED=0")
+		if out, err := build.CombinedOutput(); err != nil {
+			selftestBuild.err = fmt.Errorf("%v\n%s", err, out)
+		}
+	})
+	if selftestBuild.err != nil {
+		t.Fatalf("SETUP: build the selftest binary: %v", selftestBuild.err)
+	}
+	return selftestBuild.path
+}
+
+// runRehearsal runs one rehearsal in a fresh test gate process.
+func runRehearsal(t *testing.T, config testGateConfig) testRehearsal {
+	t.Helper()
+	config.Dir, config.SelftestBinary = shortTempDir(t), buildSelftestBinary(t)
+	code, out := runTestGate(t, config, config.Dir, "")
+	var result testRehearsal
+	if code != 0 || json.Unmarshal([]byte(out), &result) != nil {
+		t.Fatalf("SETUP: rehearsal gate: exit %d, output %q", code, out)
+	}
+	return result
+}
+
+// legSelftestJailed: the rehearsal engine end to end, for a net=deny and a
+// net=allow candidate: fixtures, liveness, the jailed selftest, its
+// attestation and every outside check pass, at the lane's ABI.
+func legSelftestJailed(t *testing.T, abi string) {
+	p := newProof(t, "G-SELFTEST-JAILED")
+	passed := true
+	for _, net := range []bool{false, true} {
+		r := runRehearsal(t, testGateConfig{ABI: abi, Rehearse: &confine.Pin{Profile: confine.ProfileROv1, Net: net}})
+		abiOK := r.ABI >= 1 && (abi != "abi1" || r.ABI == 1)
+		if !r.Passed || !r.Strict || !abiOK || r.Net != net {
+			t.Errorf("net=%v: %+v", net, r.rehearsalResult)
+			passed = false
+		}
+	}
+	p.Jailed("selftest", passed)
+	p.Observed("fixtures", passed)
+	p.Finish()
+}
+
+// legSelftestUnjailed: run outside the jail, the selftest refuses (77) and
+// the fixtures are untouched; a direct write to them lands.
+func legSelftestUnjailed(t *testing.T, abi string) {
+	p := newProof(t, "G-SELFTEST-UNJAILED")
+	r := runRehearsal(t, testGateConfig{ABI: abi, Rehearse: &confine.Pin{Profile: confine.ProfileROv1}, Unjailed: true})
+	p.Control("write", r.Control)
+	changed := false
+	for _, failure := range r.Failures {
+		changed = changed || strings.HasPrefix(failure, "the canary") || strings.HasPrefix(failure, "the child")
+	}
+	p.Effect("selftest-unjailed", changed)
+	p.Jailed("selftest", r.Ran && (r.Exit == exitNoPermVal && len(r.Failures) == 0 || r.Exit == exitOK && changed))
+	p.Observed("fixtures", r.Skipped == "")
+	p.Finish()
 }

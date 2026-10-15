@@ -117,7 +117,11 @@ single-call indirections:
   until the signed wire carries one), `readSpecHook` (forces a Landlock ABI or a setup failure),
   `hostFactsFn`, `pinUIDFn`, `jailPinFn`, `sealFn` (the seal of a jailed read) and
   `resetVerbEnv` (the `SSHGATE_JAIL` environment reset); the in-process test binary
-  records the last two instead of sealing itself or clearing its environment. The gate legs that need the gate in its own process
+  records the last two instead of sealing itself or clearing its environment. The
+  rehearsal's seams are `selftestBinaryFn` (tests point it at a non-race build of the
+  gate made with `jailmut.BuildFlags()`, so the mutation hooks stay live and no
+  race-built binary runs under the jail's seccomp filter), `rehearsalSpecHook` and
+  `rehearsalObserveHook`. The gate legs that need the gate in its own process
   set the same seams through the test binary's `SSHGATE_TEST_GATE` mode (`jail_testmain_test.go`);
   the gate itself never reads them from the environment.
 - `dialWithCtx` — `src/mcp/sign/client.go` (`var dialWithCtx`)

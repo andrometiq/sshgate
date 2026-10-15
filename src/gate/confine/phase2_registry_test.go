@@ -70,6 +70,8 @@ func phase2Registry() []prot {
 			MutationSets: []harness.MutationSet{one("P-G-LABEL-SWITCH", phase2Leg("U-LabelContract", "MUTATION-EFFECT label"), phase2Leg("G-JAILVERB-LABEL", "MUTATION-EFFECT label"))}},
 		{ID: "P-G-JAILVERB-NOEXEC", Site: "jailVerbProbe exact match", Class: "single", DirectLeg: "U-JailVerbNoExec", EffectLegs: []string{"G-JAILVERB-NOEXEC"},
 			MutationSets: []harness.MutationSet{one("P-G-JAILVERB-NOEXEC", phase2Leg("U-JailVerbNoExec", "MUTATION-EFFECT exec"), phase2Leg("G-JAILVERB-NOEXEC", "MUTATION-EFFECT agent-bytes"))}},
+		{ID: "P-G-SELFTEST-JAILED", Site: "selftestAllowed jailed credentials and namespaces", Class: "single", DirectLeg: "U-SelftestRefusesUnjailed", EffectLegs: []string{"G-SELFTEST-UNJAILED"},
+			MutationSets: []harness.MutationSet{one("P-G-SELFTEST-JAILED", phase2Leg("U-SelftestRefusesUnjailed", "MUTATION-EFFECT decision"), phase2Leg("G-SELFTEST-UNJAILED", "MUTATION-EFFECT selftest-unjailed"))}},
 	}
 }
 

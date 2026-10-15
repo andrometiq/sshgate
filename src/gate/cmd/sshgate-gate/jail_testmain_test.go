@@ -4,10 +4,12 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -43,6 +45,8 @@ func TestMain(m *testing.M) {
 			os.Exit(confine.RunShim(os.Args[2:]))
 		case confine.SentinelWorker:
 			os.Exit(confine.RunWorker(os.Args[2:]))
+		case sentinelSelftest:
+			os.Exit(runJailSelftest(os.Args[2:]))
 		case sentinelCaplessReader:
 			os.Exit(runCaplessReader(os.Args[2:]))
 		}
@@ -95,6 +99,12 @@ type testGateConfig struct {
 	// Repeat runs the read a second time in the same gate process, after the
 	// first one sealed it; the exit code is the second read's.
 	Repeat bool
+	// Rehearse runs the rehearsal of this candidate pin in Dir instead of a
+	// read, with SelftestBinary as the selftest, and prints its result as
+	// JSON. Unjailed runs the selftest outside the jail instead.
+	Rehearse       *confine.Pin
+	Unjailed       bool
+	SelftestBinary string
 }
 
 // sealCalls counts the seals of in-process reads; verbEnvResets counts the
@@ -111,9 +121,13 @@ func testGateMain(raw string) int {
 	forceNetGrant = config.Grant
 	if config.ABI == "abi1" {
 		readSpecHook = func(spec *confine.Spec) { spec.ForceABI = 1 }
+		rehearsalSpecHook = readSpecHook
 	}
 	if config.NoSeal {
 		sealFn = func() error { return nil }
+	}
+	if config.Rehearse != nil {
+		return testRehearsalMain(config)
 	}
 	if config.Repeat {
 		if code := run(); code != exitOK {
@@ -233,4 +247,78 @@ func reportExec() int {
 		Path: exe, Args: os.Args, Env: os.Environ(), StdinIsNul: stdinNul,
 	})
 	return 0
+}
+
+// testRehearsal is what a Rehearse-mode test gate prints. Exit and Control are
+// set by an unjailed run only.
+type testRehearsal struct {
+	rehearsalResult
+	Exit    int  `json:"exit"`
+	Control bool `json:"control"`
+}
+
+// testRehearsalMain builds the fixtures in a process that has made no jail
+// attempt, runs the rehearsal (sealed, as doctor does) or the unjailed
+// selftest, and prints the result.
+func testRehearsalMain(config testGateConfig) int {
+	selftestBinaryFn = func() (string, error) { return config.SelftestBinary, nil }
+	fx, err := buildFixtures(config.Dir)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "TestMain: fixtures:", err)
+		return 2
+	}
+	var result testRehearsal
+	if config.Unjailed {
+		result = rehearseUnjailed(fx)
+	} else {
+		result.rehearsalResult = fx.rehearse(context.Background(), *config.Rehearse, sealRead)
+	}
+	if err := fx.teardown(); err != nil {
+		fmt.Fprintln(os.Stderr, "TestMain: teardown:", err)
+		return 2
+	}
+	if json.NewEncoder(os.Stdout).Encode(result) != nil {
+		return 2
+	}
+	return 0
+}
+
+// rehearseUnjailed runs the selftest outside any jail, with this process's
+// own namespaces as the declared outer ones, and makes the rehearsal's outside
+// checks. Control is a direct append to a sibling of the canary.
+func rehearseUnjailed(fx *fixtures) testRehearsal {
+	var result testRehearsal
+	if reason := fx.liveness(); reason != "" {
+		result.Skipped = "could not run: " + reason
+		return result
+	}
+	sibling := filepath.Join(fx.dir, "sibling")
+	result.Control = os.WriteFile(sibling, []byte("before\n"), 0o644) == nil && appendText(sibling, "after\n") == nil
+	if data, err := os.ReadFile(sibling); err != nil || string(data) != "before\nafter\n" {
+		result.Control = false
+	}
+	before, err := fx.snapshot()
+	binary, binaryErr := selftestBinaryFn()
+	outer, outerErr := ownNamespaces()
+	if err = errors.Join(err, binaryErr, outerErr); err != nil {
+		result.Skipped = "could not run: " + err.Error()
+		return result
+	}
+	command := exec.Command(binary, append([]string{sentinelSelftest}, fx.selftestArgs(outer, false)...)...)
+	if err := command.Run(); command.ProcessState == nil {
+		result.fail("selftest: %v", err)
+	} else {
+		result.Ran, result.Exit = true, command.ProcessState.ExitCode()
+	}
+	fx.observe(&result.rehearsalResult, before)
+	return result
+}
+
+func appendText(path, text string) error {
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0)
+	if err != nil {
+		return err
+	}
+	_, err = file.WriteString(text)
+	return errors.Join(err, file.Close())
 }

@@ -48,6 +48,8 @@ func TestJailMatrixPhase2(t *testing.T) {
 			t.Run("G-SEAL-GUARD", func(t *testing.T) { legSealGuard(t, abi) })
 			t.Run("G-JAILVERB-LABEL", func(t *testing.T) { legJailVerbLabel(t, abi) })
 			t.Run("G-JAILVERB-NOEXEC", func(t *testing.T) { legJailVerbNoExec(t, abi) })
+			t.Run("G-SELFTEST-JAILED", func(t *testing.T) { legSelftestJailed(t, abi) })
+			t.Run("G-SELFTEST-UNJAILED", func(t *testing.T) { legSelftestUnjailed(t, abi) })
 		})
 	}
 }

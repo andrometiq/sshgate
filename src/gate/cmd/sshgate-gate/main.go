@@ -109,6 +109,10 @@ func main() {
 			os.Exit(confine.RunShim(os.Args[2:]))
 		case confine.SentinelWorker:
 			os.Exit(confine.RunWorker(os.Args[2:]))
+		case sentinelSelftest:
+			// The rehearsal's probe menu, run by doctor inside the jail. It
+			// refuses (77) anywhere but there; see selftest.go.
+			os.Exit(runJailSelftest(os.Args[2:]))
 		}
 		os.Exit(runLocalSubcommand(os.Args[1:]))
 	}

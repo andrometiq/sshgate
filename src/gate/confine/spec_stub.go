@@ -24,3 +24,5 @@ func RunWorker([]string) int { return ExitSetupFailed }
 
 func EnableSubreaper() error    { return nil }
 func CleanupDescendants() error { return nil }
+
+func CheckJailedCredentials(string, bool) error { return errUnsupported }

@@ -261,6 +261,7 @@ func TestPhase2Tables(t *testing.T) {
 			t.Run("U-SealReads", func(t *testing.T) { unitSealReads(t) })
 			t.Run("U-LabelContract", func(t *testing.T) { unitLabelContract(t) })
 			t.Run("U-JailVerbNoExec", func(t *testing.T) { unitJailVerbNoExec(t) })
+			t.Run("U-SelftestRefusesUnjailed", func(t *testing.T) { unitSelftestRefusesUnjailed(t) })
 		})
 	}
 }
