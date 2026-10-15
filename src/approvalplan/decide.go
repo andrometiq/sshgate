@@ -51,7 +51,7 @@ func Decide(p Policy, votes []Vote) ApprovalStatus {
 }
 
 // ApprovingOperators lists the distinct operators whose eligible vote is an
-// approve, in first-vote order: the approved decision's decided_by.
+// approve, in first-vote order. Approval attribution uses the first quorum.
 func ApprovingOperators(p Policy, votes []Vote) []string {
 	approvers, _ := tally(p, votes)
 	return approvers

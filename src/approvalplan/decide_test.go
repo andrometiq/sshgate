@@ -283,3 +283,54 @@ func TestVoteRoomProperty(t *testing.T) {
 		t.Fatal("local flags must keep the veto on")
 	}
 }
+
+func TestApprovalAttributionAfterRestart(t *testing.T) {
+	for _, n := range []int{1, 2, 64} {
+		t.Run(fmt.Sprint(n), func(t *testing.T) {
+			h := newHosted(t, n, "")
+			operators := []string{requester}
+			for i := 0; i < n; i++ {
+				operators = append(operators, fmt.Sprintf("%0128d", i))
+			}
+			for _, op := range operators[:n] {
+				if ans := h.vote(op, ap.VoteApprove, ap.VoteFlags{}); ans.Code != "" || ans.Noise || !ans.Changed {
+					t.Fatalf("stored approval: %+v", ans)
+				}
+			}
+			if h.status() != ap.ApprovalPending {
+				t.Fatal("decided before restart")
+			}
+			data, err := ap.EncodeR1(h.rec)
+			if err != nil {
+				t.Fatal(err)
+			}
+			h.rec, err = ap.DecodeR1(data)
+			if err != nil {
+				t.Fatal(err)
+			}
+			h.in.Epoch = st.Epoch(2)
+			ans := h.vote(operators[n], ap.VoteApprove, ap.VoteFlags{AllowSelfApprove: true})
+			if ans.Code != "" || ans.Noise || !ans.Changed {
+				t.Fatalf("deciding vote: %+v", ans)
+			}
+			d := h.rec.Header.Decision
+			if d == nil || d.Status != ap.ApprovalApproved || d.DecidedBy != strings.Join(operators[:n], ",") || len(h.rec.Header.Votes) != n+1 {
+				t.Fatalf("decision %+v, votes %d", d, len(h.rec.Header.Votes))
+			}
+			if len(d.DecidedBy) > n*(ap.MaxOperatorIDBytes+1)-1 {
+				t.Fatal("attribution exceeds frozen bound")
+			}
+			data, err = ap.EncodeR1(h.rec)
+			if err != nil {
+				t.Fatal(err)
+			}
+			back, err := ap.DecodeR1(data)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if mustJSON(t, back) != mustJSON(t, h.rec) {
+				t.Fatal("decision did not round-trip")
+			}
+		})
+	}
+}

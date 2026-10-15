@@ -363,3 +363,28 @@ func TestReportedUnmintedWaitsForClockBeforeShed(t *testing.T) {
 		t.Fatal("did not shed after Clock event flushed", a)
 	}
 }
+
+func TestCorruptFirstClaimDiscardsDueAssist(t *testing.T) {
+	r := newRig(t)
+	r.grant(st.ID(1), st.PrincipalA, time.Hour)
+	key := r.submit(st.ID(2), ap.CoordinatorExecutor, st.Write("w", 60))
+	r.s.FlushPass()
+	bad := r.rec(key)
+	if bad.Header.Decision == nil || bad.Header.Decision.DecidedBy != ap.GrantDecidedPrefix+st.ID(1) || bad.Header.Assist != nil {
+		t.Fatal("expected grant approval with pending assist")
+	}
+	r.clock.Advance(bad.Header.AssistDeadline.Sub(r.clock.Wall))
+	bad.Payload.Plan.CommandJob.Steps[0].ExactCommand = "SSHGATE_XFER_SEND x"
+	before := mustJSON(t, bad)
+	clocked, changed := ap.Clock(bad, r.now(), r.s.Epoch)
+	if len(changed) == 0 || clocked.Header.Assist == nil {
+		t.Fatal("assist clock work was not due")
+	}
+	after, ans := ap.Apply(&bad, ap.Claim{Token: st.Token(st.ID(2)), PlanHash: bad.Header.PlanHash}, r.now(), ap.Inputs{Epoch: r.s.Epoch})
+	if ans.Code != ap.CodeRecordCorrupt || ans.Changed || ans.MintRequired || len(ans.Signatures) != 0 {
+		t.Fatalf("corrupted plan with due assist: %+v", ans)
+	}
+	if mustJSON(t, after) != before || mustJSON(t, bad) != before {
+		t.Fatal("corruption refusal changed record")
+	}
+}

@@ -307,6 +307,9 @@ func Apply(rec *R1, cmd Command, now Now, in Inputs) (R1, Answer) {
 	clocked := begin(c.rec, c.now, c.epoch)
 	clocked.changed = c.changed
 	ans := c.apply(cmd, in)
+	if ans.Code == CodeRecordCorrupt {
+		return *rec, ans
+	}
 	if ans.Code != "" && !ans.Noise {
 		c = clocked
 	}
@@ -513,7 +516,7 @@ func (c *change) vote(v CastVote, hosted bool) Answer {
 	p := EffectivePolicy(c.rec, v.Flags)
 	switch Decide(p, h.Votes) {
 	case ApprovalApproved:
-		c.decide(ApprovalApproved, vote.TS, strings.Join(ApprovingOperators(p, h.Votes), ","), "")
+		c.decide(ApprovalApproved, vote.TS, strings.Join(ApprovingOperators(p, h.Votes)[:p.RequiredApprovals], ","), "")
 	case ApprovalDenied:
 		c.decide(ApprovalDenied, vote.TS, firstEligibleDeny(p, h.Votes), "")
 	}

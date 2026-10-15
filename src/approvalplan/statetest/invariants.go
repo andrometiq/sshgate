@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	ap "github.com/karthikeyan5/sshgate/src/approvalplan"
@@ -24,6 +25,11 @@ func enc(v any) string {
 // to the same bytes. DecodeR1's own checks are EncodeR1's, so the harness
 // runs them once.
 func CheckRecord(rec ap.R1) error {
+	if d := rec.Header.Decision; d != nil && d.Status == ap.ApprovalApproved && !strings.HasPrefix(d.DecidedBy, ap.GrantDecidedPrefix) {
+		if len(strings.Split(d.DecidedBy, ",")) != rec.Header.RequiredApprovals {
+			return errors.New("approved vote attribution does not name exactly required_approvals operators")
+		}
+	}
 	b, err := ap.EncodeR1(rec)
 	if err != nil {
 		return fmt.Errorf("record does not encode: %w", err)
