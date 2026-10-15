@@ -18,6 +18,10 @@ var (
 	// before the verification clock (now >= exp).
 	ErrExpired = errors.New("signature expired")
 
+	// ErrNotYetValid means the signed command's ts is more than
+	// sigwire.MaxClockSkew ahead of the gate's clock.
+	ErrNotYetValid = errors.New("signature not yet valid: its timestamp is ahead of this host's clock")
+
 	// ErrValidityTooLong means the signed command's validity window
 	// (exp-ts) exceeds sigwire.MaxSigValidity. This caps the blast
 	// radius of an approved signature and is enforced even if the

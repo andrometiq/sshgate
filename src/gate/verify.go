@@ -41,7 +41,7 @@ import (
 // did not fully verify.
 //
 // On failure, the returned error wraps one of the package's sentinels
-// (ErrBadFormat, ErrBadSig, ErrExpired, ErrValidityTooLong,
+// (ErrBadFormat, ErrBadSig, ErrNotYetValid, ErrExpired, ErrValidityTooLong,
 // ErrEmptyCmd, ErrHostMismatch) so callers can match with errors.Is.
 //
 // VerifySigned is the only correct way to unwrap a SSHGATE_SIG line —
@@ -78,6 +78,9 @@ func VerifySigned(line string, pubkey ed25519.PublicKey, now time.Time, selfHost
 	nowUnix := now.Unix()
 	if payload.TS <= 0 || payload.Exp <= 0 || payload.Exp <= payload.TS {
 		return "", false, ErrBadFormat
+	}
+	if nowUnix < payload.TS-int64(sigwire.MaxClockSkew/time.Second) {
+		return "", false, ErrNotYetValid
 	}
 	if nowUnix >= payload.Exp {
 		return "", false, ErrExpired

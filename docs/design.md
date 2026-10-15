@@ -143,7 +143,10 @@ timestamp and an expiry. The gate:
   forwarded `SSH_ORIGINAL_COMMAND`,
 - rejects malformed or non-positive timestamps, and rejects a token whose
   validity window (`exp − ts`) exceeds the maximum allowed lifetime, and
-- rejects an expired token (`now ≥ exp`).
+- rejects a token whose timestamp is more than 30 s ahead of the gate's clock
+  (`now < ts − 30 s`), so a token is admissible for at most 330 s of gate time, and
+- rejects an expired token (`now ≥ exp`). Expiry limits admission, not a command
+  already running.
 
 Only a payload that passes every check is executed. Because each command is
 signed individually, the audit trail is per command even when many are approved

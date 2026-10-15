@@ -19,6 +19,11 @@ const sigPrefix = "SSHGATE_SIG:"
 // approved commands cannot be replayed long after the human tapped approve.
 const MaxSigValidity time.Duration = 5 * time.Minute
 
+// MaxClockSkew is how far a signature's timestamp may be ahead of the gate's
+// clock. Admission is TS - MaxClockSkew <= now < Exp, so a signature is
+// admissible for at most MaxSigValidity + MaxClockSkew (330 s) of gate time.
+const MaxClockSkew time.Duration = 30 * time.Second
+
 // SigPayload is the signed-command payload defined in the spec. It is the
 // JSON object that signer signs and gate verifies, carried on the wire
 // inside a SSHGATE_SIG envelope.
