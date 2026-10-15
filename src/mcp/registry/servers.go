@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/karthikeyan5/sshgate/src/approvalplan"
 )
 
 // warnw is the sink for non-fatal warnings (the deprecated-wrapper notice in
@@ -398,4 +400,61 @@ func (s *Servers) persist(m map[string]Entry) error {
 		_ = dirF.Close()
 	}
 	return nil
+}
+
+// Snapshot copies the registry route into the approval contract.
+func Snapshot(alias string, entry Entry) approvalplan.RouteSnapshot {
+	return approvalplan.RouteSnapshot{
+		ServerAlias: alias, ResolvedHost: entry.Host, ResolvedPort: entry.Port,
+		ResolvedUser: entry.User, TrustedHostFingerprint: entry.Fingerprint,
+		ReadOnly: entry.ReadOnly, AddedAt: entry.AddedAt.UTC(),
+	}
+}
+
+// ReadCurrent reads one current file version without consulting or updating the cache.
+func (s *Servers) ReadCurrent(alias string) (approvalplan.RouteSnapshot, string, error) {
+	var zero approvalplan.RouteSnapshot
+	file, err := os.Open(s.path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return zero, "", errors.New("alias not found")
+	}
+	if err != nil {
+		return zero, "", errors.New("registry unreadable")
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return zero, "", errors.New("registry unreadable")
+	}
+	if info.Mode().Perm()&0o022 != 0 {
+		return zero, "", errors.New("registry has insecure mode")
+	}
+	body, err := io.ReadAll(file)
+	if err != nil {
+		return zero, "", errors.New("registry unreadable")
+	}
+	if len(body) == 0 {
+		return zero, "", errors.New("alias not found")
+	}
+	var loaded map[string]Entry
+	if err := json.Unmarshal(body, &loaded); err != nil {
+		return zero, "", errors.New("registry malformed")
+	}
+	if entry, ok := loaded["servers"]; len(loaded) == 1 && ok && entry == (Entry{}) {
+		var top map[string]json.RawMessage
+		var inner map[string]json.RawMessage
+		if json.Unmarshal(body, &top) != nil || json.Unmarshal(top["servers"], &inner) != nil {
+			return zero, "", errors.New("registry malformed")
+		}
+		if len(inner) != 0 {
+			return zero, "", errors.New("registry uses unsupported wrapped format")
+		}
+		return zero, "", errors.New("alias not found")
+	}
+	entry, ok := loaded[alias]
+	if !ok {
+		return zero, "", errors.New("alias not found")
+	}
+	snapshot := Snapshot(alias, entry)
+	return snapshot, snapshot.Digest(), nil
 }
