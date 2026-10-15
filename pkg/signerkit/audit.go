@@ -6,6 +6,8 @@ import (
 	"os"
 	"sync"
 	"time"
+
+	"github.com/karthikeyan5/sshgate/src/approvalplan"
 )
 
 // AuditEvent is the on-disk shape of a single audit record. The shape is
@@ -43,7 +45,8 @@ type AuditEvent struct {
 	AuthMode   string    `json:"auth_mode,omitempty"`
 	// Policy is nil for every frozen ordinary audit row. Dedicated policy
 	// events populate it without changing ordinary JSON bytes.
-	Policy *PolicyAuditMetadata `json:"policy,omitempty"`
+	Policy   *PolicyAuditMetadata        `json:"policy,omitempty"`
+	Approval *approvalplan.AuditMetadata `json:"approval,omitempty"`
 }
 
 // AuditLog is an append-only JSON-Lines file with fsync per record.

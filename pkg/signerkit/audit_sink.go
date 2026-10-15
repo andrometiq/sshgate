@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/karthikeyan5/sshgate/src/approvalplan"
 	"github.com/karthikeyan5/sshgate/src/policy"
 	"github.com/karthikeyan5/sshgate/src/policyauthority"
 	"github.com/karthikeyan5/sshgate/src/policywire"
@@ -87,7 +88,8 @@ type AuditCall struct {
 	// Recovery is non-nil only for the durable sink's audit_log_recovered
 	// lifecycle record. Its position and omitempty tag preserve every existing
 	// ordinary, custody, and policy encoding.
-	Recovery *AuditRecoveryMetadata `json:"recovery,omitempty"`
+	Recovery *AuditRecoveryMetadata      `json:"recovery,omitempty"`
+	Approval *approvalplan.AuditMetadata `json:"approval,omitempty"`
 }
 
 // AuditVerdict is the event recorded for every vote on the hosted human plane.
@@ -102,7 +104,8 @@ type AuditVerdict struct {
 	Approved      bool      `json:"approved"`
 	// Policy is non-nil only for the dedicated base-manifest human-verdict
 	// phase. Ordinary hosted verdict encodings remain byte-identical.
-	Policy *PolicyAuditMetadata `json:"policy,omitempty"`
+	Policy   *PolicyAuditMetadata        `json:"policy,omitempty"`
+	Approval *approvalplan.AuditMetadata `json:"approval,omitempty"`
 }
 
 // PolicyAuditMetadata is the payload-free, additive policy-authority audit
