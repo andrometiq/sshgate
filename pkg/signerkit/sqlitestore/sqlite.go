@@ -43,6 +43,9 @@ const (
 	maxPendingPerClient = 100
 )
 
+// liveV2Predicate reads authoritative slots, never the worker's cached class.
+const liveV2Predicate = `(decision_status IS NULL OR (decision_status = 'approved' AND mint_state IN ('none','bytes') AND final_class IS NULL))`
+
 // memoryDBSeq gives each Open(":memory:") call a private shared-cache URI.
 // Shared cache keeps the schema visible if the driver ever uses another
 // connection; the unique name prevents two independent stores in one process
@@ -198,6 +201,7 @@ func openSQLite(path string, create, migrate, setWAL bool) (*DB, error) {
 		name := memoryDBSeq.Add(1)
 		dsn = fmt.Sprintf("file:sshgate-memory-%d?mode=memory&cache=shared&_txlock=immediate&_pragma=busy_timeout(5000)&_pragma=foreign_keys(on)&_pragma=recursive_triggers(on)", name)
 	}
+	dsn += "&_pragma=synchronous(FULL)"
 	d, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open %s: %w", path, err)
@@ -273,6 +277,11 @@ func (s *DB) Insert(ctx context.Context, r *store.Request) error {
 	if r.CreatedAt.IsZero() {
 		r.CreatedAt = time.Now().UTC()
 	}
+	expiresAt := r.ExpiresAt
+	if (expiresAt == nil || expiresAt.IsZero()) && r.Status == store.StatusPending {
+		deadline := r.CreatedAt.Add(24 * time.Hour)
+		expiresAt = &deadline
+	}
 	// RequiredApprovals defaults to 1 at the column level; mirror that
 	// here so a zero-valued Request (the common handler path, which
 	// does not set the field) stores a sane non-zero N rather than 0,
@@ -284,18 +293,20 @@ func (s *DB) Insert(ctx context.Context, r *store.Request) error {
 		reqApprovals = 1
 	}
 	res, err := s.db.ExecContext(ctx, `
-		INSERT INTO requests (request_id, status, client_id, commands, signatures, created_at, resolved_at, approved_by, required_approvals)
-		SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?
+		INSERT INTO requests (request_id, status, client_id, commands, signatures, created_at, resolved_at, approved_by, required_approvals, request_expires_at, terminal_reason)
+		SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL
 		WHERE ? <> ? OR (
-			(SELECT COUNT(*) FROM requests WHERE status = ?) < ?
-			AND (SELECT COUNT(*) FROM requests WHERE status = ? AND client_id = ?) < ?
+			((SELECT COUNT(*) FROM requests WHERE status = ?) +
+			 (SELECT COUNT(*) FROM approvals_v2 WHERE `+liveV2Predicate+`)) < ?
+			AND ((SELECT COUNT(*) FROM requests WHERE status = ? AND client_id = ?) +
+			 (SELECT COUNT(*) FROM approvals_v2 WHERE client_id = ? AND `+liveV2Predicate+`)) < ?
 		)
 	`,
 		r.RequestID, string(r.Status), r.ClientID, string(r.Commands),
 		nullableString(r.Signatures), r.CreatedAt.Unix(),
-		nullableTime(r.ResolvedAt), nullableEmpty(r.ApprovedBy), reqApprovals,
+		nullableTime(r.ResolvedAt), nullableEmpty(r.ApprovedBy), reqApprovals, nullableTime(expiresAt),
 		string(r.Status), string(store.StatusPending), string(store.StatusPending), maxPendingGlobal,
-		string(store.StatusPending), r.ClientID, maxPendingPerClient,
+		string(store.StatusPending), r.ClientID, r.ClientID, maxPendingPerClient,
 	)
 	if err != nil {
 		// modernc.org/sqlite surfaces unique-violation as a generic
@@ -327,7 +338,7 @@ func (s *DB) Insert(ctx context.Context, r *store.Request) error {
 // GetByID implements Store.GetByID.
 func (s *DB) GetByID(ctx context.Context, id string) (*store.Request, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT request_id, status, client_id, commands, signatures, created_at, resolved_at, approved_by, required_approvals
+		SELECT request_id, status, client_id, commands, signatures, created_at, resolved_at, approved_by, required_approvals, request_expires_at, terminal_reason
 		FROM requests WHERE request_id = ?
 	`, id)
 	r, err := scanRequest(row)
@@ -411,7 +422,7 @@ func (s *DB) WaitForResolution(ctx context.Context, id string, timeout time.Dura
 // ListPending implements Store.ListPending.
 func (s *DB) ListPending(ctx context.Context) ([]*store.Request, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT request_id, status, client_id, commands, signatures, created_at, resolved_at, approved_by, required_approvals
+		SELECT request_id, status, client_id, commands, signatures, created_at, resolved_at, approved_by, required_approvals, request_expires_at, terminal_reason
 		FROM requests WHERE status = ? ORDER BY created_at ASC, request_id ASC
 	`, string(store.StatusPending))
 	if err != nil {
@@ -433,7 +444,7 @@ func (s *DB) ListPendingPage(ctx context.Context, limit, offset int) ([]*store.R
 		offset = 0
 	}
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT request_id, status, client_id, commands, signatures, created_at, resolved_at, approved_by, required_approvals
+		SELECT request_id, status, client_id, commands, signatures, created_at, resolved_at, approved_by, required_approvals, request_expires_at, terminal_reason
 		FROM requests WHERE status = ? ORDER BY created_at ASC, request_id ASC LIMIT ? OFFSET ?
 	`, string(store.StatusPending), limit, offset)
 	if err != nil {
@@ -449,7 +460,7 @@ func (s *DB) RecentAudit(ctx context.Context, limit int) ([]*store.Request, erro
 		limit = 100
 	}
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT request_id, status, client_id, commands, signatures, created_at, resolved_at, approved_by, required_approvals
+		SELECT request_id, status, client_id, commands, signatures, created_at, resolved_at, approved_by, required_approvals, request_expires_at, terminal_reason
 		FROM requests ORDER BY created_at DESC LIMIT ?
 	`, limit)
 	if err != nil {
@@ -467,18 +478,25 @@ type rowScanner interface {
 
 func scanRequest(s rowScanner) (*store.Request, error) {
 	var (
-		r            store.Request
-		statusStr    string
-		signatures   sql.NullString
-		createdUnix  int64
-		resolvedUnix sql.NullInt64
-		approvedBy   sql.NullString
-		commands     string
-		reqApprovals int
+		r              store.Request
+		statusStr      string
+		signatures     sql.NullString
+		createdUnix    int64
+		resolvedUnix   sql.NullInt64
+		approvedBy     sql.NullString
+		commands       string
+		reqApprovals   int
+		expiresUnix    sql.NullInt64
+		terminalReason sql.NullString
 	)
-	if err := s.Scan(&r.RequestID, &statusStr, &r.ClientID, &commands, &signatures, &createdUnix, &resolvedUnix, &approvedBy, &reqApprovals); err != nil {
+	if err := s.Scan(&r.RequestID, &statusStr, &r.ClientID, &commands, &signatures, &createdUnix, &resolvedUnix, &approvedBy, &reqApprovals, &expiresUnix, &terminalReason); err != nil {
 		return nil, err
 	}
+	if expiresUnix.Valid {
+		t := time.Unix(expiresUnix.Int64, 0).UTC()
+		r.ExpiresAt = &t
+	}
+	r.TerminalReason = terminalReason.String
 	r.RequiredApprovals = reqApprovals
 	r.Status = store.Status(statusStr)
 	r.Commands = []byte(commands)
