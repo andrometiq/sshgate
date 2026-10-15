@@ -202,18 +202,77 @@ func openWrite(path string, flag int) error {
 
 // connectTo connects a new socket and, for TCP, sends the nonce.
 func connectTo(family int, address unix.Sockaddr, nonce string) error {
-	fd, err := unix.Socket(family, unix.SOCK_STREAM|unix.SOCK_CLOEXEC, 0)
+	fd, err := unix.Socket(family, unix.SOCK_STREAM|unix.SOCK_CLOEXEC|unix.SOCK_NONBLOCK, 0)
 	if err != nil {
 		return err
 	}
 	defer unix.Close(fd)
-	if err := unix.Connect(fd, address); err != nil {
+	var now unix.Timespec
+	if err := unix.ClockGettime(unix.CLOCK_MONOTONIC, &now); err != nil {
 		return err
 	}
-	if family != unix.AF_UNIX {
-		_, err = unix.Write(fd, []byte(nonce))
+	deadline := now.Nano() + acceptBudget.Nanoseconds()
+	if err := unix.Connect(fd, address); err != nil {
+		// AF_UNIX backlog saturation is EAGAIN, not a pending connect.
+		if err != unix.EINPROGRESS {
+			return err
+		}
+		if err := waitWritable(fd, deadline); err != nil {
+			return err
+		}
+		code, err := unix.GetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_ERROR)
+		if err != nil {
+			return err
+		}
+		if code != 0 {
+			return syscall.Errno(code)
+		}
 	}
-	return err
+	if family != unix.AF_UNIX {
+		payload := []byte(nonce)
+		for len(payload) > 0 {
+			if err := waitWritable(fd, deadline); err != nil {
+				return err
+			}
+			n, err := unix.Write(fd, payload)
+			if err == unix.EAGAIN || err == unix.EINTR {
+				continue
+			}
+			if err != nil {
+				return err
+			}
+			if n == 0 {
+				return unix.EIO
+			}
+			payload = payload[n:]
+		}
+	}
+	return nil
+}
+
+func waitWritable(fd int, deadline int64) error {
+	for {
+		var now unix.Timespec
+		if err := unix.ClockGettime(unix.CLOCK_MONOTONIC, &now); err != nil {
+			return err
+		}
+		remaining := deadline - now.Nano()
+		if remaining <= 0 {
+			return unix.ETIMEDOUT
+		}
+		poll := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLOUT}}
+		n, err := unix.Poll(poll, int((remaining+999999)/1000000))
+		if err == unix.EINTR {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return unix.ETIMEDOUT
+		}
+		return nil
+	}
 }
 
 // selftestProbe performs one row's action.

@@ -197,3 +197,66 @@ func TestAcceptAllSilentPeer(t *testing.T) {
 		}
 	})
 }
+
+func TestLivenessFullBacklogReleasesLock(t *testing.T) {
+	fx := &fixtures{abstract: "sshgate-backlog-" + randomToken(16), listeners: map[string]int{}}
+	listener, err := unix.Socket(unix.AF_UNIX, unix.SOCK_STREAM|unix.SOCK_NONBLOCK|unix.SOCK_CLOEXEC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unix.Close(listener)
+	address := &unix.SockaddrUnix{Name: "@" + fx.abstract}
+	if err := unix.Bind(listener, address); err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Listen(listener, 8); err != nil {
+		t.Fatal(err)
+	}
+	fx.listeners["abstract"] = listener
+	for i := 0; ; i++ {
+		peer, err := unix.Socket(unix.AF_UNIX, unix.SOCK_STREAM|unix.SOCK_NONBLOCK|unix.SOCK_CLOEXEC, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = unix.Connect(peer, address)
+		_ = unix.Close(peer)
+		if err == unix.EAGAIN {
+			break
+		}
+		if err != nil || i >= 16 {
+			t.Fatalf("fill backlog: connection %d: %v", i, err)
+		}
+	}
+	directory := t.TempDir()
+	lock, refusal := lockGateDir(directory)
+	if refusal != nil {
+		t.Fatal(refusal)
+	}
+	done := make(chan string, 1)
+	go func() {
+		defer close(done)
+		defer lock.Close()
+		done <- fx.liveness()
+	}()
+	select {
+	case reason := <-done:
+		<-done // Wait for the deferred lock close.
+		if !strings.HasPrefix(reason, "abstract listener:") {
+			t.Fatalf("expected failed connection, got %q", reason)
+		}
+	case <-time.After(acceptBudget + time.Second):
+		// Release a blocking connect in the reverted implementation.
+		connection, _, err := unix.Accept4(listener, unix.SOCK_NONBLOCK|unix.SOCK_CLOEXEC)
+		if err == nil {
+			_ = unix.Close(connection)
+		}
+		<-done
+		<-done
+		t.Fatal("liveness timed out with a full backlog")
+	}
+	lock, refusal = lockGateDir(directory)
+	if refusal != nil {
+		t.Fatalf("liveness left the pin directory locked: %v", refusal)
+	}
+	_ = lock.Close()
+}
