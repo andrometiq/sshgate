@@ -177,7 +177,7 @@ func buildFilter(p filterParams) []unix.SockFilter {
 	// After the per-row mutation loop: the table rows stay allow, so this never
 	// makes a P-SC-MEMFD_* hook live.
 	for i, row := range syscallTable {
-		if p.lane2 && (row.name == "MEMFD_CREATE" || row.name == "MEMFD_SECRET") {
+		if p.lane2 && (row.name == "MEMFD_CREATE" || row.name == "MEMFD_SECRET") && !jailmut.On("P-L2-MEMFD") {
 			actions[i] = "deny"
 		}
 		if actions[i] == "allow" {

@@ -399,10 +399,10 @@ func execChild(cmd string, reveal bool, captureLimit int, plan execPlan) (rc int
 		Reveal:       reveal,
 		CaptureLimit: captureLimit,
 	}
-	if plan.confine != nil || plan.read != nil && plan.argv == nil {
-		// Jailed reads and their classifier-only fallback hold the client
-		// sink: the fallback runs after the jail attempt made the client fds
-		// non-blocking. Signed writes and daemon reads keep it nil.
+	if plan.confine != nil || plan.read != nil {
+		// Every read holds the client sink: an unconfined fallback runs after
+		// the jail attempt made the client fds non-blocking. Signed writes
+		// keep it nil.
 		opts.ClientSink = sessionSink
 	}
 	var err error
@@ -411,10 +411,14 @@ func execChild(cmd string, reveal bool, captureLimit int, plan execPlan) (rc int
 		res, err = gate.ExecArgvWithRedaction(ctx, plan.execPath, plan.argv, confine.Lane2Env(), opts)
 	default:
 		opts.Confine = plan.confine
+		command := cmd
 		if plan.confine != nil {
 			opts.Seal = sealRead
+			if plan.confine.Lane2 != nil {
+				command = confine.EncodeArgv(plan.lane2)
+			}
 		}
-		res, err = executeCommand(ctx, cmd, opts)
+		res, err = executeCommand(ctx, command, opts)
 	}
 	if plan.confine != nil && res.ExitCode < 0 {
 		// The read router logs the outcome: a deny line, or nothing for a
@@ -577,11 +581,14 @@ func execAndAudit(audit *gate.AuditLogger, cmd, classification, approval string,
 
 // execPlan says how execChild runs a command. The zero value is the plain
 // /bin/sh -c of a signed write. A read sets read (its audit block) and at most
-// one of argv (Lane 2, shell-free) or confine (the jail); a read with neither
-// is a classifier-only run.
+// one of confine (the jail; for a daemon read, with lane2, its canonical argv)
+// or argv (a daemon read's unconfined fallback, shell-free); a read with
+// neither is a classifier-only run. execPath is a daemon read's admitted
+// client.
 type execPlan struct {
 	execPath string
 	argv     []string
+	lane2    []string
 	confine  *confine.Spec
 	read     *gate.ReadAudit
 }

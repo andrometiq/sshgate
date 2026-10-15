@@ -131,7 +131,7 @@ func buildSocketFilter(a *bpfAsm, p filterParams) {
 	a.jeq(unix.AF_NETLINK, "socket-netlink", "")
 	a.jeq(unix.AF_INET, "socket-inet", "")
 	a.jeq(unix.AF_INET6, "socket-inet6", "")
-	if p.lane2 {
+	if p.lane2 || jailmut.On("P-L2-SOCK-SCOPE") {
 		a.jeq(unix.AF_UNIX, "socket-unix", "")
 	}
 	if jailmut.On("P-SC-SOCK-FAM") {
@@ -139,7 +139,7 @@ func buildSocketFilter(a *bpfAsm, p filterParams) {
 	} else {
 		a.ja("deny")
 	}
-	if p.lane2 {
+	if p.lane2 || jailmut.On("P-L2-SOCK-SCOPE") {
 		// A daemon read reaches its daemon over a Unix stream socket only;
 		// type flags such as SOCK_CLOEXEC pass.
 		a.mark("socket-unix")

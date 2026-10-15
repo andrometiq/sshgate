@@ -391,7 +391,7 @@ func RunWorker(args []string) int {
 			execPath = "/nonexistent/client"
 		}
 		lane2.close()
-		execErr = unix.Exec(execPath, lane2Argv, Lane2Env())
+		execErr = unix.Exec(execPath, lane2Argv, lane2ExecEnv(cwd))
 	} else {
 		execErr = unix.Exec(execPath, []string{"sh", "-c", cmd}, jailEnv(cwd))
 	}
@@ -445,6 +445,15 @@ func jailEnv(cwd string) []string {
 		out = append(out, k+"="+v)
 	}
 	return out
+}
+
+// lane2ExecEnv is a daemon read's environment: Lane2Env, the same slice the
+// gate's unjailed fallback uses, never the gate's own.
+func lane2ExecEnv(cwd string) []string {
+	if jailmut.On("P-L2-ENV") {
+		return jailEnv(cwd)
+	}
+	return Lane2Env()
 }
 
 // readCapped reads up to max bytes, returning an error if the source produces

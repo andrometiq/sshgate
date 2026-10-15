@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/karthikeyan5/sshgate/src/gate/confine"
 	"github.com/karthikeyan5/sshgate/src/gate/confine/jailmut"
 	"github.com/karthikeyan5/sshgate/src/gate/confine/jailmut/harness"
 )
@@ -75,11 +76,34 @@ func gateProofCases() []harness.Case {
 	add("G-L2-ADMIT-ENDPOINT", "Effect", "Execute", nil, []string{"control:connect", "jailed:lane2", "observe:listener"}, []string{"EFFECT:endpoint-accepted"}, []string{"root-only"})
 	cases[len(cases)-1].Root = true
 	add("G-L2-INTERP-UNTRUSTED", "Effect", "Execute", nil, []string{"control:exec", "jailed:lane2", "observe:output"}, []string{"EFFECT:interp-ran"}, nil)
+	// P3.2: daemon reads run in the jail. The residual lanes follow this host's
+	// Landlock ABI, as the registry's expected markers do.
+	hostABI := confine.ReadHostFacts().LandlockABI
+	add("U-Lane2SpecNet", "Unit", "", nil, []string{"control:decision"}, []string{"EFFECT:decision"}, nil)
+	add("G-LANE2-PLUGIN-NOEXEC", "Effect", "Execute", nil, []string{"control:exec", "jailed:lane2", "observe:output"}, []string{"EFFECT:plugin-ran"}, nil)
+	add("G-L2-MEMFD-NOEXEC", "Effect", "Execute", nil, []string{"control:exec", "jailed:lane2", "observe:output"}, []string{"EFFECT:memfd-ran"}, nil)
+	add("G-L2-SOCK-PIN", "Effect", "Execute", nil, []string{"control:connect", "jailed:lane2", "observe:listener"}, []string{"EFFECT:unpinned-connected"}, nil)
+	cases[len(cases)-1].ResidualABIs = harness.ResidualBelowABI("R-L2-SOCKET-BELOW-ABI9", hostABI, 9)
+	add("G-L2-SOCK-SWAP-AFTER-OPEN", "Effect", "Execute", nil, []string{"control:connect", "jailed:lane2", "observe:listener"}, []string{"EFFECT:swapped-connected"}, nil)
+	cases[len(cases)-1].ResidualABIs = harness.ResidualBelowABI("R-L2-SOCKET-BELOW-ABI9", hostABI, 9)
+	add("G-L2-NET-OFF", "Effect", "Execute", []string{"SetupAbort"}, []string{"control:connect", "jailed:lane2", "observe:listener"}, []string{"ABORT:spec", "EFFECT:tcp-connected"}, nil)
+	add("G-L2-ENV", "Effect", "Execute", nil, []string{"control:env", "jailed:lane2", "observe:report"}, []string{"EFFECT:env-leaked"}, nil)
+	for _, name := range []string{"G-L2-IDENTITY-BINARY", "G-L2-IDENTITY-INTERP"} {
+		add(name, "Effect", "Execute", nil, []string{"control:exec", "jailed:lane2", "observe:output"}, []string{"EFFECT:replaced-ran"}, nil)
+	}
+	add("G-L2-IDENTITY-SOCKET", "Effect", "Execute", nil, []string{"control:connect", "jailed:lane2", "observe:listener"}, []string{"EFFECT:replaced-accepted"}, nil)
+	add("C-L2-LOADER", "Execution", "Execute", nil, []string{"jailed:loader"}, nil, nil)
+	cases[len(cases)-1].ResidualABIs = map[string]string{"native": "R-L2-LOADER-ROUTE", "abi1": "R-L2-LOADER-ROUTE"}
+	add("C-L2-REEXEC", "Execution", "Execute", nil, []string{"jailed:reexec"}, nil, nil)
+	add("C-L2-MEMFD-SECRET", "Execution", "Execute", nil, []string{"jailed:memfd-secret"}, nil, nil)
+	add("C-L2-ABSTRACT", "Execution", "Execute", nil, []string{"jailed:abstract"}, nil, nil)
+	cases[len(cases)-1].ResidualABIs = harness.ResidualBelowABI("R-L2-ABSTRACT-BELOW-ABI6", hostABI, 6)
+	add("C-L2-UNIX-DGRAM", "Execution", "Execute", nil, []string{"jailed:dgram"}, nil, nil)
 	return cases
 }
 
 // gateHooks are the protections whose mutation may show an effect here.
-var gateHooks = []string{"P-G-CONFINE-REQUIRED", "P-G-STRICT", "P-G-NET-STRICT", "P-COVERS", "P-CLONE-MNT", "P-SC-NET", "P-G-SEAL", "P-G-SEAL-GUARD", "P-G-LABEL-SWITCH", "P-G-JAILVERB-NOEXEC", "P-G-SELFTEST-JAILED", "P-G-PIN-REHEARSAL", "P-L2-GRAMMAR", "P-L2-REDIRECT", "P-L2-ADMIT", "P-L2-INTERP"}
+var gateHooks = []string{"P-G-CONFINE-REQUIRED", "P-G-STRICT", "P-G-NET-STRICT", "P-COVERS", "P-CLONE-MNT", "P-SC-NET", "P-G-SEAL", "P-G-SEAL-GUARD", "P-G-LABEL-SWITCH", "P-G-JAILVERB-NOEXEC", "P-G-SELFTEST-JAILED", "P-G-PIN-REHEARSAL", "P-L2-GRAMMAR", "P-L2-REDIRECT", "P-L2-ADMIT", "P-L2-INTERP", "P-L2-EXEC-NARROW", "P-L2-MEMFD", "P-L2-SOCK-PIN", "P-L2-NET-OFF", "P-L2-SPEC-NET", "P-L2-ENV", "P-L2-IDENTITY"}
 
 // gateProof is the gate package's proof: one case, its obligations, and the
 // markers its legs observed. Finish prints the one PROOF-COMPLETE line.

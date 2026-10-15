@@ -3,6 +3,8 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
@@ -10,6 +12,8 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+
+	"github.com/karthikeyan5/sshgate/src/gate"
 
 	"github.com/karthikeyan5/sshgate/src/gate/confine"
 )
@@ -221,9 +225,12 @@ func TestLane2CanonicalArgvGolden(t *testing.T) {
 	}
 }
 
-// TestLane2HeldFDsClosed: no admitted fd outlives the read on any P3.1 path.
+// TestLane2HeldFDsClosed: no admitted fd outlives the read on any path: an
+// admission refusal, a run in the jail, the Absent fallback, a Failed jail and
+// a cancelled session. The client is the C fixture, never the race-built test
+// binary under the jail's filter.
 func TestLane2HeldFDsClosed(t *testing.T) {
-	withLane2Bins(t)
+	buildLane2Fixtures(t)
 	count := func() int {
 		entries, err := os.ReadDir("/proc/self/fd")
 		if err != nil {
@@ -231,28 +238,31 @@ func TestLane2HeldFDsClosed(t *testing.T) {
 		}
 		return len(entries)
 	}
-	base := lane2SystemEndpoints
+	base, previousHook, previousExecute := lane2SystemEndpoints, readSpecHook, executeCommand
 	for _, row := range []struct {
-		name, pin string
-		setup     func()
-		code      int
+		name  string
+		setup func()
+		code  int
 	}{
-		{"run", "", func() {}, exitOK},
-		{"admit refusal", "", func() { lane2SystemEndpoints.docker = filepath.Join(t.TempDir(), "missing") }, exitNoPermVal},
-		{"confinement required", pinAllow, func() {}, exitNoPermVal},
+		{"run", func() {}, exitOK},
+		{"admit refusal", func() { lane2SystemEndpoints.docker = filepath.Join(t.TempDir(), "missing") }, exitNoPermVal},
+		{"absent fallback", func() { readSpecHook = func(spec *confine.Spec) { spec.ForceABI = confine.ForceNoLandlock } }, exitOK},
+		{"failed setup", func() { readSpecHook = func(spec *confine.Spec) { spec.InjectFailAt = "lane2id:EACCES" } }, exitNoPermVal},
+		{"cancelled", func() {
+			executeCommand = func(context.Context, string, gate.ExecOpts) (gate.ExecResult, error) {
+				return gate.ExecResult{ExitCode: -1}, context.Canceled
+			}
+		}, exitCancelled},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			dir := t.TempDir()
 			withGateDir(t, dir)
-			if row.pin != "" {
-				plantPin(t, dir, row.pin, 0o644)
-			}
-			lane2SystemEndpoints = base
-			t.Cleanup(func() { lane2SystemEndpoints = base })
+			t.Cleanup(func() { lane2SystemEndpoints, readSpecHook, executeCommand = base, previousHook, previousExecute })
 			row.setup()
-			runWith(t, "docker ps") // the first read opens the gate's own long-lived files
+			command := "docker inspect sg-report.0"
+			runWith(t, command) // the first read opens the gate's own long-lived files
 			before := count()
-			if code, _, stderr := runWith(t, "docker ps"); code != row.code {
+			if code, _, stderr := runWith(t, command); code != row.code {
 				t.Fatalf("exit = %d, want %d: %s", code, row.code, stderr)
 			}
 			if after := count(); after != before {
@@ -260,4 +270,49 @@ func TestLane2HeldFDsClosed(t *testing.T) {
 			}
 		})
 	}
+}
+
+// unitLane2SpecNet is U-Lane2SpecNet: a daemon read's Spec never has network,
+// whatever the pin or a grant, and keeps the strictness and accepted
+// filesystems a plain read would get; a daemon-read Spec with network is
+// refused at "spec" before any clone. P-L2-NET-OFF and P-L2-SPEC-NET each flip
+// a row.
+func unitLane2SpecNet(t *testing.T) {
+	p := newProof(t, "U-Lane2SpecNet")
+	withLane2Bins(t)
+	plan, matched, refusal := lane2Plan("docker ps", pinState{})
+	defer plan.Close()
+	if !matched || refusal != "" {
+		t.Fatalf("SETUP: daemon read not admitted: %q", refusal)
+	}
+	changed := false
+	for _, pin := range []pinState{{}, {valid: true, pin: confine.Pin{Profile: confine.ProfileROv1}},
+		{valid: true, pin: confine.Pin{Profile: confine.ProfileROv1, Net: true, AcceptFS: []string{"network"}}}} {
+		for _, grant := range []bool{false, true} {
+			requires := requiresConfinement(pin, grant)
+			spec, plain := lane2Spec(pin, requires, &plan), readSpec(pin, requires, grant)
+			if spec.Strict != plain.Strict || spec.Cwd != "/" || spec.Lane2 == nil || !reflect.DeepEqual(spec.AcceptFS, plain.AcceptFS) {
+				t.Fatalf("pin %+v grant=%v: spec %+v", pin, grant, spec)
+			}
+			changed = changed || spec.Net
+		}
+	}
+	spec := lane2Spec(pinState{}, false, &plan)
+	spec.Net = true
+	var setup *confine.SetupError
+	err := lane2SpecRefused(spec, plan.argv)
+	changed = changed || !errors.As(err, &setup) || setup.Stage != "spec"
+	p.Effect("decision", changed)
+	p.Control("decision", true)
+	p.Finish()
+}
+
+// lane2SpecRefused builds a daemon read's jail command and aborts it without
+// starting it: the error is the Spec check's verdict, before any clone.
+func lane2SpecRefused(spec confine.Spec, argv []string) error {
+	jailed, err := spec.Command(context.Background(), confine.EncodeArgv(argv))
+	if jailed != nil {
+		jailed.Abort()
+	}
+	return err
 }

@@ -5,6 +5,7 @@ package confine
 import (
 	"os"
 
+	"github.com/karthikeyan5/sshgate/src/gate/confine/jailmut"
 	"golang.org/x/sys/unix"
 )
 
@@ -94,6 +95,9 @@ func lane2Identity(atPath, atHeld unix.Stat_t, want FileID, socket bool) error {
 	}
 	if atPath.Mode&unix.S_IFMT != kind {
 		return unix.ESTALE
+	}
+	if jailmut.On("P-L2-IDENTITY") {
+		return nil
 	}
 	for _, st := range []unix.Stat_t{atPath, atHeld} {
 		if (FileID{Dev: uint64(st.Dev), Ino: st.Ino}) != want {

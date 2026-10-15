@@ -25,6 +25,11 @@ func filterM1TableCheck(t *testing.T, leg string, checks func(func(bool))) {
 func TestFilterTables(t *testing.T) {
 	for _, abi := range []string{"native", "abi1"} {
 		t.Run(abi, func(t *testing.T) {
+			t.Run("U-Lane2LandlockRules", unitLane2LandlockRules)
+			t.Run("U-Lane2FilterRows", unitLane2FilterRows)
+			t.Run("U-Lane2SocketTable", unitLane2SocketTable)
+			t.Run("U-Lane2IdentityCompare", unitLane2IdentityCompare)
+			t.Run("U-Lane2EnvConstant", unitLane2EnvConstant)
 			t.Run("U-CloneIPC", func(t *testing.T) {
 				p := newProof(t, "U-CloneIPC")
 				mutationEffect(t, "U-CloneIPC", "decision", cloneSysProcAttr().Cloneflags&unix.CLONE_NEWIPC == 0)

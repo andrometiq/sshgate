@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/karthikeyan5/sshgate/src/redact"
@@ -45,14 +46,43 @@ func buildLane2Fixtures(t *testing.T) string {
 			t.Fatal(err)
 		}
 	}
-	if err := os.Chmod(dir, 0o755); err != nil {
+	plugins := filepath.Join(dir, "plugins")
+	if err := os.Mkdir(plugins, 0o755); err != nil {
 		t.Fatal(err)
+	}
+	if output, err := exec.Command(cc, "-O2", "-Wall", "-Werror", "-o", filepath.Join(plugins, "sg-plugin"), "testdata/lane2client/sg-plugin.c").CombinedOutput(); err != nil {
+		t.Fatalf("SETUP: build the plugin: %v\n%s", err, output)
+	}
+	for _, path := range []string{plugins, dir} {
+		if err := os.Chmod(path, 0o755); err != nil {
+			t.Fatal(err)
+		}
 	}
 	withLane2Seams(t, dir)
 	previousRules := redactRules
 	redactRules = []redact.Rule{}
 	t.Cleanup(func() { redactRules = previousRules })
 	return dir
+}
+
+// lane2Replacement builds, in dir, a client that only prints REPLACED-RAN
+// <nonce>, for a leg to rename over an admitted object.
+func lane2Replacement(t *testing.T, dir string) string {
+	t.Helper()
+	path := filepath.Join(dir, ".sg-replacement")
+	if output, err := exec.Command("cc", "-O2", "-Wall", "-Werror", "-DSG_REPLACEMENT", "-o", path, "testdata/lane2client/main.c").CombinedOutput(); err != nil {
+		t.Fatalf("SETUP: build the replacement: %v\n%s", err, output)
+	}
+	return path
+}
+
+// lane2FixtureFile writes the lines a client mode reads from its own
+// directory: sockets, abstract or tcp.
+func lane2FixtureFile(t *testing.T, dir, name string, lines ...string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, name), []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // lane2Mode is a positional that selects the client's mode: sg-<mode>.<nonce>.

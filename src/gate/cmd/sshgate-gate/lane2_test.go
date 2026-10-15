@@ -167,6 +167,7 @@ func TestLane2BinaryAbsentFallsThrough(t *testing.T) {
 // other inherited variable are absent), cwd / and /dev/null stdin, and is
 // audited as lane2.
 func TestRunLane2ExecShellFreeClosedEnv(t *testing.T) {
+	withAbsentJail(t)
 	bin := withLane2Bins(t)
 	for _, kv := range [][2]string{
 		{"DOCKER_HOST", "tcp://attacker.invalid:2375"},
@@ -231,6 +232,7 @@ func TestRunLane2ExecShellFreeClosedEnv(t *testing.T) {
 
 // TestRunLane2SignedRead: Lane 2 is also consulted on the signed read path.
 func TestRunLane2SignedRead(t *testing.T) {
+	withAbsentJail(t)
 	bin := withLane2Bins(t)
 	dir := t.TempDir()
 	pub, priv := genKey(t)
@@ -258,6 +260,7 @@ func TestRunLane2SignedRead(t *testing.T) {
 // inspect, systemctl show and cat) can print secrets, so its output must pass
 // the gate's production redactor exactly like a jailed read's.
 func TestRunLane2OutputRedacted(t *testing.T) {
+	withAbsentJail(t)
 	withLane2Bins(t)
 	redactRules = nil // the production ruleset; withLane2Bins restores the seam
 	dir := t.TempDir()
@@ -274,6 +277,16 @@ func TestRunLane2OutputRedacted(t *testing.T) {
 	if len(recs) != 1 || recs[0]["enforcement"] != "daemon-read" {
 		t.Errorf("audit = %v, want one daemon-read record", recs)
 	}
+}
+
+// withAbsentJail forces the read jail Absent (no Landlock), so a daemon read on
+// an unpinned host takes its unjailed fallback: the race-built test binary
+// used as the client never runs under the jail's filter.
+func withAbsentJail(t *testing.T) {
+	t.Helper()
+	previous := readSpecHook
+	readSpecHook = func(spec *confine.Spec) { spec.ForceABI = confine.ForceNoLandlock }
+	t.Cleanup(func() { readSpecHook = previous })
 }
 
 // lane2Argv keeps the canonical argv assertions focused while exercising admission.

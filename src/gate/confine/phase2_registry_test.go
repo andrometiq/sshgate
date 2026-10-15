@@ -51,7 +51,7 @@ func phase2Registry() []prot {
 		return harness.MutationSet{IDs: []string{id}, Legs: legs}
 	}
 	return []prot{
-		{ID: "P-G-CONFINE-REQUIRED", Site: "routeBeforeAttempt and routeAfterSetupFailure requires term", Class: "single", DirectLeg: "U-ExecReadConfineRequired",
+		{ID: "P-G-CONFINE-REQUIRED", Site: "routeAfterSetupFailure requires term", Class: "single", DirectLeg: "U-ExecReadConfineRequired",
 			EffectLegs: []string{"G-CONFINE-REQUIRED-ABSENT", "G-CONFINE-REQUIRED-LANE2"},
 			MutationSets: []harness.MutationSet{one("P-G-CONFINE-REQUIRED", phase2Leg("U-ExecReadConfineRequired", "MUTATION-EFFECT decision"),
 				phase2Leg("G-CONFINE-REQUIRED-ABSENT", "MUTATION-EFFECT ran-unconfined"), phase2Leg("G-CONFINE-REQUIRED-LANE2", "MUTATION-EFFECT lane2-ran"))}},

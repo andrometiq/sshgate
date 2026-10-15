@@ -235,3 +235,29 @@ func TestGateBinaryNetworkPin(t *testing.T) {
 		unexpected(t, "network hint: exit %d, stderr %q", code, stderr)
 	}
 }
+
+// TestGateBinaryLane2: the real gate binary, with its production seams, runs a
+// real daemon read in the read jail: the installed systemctl answers over its
+// pinned socket, and the audit says it ran jailed without network. Anything
+// else, including an unjailed fallback, fails.
+func TestGateBinaryLane2(t *testing.T) {
+	requireJail(t)
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "gate")
+	build := exec.Command("go", "build", "-trimpath", "-o", bin, ".")
+	build.Env = append(os.Environ(), "CGO_ENABLED=0")
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build gate: %v\n%s", err, out)
+	}
+	gate := exec.Command(bin)
+	gate.Env = append(os.Environ(), "SSH_ORIGINAL_COMMAND=systemctl show --property=Version")
+	var stdout, stderr bytes.Buffer
+	gate.Stdout, gate.Stderr = &stdout, &stderr
+	if err := gate.Run(); err != nil || !strings.HasPrefix(stdout.String(), "Version=") {
+		t.Fatalf("gate: %v (stdout=%q stderr=%q)", err, stdout.String(), stderr.String())
+	}
+	records := auditRecords(t, dir)
+	if len(records) != 1 || records[0]["enforcement"] != "daemon-read" || records[0]["profile"] != "ro-v1" || records[0]["net"] != false {
+		t.Fatalf("audit = %v, want one jailed daemon read without network", records)
+	}
+}

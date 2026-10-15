@@ -22,6 +22,7 @@ var proofScanExceptions = map[string]string{
 
 var proofLaunchExceptions = map[string]string{
 	"proof_execution_test.go:runJailed":                     "the sole jailed execution primitive",
+	"lane2_endpoint_test.go:lane2SpecRefused":               "builds and aborts a daemon-read jail command, never starting it, to read the Spec check",
 	"cover_fixture_e2e_test.go:coverNamespace":              "unjailed namespace fixture and child-test proof transport",
 	"cover_fixture_e2e_test.go:startCoverFuse":              "unjailed FUSE daemon observer startup",
 	"cover_fixture_e2e_test.go:fuseFixture.Stop":            "FUSE observer shutdown and verdict join",

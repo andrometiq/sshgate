@@ -130,12 +130,6 @@ func requiresConfinement(pin pinState, grant bool) bool {
 	return pin.valid && pin.pin.Net || grant
 }
 
-// routeBeforeAttempt reports whether a daemon read may run: it runs outside
-// the jail, so a read that requires confinement is refused.
-func routeBeforeAttempt(requires bool) bool {
-	return !requires || jailmut.On("P-G-CONFINE-REQUIRED")
-}
-
 // routeAfterSetupFailure reports whether a jail that never reached the command
 // may fall back to a classifier-only run: only an Absent jail on an unpinned
 // host, for a read that does not require confinement.
@@ -144,6 +138,17 @@ func routeAfterSetupFailure(pinned, requires bool, class confine.FailureClass) b
 		return false
 	}
 	return !requires || jailmut.On("P-G-CONFINE-REQUIRED")
+}
+
+// lane2Spec is a daemon read's jail: the read jail the pin gives (strict, the
+// accepted filesystems), never network, from /, running the admitted client.
+func lane2Spec(pin pinState, requires bool, plan *lane2Execution) confine.Spec {
+	spec := readSpec(pin, requires, false)
+	if !jailmut.On("P-L2-NET-OFF") {
+		spec.Net = false
+	}
+	spec.Cwd, spec.Lane2 = "/", plan.jailLane2()
+	return spec
 }
 
 // readSpec builds the jail for a read: readSpecBase, then the test-only
@@ -180,12 +185,13 @@ func readSpecBase(pin pinState, requires, grant bool) confine.Spec {
 // execRead runs a command the classifier called a read, on the Tier-1 and
 // signed read paths alike. Signed writes and admin verbs never reach it.
 //
-// A damaged pin denies. An exact daemon read runs shell-free outside the jail
-// unless the read requires confinement. Everything else attempts the jail:
-// the attempt is the probe. A setup failure that never reached the command is
-// classified, and only an Absent jail on an unpinned host, for a read that
-// does not require confinement, falls back to a classifier-only run. Nothing
-// that may have reached the command is ever run again.
+// A damaged pin denies, and so does a daemon read whose admission fails.
+// Every other read attempts the jail; the attempt is the probe. A daemon read
+// runs its admitted client in its own narrower jail. A setup failure that
+// never reached the command is classified, and only an Absent jail on an
+// unpinned host, for a read that does not require confinement, falls back to
+// an unconfined run: classifier-only, or the shell-free client for a daemon
+// read. Nothing that may have reached the command is ever run again.
 func execRead(audit *gate.AuditLogger, cmd, approval string, reveal bool) int {
 	pin := jailPinFn()
 	if pin.damaged != "" {
@@ -198,24 +204,36 @@ func execRead(audit *gate.AuditLogger, cmd, approval string, reveal bool) int {
 	requires := requiresConfinement(pin, grant)
 	plan, matched, refusal := lane2Plan(cmd, pin)
 	defer plan.Close()
-	if matched {
-		if refusal != "" {
-			logf("daemon read refused: %s; nothing ran", refusal)
-			auditReadDenied(audit, cmd, "lane2:admit:"+refusal, exitNoPermVal)
-			return exitNoPermVal
-		}
-		if !routeBeforeAttempt(requires) {
-			logf("read jail unavailable: this read must run confined and %s cannot run in the jail yet; nothing ran", filepath.Base(plan.argv[0]))
-			auditReadDenied(audit, cmd, "confine:required", exitNoPermVal)
-			return exitNoPermVal
-		}
-		read := &gate.ReadAudit{Enforcement: "daemon-read", Pinned: pin.valid, Net: true}
-		rc, _, _ := execAndAudit(audit, cmd, "read", approval, reveal, execPlan{argv: plan.argv, execPath: plan.binary.path, read: read})
-		return rc
+	if !matched {
+		spec := readSpec(pin, requires, grant)
+		read := &gate.ReadAudit{Enforcement: "kernel", Profile: spec.Profile, Pinned: pin.valid, AcceptFS: spec.AcceptFS, RequiresConfinement: requires}
+		return routeRead(audit, cmd, approval, reveal, pin, requires, execPlan{confine: &spec, read: read},
+			execPlan{read: &gate.ReadAudit{Enforcement: "classifier", Net: true}})
 	}
-	spec := readSpec(pin, requires, grant)
-	read := &gate.ReadAudit{Enforcement: "kernel", Profile: spec.Profile, Pinned: pin.valid, AcceptFS: spec.AcceptFS, RequiresConfinement: requires}
-	rc, res, setupErr := execAndAudit(audit, cmd, "read", approval, reveal, execPlan{confine: &spec, read: read})
+	if refusal != "" {
+		logf("daemon read refused: %s; nothing ran", refusal)
+		auditReadDenied(audit, cmd, "lane2:admit:"+refusal, exitNoPermVal)
+		return exitNoPermVal
+	}
+	if lane2AfterAdmitHook != nil {
+		lane2AfterAdmitHook(&plan)
+	}
+	spec := lane2Spec(pin, requires, &plan)
+	read := &gate.ReadAudit{Enforcement: "daemon-read", Profile: spec.Profile, Pinned: pin.valid, AcceptFS: spec.AcceptFS, RequiresConfinement: requires}
+	return routeRead(audit, cmd, approval, reveal, pin, requires, execPlan{confine: &spec, lane2: plan.argv, execPath: plan.binary.path, read: read},
+		execPlan{argv: plan.argv, execPath: plan.binary.path, read: &gate.ReadAudit{Enforcement: "daemon-read", Net: true}})
+}
+
+// lane2AfterAdmitHook runs, in tests only, between a daemon read's admission
+// and its jail, to replace an admitted object at a fixed point. Production
+// leaves it nil; TestLane2TrustDefaults guards that.
+var lane2AfterAdmitHook func(*lane2Execution)
+
+// routeRead attempts the jail with jailed and applies the outcome table: the
+// read ran there, the session ended, it is denied, or it falls back once to
+// the unconfined fallback plan, which never reached the command before.
+func routeRead(audit *gate.AuditLogger, cmd, approval string, reveal bool, pin pinState, requires bool, jailed, fallback execPlan) int {
+	rc, res, setupErr := execAndAudit(audit, cmd, "read", approval, reveal, jailed)
 	route := routeAttempt(pin.valid, requires, res, setupErr)
 	switch {
 	case route.kernel:
@@ -232,10 +250,10 @@ func execRead(audit *gate.AuditLogger, cmd, approval string, reveal bool) int {
 		auditReadDenied(audit, cmd, "cancelled", exitCancelled, res.Transport)
 		return exitCancelled
 	}
-	// The command never started, so running it once, classifier-only, is
-	// its first run. Nothing removes network here.
-	fallback := &gate.ReadAudit{Enforcement: "classifier", Net: true, JailAbsent: route.jailAbsent}
-	rc, _, _ = execAndAudit(audit, cmd, "read", approval, reveal, execPlan{read: fallback})
+	// The command never started, so running it once, unconfined, is its
+	// first run. Nothing removes network here.
+	fallback.read.JailAbsent = route.jailAbsent
+	rc, _, _ = execAndAudit(audit, cmd, "read", approval, reveal, fallback)
 	return rc
 }
 

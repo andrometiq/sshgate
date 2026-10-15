@@ -247,7 +247,11 @@ func ExecWithRedaction(ctx context.Context, cmd string, opts ExecOpts) (res Exec
 		c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	}
 
-	return runRedacted(ctx, c, jailed, "/bin/sh", opts)
+	what := "/bin/sh"
+	if opts.Confine != nil && opts.Confine.Lane2 != nil {
+		what = opts.Confine.Lane2.Binary
+	}
+	return runRedacted(ctx, c, jailed, what, opts)
 }
 
 // ExecArgvWithRedaction runs argv directly — no shell, no jail — with exactly

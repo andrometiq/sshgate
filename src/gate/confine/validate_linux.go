@@ -59,7 +59,7 @@ func (s Spec) validate(worker bool) error {
 	if worker && (s.ParentNS.User == 0 || s.ParentNS.Mnt == 0 || s.ParentNS.Pid == 0 || s.ParentNS.IPC == 0) {
 		return unix.EINVAL
 	}
-	if s.Lane2 != nil && (s.Cwd != "/" || s.Net || !s.Lane2.valid()) {
+	if s.Lane2 != nil && (s.Cwd != "/" || s.Net && !jailmut.On("P-L2-SPEC-NET") || !s.Lane2.valid()) {
 		return unix.EINVAL
 	}
 	return nil

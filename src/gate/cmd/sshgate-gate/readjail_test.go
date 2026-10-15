@@ -226,7 +226,6 @@ func TestPhase2Tables(t *testing.T) {
 						if want := pin.valid && pin.pin.Net || grant; requires != want {
 							t.Fatalf("%s grant=%v: requires = %v", name, grant, requires)
 						}
-						changed = changed || routeBeforeAttempt(requires) != !requires
 						for _, class := range []confine.FailureClass{confine.Absent, confine.Failed} {
 							want := class == confine.Absent && !pin.valid && !requires
 							changed = changed || routeAfterSetupFailure(pin.valid, requires, class) != want
@@ -682,16 +681,19 @@ func TestJailUnavailableNeverBlocksWritesOrAdmin(t *testing.T) {
 	})
 }
 
-func TestLane2DeniedWhenConfinementRequired(t *testing.T) {
+// TestLane2PinnedAbsentDenied: on a pinned host whose jail is Absent, a daemon
+// read is denied like any read; it never runs unjailed.
+func TestLane2PinnedAbsentDenied(t *testing.T) {
 	withLane2Bins(t)
+	withAbsentJail(t)
 	dir := t.TempDir()
 	withGateDir(t, dir)
 	plantPin(t, dir, pinAllow, 0o644)
 	code, out, stderr := runWith(t, "docker ps")
-	if code != exitNoPermVal || out != "" || stderr != "gate: read jail unavailable: this read must run confined and docker cannot run in the jail yet; nothing ran\n" {
+	if code != exitNoPermVal || out != "" || !strings.Contains(stderr, "read jail unavailable") {
 		t.Fatalf("exit = %d, stdout = %q, stderr = %q", code, out, stderr)
 	}
-	oneDeniedRead(t, dir, "confine:required", exitNoPermVal)
+	oneDeniedRead(t, dir, "jail:absent:landlock:ENOSYS", exitNoPermVal)
 }
 
 func TestNeedsNetwork(t *testing.T) {

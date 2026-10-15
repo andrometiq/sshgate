@@ -104,8 +104,13 @@ type landlockRule struct {
 func landlockPlan(abi int, writable []string, lane2 *lane2FDs) []landlockRule {
 	read, write := readRights(), writeRights(abi)
 	if lane2 != nil {
-		read &^= unix.LANDLOCK_ACCESS_FS_EXECUTE
+		if !jailmut.On("P-L2-EXEC-NARROW") {
+			read &^= unix.LANDLOCK_ACCESS_FS_EXECUTE
+		}
 		write &^= unix.LANDLOCK_ACCESS_FS_EXECUTE
+		if abi >= 9 && jailmut.On("P-L2-SOCK-PIN") {
+			read |= landlockAccessFSResolveUnix
+		}
 	}
 	if jailmut.On("P-LL-FS") {
 		read = handledFS(abi)

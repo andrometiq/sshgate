@@ -126,20 +126,25 @@ func legConfineRequiredAbsent(t *testing.T, abi string) {
 
 // legConfineRequiredLane2: on a host pinned net=allow a daemon read requires
 // confinement, so it is refused before the daemon binary runs.
+// legConfineRequiredLane2: a daemon read that must run confined (here through
+// a network grant) is denied on a host whose jail is Absent; only the unpinned,
+// not-required case falls back to the unjailed client.
 func legConfineRequiredLane2(t *testing.T) {
 	p := newProof(t, "G-CONFINE-REQUIRED-LANE2")
-	bin := withLane2Bins(t)
+	bin := buildLane2Fixtures(t)
 	dir := t.TempDir()
 	withGateDir(t, dir)
-	plantPin(t, dir, pinAllow, 0o644)
-	out, err := exec.Command(filepath.Join(bin, "docker"), "ps").Output()
-	p.Control("lane2", err == nil && strings.Contains(string(out), `"path"`))
+	withNetGrant(t)
+	withReadSpec(t, "native", func(spec *confine.Spec) { spec.ForceABI = confine.ForceNoLandlock })
+	mode := lane2Mode(t, "report")
+	out, err := exec.Command(filepath.Join(bin, "systemctl"), "status", mode).Output()
+	p.Control("lane2", err == nil && lane2Reported(out, mode))
 
-	code, out2, _ := runWith(t, "docker ps")
-	ran := strings.Contains(out2, `"path"`)
+	code, out2, _ := runWith(t, "systemctl status "+mode)
+	ran := lane2Reported([]byte(out2), mode)
 	p.Effect("lane2-ran", ran)
 	recs := auditRecords(t, dir)
-	denied := code == exitNoPermVal && out2 == "" && len(recs) == 1 && recs[0]["deny_reason"] == "confine:required"
+	denied := code == exitNoPermVal && out2 == "" && len(recs) == 1 && recs[0]["deny_reason"] == "jail:absent:landlock:ENOSYS"
 	p.Jailed("lane2", denied || ran && code == exitOK)
 	p.Observed("lane2", ran || out2 == "")
 	p.Finish()

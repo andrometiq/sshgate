@@ -13,6 +13,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/karthikeyan5/sshgate/src/gate/confine"
 	"github.com/karthikeyan5/sshgate/src/gate/confine/jailmut"
 	"golang.org/x/sys/unix"
 )
@@ -104,11 +105,30 @@ func trustedPath(name string, owners []uint32) (lane2Path, error) {
 	return result, err
 }
 
+// lane2Execution is an admitted daemon read: its canonical argv and the
+// identities and held references of its client binary, interpreter and
+// sockets, which the jail re-checks and binds its rules to.
 type lane2Execution struct {
-	argv   []string
-	binary lane2Path
-	interp lane2Path // zero for a static client
-	held   []*os.File
+	client                 string
+	argv                   []string
+	binary                 lane2Path
+	interp                 lane2Path // zero for a static client
+	binaryFile, interpFile *os.File
+	sockets                []confine.Endpoint
+	held                   []*os.File // every reference, for Close
+}
+
+// jailLane2 is the admitted read as the jail's Spec carries it.
+func (p *lane2Execution) jailLane2() *confine.Lane2 {
+	id := func(path lane2Path) confine.FileID {
+		return confine.FileID{Dev: uint64(path.stat.Dev), Ino: path.stat.Ino}
+	}
+	lane2 := &confine.Lane2{Client: p.client, Binary: p.binary.path, BinaryID: id(p.binary), BinaryFile: p.binaryFile,
+		Sockets: append([]confine.Endpoint(nil), p.sockets...)}
+	if p.interp.path != "" {
+		lane2.Interp, lane2.InterpID, lane2.InterpFile = p.interp.path, id(p.interp), p.interpFile
+	}
+	return lane2
 }
 
 func (p *lane2Execution) Close() {
@@ -134,8 +154,9 @@ func lane2Plan(cmd string, pin pinState) (plan lane2Execution, matched bool, ref
 	if name == "" {
 		return plan, false, ""
 	}
+	plan.client = call.client
 	binary, file, executable, binaryRefusal, err := lane2Admit(name)
-	plan.binary = binary
+	plan.binary, plan.binaryFile = binary, file
 	if file != nil {
 		plan.held = append(plan.held, file)
 	}
@@ -195,6 +216,7 @@ func (p *lane2Execution) admitInterp(executable *elf.File) (refusal string, err 
 	}
 	file := os.NewFile(uintptr(fd), id.path)
 	p.held = append(p.held, file)
+	p.interpFile = file
 	var st syscall.Stat_t
 	if err := syscall.Fstat(fd, &st); err != nil {
 		return "interp", err
@@ -275,7 +297,8 @@ func (p *lane2Execution) holdEndpoint(path string, directoryOwners, owners []uin
 	if err != nil {
 		return socket, false, err
 	}
-	p.held = append(p.held, os.NewFile(uintptr(fd), socket.path))
+	file := os.NewFile(uintptr(fd), socket.path)
+	p.held = append(p.held, file)
 	var st syscall.Stat_t
 	if err := syscall.Fstat(fd, &st); err != nil {
 		return socket, false, err
@@ -284,6 +307,7 @@ func (p *lane2Execution) holdEndpoint(path string, directoryOwners, owners []uin
 		return socket, false, syscall.ESTALE
 	}
 	socket.stat = st
+	p.sockets = append(p.sockets, confine.Endpoint{Path: socket.path, ID: confine.FileID{Dev: uint64(st.Dev), Ino: st.Ino}, File: file})
 	trusted = trusted && st.Mode&syscall.S_IFMT == syscall.S_IFSOCK && slices.Contains(owners, st.Uid)
 	return socket, trusted, nil
 }

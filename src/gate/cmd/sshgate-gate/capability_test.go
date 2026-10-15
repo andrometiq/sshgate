@@ -368,6 +368,27 @@ func unitLabelContract(t *testing.T) {
 			t.Errorf("%+v net=%v: labels %q / %q, want %q / %q", row.state, row.net, off, on, row.off, row.on)
 		}
 	}
+	// A daemon read keeps its own label in every pin state, jailed or not; only
+	// a damaged pin denies it.
+	daemon := "daemon read, limited verbs: systemctl (not kernel read-only)"
+	for _, pin := range bools {
+		for _, damaged := range bools {
+			for _, strict := range bools {
+				for _, net := range bools {
+					for _, enabled := range bools {
+						s := confine.LabelState{Pinned: pin, Damaged: damaged, Strict: strict, Outcome: confine.RunDaemonRead, Profile: confine.ProfileROv1, ABI: 3, Binary: "systemctl"}
+						want := daemon
+						if damaged {
+							want = confine.LabelDenied
+						}
+						if got := confine.Label(s, net, enabled); got != want {
+							t.Errorf("%+v net=%v enabled=%v: daemon-read label %q, want %q", s, net, enabled, got, want)
+						}
+					}
+				}
+			}
+		}
+	}
 	if off := confine.Label(pinned, false, false); off != confine.LabelKernelNoLabel && off != confine.LabelReadOnlyKernel {
 		t.Errorf("pinned row, switch off: %q", off)
 	}
