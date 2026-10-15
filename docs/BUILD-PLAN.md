@@ -319,24 +319,46 @@ Status: done.
 - *Acceptance:* findings recorded in the P3.1 commit message. A retained verb whose output
   changes is dropped or declared `L2-NOEXEC`. A `memfd_create`/`memfd_secret` deny for these
   verbs is adopted only if no retained verb calls them.
+- *Findings:* every retained verb gives identical output with `EXECUTE` limited to the client
+  and its interpreter, and none of the retained verbs (`docker` `version`, `ps`, `inspect`,
+  `logs`, `images`, `stats --no-stream`, `top`; `systemctl` `status`, `is-active`,
+  `is-failed`, `list-units`, `list-unit-files`, `show`, `cat`, `get-default`) executes another
+  program after start, for native units and for an enabled SysV-only service; `docker info`
+  executes its CLI plugins and is dropped; `systemctl is-enabled` executes
+  `systemd-sysv-install` for a SysV-only service and is dropped (it takes the ordinary read
+  path); no retained verb calls `memfd_create` or `memfd_secret`, so the deny is adopted;
+  `memfd` execution and the interpreter used as a loader both get past narrow `EXECUTE`;
+  Ubuntu's and Debian's `systemctl` carry an absolute, root-owned `RUNPATH`; the interpreter
+  path is a symlink (on Debian 12 through a symlinked directory too). Recorded in the P3.1
+  commit message.
 - *Depends:* Phase 2.
 
-**P3.1 — Grammar, canonical argv, identity checks and endpoint pinning.** Status: open.
+**P3.1 — Grammar, canonical argv, identity checks and endpoint pinning.** Status: done.
 
-- *Deliverables:* a typed grammar per verb (typed flags and positional counts, values at most 128
-  bytes, never starting with `-`, each flag at most once) producing a canonical argv;
+- *Deliverables:* a typed grammar per verb (typed flags and positional counts, values at most
+  128 bytes, never starting with `-`, each flag at most once) producing a canonical argv;
   `FuzzLane2Parse` (the parse is idempotent on its own output and accepts only grammar tokens);
-  `docker info` removed; binary and interpreter (`PT_INTERP`) identity checks, path-component
-  checks and a refusal of `DT_RPATH`/`DT_RUNPATH`, all as hygiene (the gate trusts the installed
-  client's dependency closure and does not certify it); endpoint pinning: `docker` gets
+  `docker info` and `systemctl is-enabled` removed; `argv[0]` is the fixed-directory name and
+  the resolved path is executed; the client admitted only if it, every directory above it, its
+  interpreter (`PT_INTERP`, every symlink resolved and the resolved inode pinned) and each
+  `DT_RPATH`/`DT_RUNPATH` directory are owned by root and replaceable by no other user; a
+  search-path entry that is empty, relative or carries `$ORIGIN` or another dynamic string
+  token, a `DT_AUDIT`/`DT_DEPAUDIT` tag, or a `DT_NEEDED`/`DT_FILTER`/`DT_AUXILIARY` string with a
+  `/` or a dynamic string token is refused; a socket endpoint's own mode bits are not checked
+  (they grant `connect`), its owner and every directory above it are; ELF tags are read from
+  the program headers; all of this is hygiene (the gate trusts the installed client's
+  dependency closure and does not certify it); endpoint pinning: `docker` gets
   `--host=unix://<socket>` (`/run/docker.sock` owned by root, or the pin's `docker_socket` owned
   by the gate's uid); `systemctl` gets `--no-pager --no-ask-password` and the system bus (plus
-  `/run/systemd/private` for a root SSH user), each a root-owned socket; `--user`, `--host`,
-  `--machine`, `--root`, `--image`, `--global`, `--context` and `-c` are never accepted. The
-  verbs still run unjailed in this step.
-- *Acceptance:* `P-L2-INTERP` and `P-L2-ADMIT` registered and mutation-proof with
-  `U-Lane2ELFSearchTags` and the three `G-L2-ADMIT` fixtures; the fuzz target runs in
-  `make test`.
+  `/run/systemd/private` for a root SSH user), each a root-owned socket, and an absent one must
+  lie under a directory only root can write; `--user`, `--host`, `--machine`, `--root`,
+  `--image`, `--global`, `--context` and `-c` are never accepted; a failed check refuses the
+  read 77 (`lane2:admit:<check>`); the verbs run from `/` and still run unjailed in this step.
+- *Acceptance:* `P-L2-GRAMMAR`, `P-L2-REDIRECT`, `P-L2-ADMIT` and `P-L2-INTERP` registered and
+  mutation-proof with `U-Lane2Grammar`, `G-L2-GRAMMAR` and `G-L2-REDIRECT`;
+  `U-Lane2ELFSearchTags`, the three `G-L2-ADMIT` fixtures (`-WRITABLE-DIR`, `-RUNPATH-ORIGIN`,
+  `-RUNPATH-UNTRUSTED`) and the root-lane `G-L2-ADMIT-ENDPOINT`; `U-Lane2Interp` and
+  `G-L2-INTERP-UNTRUSTED`; the fuzz target runs in `make test`.
 - *Depends:* P3.0.
 
 **P3.2 — Daemon-read verbs run inside `ro-v1`.** Status: open.

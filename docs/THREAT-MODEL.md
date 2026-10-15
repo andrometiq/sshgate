@@ -195,12 +195,42 @@ JSON.
 
 A small fixed list of `systemctl` and `docker` read verbs (for example
 `systemctl status`, `docker ps`, `docker logs`) **always runs outside the jail**,
-on every host, because those reads need the daemon's Unix socket. They run
-without a shell, from a fixed binary path, with only allowlisted flags and a
-fixed minimal environment that also stops `docker` from reading the SSH user's
-own `~/.docker` config (`src/gate/cmd/sshgate-gate/lane2.go`). Remember that
-`docker.sock` is root-equivalent: these verbs are trusted to be read-only by
-their own design, not by the kernel.
+on every host, because those reads need the daemon's Unix socket. A typed
+grammar decides what counts as one: each verb has a fixed set of flags with
+typed values and a bounded number of arguments, and any other line is an
+ordinary read. The gate then runs its own canonical command, never the agent's
+words: a fixed binary path, each flag in its long spelling, and a gate-chosen
+prefix that fixes the daemon (`--no-pager --no-ask-password` for `systemctl`,
+`--host=unix://<socket>` for `docker`). It runs without a shell, from `/`, with
+a fixed minimal environment that also stops `docker` from reading the SSH
+user's own `~/.docker` config (`src/gate/cmd/sshgate-gate/lane2.go`).
+
+Before one runs, the gate admits its client
+(`src/gate/cmd/sshgate-gate/lane2admit.go`). The binary,
+every directory above it, its ELF interpreter (every symlink resolved), each
+directory on its `DT_RPATH`/`DT_RUNPATH`, and the daemon socket must be owned by
+root and replaceable by no other user; a pinned `docker_socket` must be owned by
+the gate's user instead. A socket's own mode bits are not checked (they allow
+connecting, not replacing it); its owner and the directories above it are. A
+`systemctl` socket that is absent must lie under a directory only root can
+write, so no other user can create it before the client connects. A relative,
+empty or `$ORIGIN`-style search path, a loader audit module, or a library name
+containing `/` is refused. ELF tags are read the way the loader reads them,
+from the program headers at their mapped addresses, and a binary whose load
+segments share a memory page is refused. A failed check refuses the read with
+exit 77 (`gate: daemon read refused: <check>; nothing ran`, audited as
+`lane2:admit:<check>`). Remember that `docker.sock` is root-equivalent: these
+verbs are trusted to be read-only by their own design, not by the kernel.
+
+`systemctl is-enabled` is not one of these verbs. For a service that has only a
+SysV init script, it runs a helper program to answer, and a daemon read is not
+meant to run other programs. It is an ordinary read: in the jail, plain
+`systemctl is-enabled <unit>` cannot reach the service manager and fails
+(`Failed to connect to bus`). `systemctl --root=/ is-enabled <unit>` and
+`SYSTEMD_OFFLINE=1 systemctl is-enabled <unit>` answer from the unit files
+instead, and in the jail they print the same result as an unjailed run, for
+native units and SysV services alike. The gate never rewrites a command to
+make it work: a clear failure is better than a silently wrong answer.
 
 Signed writes and the admin verbs (`SSHGATE_REVOKE`, `SSHGATE_UPDATE`,
 `SSHGATE_XFER_*`) run exactly as before, unconfined; a jail problem never
@@ -327,7 +357,17 @@ item 1; others are outside what a read jail can promise.
   if it lives on a hidden mount. A read can squat an abstract Unix socket name so a
   daemon starting at that moment cannot bind it.
 - **Daemon-read verbs** run outside the jail (see above); their safety rests on
-  the fixed verb and flag list and on the installed `systemctl`/`docker` client.
+  the typed verb and flag grammar and on the installed `systemctl`/`docker`
+  client.
+- **The daemon-read client's dependency closure is trusted.** Admission refuses
+  search paths, interpreters and sockets another user could replace; it does
+  not certify the installed packages. The libraries the system loader finds
+  through its cache and `/etc/ld.so.preload`, and the client's own code, are
+  trusted as installed. In the same spirit, admission reads the dynamic table
+  where the kernel maps it, but it does not model every way a binary crafted by
+  root could make the loader see different program headers (for example a
+  `PT_PHDR` that disagrees with where the kernel maps them). Only a trusted
+  owner can install such a client.
 - **Proof gaps.** Every jail protection has a test that fails when the protection
   is removed (`TESTING.md` §12), but a few are proved only by the error the kernel
   returns, not by observing the effect (for example the page-migration calls,

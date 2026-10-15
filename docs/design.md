@@ -226,7 +226,9 @@ gate never re-runs a command the jail may have started. The operator runs
 
 Three things deliberately stay outside the jail: a fixed allowlist of
 `systemctl` and `docker` read verbs that need a daemon socket (run shell-free,
-from a fixed path, with allowlisted flags and a closed environment); signed
+from a fixed path, as a canonical command built from a typed flag grammar, with
+a closed environment, after admission checks the client, its loader and the
+daemon socket; THREAT-MODEL.md has the rules); signed
 writes; and the admin verbs (`SSHGATE_REVOKE`, `SSHGATE_UPDATE`,
 `SSHGATE_XFER_*`). A jail problem never blocks a signed write or an admin verb.
 

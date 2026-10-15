@@ -102,7 +102,10 @@ have them check the host's `/var/log/auth.log` and that the key line was pasted 
   `/dev/shm` (`TMPDIR` points there), so a tool that insists on writing to `/tmp` fails.
   Whether jailed reads have network (even localhost TCP) is set per host by the operator's
   pin; when a network tool fails for lack of it, the gate prints a note saying so. On a host
-  pinned `net=allow` the `systemctl`/`docker` read verbs are refused. Hosts without the
+  pinned `net=allow` the `systemctl`/`docker` read verbs are refused. `systemctl is-enabled`
+  is not one of them: spell it `systemctl --root=/ is-enabled <unit>` (or with
+  `SYSTEMD_OFFLINE=1`), which works in the jail. A 77 with `daemon read refused` means the
+  host's client or daemon socket failed the gate's ownership checks: don't retry. Hosts without the
   jail run reads classifier-only, with network, unless the operator pinned the host. A read denied with 77 and `read jail unavailable` means the pin is
   damaged, or the host's jail could not be set up (or is missing on a pinned host, or for
   a read that must run confined), so nothing ran: don't retry; a human runs

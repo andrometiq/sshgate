@@ -125,6 +125,13 @@ single-call indirections:
   `rehearser` interface), `mountOfFn` and `describeMountsFn`. The gate legs that need the gate in its own process
   set the same seams through the test binary's `SSHGATE_TEST_GATE` mode (`jail_testmain_test.go`);
   the gate itself never reads them from the environment.
+- The daemon-read seams in `src/gate/cmd/sshgate-gate/lane2.go` and `lane2admit.go`:
+  `lane2BinDirs` (where the client is looked up), `lane2TrustedUIDs` (the owners admission
+  trusts, `{0}` in production) and `lane2SystemEndpoints` (the default daemon sockets).
+  `withLane2Seams` sets all three for a test (the test's binary directory, root plus the test
+  user, and test-owned listening sockets) and restores them. These are trust decisions, so
+  `TestLane2TrustDefaults` checks their initialisers in the source and fails on any assignment,
+  in-place change or address-taking of them outside `_test.go` files.
 - `dialWithCtx` — `src/mcp/sign/client.go` (`var dialWithCtx`)
 - `randRead` — `src/signer/daemon.go` (`var randRead`)
 - `dialAgentSock`, `parsePrivateKey` — `src/mcp/tools/add_server.go` (package vars)
@@ -609,8 +616,9 @@ them.
   namespaces that can mount (on Ubuntu 24.04 that means
   `kernel.apparmor_restrict_unprivileged_userns=0` or an AppArmor profile for the
   test binaries), Landlock, seccomp, `/dev/fuse` and `fusermount3`, at least two
-  CPUs, and both `dash` and `bash`. The CI workflow `.github/workflows/jail.yml`
-  shows a complete runner setup.
+  CPUs, both `dash` and `bash`, and a C compiler (`cc`): the daemon-read legs build
+  their test clients from `src/gate/cmd/sshgate-gate/testdata/lane2client`. The
+  CI workflow `.github/workflows/jail.yml` shows a complete runner setup.
 - **Root lane (`make test-jail-root`):** everything above, run as root, plus
   systemd, `systemd-mount`, loop devices, `losetup`, `mkfs.ext4`, `binfmt_misc`,
   `useradd` and `userdel`, and host `CAP_SYS_NICE`. **Use a disposable VM or

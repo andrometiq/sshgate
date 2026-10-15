@@ -103,17 +103,32 @@ itself, not just in the classifier. What this means for you:
   `docker` reads still works, because the gate runs them outside the jail
   (except on a host pinned `net=allow`, which refuses them), but only in
   their plain form: one command, no pipe, no quotes.
-  - `systemctl status | is-active | is-enabled | is-failed | list-units |
+  - `systemctl status | is-active | is-failed | list-units |
     list-unit-files | show | cat | get-default`, with display flags such as
     `--no-pager`, `-l`/`--full`, `-a`/`--all`, `--no-legend`, `--plain`,
-    `--type=…`, `--state=…`, `-n`/`--lines`, `-p`/`--property`.
-  - `docker ps | inspect | logs | images | version | info | top`, and
-    `docker stats --no-stream`.
+    `-q`/`--quiet`; `--type=…` and `--state=…` (one value each) on
+    `list-units`/`list-unit-files`, `-n`/`--lines` on `status`,
+    `-p`/`--property` and `--value` on `show`.
+  - `docker ps | inspect | logs | images | version`, `docker top <container>`
+    and `docker stats --no-stream`; `--format` takes only `json` or `table`.
 
   So `systemctl list-units --state=failed` works on a jailed host, but
   `systemctl list-units | grep nginx`, `timedatectl` and
   `systemctl is-system-running` fail there with a "Failed to connect to bus"
   style error. Read the plain output yourself instead of piping it.
+- **`systemctl is-enabled`: use the offline form.** It is not on that list
+  (for a SysV-only service it runs a helper program), so on a jailed host plain
+  `systemctl is-enabled <unit>` fails with "Failed to connect to bus". Use
+  `systemctl --root=/ is-enabled <unit>` (with the `=`) or
+  `SYSTEMD_OFFLINE=1 systemctl is-enabled <unit>`: both read the unit files,
+  give the same answer, and work on every host. The gate never rewrites the
+  command for you. `docker info` is likewise off the list; use
+  `docker version` or `docker ps`.
+- **77 with `gate: daemon read refused: <check>; nothing ran`.** The host's
+  `systemctl`/`docker` client, its loader, a library search path or the daemon
+  socket failed the gate's ownership checks (for example a missing
+  `/run/docker.sock`, or a client another user could replace). Nothing ran. Do
+  not retry; tell the user which check failed so a human can fix the host.
 - **Root-only kernel reads can fail.** `dmesg` may print "Operation not
   permitted" because the jail drops capabilities. `journalctl -k` reads the
   same kernel messages.

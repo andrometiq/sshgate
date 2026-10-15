@@ -119,6 +119,14 @@ them out instead of treating them as a generic command failure:
   are refused the same way until the host is fixed. Ask a human to
   run `~/.sshgate-gate/gate doctor` on the host (from their own shell);
   it reports the jail state and the pin, and why reads are refused.
+- **77 on a read — daemon read refused.** stderr contains
+  `gate: daemon read refused: <check>; nothing ran`. A `systemctl`/`docker`
+  read verb was refused before it ran because the host's client, its loader,
+  a library search path or the daemon socket failed the gate's ownership
+  checks (`<check>` says which: `binary`, `binary-elf`, `search-tag`,
+  `interp` or `endpoint`). Do NOT retry; tell the user, so a human can fix
+  the host (for example start the daemon, or fix the ownership of the file
+  named).
 - **77 on a write — gate denied the write.** No signer pubkey is
   configured on the remote (read-only / Tier 1), or the write arrived
   without a signature. Check `/sshgate:status`: a `read_only` server or a

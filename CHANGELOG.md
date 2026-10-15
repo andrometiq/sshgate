@@ -11,7 +11,7 @@ published; entries are ordered newest-first by version.
 ## [Unreleased]
 
 Phase 2 of the kernel read jail (work item #22): P2.1 and P2.2, released
-together.
+together, and step P3.1 of Phase 3 (the `systemctl`/`docker` read verbs).
 
 ### Added
 
@@ -33,6 +33,17 @@ together.
 
 ### Security
 
+- **The `systemctl`/`docker` read verbs are admitted before they run.** A typed
+  grammar decides which lines are these verbs, and the gate runs its own
+  canonical command: long flag spellings, a fixed binary path, and a prefix that
+  fixes the daemon (`--no-pager --no-ask-password` for `systemctl`,
+  `--host=unix://<socket>` for `docker`, the pin's `docker_socket` when set). The
+  client binary, its ELF interpreter, its library search paths and the daemon
+  socket must be owned by root (a pinned `docker_socket`: by the gate's user)
+  and replaceable by no other user. An untrusted client, interpreter or search
+  path, or a missing or mis-owned daemon socket, refuses the read with exit 77
+  (`gate: daemon read refused: <check>; nothing ran`); before, the read ran, or
+  ran and failed to connect. The verbs run from `/` with `TMPDIR=/dev/shm`.
 - **The gate seals itself while a jailed read runs.** It becomes
   non-dumpable right after the read's jail starts, so another process of the
   same user outside the jail can no longer read its environment or redaction
@@ -63,6 +74,20 @@ together.
 - **On a host pinned `net=allow`, the `systemctl`/`docker` read verbs are
   refused** (exit 77): they run outside the jail, and such a host requires
   confinement. They move into the jail in a later phase.
+- **Fewer lines count as `systemctl`/`docker` read verbs.** A line outside the
+  new grammar is no longer one of these verbs and runs as an ordinary read
+  instead (jailed, it cannot reach the daemon; on an unpinned host without the
+  jail, classifier-only as before):
+  - `docker info`, which runs the CLI's plugins;
+  - `systemctl is-enabled`, which runs a helper program for a SysV-only service.
+    In the jail plain `systemctl is-enabled <unit>` fails (`Failed to connect to
+    bus`); `systemctl --root=/ is-enabled <unit>` or
+    `SYSTEMD_OFFLINE=1 systemctl is-enabled <unit>` gives the same answer as an
+    unjailed run. The gate does not rewrite the command;
+  - `--format` other than `json` or `table`; `docker top` with more than one
+    argument; `systemctl` `--type`, `--state`, `--lines` or `--property` on a
+    verb that does not use them, and list values such as `--type=service,socket`
+    or `--state=a,b`.
 - **On Ubuntu with the AppArmor userns restriction** each read makes one jail
   attempt, which logs one AppArmor `userns_create` denial. Install an AppArmor
   profile for the gate, accept classifier-only reads, or pin the host to refuse

@@ -288,8 +288,9 @@ pin makes the gate refuse reads until the host is re-pinned or the file is remov
 
 **What runs outside the jail.** A short, fixed list of `systemctl` and `docker` read commands
 (such as `systemctl status` and `docker ps`) needs the daemons' Unix sockets, so it runs outside
-the jail without a shell, with an allowlist of flags. Signed writes and the gate's own admin
-commands run exactly as before, and a jail problem never blocks them.
+the jail without a shell, with a fixed grammar of flags, after the gate checks that the client
+program and the daemon socket belong to root. Signed writes and the gate's own admin commands
+run exactly as before, and a jail problem never blocks them.
 
 **What it does not stop.** Network where a read is allowed it, and some narrow residual effects.
 Both are listed in [docs/THREAT-MODEL.md](docs/THREAT-MODEL.md).

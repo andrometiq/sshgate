@@ -156,7 +156,9 @@ succeeding means the box is correctly configured:
   entry of the Phase 3 batch**, riding the same tap, rather than a free
   post-verify read here. Check SSH is still allowed *and reachable* (see
   stop-point) before trusting the rest.
-- Service up: `systemctl status <unit>` and `systemctl is-enabled <unit>`.
+- Service up: `systemctl status <unit>` and
+  `systemctl --root=/ is-enabled <unit>` (the offline form: plain
+  `is-enabled` cannot reach the service manager from a jailed read).
 - Listening: `ss -tlnp` — the service is actually bound to its port.
 - Timezone: `readlink /etc/localtime` (points at the new zone) and `date`.
 
