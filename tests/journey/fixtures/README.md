@@ -19,10 +19,10 @@ and no upstream DNS. The controller is privileged to boot actual systemd, with a
 namespace and temporary /run and /run/lock. **Privileged Docker exposes host devices:**
 controller root (including the passwordless-sudo operator) can read or modify host disks.
 Private cgroups, internal networking and absent bind mounts do not isolate host secrets.
-The script prints this warning and refuses before Docker access unless `CI=true` (the
-GitHub disposable runner) or `JOURNEY_ALLOW_PRIVILEGED=1` explicitly accepts the risk.
-Use a disposable VM with no secrets; never opt in on a persistent developer host or set
-`CI=true` merely to bypass this guard. Never mount the host cgroup tree or Docker socket.
+The script prints this warning and refuses before Docker access unless
+`JOURNEY_ALLOW_PRIVILEGED=1` explicitly accepts the risk; `CI=true` is not enough, because
+self-hosted runners set it too. The disposable CI job sets the opt-in itself. Use a
+disposable runner or VM with no secrets. Never mount the host cgroup tree or Docker socket.
 
 A non-privileged controller with private cgroups, runtime tmpfs mounts and Docker's read-only
 cgroup v2 mount has not been validated: Docker execution was unavailable during the fix review.

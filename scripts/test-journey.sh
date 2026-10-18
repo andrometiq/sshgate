@@ -5,10 +5,10 @@ cd "$(dirname "$0")/.."
 cat >&2 <<'WARNING'
 WARNING: Journey runs a privileged controller with passwordless sudo. It can access
 host devices and read or modify host disks, despite private cgroups and no bind mounts.
-Use only a disposable runner with no secrets. Outside CI, read this warning and set
-JOURNEY_ALLOW_PRIVILEGED=1 to accept this risk. Never use a persistent developer host.
+Use only a disposable runner with no secrets. Read this warning and set
+JOURNEY_ALLOW_PRIVILEGED=1 to accept this risk (the disposable CI job sets it).
 WARNING
-if [[ "${CI:-}" != true && "${JOURNEY_ALLOW_PRIVILEGED:-}" != 1 ]]; then
+if [[ "${JOURNEY_ALLOW_PRIVILEGED:-}" != 1 ]]; then
     echo 'Refusing privileged journey; use a disposable runner and explicitly opt in.' >&2
     exit 1
 fi
@@ -70,4 +70,4 @@ export GOPROXY=off GOSUMDB=off GOTOOLCHAIN=local
 # The shared lock also serializes this lane with the project's other Go test processes.
 test_lock="${JOURNEY_TEST_LOCK:-${XDG_CACHE_HOME:-$HOME/.cache}/sshgate-lanes/test.lock}"
 mkdir -p "$(dirname "$test_lock")"
-flock "$test_lock" go test -race -timeout 30m -tags journey -count=1 ./tests/journey/... "$@"
+flock "$test_lock" go test -race -timeout 20m -tags journey -count=1 ./tests/journey/... "$@"
