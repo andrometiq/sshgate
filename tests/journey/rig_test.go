@@ -161,9 +161,10 @@ func (r *journeyRig) addReadOnly(t *testing.T) {
 	r.exec(t, "target-a", "test", "!", "-e", "/home/user/.sshgate-gate/gate.pub")
 	r.operator(t, `test "$(stat -c %a ~/.config/sshgate/ssh/sshgate_ed25519)" = 600`)
 	r.exec(t, "target-a", "bash", "-ec", `grep -q 'command=.*gate' /home/user/.ssh/authorized_keys; grep -q 'no-pty' /home/user/.ssh/authorized_keys`)
+	published := strings.Fields(r.operator(t, "sha256sum ~/src/SSHGate/dist/gate/sshgate-gate-linux-amd64"))[0]
 	installed := strings.Fields(r.operator(t, "sha256sum ~/.config/sshgate/bin/sshgate-gate-linux-amd64"))[0]
 	deployed := strings.Fields(r.exec(t, "target-a", "sha256sum", "/home/user/.sshgate-gate/gate"))[0]
-	if installed != deployed {
+	if published != installed || installed != deployed {
 		t.Fatal("published gate installation hash mismatch")
 	}
 	t.Logf("published gate SHA256 %s", installed)
@@ -228,7 +229,9 @@ func TestJourneyRig(t *testing.T) {
 	rig.operator(t, "test ! -e ~/.config/sshgate/ssh/sshgate_ed25519")
 	client := rig.mcp(t)
 	client.assertTools(t)
-	client.call(t, "list_servers", map[string]any{}, nil)
+	if result := client.call(t, "list_servers", map[string]any{}, nil); result.IsError {
+		t.Fatal("list_servers returned a tool error")
+	}
 	client.close(t)
 	rig.operator(t, "test ! -e ~/.config/sshgate/ssh/sshgate_ed25519")
 	rig.addReadOnly(t)
@@ -237,7 +240,9 @@ func TestJourneyRig(t *testing.T) {
 	client.assertTools(t)
 	for _, alias := range []string{"web1", "web2"} {
 		var result map[string]any
-		client.call(t, "ping", map[string]any{"alias": alias}, &result)
+		if response := client.call(t, "ping", map[string]any{"alias": alias}, &result); response.IsError {
+			t.Fatalf("ping %s returned a tool error", alias)
+		}
 		if fmt.Sprint(result["reachable"]) != "true" {
 			t.Fatalf("%s unreachable: %v", alias, result)
 		}
