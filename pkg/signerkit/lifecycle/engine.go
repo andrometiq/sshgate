@@ -21,6 +21,7 @@ type Config struct {
 	SnapshotBuilder    SnapshotBuilder
 	Minter             Minter
 	Notifier           Notifier
+	LegacyNotifier     LegacyNotifier
 	AuditWriter        AuditWriter // nil leaves the outbox unflushed and Claim gated.
 	XferDigests        XferDigests
 	Caps               Caps // Zero fields use the local defaults.

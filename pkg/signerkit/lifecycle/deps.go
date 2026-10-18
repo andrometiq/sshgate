@@ -76,27 +76,19 @@ type Notifier interface {
 	MarkIncomplete(context.Context, int64) error
 }
 
-// PreparedLegacyApproval is the opaque artifact shared by the legacy request
-// and notifier. Construction and copy accessors belong to legacy preparation.
-type PreparedLegacyApproval struct {
-	instance    string
-	snapshot    []byte
-	handle      string
-	challenge   string
-	destination int64
-	assist      *approvalplan.AssistResult
-	assistState approvalplan.AssistState
-}
-
-// LegacyNotifier delivers only the lifecycle's prepared artifact. Prepared
-// resolves the artifact bound to an instance; delivery success means every
-// part and the decision card were delivered, permitting activation.
+// LegacyNotifier reports its frozen artifact before any I/O. Deliver sends only
+// that artifact, in order, and reports AllDelivered only after the last card.
+// The adapter binds callbacks to the destination and delivered decision message.
+// Destination and Prepared are in-memory reads. I/O methods honor cancellation.
+// No method may call Engine.Close.
 type LegacyNotifier interface {
-	Destination() int64
+	Destination() LegacyDestination
 	Prepared(instance string) (*PreparedLegacyApproval, error)
-	Deliver(context.Context, *PreparedLegacyApproval) error
+	Deliver(context.Context, *PreparedLegacyApproval) (LegacyDelivery, error)
 	EditStatus(context.Context, *PreparedLegacyApproval, string) error
 }
+
+type LegacyDelivery struct{ AllDelivered bool }
 
 // AssistInputBuilder uses assist.RedactForProvider with the adapter's redaction
 // policy and salt. An error skips the provider; raw plans must never be sent.

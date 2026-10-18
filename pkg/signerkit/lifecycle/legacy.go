@@ -24,6 +24,8 @@ type LegacyResult struct {
 // The prepared artifact is the sole owner of display and delivery material.
 type LegacyRequest struct {
 	owner                 legacyOwner
+	instance              string
+	delivering            bool
 	handle, challengeHash string
 	artifact              *PreparedLegacyApproval
 	live                  bool
