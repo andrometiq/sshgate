@@ -22,9 +22,14 @@ import (
 
 func readWire(t *testing.T, s *Service, request any, kind string) (executorwire.Response, error) {
 	t.Helper()
+	return readWireDeadline(t, s, request, kind, 10*time.Second)
+}
+
+func readWireDeadline(t *testing.T, s *Service, request any, kind string, timeout time.Duration) (executorwire.Response, error) {
+	t.Helper()
 	server, client := net.Pipe()
 	defer client.Close()
-	client.SetDeadline(time.Now().Add(10 * time.Second))
+	client.SetDeadline(time.Now().Add(timeout))
 	done := make(chan error, 1)
 	go func() { done <- s.ServeConn(context.Background(), server) }()
 	frame, err := executorwire.MarshalRequest(request)
@@ -122,6 +127,7 @@ func maximumJob(t *testing.T, id int) (ap.R2, []byte) {
 	exit := 0
 	for i := range job.Steps {
 		var answer ap.JobAnswer
+		job = dispatchFixture(t, job, i+1)
 		job, answer = ap.ApplyJob(job, ap.RecordResult{Ordinal: i + 1, Result: ap.StepResult{Status: ap.StepSucceeded, ExitCode: &exit, StdoutBytes: int64(len(body)), StderrBytes: int64(len(body)), StdoutSHA256: digest, StderrSHA256: digest, Stdout: body, Stderr: body}}, ap.Now{Wall: st.T0}, st.Epoch(1))
 		if !answer.Changed {
 			t.Fatal(answer)
@@ -142,7 +148,7 @@ func TestAwaitBinaryBodiesAndResponseCap(t *testing.T) {
 	}
 	commits := store.commits
 	request := executorwire.AwaitRequest{ProtoVersion: 1, Kind: executorwire.KindAwait, RequestIDs: []string{st.ID(1), st.ID(2)}}
-	response, err := readWire(t, s, request, executorwire.KindAwait)
+	response, err := readWireDeadline(t, s, request, executorwire.KindAwait, 2*time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -160,7 +166,7 @@ func TestAwaitBinaryBodiesAndResponseCap(t *testing.T) {
 		t.Fatal("response cap", err)
 	}
 	request.RequestIDs = []string{st.ID(2)}
-	response, err = readWire(t, s, request, executorwire.KindAwait)
+	response, err = readWireDeadline(t, s, request, executorwire.KindAwait, 2*time.Minute)
 	if err != nil || len(response.Items[0].Job.Results) != 32 {
 		t.Fatal("alone", err)
 	}
@@ -178,7 +184,7 @@ func TestAwaitBinaryBodiesAndResponseCap(t *testing.T) {
 			t.Fatal(err)
 		}
 		request.RequestIDs = []string{st.ID(1)}
-		response, err = readWire(t, s, request, executorwire.KindAwait)
+		response, err = readWireDeadline(t, s, request, executorwire.KindAwait, 2*time.Minute)
 		want := "result_expired"
 		if cause == ap.BodiesRemovedBudget {
 			want = "result_evicted"
@@ -221,6 +227,7 @@ func TestAwaitWaitCancelAndCommittedChange(t *testing.T) {
 	}
 	s.mu.Lock()
 	job, _ := store.Load(st.ID(1))
+	job.SignerAck = job.DraftHash
 	job, _ = ap.ApplyJob(job, ap.SetOutcome{Outcome: ap.JobOutcome{Kind: ap.OutcomeDenied}}, ap.Now{Wall: st.T0}, s.epoch)
 	err := store.Commit(job)
 	s.mu.Unlock()

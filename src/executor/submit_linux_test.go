@@ -406,6 +406,7 @@ func TestSubmitAccountingFinalAndRemovedBodies(t *testing.T) {
 	sum := sha256.Sum256(body)
 	empty := sha256.Sum256(nil)
 	exit := 0
+	job = dispatchFixture(t, job, 1)
 	job, answer := ap.ApplyJob(job, ap.RecordResult{Ordinal: 1, Result: ap.StepResult{Status: ap.StepSucceeded, ExitCode: &exit, StdoutBytes: int64(len(body)), Stdout: body, StdoutSHA256: hex.EncodeToString(sum[:]), StderrSHA256: hex.EncodeToString(empty[:])}}, ap.Now{Wall: st.T0}, s.epoch)
 	if !answer.Changed {
 		t.Fatal(answer)
@@ -417,14 +418,18 @@ func TestSubmitAccountingFinalAndRemovedBodies(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = s.admit(ap.ExecutorBudget - int64(len(encoded))); err != nil {
+	charge, err := R2FinalCharge(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = s.admit(ap.ExecutorBudget - charge); err != nil {
 		t.Fatal("final reservation not released", err)
 	}
-	requireCode(t, s.admit(ap.ExecutorBudget-int64(len(encoded))+1), "executor_full")
+	requireCode(t, s.admit(ap.ExecutorBudget-charge+1), "executor_full")
 	// Put the budget one byte short of admitting an identical new job.
 	fillerKey := ap.JobKey(st.ID(90))
 	store.files[fillerKey] = storedJob{JobFile: JobFile{Key: fillerKey, Quarantined: true,
-		EncodedBytes: ap.ExecutorBudget - int64(len(encoded)) - job.Reservation + 1}}
+		EncodedBytes: ap.ExecutorBudget - charge - job.Reservation + 1}}
 	_, err = s.Submit(submitRequest(t, 2))
 	requireCode(t, err, "executor_full")
 	delete(store.files, fillerKey)
@@ -436,15 +441,19 @@ func TestSubmitAccountingFinalAndRemovedBodies(t *testing.T) {
 		t.Fatal(err)
 	}
 	removed, _ := ap.EncodeR2(job)
+	removedCharge, err := R2FinalCharge(job)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(removed) >= len(encoded) {
 		t.Fatal("body not removed")
 	}
-	if err = s.admit(ap.ExecutorBudget - int64(len(removed))); err != nil {
+	if err = s.admit(ap.ExecutorBudget - removedCharge); err != nil {
 		t.Fatal("body share not released", err)
 	}
-	requireCode(t, s.admit(ap.ExecutorBudget-int64(len(removed))+1), "executor_full")
+	requireCode(t, s.admit(ap.ExecutorBudget-removedCharge+1), "executor_full")
 	store.files[fillerKey] = storedJob{JobFile: JobFile{Key: fillerKey, Quarantined: true,
-		EncodedBytes: ap.ExecutorBudget - int64(len(encoded)) - job.Reservation + 1}}
+		EncodedBytes: ap.ExecutorBudget - charge - job.Reservation + 1}}
 	if _, err = s.Submit(submitRequest(t, 2)); err != nil {
 		t.Fatal("removed bodies did not admit job", err)
 	}
@@ -455,7 +464,7 @@ func TestSubmitAccountingFinalAndRemovedBodies(t *testing.T) {
 	// A quarantined file consumes both its bytes and one live slot.
 	key := ap.JobKey(st.ID(2))
 	store.files[key] = storedJob{JobFile: JobFile{Key: key, Quarantined: true, EncodedBytes: 100}}
-	requireCode(t, s.admit(ap.ExecutorBudget-int64(len(removed))), "executor_full")
+	requireCode(t, s.admit(ap.ExecutorBudget-removedCharge), "executor_full")
 }
 
 func TestSubmitClockReads(t *testing.T) {
@@ -526,6 +535,7 @@ func TestSubmitFileCap(t *testing.T) {
 	// no live slots and together remain below the byte budget.
 	for i := 1; i <= ap.ExecutorJobFiles; i++ {
 		job := storeJob(t, i, false)
+		job.SignerAck = job.DraftHash
 		job, answer := ap.ApplyJob(job, ap.SetOutcome{Outcome: ap.JobOutcome{Kind: ap.OutcomeDenied}}, ap.Now{Wall: st.T0}, s.epoch)
 		if !answer.Changed {
 			t.Fatal(answer)
@@ -541,5 +551,164 @@ func TestSubmitFileCap(t *testing.T) {
 	requireCode(t, err, "executor_full")
 	if store.commits != 0 {
 		t.Fatal("file cap admitted a new job")
+	}
+}
+
+type admissionScanStore struct {
+	Store
+	scan func()
+}
+
+func (s *admissionScanStore) List() ([]JobFile, error) {
+	if s.scan != nil {
+		scan := s.scan
+		s.scan = nil
+		scan()
+	}
+	return s.Store.List()
+}
+
+func TestSubmitRouteAfterAdmission(t *testing.T) {
+	for _, mode := range []string{"changed", "capacity", "reservation", "invalid"} {
+		t.Run(mode, func(t *testing.T) {
+			service, store, _, path := submitService(t)
+			request := submitRequest(t, 1)
+			draft, err := service.buildDraft(request.Input, strings.Repeat("0", 64))
+			if err != nil {
+				t.Fatal(err)
+			}
+			preliminary := int64(ap.R2Reservation(draft, ap.PermittedOutputBytes(draft)))
+			if mode == "capacity" {
+				key := ap.JobKey(st.ID(90))
+				store.files[key] = storedJob{JobFile: JobFile{Key: key, Quarantined: true, EncodedBytes: ap.ExecutorBudget - preliminary}}
+			}
+			if mode == "reservation" {
+				service.reservationLimit = preliminary
+			}
+			service.store = &admissionScanStore{Store: store, scan: func() {
+				if mode == "invalid" {
+					if err := os.WriteFile(path, []byte("{"), 0600); err != nil {
+						t.Fatal(err)
+					}
+					return
+				}
+				body, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var entries map[string]registry.Entry
+				if err := json.Unmarshal(body, &entries); err != nil {
+					t.Fatal(err)
+				}
+				entry := entries["server"]
+				entry.Host = "longer-replacement-host.example"
+				entries["server"] = entry
+				body, err = json.Marshal(entries)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, body, 0600); err != nil {
+					t.Fatal(err)
+				}
+			}}
+			_, err = service.Submit(request)
+			switch mode {
+			case "capacity":
+				requireCode(t, err, "executor_full")
+			case "reservation":
+				requireCode(t, err, "request_too_large")
+			case "invalid":
+				requireCode(t, err, "invalid_request")
+			default:
+				if err != nil {
+					t.Fatal(err)
+				}
+				job, err := store.Load(request.Input.RequestID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if job.Draft.CommandJob.Steps[0].Target.ResolvedHost != "longer-replacement-host.example" {
+					t.Fatal("froze pre-admission route")
+				}
+				if job.Reservation <= preliminary {
+					t.Fatal("did not resize reservation")
+				}
+				return
+			}
+			if store.commits != 0 {
+				t.Fatal("refused admission committed a job")
+			}
+		})
+	}
+}
+
+func TestFinalChargeBudgetBoundary(t *testing.T) {
+	reports := []ap.ReportResult{{State: ap.ReportAcked}}
+	for _, code := range ap.AllCodes {
+		if !code.Retryable() {
+			reports = append(reports, ap.ReportResult{State: ap.ReportRefused, Code: code})
+		}
+	}
+	for _, report := range reports {
+		t.Run(report.State+string(report.Code), func(t *testing.T) {
+			service, store, _, _ := submitService(t)
+			request := submitRequest(t, 1)
+			if _, err := service.Submit(request); err != nil {
+				t.Fatal(err)
+			}
+			job, err := store.Load(request.Input.RequestID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			body := []byte("output")
+			digest := sha256.Sum256(body)
+			empty := sha256.Sum256(nil)
+			exit := 0
+			job = dispatchFixture(t, job, 1)
+			job, answer := ap.ApplyJob(job, ap.RecordResult{Ordinal: 1, Result: ap.StepResult{Status: ap.StepSucceeded, ExitCode: &exit, Stdout: body, StdoutBytes: int64(len(body)), StdoutSHA256: hex.EncodeToString(digest[:]), StderrSHA256: hex.EncodeToString(empty[:])}}, ap.Now{Wall: st.T0}, service.epoch)
+			if !answer.Changed {
+				t.Fatal(answer)
+			}
+			if err := store.Commit(job); err != nil {
+				t.Fatal(err)
+			}
+			charge, err := R2FinalCharge(job)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if charge > job.Reservation {
+				t.Fatal("charge exceeds reservation")
+			}
+			encoded, _ := ap.EncodeR2(job)
+			// Encoded size alone would admit this new job with no room for delivery.
+			key := ap.JobKey(st.ID(90))
+			store.files[key] = storedJob{JobFile: JobFile{Key: key, Quarantined: true, EncodedBytes: ap.ExecutorBudget - int64(len(encoded)) - job.Reservation}}
+			_, err = service.Submit(submitRequest(t, 2))
+			requireCode(t, err, "executor_full")
+			store.files[key] = storedJob{JobFile: JobFile{Key: key, Quarantined: true, EncodedBytes: ap.ExecutorBudget - charge - job.Reservation}}
+			if _, err = service.Submit(submitRequest(t, 2)); err != nil {
+				t.Fatal(err)
+			}
+			for _, command := range []ap.JobCommand{ap.MarkDelivered{}, ap.SettleReport{Result: report}, ap.RemoveBodies{Cause: ap.BodiesRemovedAge}, ap.DropToken{}} {
+				job, answer = ap.ApplyJob(job, command, ap.Now{Wall: st.T0.Add(ap.BodyRetention)}, service.epoch)
+				if !answer.Changed {
+					t.Fatal(answer)
+				}
+				if err := store.Commit(job); err != nil {
+					t.Fatal(err)
+				}
+				next, err := R2FinalCharge(job)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if next > charge {
+					t.Fatalf("%T raised charge: %d > %d", command, next, charge)
+				}
+				charge = next
+				if err := service.admit(0); err != nil {
+					t.Fatalf("%T exceeded budget: %v", command, err)
+				}
+			}
+		})
 	}
 }

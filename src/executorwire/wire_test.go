@@ -12,6 +12,7 @@ import (
 	"time"
 
 	ap "github.com/karthikeyan5/sshgate/src/approvalplan"
+	st "github.com/karthikeyan5/sshgate/src/approvalplan/statetest"
 )
 
 const id = "a2_ABEiM0RVZneImaq7zN3u_w"
@@ -242,7 +243,7 @@ func TestResultAvailability(t *testing.T) {
 	}
 }
 func TestExecutionFacts(t *testing.T) {
-	j := FromSummary(ap.JobSummary{RequestID: id, State: ap.JobExecuting, Executing: 2, Steps: []ap.StepStatus{ap.StepSucceeded, ap.StepNotRun}, ExecutedOrdinals: []int{1}})
+	j := FromSummary(ap.JobSummary{RequestID: id, State: ap.JobExecuting, Executing: 2, Steps: []ap.StepStatus{ap.StepSucceeded}, ExecutedOrdinals: []int{1}})
 	if err := j.Validate(); err != nil {
 		t.Fatal(err)
 	}
@@ -334,5 +335,64 @@ func TestTransferPathProtection(t *testing.T) {
 		if _, err := in.Hash(); err == nil {
 			t.Fatal("invalid transfer path accepted")
 		}
+	}
+}
+
+func TestMarkedJobWireMethods(t *testing.T) {
+	specs := make([]st.StepSpec, ap.MaxSteps)
+	for i := range specs {
+		specs[i] = st.Write("touch /tmp/job", 60)
+	}
+	draft := st.JobDraft(id, ap.CoordinatorExecutor, st.T0, specs...)
+	hash, _ := ap.DraftHash(draft)
+	token := st.Token(id)
+	record := ap.R2{Version: ap.R2Version, RequestID: id, InputHash: hash, Draft: draft, DraftHash: hash, CreatedAt: st.T0, Reservation: int64(ap.R2Reservation(draft, ap.PermittedOutputBytes(draft))), ClaimToken: hex.EncodeToString(token[:])}
+	for i := range specs {
+		record.Steps = append(record.Steps, ap.JobStep{Ordinal: i + 1})
+	}
+	for ordinal := 1; ordinal <= ap.MaxSteps; ordinal++ {
+		var answer ap.JobAnswer
+		record, answer = ap.ApplyJob(record, ap.MarkStep{Ordinal: ordinal}, ap.Now{Wall: st.T0}, strings.Repeat("e", 32))
+		if !answer.Changed {
+			t.Fatal(answer)
+		}
+		job := FromSummary(ap.JobView(record, strings.Repeat("e", 32)))
+		for _, kind := range []string{KindSubmit, KindGet, KindAwait, KindList} {
+			response := Response{ProtoVersion: Proto, Kind: kind, OK: true}
+			if kind == KindSubmit || kind == KindGet {
+				response.Job = &job
+			} else {
+				response.Items = []Item{{RequestID: id, Job: &job}}
+			}
+			body, err := MarshalResponse(response)
+			if err != nil {
+				t.Fatalf("ordinal %d %s: %v", ordinal, kind, err)
+			}
+			if _, err := DecodeResponse(kind, body); err != nil {
+				t.Fatal(err)
+			}
+		}
+		bad := job
+		bad.Executing++
+		if bad.Validate() == nil {
+			t.Fatal("accepted ordinal outside completed prefix or MaxSteps")
+		}
+		empty := sha256.Sum256(nil)
+		exit := 0
+		record, answer = ap.ApplyJob(record, ap.RecordResult{Ordinal: ordinal, Result: ap.StepResult{Status: ap.StepSucceeded, ExitCode: &exit, StdoutSHA256: hex.EncodeToString(empty[:]), StderrSHA256: hex.EncodeToString(empty[:])}}, ap.Now{Wall: st.T0}, strings.Repeat("e", 32))
+		if !answer.Changed {
+			t.Fatal(answer)
+		}
+	}
+}
+
+func TestExecutingOrdinalBound(t *testing.T) {
+	summary := ap.JobSummary{RequestID: id, State: ap.JobExecuting, Executing: ap.MaxSteps + 1}
+	for i := 1; i <= ap.MaxSteps; i++ {
+		summary.Steps = append(summary.Steps, ap.StepSucceeded)
+		summary.ExecutedOrdinals = append(summary.ExecutedOrdinals, i)
+	}
+	if FromSummary(summary).Validate() == nil {
+		t.Fatal("accepted executing ordinal beyond MaxSteps")
 	}
 }

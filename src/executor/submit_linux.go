@@ -98,6 +98,18 @@ func (s *Service) Submit(request executorwire.SubmitRequest) (executorwire.Job, 
 	if err := s.admit(reservation); err != nil {
 		return executorwire.Job{}, err
 	}
+	// Freeze the route only after admission, then account for its actual size.
+	draft, err = s.buildDraft(in, ap.ClaimTokenHash(token))
+	if err != nil {
+		return executorwire.Job{}, err
+	}
+	reservation = int64(ap.R2Reservation(draft, ap.PermittedOutputBytes(draft)))
+	if reservation > s.reservationLimit {
+		return executorwire.Job{}, refusal("request_too_large")
+	}
+	if err := s.admit(reservation); err != nil {
+		return executorwire.Job{}, err
+	}
 	hash, err := ap.DraftHash(draft)
 	if err != nil {
 		return executorwire.Job{}, err
@@ -141,6 +153,11 @@ func (s *Service) admit(reservation int64) error {
 			if ap.JobView(job, s.epoch).State != ap.JobFinal {
 				live++
 				charge = job.Reservation
+			} else {
+				charge, err = R2FinalCharge(job)
+				if err != nil {
+					return err
+				}
 			}
 		}
 		if charge < 0 || charge > ap.ExecutorBudget-used {

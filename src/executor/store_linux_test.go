@@ -257,6 +257,7 @@ func TestJobCommitRefusalAndUncertainty(t *testing.T) {
 			if err := s.Commit(job); err != nil {
 				t.Fatal(err)
 			}
+			job.SignerAck = job.DraftHash
 			next, answer := ap.ApplyJob(job, ap.SetOutcome{Outcome: ap.JobOutcome{Kind: ap.OutcomeDenied}}, ap.Now{Wall: st.T0}, st.Epoch(1))
 			if !answer.Changed {
 				t.Fatal(answer)
@@ -329,6 +330,7 @@ func TestJobStoreMaximumBodies(t *testing.T) {
 	exit := 0
 	for i := range job.Steps {
 		var answer ap.JobAnswer
+		job = dispatchFixture(t, job, i+1)
 		job, answer = ap.ApplyJob(job, ap.RecordResult{Ordinal: i + 1, Result: ap.StepResult{Status: ap.StepSucceeded, ExitCode: &exit, StdoutBytes: int64(len(body)), StderrBytes: int64(len(body)), StdoutSHA256: digest, StderrSHA256: digest, Stdout: body, Stderr: body}}, ap.Now{Wall: st.T0}, st.Epoch(1))
 		if !answer.Changed {
 			t.Fatal(answer)
@@ -370,6 +372,7 @@ func TestJobStoreBodyRemoval(t *testing.T) {
 	sum := sha256.Sum256(body)
 	empty := sha256.Sum256(nil)
 	exit := 0
+	job = dispatchFixture(t, job, 1)
 	job, answer := ap.ApplyJob(job, ap.RecordResult{Ordinal: 1, Result: ap.StepResult{Status: ap.StepSucceeded, ExitCode: &exit, StdoutBytes: int64(len(body)), Stdout: body, StdoutSHA256: hex.EncodeToString(sum[:]), StderrSHA256: hex.EncodeToString(empty[:])}}, ap.Now{Wall: st.T0}, st.Epoch(1))
 	if !answer.Changed {
 		t.Fatal(answer)
@@ -415,5 +418,97 @@ func TestJobOrphanChild(t *testing.T) {
 	}
 	if err := unix.Kill(os.Getpid(), unix.SIGKILL); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestJobStoreAuthorityRestart(t *testing.T) {
+	for _, kind := range []string{"wrong_token", "missing_live_token", "missing_final_at", "live_final_at", "missing_owed_token", "missing_body_token", "settled_no_token", "never_owed_no_token"} {
+		t.Run(kind, func(t *testing.T) {
+			local, store, dir := jobStore(t)
+			job := storeJob(t, 1, false)
+			switch kind {
+			case "wrong_token":
+				job.ClaimToken = strings.Repeat("0", 64)
+			case "missing_live_token":
+				job.ClaimToken = ""
+			case "live_final_at":
+				at := st.T0
+				job.FinalAt = &at
+			default:
+				var answer ap.JobAnswer
+				if kind == "missing_owed_token" || kind == "missing_body_token" || kind == "settled_no_token" {
+					body := []byte("output")
+					digest := sha256.Sum256(body)
+					empty := sha256.Sum256(nil)
+					exit := 0
+					result := ap.StepResult{Status: ap.StepSucceeded, ExitCode: &exit, Stdout: body, StdoutBytes: int64(len(body)), StdoutSHA256: hex.EncodeToString(digest[:]), StderrSHA256: hex.EncodeToString(empty[:])}
+					job = dispatchFixture(t, job, 1)
+					job, answer = ap.ApplyJob(job, ap.RecordResult{Ordinal: 1, Result: result}, ap.Now{Wall: st.T0}, "epoch")
+					if !answer.Changed {
+						t.Fatal(answer)
+					}
+					if kind != "missing_owed_token" {
+						job, answer = ap.ApplyJob(job, ap.SettleReport{Result: ap.ReportResult{State: ap.ReportAcked}}, ap.Now{Wall: st.T0}, "epoch")
+						if !answer.Changed {
+							t.Fatal(answer)
+						}
+					}
+					if kind != "missing_body_token" {
+						job, answer = ap.ApplyJob(job, ap.RemoveBodies{Cause: ap.BodiesRemovedAge}, ap.Now{Wall: st.T0.Add(ap.BodyRetention)}, "epoch")
+						if !answer.Changed {
+							t.Fatal(answer)
+						}
+					}
+				} else {
+					job.SignerAck = job.DraftHash
+					job, answer = ap.ApplyJob(job, ap.SetOutcome{Outcome: ap.JobOutcome{Kind: ap.OutcomeDenied}}, ap.Now{Wall: st.T0}, "epoch")
+					if !answer.Changed {
+						t.Fatal(answer)
+					}
+				}
+				if kind == "missing_final_at" {
+					job.FinalAt = nil
+				} else {
+					job.ClaimToken = ""
+				}
+			}
+			body, err := ap.EncodeR2(job)
+			if err != nil {
+				t.Fatal("fixture must pass frozen decoder", err)
+			}
+			if _, err := ap.DecodeR2(body); err != nil {
+				t.Fatal(err)
+			}
+			valid := kind == "settled_no_token" || kind == "never_owed_no_token"
+			if !valid && !errors.Is(store.Commit(job), ErrReportAuthLost) {
+				t.Fatal("commit accepted corrupt authority")
+			}
+			store.Close()
+			path := filepath.Join(dir, ap.JobKey(job.RequestID))
+			if err := os.WriteFile(path, body, 0600); err != nil {
+				t.Fatal(err)
+			}
+			reopened, err := local.OpenJobStore()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer reopened.Close()
+			_, err = reopened.Load(job.RequestID)
+			if valid {
+				if err != nil {
+					t.Fatal(err)
+				}
+			} else if !errors.Is(err, ErrReportAuthLost) {
+				t.Fatalf("corrupt record escaped quarantine: %v", err)
+			}
+			files, err := reopened.List()
+			if err != nil || len(files) != 1 || files[0].Quarantined == valid {
+				t.Fatal(files, err)
+			}
+			after, err := os.ReadFile(path)
+			if err != nil || !bytes.Equal(after, body) {
+				t.Fatal("quarantine modified evidence", err)
+			}
+		})
 	}
 }

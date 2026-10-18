@@ -55,7 +55,7 @@ func (j Job) Validate() error {
 	default:
 		return invalid("unknown execution status")
 	}
-	if (j.ExecutionStatus == approvalplan.JobExecuting) != (j.Executing > 0) || j.Executing > len(j.Steps) || j.Executing < 0 {
+	if (j.ExecutionStatus == approvalplan.JobExecuting) != (j.Executing > 0) || j.Executing > approvalplan.MaxSteps || j.Executing < 0 || j.Executing > 0 && j.Executing != len(j.Steps)+1 {
 		return invalid("invalid executing ordinal")
 	}
 	for _, s := range j.Steps {

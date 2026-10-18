@@ -4,6 +4,7 @@ package executor
 
 import (
 	"encoding/base32"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"sort"
@@ -77,7 +78,7 @@ func (l *Local) OpenJobStore() (*JobStore, error) {
 				entry := storedJob{JobFile: JobFile{Key: name, EncodedBytes: stat.Size}}
 				if err == nil {
 					job, decodeErr := approvalplan.DecodeR2(body)
-					if decodeErr == nil && approvalplan.JobKey(job.RequestID) == name {
+					if decodeErr == nil && validateStoredJob(job) == nil && approvalplan.JobKey(job.RequestID) == name {
 						entry.body = body
 						entry.RequestID = job.RequestID
 						entry.EncodedBytes = int64(len(body))
@@ -148,8 +149,8 @@ func (s *JobStore) List() ([]JobFile, error) {
 	return files, nil
 }
 
-// Commit validates and atomically replaces one R2. The caller owns admission
-// and applies approvalplan transitions before passing a replacement here.
+// Commit validates schema, authority, lifecycle and result consistency before replacing
+// one R2. The caller owns admission and applies approvalplan transitions first.
 func (s *JobStore) Commit(job approvalplan.R2) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -159,6 +160,9 @@ func (s *JobStore) Commit(job approvalplan.R2) error {
 	key := approvalplan.JobKey(job.RequestID)
 	if s.files[key].Quarantined {
 		return ErrReportAuthLost
+	}
+	if err := validateStoredJob(job); err != nil {
+		return err
 	}
 	body, err := approvalplan.EncodeR2(job)
 	if err != nil {
@@ -208,4 +212,112 @@ func (s *JobStore) Close() error {
 	s.closed = true
 	s.files = nil
 	return s.disk.Close()
+}
+
+func validateStoredJob(job approvalplan.R2) error {
+	// SA-3/SA-5: results form one prefix, followed by at most one
+	// in-flight marker. A terminal result forbids all later evidence.
+	closed, ended, hadBodies, hasBodies := false, false, false, false
+	for i, step := range job.Steps {
+		if closed && (step.Marker != nil || step.Result != nil) {
+			return ErrReportAuthLost
+		}
+		if (step.Marker != nil || step.Result != nil) && job.SignerAck == "" {
+			return ErrReportAuthLost
+		}
+		r := step.Result
+		if r == nil {
+			closed = true
+			if step.Marker != nil && job.Outcome != nil && job.Outcome.Kind != approvalplan.OutcomeJobError {
+				return ErrReportAuthLost
+			}
+			continue
+		}
+		route := approvalplan.Route("")
+		if command := job.Draft.CommandJob; command != nil && i < len(command.Steps) {
+			route = command.Steps[i].Route
+		}
+		if err := validateStepResult(*r, route); err != nil {
+			return err
+		}
+		switch r.Status {
+		case approvalplan.StepSucceeded, approvalplan.StepFailed, approvalplan.StepIndeterminate:
+			if step.Marker == nil {
+				return ErrReportAuthLost
+			}
+		case approvalplan.StepFailedNotStarted, approvalplan.StepExpiredUnexecuted, approvalplan.StepStaleTarget:
+		default: // skipped and not_run are derived, never stored results.
+			return ErrReportAuthLost
+		}
+		hasBodies = hasBodies || len(r.Stdout)+len(r.Stderr) > 0
+		hadBodies = hadBodies || !r.BodiesUnstorable && (r.StdoutBytes > 0 || r.StderrBytes > 0)
+		stop := true
+		if command := job.Draft.CommandJob; command != nil && i < len(command.Steps) {
+			stopSigned := command.StopPolicy != approvalplan.StopNever && command.Steps[i].Route.Signed()
+			stop = command.StopPolicy == approvalplan.StopAnyNonzero || stopSigned
+		}
+		failedStop := r.Status == approvalplan.StepFailed && stop
+		ended = r.Status.Abort() || failedStop || i == len(job.Steps)-1
+		closed = ended
+	}
+	if outcome := job.Outcome; outcome != nil {
+		lostAfterAck := outcome.Kind == approvalplan.OutcomeApprovalLost && job.SignerAck != ""
+		missingAck := outcome.Kind != approvalplan.OutcomeApprovalLost && outcome.Kind != approvalplan.OutcomeJobError && job.SignerAck == ""
+		if ended || lostAfterAck || missingAck {
+			return ErrReportAuthLost
+		}
+	}
+	final := ended || job.Outcome != nil
+	hasFinalEvidence := job.ReportResult != nil || job.FirstDeliveredAt != nil || job.BodiesRemoved != nil
+	hasOutcomeReport := job.Outcome != nil && job.ReportResult != nil
+	if !final && hasFinalEvidence || hasOutcomeReport {
+		return ErrReportAuthLost
+	}
+	if removed := job.BodiesRemoved; removed != nil {
+		unknownCause := removed.Cause != approvalplan.BodiesRemovedAge && removed.Cause != approvalplan.BodiesRemovedBudget
+		pressureBeforeDelivery := removed.Cause == approvalplan.BodiesRemovedBudget && job.FirstDeliveredAt == nil
+		if hasBodies || !hadBodies || unknownCause || pressureBeforeDelivery {
+			return ErrReportAuthLost
+		}
+	}
+	if final != (job.FinalAt != nil) {
+		return ErrReportAuthLost
+	}
+	if job.ClaimToken == "" {
+		if !final || job.Outcome == nil && job.ReportResult == nil {
+			return ErrReportAuthLost
+		}
+		if hasBodies {
+			return ErrReportAuthLost
+		}
+		return nil
+	}
+	raw, err := hex.DecodeString(job.ClaimToken)
+	if err != nil || len(raw) != 32 {
+		return ErrReportAuthLost
+	}
+	var token [32]byte
+	copy(token[:], raw)
+	if approvalplan.ClaimTokenHash(token) != job.Draft.ExecutorClaimTokenHash {
+		return ErrReportAuthLost
+	}
+	return nil
+}
+
+// validateStepResult accepts only exit-code shapes produced by jobplan's runner
+// or approvalplan.NoOutputResult during recovery and pre-dispatch refusal.
+func validateStepResult(result approvalplan.StepResult, route approvalplan.Route) error {
+	exit := result.ExitCode
+	allowed := map[approvalplan.StepStatus]bool{
+		approvalplan.StepSucceeded:         exit != nil && *exit == 0,
+		approvalplan.StepFailed:            exit != nil && *exit > 0,
+		approvalplan.StepFailedNotStarted:  exit == nil || route == approvalplan.RouteUnsignedRead && *exit == 77,
+		approvalplan.StepIndeterminate:     exit == nil,
+		approvalplan.StepExpiredUnexecuted: exit == nil,
+		approvalplan.StepStaleTarget:       exit == nil,
+	}
+	if !allowed[result.Status] {
+		return ErrReportAuthLost
+	}
+	return nil
 }
