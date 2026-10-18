@@ -77,9 +77,6 @@ func (c *journeyMCP) call(t *testing.T, name string, arguments map[string]any, o
 	if err != nil {
 		t.Fatalf("tools/call %s: %v", name, err)
 	}
-	if result.IsError {
-		t.Fatalf("tools/call %s returned an MCP error", name)
-	}
 	if output != nil {
 		if result.StructuredContent == nil {
 			t.Fatalf("tools/call %s has no structured content", name)
@@ -93,4 +90,34 @@ func (c *journeyMCP) call(t *testing.T, name string, arguments map[string]any, o
 		}
 	}
 	return result
+}
+
+func TestMCPCallToolError(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	server := mcp.NewServer(&mcp.Implementation{Name: "fixture", Version: "1"}, nil)
+	server.AddTool(&mcp.Tool{Name: "refuse", InputSchema: map[string]any{"type": "object"}},
+		func(context.Context, *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			return &mcp.CallToolResult{IsError: true, StructuredContent: map[string]any{"error_class": "read_only_server"}}, nil
+		})
+	clientTransport, serverTransport := mcp.NewInMemoryTransports()
+	serverSession, err := server.Connect(ctx, serverTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer serverSession.Close()
+	client := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "1"}, nil)
+	session, err := client.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	connection := &journeyMCP{session: session}
+	defer connection.close(t)
+	var output struct {
+		ErrorClass string `json:"error_class"`
+	}
+	result := connection.call(t, "refuse", map[string]any{}, &output)
+	if !result.IsError || output.ErrorClass != "read_only_server" {
+		t.Fatalf("refusal not preserved: isError=%v, output=%+v", result.IsError, output)
+	}
 }

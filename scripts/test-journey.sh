@@ -2,6 +2,16 @@
 # Preparation may use the network. The test phase uses only an internal Docker network.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+cat >&2 <<'WARNING'
+WARNING: Journey runs a privileged controller with passwordless sudo. It can access
+host devices and read or modify host disks, despite private cgroups and no bind mounts.
+Use only a disposable runner with no secrets. Outside CI, read this warning and set
+JOURNEY_ALLOW_PRIVILEGED=1 to accept this risk. Never use a persistent developer host.
+WARNING
+if [[ "${CI:-}" != true && "${JOURNEY_ALLOW_PRIVILEGED:-}" != 1 ]]; then
+    echo 'Refusing privileged journey; use a disposable runner and explicitly opt in.' >&2
+    exit 1
+fi
 docker info >/dev/null
 docker compose version >/dev/null
 [[ "$(uname -m)" = x86_64 ]] || { echo "Journey requires an amd64 runner (published gate architecture)" >&2; exit 1; }
@@ -15,7 +25,22 @@ cleanup() {
     result=$?
     trap - EXIT
     docker compose -p "$JOURNEY_PROJECT" -f "$JOURNEY_COMPOSE_FILE" down --volumes --remove-orphans --timeout 10 || result=1
-    docker image rm "$JOURNEY_IMAGE" >/dev/null 2>&1 || true
+    # Listing distinguishes a never-built image from a daemon/inspection failure.
+    if images=$(docker image ls --quiet --filter "reference=$JOURNEY_IMAGE"); then
+        if [[ -n "$images" ]]; then
+            docker image rm "$JOURNEY_IMAGE" || result=1
+        fi
+        if remaining=$(docker image ls --quiet --filter "reference=$JOURNEY_IMAGE"); then
+            if [[ -n "$remaining" ]]; then
+                echo "Journey image remains after cleanup: $JOURNEY_IMAGE" >&2
+                result=1
+            fi
+        else
+            result=1
+        fi
+    else
+        result=1
+    fi
     chmod -R u+w "$prep" 2>/dev/null || true
     rm -rf "$prep"
     exit "$result"
