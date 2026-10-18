@@ -4,9 +4,9 @@ ENV container=docker
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
     systemd systemd-sysv dbus openssh-server openssh-client sudo make gcc libc6-dev \
     git ca-certificates python3 curl iproute2 procps && rm -rf /var/lib/apt/lists/* \
-    && useradd -m -s /bin/bash operator && useradd -m -s /bin/bash user \
-    && echo 'operator ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/operator \
-    && chmod 0440 /etc/sudoers.d/operator \
+    && useradd -m -s /bin/bash sgop && useradd -m -s /bin/bash user \
+    && echo 'sgop ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/sgop \
+    && chmod 0440 /etc/sudoers.d/sgop \
     && passwd -d user && rm -f /etc/ssh/ssh_host_* \
     && systemctl mask systemd-resolved.service systemd-networkd.service \
     && mkdir -p /run/sshd /opt/journey

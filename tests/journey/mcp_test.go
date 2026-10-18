@@ -18,7 +18,7 @@ type journeyMCP struct{ session *mcp.ClientSession }
 
 func (r *journeyRig) mcp(t *testing.T) *journeyMCP {
 	t.Helper()
-	command := exec.Command("docker", "exec", "-i", r.controller, "runuser", "-l", "operator", "-c", "exec sshgate-mcp")
+	command := exec.Command("docker", "exec", "-i", r.controller, "runuser", "-l", "sgop", "-c", "exec sshgate-mcp")
 	// CommandTransport keeps protocol stdout separate. Stderr is deliberately not
 	// persisted here: scenarios own redacted/bounded artifact collection.
 	client := mcp.NewClient(&mcp.Implementation{Name: "journey", Version: "1"}, nil)

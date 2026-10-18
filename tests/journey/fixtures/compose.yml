@@ -9,7 +9,7 @@ services:
       - /run/lock
       - /tmp
     volumes:
-      - controller-home:/home/operator
+      - controller-home:/home/sgop
     networks: [journey]
     dns: [127.0.0.1]
     stop_grace_period: 10s

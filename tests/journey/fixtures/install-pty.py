@@ -9,7 +9,7 @@ import time
 
 pid, master = pty.fork()
 if pid == 0:
-    os.chdir('/home/operator/src/SSHGate')
+    os.chdir('/home/sgop/src/SSHGate')
     os.execvp('sudo', ['sudo', './scripts/install.sh'])
 
 prompts = [(b'Telegram user_id (numeric), or press Enter to skip:', b'424242\n'),

@@ -43,7 +43,7 @@ func (r *journeyRig) exec(t *testing.T, service string, args ...string) string {
 // Each invocation starts a fresh login, including supplementary groups added by install.sh.
 func (r *journeyRig) operator(t *testing.T, script string) string {
 	t.Helper()
-	return r.exec(t, "controller", "runuser", "-l", "operator", "-c", script)
+	return r.exec(t, "controller", "runuser", "-l", "sgop", "-c", script)
 }
 
 func (r *journeyRig) wait(t *testing.T, service string, args ...string) {
@@ -133,13 +133,13 @@ func newJourneyRig(t *testing.T) *journeyRig {
 		r.exec(t, service, "bash", "-c", "! curl --noproxy '*' --connect-timeout 2 --max-time 3 -s http://1.1.1.1 >/dev/null")
 		r.exec(t, service, "bash", "-c", "! timeout 3 getent ahostsv4 example.com >/dev/null")
 	}
-	r.exec(t, "controller", "bash", "-ec", `install -d -o operator -g operator /home/operator/src
+	r.exec(t, "controller", "bash", "-ec", `install -d -o sgop -g sgop /home/sgop/src
 chmod a+r /opt/journey/source.bundle
-runuser -u operator -- git clone /opt/journey/source.bundle /home/operator/src/SSHGate
-cp -a /opt/journey/vendor /home/operator/src/SSHGate/vendor
-chown -R operator:operator /home/operator/src/SSHGate/vendor
-printf '%s\n' 'export PATH="$HOME/go/bin:/usr/local/go/bin:$PATH"' 'export GOPROXY=off GOSUMDB=off GOTOOLCHAIN=local' > /home/operator/.bash_profile
-chown operator:operator /home/operator/.bash_profile`)
+runuser -u sgop -- git clone /opt/journey/source.bundle /home/sgop/src/SSHGate
+cp -a /opt/journey/vendor /home/sgop/src/SSHGate/vendor
+chown -R sgop:sgop /home/sgop/src/SSHGate/vendor
+printf '%s\n' 'export PATH="$HOME/go/bin:/usr/local/go/bin:$PATH"' 'export GOPROXY=off GOSUMDB=off GOTOOLCHAIN=local' > /home/sgop/.bash_profile
+chown sgop:sgop /home/sgop/.bash_profile`)
 	commit := strings.TrimSpace(r.operator(t, "cd ~/src/SSHGate && git rev-parse HEAD"))
 	if commit != os.Getenv("JOURNEY_COMMIT") {
 		t.Fatalf("installed commit %q differs from tested commit", commit)
