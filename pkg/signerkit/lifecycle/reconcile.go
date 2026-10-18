@@ -12,12 +12,13 @@ import (
 // Run drives the due index, outbox flusher and per-record notifier actors.
 // Cancellation or a storage failure permanently stops this instance and joins
 // its v2 effects. Recovery requires a new Engine over the store. Keep routing
-// legacy requests to this instance until service shutdown calls Close.
-func (e *Engine) Run(ctx context.Context) error {
+// legacy requests to the shared LegacyService until service shutdown.
+func (e *Engine) Run(ctx context.Context) (result error) {
 	e.mu.Lock()
-	if e.stopping {
+	if err := e.availabilityLocked(); err != nil {
 		e.mu.Unlock()
-		return unavailable()
+		e.Close()
+		return err
 	}
 	if e.running {
 		e.mu.Unlock()
@@ -53,6 +54,9 @@ func (e *Engine) Run(ctx context.Context) error {
 		}
 		e.waitJoined.Wait()
 		e.mu.Lock()
+		if e.stopCause != nil {
+			result = e.stopCause
+		}
 		e.running = false
 		close(e.runDone)
 		e.mu.Unlock()
@@ -85,12 +89,11 @@ func (e *Engine) Run(ctx context.Context) error {
 func (e *Engine) Reconcile() error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if e.stopping {
-		return unavailable()
+	if err := e.availabilityLocked(); err != nil {
+		return err
 	}
 	now := e.now()
 	e.projections.expireGrants(now)
-	e.expireLegacyLocked(now)
 	for _, key := range e.dueKeys(now) {
 		if err := e.reconcileLocked(key, now); err != nil {
 			return err

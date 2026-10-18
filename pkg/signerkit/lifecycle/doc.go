@@ -1,11 +1,13 @@
 // Package lifecycle owns local approval storage and the dependency contracts
 // used by the single-writer approval engine. State transitions belong to
 // approvalplan; transport, rendering and signing adapters belong to callers.
-// Legacy callbacks stay on their original engine across v2 reopen. Its audit
-// worker, tables, counters, context, assist admission and goroutines belong to
-// one legacy service created by New. Its single-slot assist pool is independent
-// of the v2 pool. Only service Close cancels and joins these resources.
-// Replacement v2 engines do not take over legacy state.
+// Storage uncertainty permanently stops a v2 generation under its writer lock.
+// Availability and every v2 operation retain that cause until replacement;
+// Run joins interrupted effects before returning it. Recovery belongs to callers.
+// NewLegacyService creates the independent v1 owner. Pass the same service in
+// Config.LegacyService across v2 replacements and route legacy callbacks to it.
+// Engine.Close joins only v2 work; the runtime separately closes LegacyService
+// at process shutdown, joining its audit worker, assist pool and requests.
 // ReserveLegacy admits a preparing request and waits for its sole assist attempt.
 // The caller builds one immutable PreparedLegacyApproval from the returned
 // snapshot and render context, then DeliverLegacy compares the notifier copy

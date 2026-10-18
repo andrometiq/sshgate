@@ -50,9 +50,9 @@ func legacyInstanceID(n int) string { return fmt.Sprintf("%032x", n) }
 func preparedFixture(t *testing.T) (*Engine, *preparedNotifier) {
 	t.Helper()
 	e, _, _, _ := engineFixture(t)
-	t.Cleanup(func() { e.Close() })
+	t.Cleanup(func() { closeLegacyFixture(e) })
 	n := &preparedNotifier{destination: LegacyDestination{ChatID: 123, TopicID: 456}}
-	e.config.LegacyNotifier = n
+	e.legacy.config.LegacyNotifier = n
 	return e, n
 }
 func legacyInput(t *testing.T) assist.Input {
@@ -132,7 +132,7 @@ func TestPreparedLegacyDeepCopies(t *testing.T) {
 func TestLegacyPreparedActivationAndAudit(t *testing.T) {
 	e, n := preparedFixture(t)
 	sink := &legacyAuditSink{}
-	e.config.AuditWriter = sink
+	e.legacy.config.AuditWriter = sink
 	r := reservePrepared(t, e, 102)
 	n.artifact = preparedArtifact(t, r)
 	vote := reservationVote(r)
@@ -191,7 +191,7 @@ func TestLegacyDeliveryFailuresNeverActivate(t *testing.T) {
 				case "cancel":
 					return LegacyDelivery{}, context.Canceled
 				case "close":
-					go e.Close()
+					go closeLegacyFixture(e)
 					<-e.legacy.ctx.Done()
 					return LegacyDelivery{AllDelivered: true}, nil
 				default:
@@ -205,9 +205,9 @@ func TestLegacyDeliveryFailuresNeverActivate(t *testing.T) {
 			if r.Request().Wait().Status == "approved" {
 				t.Fatal("failed delivery approved")
 			}
-			e.mu.Lock()
+			e.legacy.mu.Lock()
 			live := r.request.live
-			e.mu.Unlock()
+			e.legacy.mu.Unlock()
 			if live {
 				t.Fatal("failed delivery activated")
 			}
@@ -334,7 +334,7 @@ func TestLegacyAssistTerminalBeforeDelivery(t *testing.T) {
 			pool := assist.NewPool(1, assist.Timers{Now: e.config.Clock.Wall, After: func(time.Duration) <-chan time.Time { return timer }})
 			e.legacy.assistPool.Close()
 			e.legacy.assistPool = pool
-			e.config.Assessor = assessorFunc(func(ctx context.Context, in assist.Input) (ap.AssistResult, error) {
+			e.legacy.config.Assessor = assessorFunc(func(ctx context.Context, in assist.Input) (ap.AssistResult, error) {
 				calls.Add(1)
 				close(entered)
 				if mode == "recovery" {
@@ -539,18 +539,18 @@ func TestLegacyPreparationCancellation(t *testing.T) {
 				done <- err
 			}()
 			<-entered
-			e.mu.Lock()
+			e.legacy.mu.Lock()
 			var request *LegacyRequest
 			for _, r := range e.legacy.requests {
 				request = r
 			}
-			e.mu.Unlock()
+			e.legacy.mu.Unlock()
 			if mode == "close" {
-				if err := e.Close(); err != nil {
+				if err := closeLegacyFixture(e); err != nil {
 					t.Fatal(err)
 				}
 			} else if mode == "abandon" {
-				e.CancelLegacy(&LegacyReservation{engine: e, request: request})
+				e.CancelLegacy(&LegacyReservation{service: e.legacy, request: request})
 			} else {
 				cancel()
 			}
@@ -589,9 +589,9 @@ func TestLegacyDeliveryExpiryAndDisconnect(t *testing.T) {
 				if mode == "disconnect" {
 					cancel()
 				} else {
-					e.mu.Lock()
+					e.legacy.mu.Lock()
 					r.request.deadline = e.config.Clock.Elapsed()
-					e.mu.Unlock()
+					e.legacy.mu.Unlock()
 				}
 				return LegacyDelivery{AllDelivered: true}, nil
 			}
@@ -607,9 +607,9 @@ func TestLegacyDeliveryExpiryAndDisconnect(t *testing.T) {
 
 func TestLegacyPreparationSurvivesActualV2Recovery(t *testing.T) {
 	e, clock, store, _ := engineFixture(t)
-	defer e.Close()
+	defer closeLegacyFixture(e)
 	n := &preparedNotifier{destination: LegacyDestination{ChatID: 123}}
-	e.config.LegacyNotifier = n
+	e.legacy.config.LegacyNotifier = n
 	submitJob(t, e, 1)
 	clock.Advance(6 * time.Second)
 	entered, release := make(chan struct{}), make(chan struct{})
@@ -643,6 +643,7 @@ func TestLegacyPreparationSurvivesActualV2Recovery(t *testing.T) {
 	if err := receiveNotify(t, stopped); err == nil {
 		t.Fatal("missing storage failure")
 	}
+	e.Close()
 	store.fail = false
 	reopened, err := New(e.config)
 	if err != nil {
@@ -657,16 +658,16 @@ func TestLegacyPreparationSurvivesActualV2Recovery(t *testing.T) {
 	for i := 0; i < 2; i++ {
 		r := first.r
 		if i == 1 {
-			r = reservePrepared(t, e, 202)
+			r = reservePrepared(t, reopened, 202)
 		}
 		if r.RenderContext().Assist.State != ap.AssistReady {
 			t.Fatalf("legacy assist interrupted by recovery: %+v", r.RenderContext().Assist)
 		}
 		n.artifact = preparedArtifact(t, r)
-		if err := e.DeliverLegacy(r, n.artifact); err != nil {
+		if err := reopened.DeliverLegacy(r, n.artifact); err != nil {
 			t.Fatal(err)
 		}
-		if !legacyTap(t, e, reservationVote(r)).Resolved || r.Request().Wait().Status != "approved" {
+		if !legacyTap(t, reopened, reservationVote(r)).Resolved || r.Request().Wait().Status != "approved" {
 			t.Fatal("legacy activation lost")
 		}
 	}
@@ -693,9 +694,9 @@ func TestLegacyBlockedDeliveryResolution(t *testing.T) {
 				e.CancelLegacy(r)
 			} else {
 				want = "timeout"
-				e.mu.Lock()
+				e.legacy.mu.Lock()
 				r.request.deadline = e.config.Clock.Elapsed()
-				e.mu.Unlock()
+				e.legacy.mu.Unlock()
 			}
 			if err := receiveNotify(t, done); err == nil {
 				t.Fatal("resolved delivery activated")
