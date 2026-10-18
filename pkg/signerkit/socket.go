@@ -26,6 +26,18 @@ type RequestHandler interface {
 	HandleSignRequest(ctx context.Context, conn io.ReadWriter) error
 }
 
+// PeerCredentials identifies the connection's peer as reported by the kernel.
+type PeerCredentials struct {
+	UID uint32
+}
+
+// PeerAwareHandler optionally receives kernel peer credentials. A nil peer means
+// identity could not be established; handlers must refuse principal-scoped work.
+// Legacy RequestHandler implementations retain their existing dispatch path.
+type PeerAwareHandler interface {
+	HandleSignRequestWithPeer(ctx context.Context, conn io.ReadWriter, peer *PeerCredentials) error
+}
+
 // Server binds a Unix-domain socket at Path and dispatches accepted
 // connections to Handler. One JSON request per connection; the Server
 // itself owns the accept loop and per-connection deadlines, but does
@@ -38,6 +50,9 @@ type RequestHandler interface {
 type Server struct {
 	Path    string
 	Handler RequestHandler
+
+	// Tests may inject a peer resolver; production uses kernel credentials.
+	peerCredentials func(*net.UnixConn) (uint32, error)
 
 	// HandlerTimeout bounds a single connection's lifetime: request read
 	// + approval wait + response write, all under one absolute deadline
@@ -200,7 +215,23 @@ func (s *Server) serveOne(ctx context.Context, conn net.Conn, timeout time.Durat
 	connCtx, cancel := context.WithTimeout(ctx, waitBudget)
 	defer cancel()
 
-	if err := s.Handler.HandleSignRequest(connCtx, conn); err != nil {
+	var err error
+	if handler, ok := s.Handler.(PeerAwareHandler); ok {
+		var peer *PeerCredentials
+		if unixConn, ok := conn.(*net.UnixConn); ok {
+			resolve := s.peerCredentials
+			if resolve == nil {
+				resolve = socketPeerUID
+			}
+			if uid, resolveErr := resolve(unixConn); resolveErr == nil {
+				peer = &PeerCredentials{UID: uid}
+			}
+		}
+		err = handler.HandleSignRequestWithPeer(connCtx, conn, peer)
+	} else {
+		err = s.Handler.HandleSignRequest(connCtx, conn)
+	}
+	if err != nil {
 		// Handler errors are surfaced to operators; the protocol-level
 		// response (if any) was the handler's responsibility.
 		fmt.Fprintf(os.Stderr, "signer: handler: %v\n", err)
