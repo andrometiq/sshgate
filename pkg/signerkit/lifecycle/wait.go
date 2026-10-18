@@ -17,6 +17,11 @@ type WaitResult struct {
 // WaitMany waits for a confirmed change to any requested record. A zero budget
 // reads immediately. Missing and foreign IDs both answer not_found.
 func (e *Engine) WaitMany(ctx context.Context, principal string, requestIDs []string, wait time.Duration) (WaitResult, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if err := e.availabilityLocked(); err != nil {
+		return WaitResult{}, err
+	}
 	if len(requestIDs) == 0 || len(requestIDs) > ap.AwaitMaxIDs || wait < 0 || wait > ap.AwaitMaxWait {
 		return WaitResult{}, &ap.CodeError{Code: ap.CodeInvalidRequest}
 	}
@@ -29,8 +34,6 @@ func (e *Engine) WaitMany(ctx context.Context, principal string, requestIDs []st
 		seen[id] = true
 		keys[i] = ap.RecordKey(principal, id)
 	}
-	e.mu.Lock()
-	defer e.mu.Unlock()
 	if err := ctx.Err(); err != nil {
 		return WaitResult{}, err
 	}
@@ -73,6 +76,9 @@ func (e *Engine) WaitMany(ctx context.Context, principal string, requestIDs []st
 	case <-ctx.Done():
 	}
 	e.mu.Lock()
+	if err := e.availabilityLocked(); err != nil {
+		return WaitResult{}, err
+	}
 	if err := ctx.Err(); err != nil {
 		return WaitResult{}, err
 	}
@@ -90,8 +96,8 @@ func (e *Engine) WaitMany(ctx context.Context, principal string, requestIDs []st
 }
 
 func (e *Engine) waitSummariesLocked(keys []string) ([]ap.Summary, error) {
-	if e.stopping {
-		return nil, unavailable()
+	if err := e.availabilityLocked(); err != nil {
+		return nil, err
 	}
 	summaries := make([]ap.Summary, 0, len(keys))
 	now := e.now()

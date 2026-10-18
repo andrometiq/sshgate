@@ -19,11 +19,11 @@ type LegacyInstance struct {
 	RequestID string
 }
 
-// LegacyReservation is a preparation capability bound to one engine/request.
+// LegacyReservation is a preparation capability bound to one legacy service/request.
 // It returns only copies of the frozen rendering inputs. ReserveLegacy has
 // completed the one assist attempt before returning it.
 type LegacyReservation struct {
-	engine   *Engine
+	service  *LegacyService
 	request  *LegacyRequest
 	instance string
 	snapshot []byte
@@ -37,16 +37,16 @@ func (r *LegacyReservation) RenderContext() LegacyRenderContext { return cloneLe
 // ReserveLegacy admits an untappable request, freezes destination and snapshot,
 // and waits for terminal assist. The raw challenge stays only in preparation
 // material; the request table and tombstone use its hash.
-func (e *Engine) ReserveLegacy(ctx context.Context, instance LegacyInstance, snapshot []byte, input assist.Input) (*LegacyReservation, error) {
+func (e *LegacyService) ReserveLegacy(ctx context.Context, instance LegacyInstance, snapshot []byte, input assist.Input) (*LegacyReservation, error) {
 	if !ap.ValidEpoch(instance.ID) || len(snapshot) == 0 {
 		return nil, errors.New("lifecycle: invalid legacy instance or snapshot")
 	}
 	e.mu.Lock()
-	if e.legacy.closed || e.config.LegacyNotifier == nil {
+	if e.closed || e.config.LegacyNotifier == nil {
 		e.mu.Unlock()
 		return nil, unavailable()
 	}
-	for _, r := range e.legacy.requests {
+	for _, r := range e.requests {
 		if r.instance == instance.ID {
 			e.mu.Unlock()
 			return nil, errors.New("lifecycle: duplicate legacy instance")
@@ -68,11 +68,11 @@ func (e *Engine) ReserveLegacy(ctx context.Context, instance LegacyInstance, sna
 		return nil, err
 	}
 	r.instance = instance.ID
-	reservation := &LegacyReservation{engine: e, request: r, instance: instance.ID, snapshot: bytes.Clone(snapshot), render: LegacyRenderContext{Handle: handle, Challenge: challenge}}
+	reservation := &LegacyReservation{service: e, request: r, instance: instance.ID, snapshot: bytes.Clone(snapshot), render: LegacyRenderContext{Handle: handle, Challenge: challenge}}
 	deadline := e.config.Clock.Wall().Add(e.config.AssistTimeout)
-	e.legacy.joined.Add(1)
+	e.joined.Add(1)
 	e.mu.Unlock()
-	defer e.legacy.joined.Done()
+	defer e.joined.Done()
 	reservation.render.Destination = e.config.LegacyNotifier.Destination()
 	if reservation.render.Destination.ChatID == 0 || reservation.render.Destination.TopicID < 0 {
 		e.CancelLegacy(reservation)
@@ -80,7 +80,7 @@ func (e *Engine) ReserveLegacy(ctx context.Context, instance LegacyInstance, sna
 	}
 	workCtx := r.ctx
 	completed := make(chan assist.Snapshot, 1)
-	outcome := e.legacy.assistPool.TrySubmit(workCtx, e.config.Assessor, input, deadline, func(s assist.Snapshot) { completed <- s })
+	outcome := e.assistPool.TrySubmit(workCtx, e.config.Assessor, input, deadline, func(s assist.Snapshot) { completed <- s })
 	switch outcome {
 	case assist.Closed:
 		e.CancelLegacy(reservation)
@@ -108,7 +108,7 @@ func (e *Engine) ReserveLegacy(ctx context.Context, instance LegacyInstance, sna
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.expireLegacyLocked(e.now())
-	if e.legacy.closed || r.result.Status != "" {
+	if e.closed || r.result.Status != "" {
 		return nil, unavailable()
 	}
 	return reservation, nil
@@ -116,10 +116,10 @@ func (e *Engine) ReserveLegacy(ctx context.Context, instance LegacyInstance, sna
 
 // CancelLegacy drops an abandoned preparation (for example a render mismatch).
 // It cancels preparation and delivery; a live approval is already committed.
-func (e *Engine) CancelLegacy(reservation *LegacyReservation) {
+func (e *LegacyService) CancelLegacy(reservation *LegacyReservation) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if reservation != nil && reservation.engine == e && !reservation.request.live {
+	if reservation != nil && reservation.service == e && !reservation.request.live {
 		e.resolveLegacyLocked(reservation.request, LegacyResult{Status: "error"})
 	}
 }
@@ -127,9 +127,9 @@ func (e *Engine) CancelLegacy(reservation *LegacyReservation) {
 // DeliverLegacy compares the notifier's complete frozen copy before I/O. No
 // caller can activate separately: only a successful all-delivered report does.
 // A reservation is single-use even if delivery fails; errors never include data.
-func (e *Engine) DeliverLegacy(reservation *LegacyReservation, artifact *PreparedLegacyApproval) error {
+func (e *LegacyService) DeliverLegacy(reservation *LegacyReservation, artifact *PreparedLegacyApproval) error {
 	e.mu.Lock()
-	if e.legacy.closed || reservation == nil || reservation.engine != e {
+	if e.closed || reservation == nil || reservation.service != e {
 		e.mu.Unlock()
 		return unavailable()
 	}
@@ -147,9 +147,9 @@ func (e *Engine) DeliverLegacy(reservation *LegacyReservation, artifact *Prepare
 	artifact = &PreparedLegacyApproval{data: artifact.Data()}
 	r.artifact = artifact
 	r.delivering = true
-	e.legacy.joined.Add(1)
+	e.joined.Add(1)
 	e.mu.Unlock()
-	defer e.legacy.joined.Done()
+	defer e.joined.Done()
 	prepared, err := e.config.LegacyNotifier.Prepared(reservation.instance)
 	if err != nil || !sameLegacyPrepared(artifact, prepared) {
 		e.mu.Lock()
@@ -159,7 +159,7 @@ func (e *Engine) DeliverLegacy(reservation *LegacyReservation, artifact *Prepare
 	}
 	e.mu.Lock()
 	e.expireLegacyLocked(e.now())
-	if e.legacy.closed || r.result.Status != "" {
+	if e.closed || r.result.Status != "" {
 		e.mu.Unlock()
 		return unavailable()
 	}
@@ -168,7 +168,7 @@ func (e *Engine) DeliverLegacy(reservation *LegacyReservation, artifact *Prepare
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.expireLegacyLocked(e.now())
-	if e.legacy.closed || r.result.Status != "" {
+	if e.closed || r.result.Status != "" {
 		return unavailable()
 	}
 	if err != nil || !report.AllDelivered {
