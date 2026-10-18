@@ -1245,7 +1245,11 @@ func (d *Daemon) handleTransfer(ctx context.Context, conn io.ReadWriter, line []
 // Reveal is never set. No new SigPayload field — both legs ride inside
 // SigPayload.Cmd like SSHGATE_UPDATE, so payload_golden_test.go stays byte-safe.
 func (d *Daemon) signTransferLegs(sendCmd, sendFP, recvCmd, recvFP string, ttl int64) (send, recv *transferLeg, err error) {
-	now := d.now().Unix()
+	return d.signTransferLegsAt(sendCmd, sendFP, recvCmd, recvFP, ttl, d.now().Unix())
+}
+
+// signTransferLegsAt signs both legs at the supplied Unix timestamp.
+func (d *Daemon) signTransferLegsAt(sendCmd, sendFP, recvCmd, recvFP string, ttl, now int64) (send, recv *transferLeg, err error) {
 	signOne := func(cmd, host string) (*transferLeg, error) {
 		nonce, err := newNonce()
 		if err != nil {
@@ -1571,8 +1575,12 @@ func grantCovers(g grant, cmd string) bool {
 // encoded signed strings. Each signature uses an independent random
 // nonce.
 func (d *Daemon) signAll(cmds []signRequestCmd) ([]signResponseSig, error) {
+	return d.signAt(cmds, d.now().Unix())
+}
+
+// signAt signs each command at the supplied Unix timestamp, with its own nonce.
+func (d *Daemon) signAt(cmds []signRequestCmd, now int64) ([]signResponseSig, error) {
 	out := make([]signResponseSig, len(cmds))
-	now := d.now().Unix()
 	for i, c := range cmds {
 		nonce, err := newNonce()
 		if err != nil {
