@@ -833,6 +833,44 @@ the result after approval; macOS and bundle installs without an executor get
 
 ---
 
+## Release gate: the journey E2E
+
+The v0.2 release is not done until a real user's journey passes end to end, automatically, on every
+push and pull request. Status: in progress.
+
+**What it is.** `make test-journey` and a required `journey` CI job drive the installed binaries
+(`sshgate`, `sshgate-mcp`, the local Telegram signer as its systemd service, the gate on two SSH
+targets) through a real MCP client over stdio. A fake Telegram Bot API process stands in for the
+phone: it taps the rendered Approve or Deny button now, after the synchronous wait, or never. The
+installation follows the README's commands as literally as a container allows. Nothing leaves the
+runner: no real Telegram, no external model calls, no published ports.
+
+**Journey.** Fresh install → useful read-only diagnosis (and a Tier-1 write refused) → approve
+immediately → a two-command fix approved late in the window → deny → never, and a tap after expiry
+→ signer restart while an approval is pending → two-server secret transfer. Each step asserts real
+effects on the targets (file bytes, modes, service health), card edits, signer and gate audit lines,
+and that no secret appears in any transcript. Work item 2 extends it: durable pending approvals
+across a restart (Phase B), async submit, late approval and result collection, and the refusal of
+`async` with `reveal` (Phase C).
+
+**Rules.** Every scheduled scenario runs; none is skipped when infrastructure is missing (that is
+a failure). No blind sleeps or automatic reruns. Failure artifacts exclude keys, tokens and secret
+fixtures. The read jail is exercised in the dedicated jail workflow; the journey's targets assert the
+classifier fallback honestly (`enforcement=classifier`) rather than claim a jail pass. The suite
+never edits `dist/gate`; it tests the committed gate and the candidate gate separately.
+
+**Steps.** J1 the fake Telegram service (`tests/journey/faketg`, `tests/journey/cmd/fake-telegram`);
+J2 the disposable rig (controller container with systemd, two SSH targets on an internal network,
+literal install, MCP transport); J3 the main-line scenarios; J4 the Makefile target, CI job and
+testing docs; J5 the work item 2 extensions. J1 and J2 run in parallel; J3 needs both; J4 needs J3;
+J5 lands with work item 2's Phases B and C.
+
+**Acceptance.** `make test-journey` green twice in a row locally and in CI within a 20-minute test
+budget; `make e2e` includes it; one outside tester also completes a cold install from the README by
+hand before the release is tagged.
+
+---
+
 ## Work item 3: Signature terminal (#81)
 
 **Definition.** A transparent, gated SSH terminal. An operator, or any terminal-capable agent,
