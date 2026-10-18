@@ -82,9 +82,11 @@ func cloneLegacyContext(c LegacyRenderContext) LegacyRenderContext {
 	c.Metadata = bytes.Clone(c.Metadata)
 	c.Handle = strings.Clone(c.Handle)
 	c.Challenge = strings.Clone(c.Challenge)
+	c.Assist.State = ap.AssistState(strings.Clone(string(c.Assist.State)))
 	c.Assist.Reason = strings.Clone(c.Assist.Reason)
 	if c.Assist.Result != nil {
 		result := *c.Assist.Result
+		result.Alignment = ap.Alignment(strings.Clone(string(result.Alignment)))
 		result.Effects = slices.Clone(result.Effects)
 		result.Concerns = slices.Clone(result.Concerns)
 		result.Summary = strings.Clone(result.Summary)
@@ -95,6 +97,7 @@ func cloneLegacyContext(c LegacyRenderContext) LegacyRenderContext {
 			result.Effects[i] = strings.Clone(result.Effects[i])
 		}
 		for i := range result.Concerns {
+			result.Concerns[i].Severity = ap.Severity(strings.Clone(string(result.Concerns[i].Severity)))
 			result.Concerns[i].Text = strings.Clone(result.Concerns[i].Text)
 		}
 		c.Assist.Result = &result

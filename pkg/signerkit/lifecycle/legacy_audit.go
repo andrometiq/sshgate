@@ -24,21 +24,21 @@ type legacyAuditWorker struct {
 }
 
 func (e *Engine) startLegacyAuditLocked() {
-	if e.legacyAudit != nil {
+	if e.legacy.audit != nil {
 		return
 	}
-	e.legacyAudit = &legacyAuditWorker{calls: make(chan legacyAuditCall)}
-	e.legacyJoined.Add(1)
-	go e.runLegacyAudit(e.legacyAudit)
+	e.legacy.audit = &legacyAuditWorker{calls: make(chan legacyAuditCall)}
+	e.legacy.joined.Add(1)
+	go e.runLegacyAudit(e.legacy.audit)
 }
 
 func (e *Engine) runLegacyAudit(worker *legacyAuditWorker) {
-	defer e.legacyJoined.Done()
+	defer e.legacy.joined.Done()
 	ticker := newReconcileTicker()
 	defer ticker.Stop()
 	for {
 		select {
-		case <-e.legacyContext.Done():
+		case <-e.legacy.ctx.Done():
 			return
 		case call := <-worker.calls:
 			e.attemptLegacyAudit(worker, call.metadata)
@@ -57,21 +57,21 @@ func (e *Engine) flushLegacyAudit() { e.callLegacyAudit(nil) }
 
 func (e *Engine) callLegacyAudit(metadata *ap.AuditMetadata) {
 	e.mu.Lock()
-	if e.legacyClosed {
+	if e.legacy.closed {
 		e.mu.Unlock()
 		return
 	}
 	e.startLegacyAuditLocked()
-	worker := e.legacyAudit
+	worker := e.legacy.audit
 	e.mu.Unlock()
 	call := legacyAuditCall{metadata: metadata, done: make(chan struct{})}
 	select {
-	case <-e.legacyContext.Done():
+	case <-e.legacy.ctx.Done():
 		return
 	case worker.calls <- call:
 	}
 	select {
-	case <-e.legacyContext.Done():
+	case <-e.legacy.ctx.Done():
 	case <-call.done:
 	}
 }
@@ -79,7 +79,7 @@ func (e *Engine) callLegacyAudit(metadata *ap.AuditMetadata) {
 // Fail-open lines are never retried or put in the durable outbox.
 func (e *Engine) attemptLegacyAudit(worker *legacyAuditWorker, metadata *ap.AuditMetadata) {
 	e.mu.Lock()
-	if e.legacyClosed || e.config.AuditWriter == nil {
+	if e.legacy.closed || e.config.AuditWriter == nil {
 		e.mu.Unlock()
 		return
 	}
@@ -97,7 +97,7 @@ func (e *Engine) attemptLegacyAudit(worker *legacyAuditWorker, metadata *ap.Audi
 	worker.lastAudit = now
 	writer := e.config.AuditWriter
 	e.mu.Unlock()
-	if err := writer.WriteApproval(e.legacyContext, *metadata); err != nil {
+	if err := writer.WriteApproval(e.legacy.ctx, *metadata); err != nil {
 		slog.Warn("lifecycle: legacy audit write failed")
 	}
 }

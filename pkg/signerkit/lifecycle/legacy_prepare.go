@@ -42,7 +42,7 @@ func (e *Engine) ReserveLegacy(ctx context.Context, instance LegacyInstance, sna
 		return nil, errors.New("lifecycle: invalid legacy instance or snapshot")
 	}
 	e.mu.Lock()
-	if e.legacyClosed || e.config.LegacyNotifier == nil {
+	if e.legacy.closed || e.config.LegacyNotifier == nil {
 		e.mu.Unlock()
 		return nil, unavailable()
 	}
@@ -70,38 +70,26 @@ func (e *Engine) ReserveLegacy(ctx context.Context, instance LegacyInstance, sna
 	r.instance = instance.ID
 	reservation := &LegacyReservation{engine: e, request: r, instance: instance.ID, snapshot: bytes.Clone(snapshot), render: LegacyRenderContext{Handle: handle, Challenge: challenge}}
 	deadline := e.config.Clock.Wall().Add(e.config.AssistTimeout)
-	e.legacyJoined.Add(1)
+	e.legacy.joined.Add(1)
 	e.mu.Unlock()
-	defer e.legacyJoined.Done()
+	defer e.legacy.joined.Done()
 	reservation.render.Destination = e.config.LegacyNotifier.Destination()
 	if reservation.render.Destination.ChatID == 0 || reservation.render.Destination.TopicID < 0 {
 		e.CancelLegacy(reservation)
 		return nil, errors.New("lifecycle: invalid legacy destination")
 	}
-	workCtx, cancel := context.WithCancel(ctx)
-	stop := context.AfterFunc(e.legacyContext, cancel)
-	defer func() { stop(); cancel() }()
+	workCtx := r.ctx
 	completed := make(chan assist.Snapshot, 1)
-	outcome := assist.Full
-	if e.config.AssistPool != nil {
-		outcome = e.config.AssistPool.TrySubmit(workCtx, e.config.Assessor, input, deadline, func(s assist.Snapshot) { completed <- s })
-	}
+	outcome := e.legacy.assistPool.TrySubmit(workCtx, e.config.Assessor, input, deadline, func(s assist.Snapshot) { completed <- s })
 	switch outcome {
 	case assist.Closed:
 		e.CancelLegacy(reservation)
 		return nil, unavailable()
 	case assist.Full:
-		reason := assist.ReasonBusy
-		if e.config.AssistPool == nil {
-			reason = assist.ReasonFailed
-		}
-		reservation.render.Assist = assist.Snapshot{State: ap.AssistUnavailable, Reason: reason}
+		reservation.render.Assist = assist.Snapshot{State: ap.AssistUnavailable, Reason: assist.ReasonBusy}
 	case assist.Accepted:
 		select {
 		case reservation.render.Assist = <-completed:
-		case <-e.effectContext.Done():
-			e.config.AssistPool.Close()
-			reservation.render.Assist = assist.Snapshot{State: ap.AssistUnavailable, Reason: assist.ReasonCanceled}
 		case <-r.done:
 			return nil, unavailable()
 		case <-workCtx.Done():
@@ -120,18 +108,18 @@ func (e *Engine) ReserveLegacy(ctx context.Context, instance LegacyInstance, sna
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.expireLegacyLocked(e.now())
-	if e.legacyClosed || r.result.Status != "" {
+	if e.legacy.closed || r.result.Status != "" {
 		return nil, unavailable()
 	}
 	return reservation, nil
 }
 
 // CancelLegacy drops an abandoned preparation (for example a render mismatch).
-// It cannot cancel a live approval or interfere with an in-flight delivery.
+// It cancels preparation and delivery; a live approval is already committed.
 func (e *Engine) CancelLegacy(reservation *LegacyReservation) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if reservation != nil && reservation.engine == e && !reservation.request.live && !reservation.request.delivering {
+	if reservation != nil && reservation.engine == e && !reservation.request.live {
 		e.resolveLegacyLocked(reservation.request, LegacyResult{Status: "error"})
 	}
 }
@@ -141,7 +129,7 @@ func (e *Engine) CancelLegacy(reservation *LegacyReservation) {
 // A reservation is single-use even if delivery fails; errors never include data.
 func (e *Engine) DeliverLegacy(reservation *LegacyReservation, artifact *PreparedLegacyApproval) error {
 	e.mu.Lock()
-	if e.legacyClosed || reservation == nil || reservation.engine != e {
+	if e.legacy.closed || reservation == nil || reservation.engine != e {
 		e.mu.Unlock()
 		return unavailable()
 	}
@@ -159,9 +147,9 @@ func (e *Engine) DeliverLegacy(reservation *LegacyReservation, artifact *Prepare
 	artifact = &PreparedLegacyApproval{data: artifact.Data()}
 	r.artifact = artifact
 	r.delivering = true
-	e.legacyJoined.Add(1)
+	e.legacy.joined.Add(1)
 	e.mu.Unlock()
-	defer e.legacyJoined.Done()
+	defer e.legacy.joined.Done()
 	prepared, err := e.config.LegacyNotifier.Prepared(reservation.instance)
 	if err != nil || !sameLegacyPrepared(artifact, prepared) {
 		e.mu.Lock()
@@ -169,21 +157,18 @@ func (e *Engine) DeliverLegacy(reservation *LegacyReservation, artifact *Prepare
 		e.mu.Unlock()
 		return errors.New("legacy approval render does not match the request")
 	}
-	ctx, cancel := context.WithCancel(r.ctx)
-	stop := context.AfterFunc(e.legacyContext, cancel)
-	defer func() { stop(); cancel() }()
 	e.mu.Lock()
 	e.expireLegacyLocked(e.now())
-	if e.legacyClosed || r.result.Status != "" {
+	if e.legacy.closed || r.result.Status != "" {
 		e.mu.Unlock()
 		return unavailable()
 	}
 	e.mu.Unlock()
-	report, err := e.config.LegacyNotifier.Deliver(ctx, &PreparedLegacyApproval{data: artifact.Data()})
+	report, err := e.config.LegacyNotifier.Deliver(r.ctx, &PreparedLegacyApproval{data: artifact.Data()})
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.expireLegacyLocked(e.now())
-	if e.legacyClosed || r.result.Status != "" {
+	if e.legacy.closed || r.result.Status != "" {
 		return unavailable()
 	}
 	if err != nil || !report.AllDelivered {

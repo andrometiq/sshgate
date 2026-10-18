@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
@@ -11,6 +12,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/karthikeyan5/sshgate/pkg/signerkit/assist"
 	ap "github.com/karthikeyan5/sshgate/src/approvalplan"
@@ -190,7 +192,7 @@ func TestLegacyDeliveryFailuresNeverActivate(t *testing.T) {
 					return LegacyDelivery{}, context.Canceled
 				case "close":
 					go e.Close()
-					<-e.legacyContext.Done()
+					<-e.legacy.ctx.Done()
 					return LegacyDelivery{AllDelivered: true}, nil
 				default:
 					return LegacyDelivery{}, errors.New("private transport failure")
@@ -327,13 +329,18 @@ func TestLegacyAssistTerminalBeforeDelivery(t *testing.T) {
 			e, n := preparedFixture(t)
 			var calls atomic.Int32
 			entered := make(chan struct{})
+			releaseRecovery := make(chan struct{})
 			timer := make(chan time.Time, 1)
 			pool := assist.NewPool(1, assist.Timers{Now: e.config.Clock.Wall, After: func(time.Duration) <-chan time.Time { return timer }})
-			e.config.AssistPool = pool
+			e.legacy.assistPool.Close()
+			e.legacy.assistPool = pool
 			e.config.Assessor = assessorFunc(func(ctx context.Context, in assist.Input) (ap.AssistResult, error) {
 				calls.Add(1)
 				close(entered)
-				if mode == "watchdog" || mode == "recovery" {
+				if mode == "recovery" {
+					<-releaseRecovery
+				}
+				if mode == "watchdog" {
 					<-ctx.Done()
 					return ap.AssistResult{}, ctx.Err()
 				}
@@ -379,7 +386,7 @@ func TestLegacyAssistTerminalBeforeDelivery(t *testing.T) {
 					timer <- st.T0.Add(5 * time.Second)
 				} else {
 					e.stop()
-					pool.Close()
+					close(releaseRecovery)
 				}
 			}
 			var got answer
@@ -398,7 +405,7 @@ func TestLegacyAssistTerminalBeforeDelivery(t *testing.T) {
 				t.Fatal(got.err)
 			}
 			a := got.r.RenderContext().Assist
-			if mode == "ready" {
+			if mode == "ready" || mode == "recovery" {
 				if a.State != ap.AssistReady || a.Result.Alignment != ap.AlignmentNotAssessed || ap.ValidateAssist(*a.Result) != nil {
 					t.Fatal(a)
 				}
@@ -514,7 +521,7 @@ func TestLegacyDeliverySingleFlightAndCopies(t *testing.T) {
 }
 
 func TestLegacyPreparationCancellation(t *testing.T) {
-	for _, mode := range []string{"disconnect", "close"} {
+	for _, mode := range []string{"disconnect", "close", "abandon"} {
 		t.Run(mode, func(t *testing.T) {
 			e, n := preparedFixture(t)
 			entered, exited := make(chan struct{}), make(chan struct{})
@@ -542,6 +549,8 @@ func TestLegacyPreparationCancellation(t *testing.T) {
 				if err := e.Close(); err != nil {
 					t.Fatal(err)
 				}
+			} else if mode == "abandon" {
+				e.CancelLegacy(&LegacyReservation{engine: e, request: request})
 			} else {
 				cancel()
 			}
@@ -554,7 +563,11 @@ func TestLegacyPreparationCancellation(t *testing.T) {
 				t.Fatal("cancellation stuck")
 			}
 			<-exited
-			if request.Wait().Status != "timeout" || n.calls.Load() != 0 {
+			want := "timeout"
+			if mode == "abandon" {
+				want = "error"
+			}
+			if request.Wait().Status != want || n.calls.Load() != 0 {
 				t.Fatal("cancellation resolved incorrectly")
 			}
 		})
@@ -589,5 +602,193 @@ func TestLegacyDeliveryExpiryAndDisconnect(t *testing.T) {
 				t.Fatal("expiry did not win")
 			}
 		})
+	}
+}
+
+func TestLegacyPreparationSurvivesActualV2Recovery(t *testing.T) {
+	e, clock, store, _ := engineFixture(t)
+	defer e.Close()
+	n := &preparedNotifier{destination: LegacyDestination{ChatID: 123}}
+	e.config.LegacyNotifier = n
+	submitJob(t, e, 1)
+	clock.Advance(6 * time.Second)
+	entered, release := make(chan struct{}), make(chan struct{})
+	var calls atomic.Int32
+	configureAssist(t, e, assessorFunc(func(ctx context.Context, _ assist.Input) (ap.AssistResult, error) {
+		if calls.Add(1) == 1 {
+			close(entered)
+			select {
+			case <-release:
+			case <-ctx.Done():
+				return ap.AssistResult{}, ctx.Err()
+			}
+		}
+		result := readyAssist()
+		result.Effects = []string{"echoes safe"}
+		return result, nil
+	}))
+	type answer struct {
+		r   *LegacyReservation
+		err error
+	}
+	prepared := make(chan answer, 1)
+	go func() {
+		r, err := e.ReserveLegacy(context.Background(), LegacyInstance{ID: legacyInstanceID(201), UID: 7, RequestID: "in-flight"}, []byte("snapshot"), legacyInput(t))
+		prepared <- answer{r, err}
+	}()
+	receiveNotify(t, entered)
+	store.fail = true
+	stopped := make(chan error, 1)
+	go func() { stopped <- e.Run(context.Background()) }()
+	if err := receiveNotify(t, stopped); err == nil {
+		t.Fatal("missing storage failure")
+	}
+	store.fail = false
+	reopened, err := New(e.config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	close(release)
+	first := receiveNotify(t, prepared)
+	if first.err != nil {
+		t.Fatal(first.err)
+	}
+	for i := 0; i < 2; i++ {
+		r := first.r
+		if i == 1 {
+			r = reservePrepared(t, e, 202)
+		}
+		if r.RenderContext().Assist.State != ap.AssistReady {
+			t.Fatalf("legacy assist interrupted by recovery: %+v", r.RenderContext().Assist)
+		}
+		n.artifact = preparedArtifact(t, r)
+		if err := e.DeliverLegacy(r, n.artifact); err != nil {
+			t.Fatal(err)
+		}
+		if !legacyTap(t, e, reservationVote(r)).Resolved || r.Request().Wait().Status != "approved" {
+			t.Fatal("legacy activation lost")
+		}
+	}
+}
+
+func TestLegacyBlockedDeliveryResolution(t *testing.T) {
+	for _, mode := range []string{"expiry", "cancel"} {
+		t.Run(mode, func(t *testing.T) {
+			e, n := preparedFixture(t)
+			r := reservePrepared(t, e, 203)
+			n.artifact = preparedArtifact(t, r)
+			entered := make(chan struct{})
+			n.deliver = func(ctx context.Context, _ *PreparedLegacyApproval) (LegacyDelivery, error) {
+				close(entered)
+				<-ctx.Done()
+				// A transport may report success despite cancellation; it cannot activate.
+				return LegacyDelivery{AllDelivered: true}, nil
+			}
+			done := make(chan error, 1)
+			go func() { done <- e.DeliverLegacy(r, n.artifact) }()
+			receiveNotify(t, entered)
+			want := "error"
+			if mode == "cancel" {
+				e.CancelLegacy(r)
+			} else {
+				want = "timeout"
+				e.mu.Lock()
+				r.request.deadline = e.config.Clock.Elapsed()
+				e.mu.Unlock()
+			}
+			if err := receiveNotify(t, done); err == nil {
+				t.Fatal("resolved delivery activated")
+			}
+			if r.Request().Wait().Status != want || legacyTap(t, e, reservationVote(r)).Resolved {
+				t.Fatal("resolution lost")
+			}
+		})
+	}
+}
+
+func TestPreparedLegacyStringBackingCopies(t *testing.T) {
+	e, _ := preparedFixture(t)
+	data := preparedArtifact(t, reservePrepared(t, e, 204)).Data()
+	result := readyAssist()
+	result.Alignment = ap.AlignmentNotAssessed
+	result.Concerns = []ap.Concern{{Severity: ap.SeverityHigh, Text: "concern"}}
+	result.Effects = []string{"effect"}
+	result.InputDigest = strings.Repeat("a", 64)
+	data.Context.Assist = assist.Snapshot{State: ap.AssistReady, Result: &result}
+	// Give every string (including string-backed enums) writable, distinct storage.
+	var buffers [][]byte
+	var ownStrings func(reflect.Value)
+	ownStrings = func(v reflect.Value) {
+		switch v.Kind() {
+		case reflect.String:
+			if v.Len() != 0 {
+				b := []byte(v.String())
+				buffers = append(buffers, b)
+				v.SetString(unsafe.String(&b[0], len(b)))
+			}
+		case reflect.Pointer:
+			if !v.IsNil() {
+				ownStrings(v.Elem())
+			}
+		case reflect.Struct:
+			for i := 0; i < v.NumField(); i++ {
+				if v.Field(i).CanSet() {
+					ownStrings(v.Field(i))
+				}
+			}
+		case reflect.Slice:
+			for i := 0; i < v.Len(); i++ {
+				ownStrings(v.Index(i))
+			}
+		}
+	}
+	ownStrings(reflect.ValueOf(&data).Elem())
+	p, err := NewPreparedLegacyApproval(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(p.Data())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var want LegacyPreparedData
+	if err := json.Unmarshal(encoded, &want); err != nil {
+		t.Fatal(err)
+	}
+	for _, b := range buffers {
+		b[0] ^= 1
+	}
+	if !reflect.DeepEqual(p.Data(), want) {
+		t.Fatal("constructor retained string backing")
+	}
+	// Each getter must also own all of its string storage.
+	out := p.Data()
+	var mutateStrings func(reflect.Value)
+	mutateStrings = func(v reflect.Value) {
+		switch v.Kind() {
+		case reflect.String:
+			if v.Len() != 0 {
+				unsafe.Slice(unsafe.StringData(v.String()), v.Len())[0] ^= 1
+			}
+		case reflect.Pointer:
+			if !v.IsNil() {
+				mutateStrings(v.Elem())
+			}
+		case reflect.Struct:
+			for i := 0; i < v.NumField(); i++ {
+				if v.Field(i).CanSet() {
+					mutateStrings(v.Field(i))
+				}
+			}
+		case reflect.Slice:
+			for i := 0; i < v.Len(); i++ {
+				mutateStrings(v.Index(i))
+			}
+		}
+	}
+	mutateStrings(reflect.ValueOf(&out).Elem())
+	if !reflect.DeepEqual(p.Data(), want) {
+		t.Fatal("getter retained string backing")
 	}
 }

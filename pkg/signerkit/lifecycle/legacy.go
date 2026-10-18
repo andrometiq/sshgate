@@ -5,7 +5,10 @@ import (
 	"crypto/subtle"
 	"errors"
 	"strconv"
+	"sync"
 	"time"
+
+	"github.com/karthikeyan5/sshgate/pkg/signerkit/assist"
 
 	ap "github.com/karthikeyan5/sshgate/src/approvalplan"
 	"github.com/karthikeyan5/sshgate/src/sigwire"
@@ -30,6 +33,7 @@ type LegacyRequest struct {
 	artifact              *PreparedLegacyApproval
 	live                  bool
 	ctx                   context.Context
+	cancel                context.CancelFunc
 	deadline              time.Duration
 	done                  chan struct{}
 	result                LegacyResult
@@ -47,18 +51,33 @@ type legacyTombstone struct {
 	noise         int
 }
 
-type legacyTable struct {
-	requests   map[string]*LegacyRequest
-	owners     map[legacyOwner]*LegacyRequest
-	tombstones map[string]*legacyTombstone
-	order      []string
+// legacyService is created once by New and stopped only by Close. Engine.mu
+// guards its state; v2 stop and recovery own none of these resources.
+type legacyService struct {
+	ctx          context.Context
+	cancel       context.CancelFunc
+	closed       bool
+	joined       sync.WaitGroup
+	assistPool   *assist.Pool
+	audit        *legacyAuditWorker
+	unknownEnd   time.Duration
+	unknownCount int
+	requests     map[string]*LegacyRequest
+	owners       map[legacyOwner]*LegacyRequest
+	tombstones   map[string]*legacyTombstone
+	order        []string
+}
+
+func newLegacyService(now func() time.Time) *legacyService {
+	ctx, cancel := context.WithCancel(context.Background())
+	return &legacyService{ctx: ctx, cancel: cancel, assistPool: assist.NewPool(1, assist.Timers{Now: now})}
 }
 
 // reserveLegacyLocked is the admission primitive for prepared legacy delivery.
 // The preparation layer supplies freshly minted callback material; no public
 // entry point can mark an undelivered request live.
 func (e *Engine) reserveLegacyLocked(ctx context.Context, uid uint32, requestID, handle, challenge string) (*LegacyRequest, error) {
-	if e.legacyClosed {
+	if e.legacy.closed {
 		return nil, unavailable()
 	}
 	if requestID == "" || !ap.ValidCardHandle(handle) || !ap.ValidChallenge(challenge) {
@@ -80,11 +99,12 @@ func (e *Engine) reserveLegacyLocked(ctx context.Context, uid uint32, requestID,
 		return nil, err
 	}
 	now := e.now()
-	r := &LegacyRequest{owner: owner, handle: handle, challengeHash: ap.ChallengeHash(challenge), ctx: ctx, deadline: now.Elapsed + sigwire.ApprovalWindow, done: make(chan struct{})}
+	requestCtx, cancel := context.WithCancel(ctx)
+	r := &LegacyRequest{owner: owner, handle: handle, challengeHash: ap.ChallengeHash(challenge), ctx: requestCtx, cancel: cancel, deadline: now.Elapsed + sigwire.ApprovalWindow, done: make(chan struct{})}
 	e.legacy.requests[handle], e.legacy.owners[owner] = r, r
-	e.legacyJoined.Add(1)
+	e.legacy.joined.Add(1)
 	go func() {
-		defer e.legacyJoined.Done()
+		defer e.legacy.joined.Done()
 		ticker := newReconcileTicker()
 		defer ticker.Stop()
 		for {
@@ -116,6 +136,7 @@ func (e *Engine) resolveLegacyLocked(r *LegacyRequest, result LegacyResult) {
 		return
 	}
 	r.result = result
+	r.cancel()
 	delete(e.legacy.requests, r.handle)
 	delete(e.legacy.owners, r.owner)
 	e.legacy.tombstones[r.handle] = &legacyTombstone{owner: r.owner, challengeHash: r.challengeHash, result: result, noise: r.noise}
@@ -148,7 +169,7 @@ type LegacyTapResult struct {
 // adapter must not call Close from answer. Audit failures never change a result.
 func (e *Engine) VoteLegacy(vote ap.CastVote, answer func(LegacyTapResult)) (LegacyTapResult, error) {
 	e.mu.Lock()
-	if e.legacyClosed {
+	if e.legacy.closed {
 		e.mu.Unlock()
 		return LegacyTapResult{}, unavailable()
 	}
@@ -164,9 +185,9 @@ func (e *Engine) VoteLegacy(vote ap.CastVote, answer func(LegacyTapResult)) (Leg
 		e.mu.Unlock()
 		return result, nil
 	}
-	e.legacyJoined.Add(1)
+	e.legacy.joined.Add(1)
 	e.mu.Unlock()
-	defer e.legacyJoined.Done()
+	defer e.legacy.joined.Done()
 	answer(result)
 	if metadata != nil {
 		e.writeLegacyAudit(*metadata)
@@ -209,14 +230,14 @@ func (e *Engine) legacyVoteLocked(vote ap.CastVote, now ap.Now) (LegacyTapResult
 		}
 	}
 	if noise == nil {
-		if now.Elapsed >= e.legacyUnknownEnd {
-			e.legacyUnknownCount = 0
-			e.legacyUnknownEnd = now.Elapsed + legacyAuditInterval
+		if now.Elapsed >= e.legacy.unknownEnd {
+			e.legacy.unknownCount = 0
+			e.legacy.unknownEnd = now.Elapsed + legacyAuditInterval
 		}
-		noise = &e.legacyUnknownCount
+		noise = &e.legacy.unknownCount
 	}
 	if *noise >= 32 {
-		e.legacyAudit.dropped++
+		e.legacy.audit.dropped++
 		return result, nil
 	}
 	*noise++
