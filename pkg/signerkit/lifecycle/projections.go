@@ -14,6 +14,7 @@ type recordCharge struct {
 	cards                        []string
 	full, live                   bool
 	reserved                     int64
+	decidedAt                    time.Time
 }
 type counters struct {
 	records, full, live int
@@ -50,16 +51,17 @@ func (i index) resolve(value string) (string, error) {
 }
 
 type projections struct {
-	records                    map[string]recordCharge
-	grants                     map[string]*grantProjection
-	newest                     map[grantOwner]string
-	cards, handles, requestIDs index
-	total                      counters
-	principals                 map[string]counters
-	due                        map[string]time.Time
-	work                       map[string]ap.Work
-	unflushed                  map[string]struct{}
-	quarantined                map[string]int64
+	records                          map[string]recordCharge
+	grants                           map[string]*grantProjection
+	newest                           map[grantOwner]string
+	cards, handles, requestIDs       index
+	total                            counters
+	principals                       map[string]counters
+	due                              map[string]time.Time
+	work                             map[string]ap.Work
+	unflushed                        map[string]struct{}
+	quarantined                      map[string]int64
+	shedCandidates, deleteCandidates reclamationQueue
 }
 
 func newProjections() projections {
@@ -91,6 +93,8 @@ func (p *projections) count(c recordCharge, delta int) {
 	}
 }
 func (p *projections) removeRecord(key string) {
+	p.shedCandidates.remove(key)
+	p.deleteCandidates.remove(key)
 	if c, ok := p.records[key]; ok {
 		p.count(c, -1)
 		p.handles.remove(c.handle, key)
@@ -126,6 +130,7 @@ func (p *projections) expireGrants(now ap.Now) {
 	}
 }
 func (p *projections) update(key string, before *ap.R1, after ap.R1, now ap.Now, epoch string, settings ap.Settings) {
+	previous := p.records[key]
 	p.removeRecord(key)
 	h := after.Header
 	if h.Kind == ap.KindStandingGrant {
@@ -145,13 +150,21 @@ func (p *projections) update(key string, before *ap.R1, after ap.R1, now ap.Now,
 	}
 	charge := recordCharge{principal: h.Principal, requestID: h.RequestID, handle: ap.RecordHandle(key), full: after.Payload != nil, live: ap.Class(after, now, settings, p.grants[key] != nil) == ap.ClassLive}
 	if charge.full {
-		charge.reserved = int64(ap.R1Reservation(after))
+		if previous.full {
+			charge.reserved = previous.reserved
+		} else {
+			charge.reserved = int64(ap.R1Reservation(after))
+		}
 		for _, card := range after.Payload.CardEntries {
 			charge.cards = append(charge.cards, card.Handle)
 			p.cards.add(card.Handle, key)
 		}
 	}
+	if h.Decision != nil {
+		charge.decidedAt = h.Decision.DecidedAt
+	}
 	p.records[key] = charge
+	p.indexReclamation(key)
 	p.count(charge, 1)
 	p.handles.add(charge.handle, key)
 	p.requestIDs.add(charge.requestID, key)

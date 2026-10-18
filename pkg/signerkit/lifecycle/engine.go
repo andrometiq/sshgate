@@ -21,8 +21,8 @@ type Config struct {
 	SnapshotBuilder    SnapshotBuilder
 	Minter             Minter
 	Notifier           Notifier
-	LegacyNotifier     LegacyNotifier
-	AuditWriter        AuditWriter // nil leaves the outbox unflushed and Claim gated.
+	LegacyService      *LegacyService // Shared owner; never closed by Engine.
+	AuditWriter        AuditWriter    // nil leaves the outbox unflushed and Claim gated.
 	XferDigests        XferDigests
 	Caps               Caps // Zero fields use the local defaults.
 	Settings           ap.Settings
@@ -38,6 +38,7 @@ type Engine struct {
 	mu            sync.Mutex
 	running       bool
 	stopping      bool
+	stopCause     error
 	effectContext context.Context
 	cancelEffects context.CancelFunc
 	runDone       chan struct{}
@@ -53,7 +54,7 @@ type Engine struct {
 	epoch         string
 	projections   projections
 
-	legacy *legacyService
+	legacy *LegacyService
 }
 
 // New recovers the store before exposing the engine. The caller owns running Run.
@@ -81,11 +82,14 @@ func New(c Config) (*Engine, error) {
 	}
 	e := &Engine{config: c, effectErrors: make(chan error, 1), projections: newProjections(), flushNudge: make(chan struct{}, 1), flushWaiters: make(map[string]*flushWaiter)}
 	e.effectContext, e.cancelEffects = context.WithCancel(context.Background())
-	if err := e.startup(); err != nil {
+	e.mu.Lock()
+	err := e.startup()
+	e.mu.Unlock()
+	if err != nil {
 		e.cancelEffects()
 		return nil, err
 	}
-	e.legacy = newLegacyService(c.Clock.Wall)
+	e.legacy = c.LegacyService
 	return e, nil
 }
 
@@ -94,12 +98,15 @@ func (e *Engine) now() ap.Now {
 }
 
 func (e *Engine) load(key string) (*ap.R1, error) {
+	if err := e.availabilityLocked(); err != nil {
+		return nil, err
+	}
 	rec, err := e.config.Store.Load(key)
 	if errors.Is(err, ErrNotFound) {
 		return nil, nil
 	}
 	if err != nil {
-		return nil, err
+		return nil, e.storageErrorLocked(err)
 	}
 	if ap.RecordKey(rec.Header.Principal, rec.Header.RequestID) != key {
 		return nil, keyError()
@@ -110,8 +117,8 @@ func (e *Engine) load(key string) (*ap.R1, error) {
 // commitLocked is the only record writer. Callers hold mu from the owner-scoped
 // load through impure input resolution and this confirmed projection update.
 func (e *Engine) commitLocked(key string, before *ap.R1, cmd ap.Command, now ap.Now, in ap.Inputs) (ap.R1, ap.Answer, error) {
-	if e.stopping {
-		return ap.R1{}, ap.Answer{}, unavailable()
+	if err := e.availabilityLocked(); err != nil {
+		return ap.R1{}, ap.Answer{}, err
 	}
 	// Apply's Delete checks the stored record without Clock. Persist any due
 	// slots first so deletion cannot bypass their outbox's flush gate.
@@ -130,12 +137,12 @@ func (e *Engine) commitLocked(key string, before *ap.R1, cmd ap.Command, now ap.
 	after, answer := ap.Apply(before, cmd, now, in)
 	if answer.Removed {
 		if err := e.config.Store.Remove(key); err != nil {
-			return ap.R1{}, ap.Answer{}, err
+			return ap.R1{}, ap.Answer{}, e.storageErrorLocked(err)
 		}
 		e.projections.remove(key)
 	} else if answer.Changed {
 		if err := e.config.Store.Commit(key, after); err != nil {
-			return ap.R1{}, ap.Answer{}, err
+			return ap.R1{}, ap.Answer{}, e.storageErrorLocked(err)
 		}
 		e.projections.update(key, before, after, now, e.epoch, e.config.Settings)
 		e.nudgeNotifyLocked(key)
@@ -168,8 +175,8 @@ func answerError(answer ap.Answer) error {
 func (e *Engine) Submit(ctx context.Context, principal string, draft ap.ApprovalDraft) (ap.Summary, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if e.stopping {
-		return ap.Summary{}, unavailable()
+	if err := e.availabilityLocked(); err != nil {
+		return ap.Summary{}, err
 	}
 	key := ap.RecordKey(principal, draft.RequestID)
 	before, err := e.load(key)
@@ -261,8 +268,8 @@ func (e *Engine) view(key string, rec ap.R1, now ap.Now) ap.Summary {
 func (e *Engine) Get(principal, requestID string) (ap.Summary, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if e.stopping {
-		return ap.Summary{}, unavailable()
+	if err := e.availabilityLocked(); err != nil {
+		return ap.Summary{}, err
 	}
 	key := ap.RecordKey(principal, requestID)
 	rec, err := e.load(key)
@@ -279,8 +286,8 @@ func (e *Engine) Get(principal, requestID string) (ap.Summary, error) {
 func (e *Engine) List(principal string) ([]ap.Summary, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if e.stopping {
-		return nil, unavailable()
+	if err := e.availabilityLocked(); err != nil {
+		return nil, err
 	}
 	now := e.now()
 	keys := make([]string, 0)

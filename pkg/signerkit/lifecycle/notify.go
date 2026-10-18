@@ -56,8 +56,8 @@ func (a *notifyActor) read(ctx context.Context) (*ap.R1, ap.NotifyStep, error) {
 	e := a.engine
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if e.stopping {
-		return nil, ap.NotifyStep{}, unavailable()
+	if err := e.availabilityLocked(); err != nil {
+		return nil, ap.NotifyStep{}, err
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, ap.NotifyStep{}, err
@@ -84,8 +84,8 @@ func (a *notifyActor) commit(ctx context.Context, cmd ap.Command) (ap.R1, ap.Ans
 	e := a.engine
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if e.stopping {
-		return ap.R1{}, ap.Answer{}, unavailable()
+	if err := e.availabilityLocked(); err != nil {
+		return ap.R1{}, ap.Answer{}, err
 	}
 	if err := ctx.Err(); err != nil {
 		return ap.R1{}, ap.Answer{}, err

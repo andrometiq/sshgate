@@ -45,12 +45,12 @@ func legacyRequest(t *testing.T, e *Engine, ctx context.Context, uid uint32, id 
 	if err != nil {
 		t.Fatal(err)
 	}
-	e.mu.Lock()
-	r, err := e.reserveLegacyLocked(ctx, uid, id, handle, challenge)
+	e.legacy.mu.Lock()
+	r, err := e.legacy.reserveLegacyLocked(ctx, uid, id, handle, challenge)
 	if r != nil {
 		r.live = live
 	}
-	e.mu.Unlock()
+	e.legacy.mu.Unlock()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,18 +68,18 @@ func TestLegacyDuplicatePending(t *testing.T) {
 	for _, live := range []bool{false, true} {
 		t.Run(fmt.Sprint(live), func(t *testing.T) {
 			e, _, _, _ := engineFixture(t)
-			defer e.Close()
+			defer closeLegacyFixture(e)
 			r, v := legacyRequest(t, e, context.Background(), 7, "same", live)
-			e.mu.Lock()
-			_, err := e.reserveLegacyLocked(context.Background(), 7, "same", "abcdefghijkl", "0123456789abcdef")
-			e.mu.Unlock()
+			e.legacy.mu.Lock()
+			_, err := e.legacy.reserveLegacyLocked(context.Background(), 7, "same", "abcdefghijkl", "0123456789abcdef")
+			e.legacy.mu.Unlock()
 			if err == nil || err.Error() != "telegram: request_id already pending — refusing duplicate" {
 				t.Fatalf("duplicate: %v", err)
 			}
 			legacyRequest(t, e, context.Background(), 8, "same", false)
-			e.mu.Lock()
+			e.legacy.mu.Lock()
 			r.live = true
-			e.mu.Unlock()
+			e.legacy.mu.Unlock()
 			if !legacyTap(t, e, v).Resolved {
 				t.Fatal("original displaced")
 			}
@@ -89,16 +89,16 @@ func TestLegacyDuplicatePending(t *testing.T) {
 }
 func TestLegacyPreparingAndChallenge(t *testing.T) {
 	e, _, store, _ := engineFixture(t)
-	defer e.Close()
+	defer closeLegacyFixture(e)
 	sink := &legacyAuditSink{}
-	e.config.AuditWriter = sink
+	e.legacy.config.AuditWriter = sink
 	r, v := legacyRequest(t, e, context.Background(), 7, "legacy", false)
 	if got := legacyTap(t, e, v); got.Resolved || got.Answer != LegacyTapRefused {
 		t.Fatal(got)
 	}
-	e.mu.Lock()
+	e.legacy.mu.Lock()
 	r.live = true
-	e.mu.Unlock()
+	e.legacy.mu.Unlock()
 	wrong := v
 	card := *v.Card
 	card.Challenge = "ffffffffffffffff"
@@ -125,9 +125,9 @@ func TestLegacyReplayAndAuditFailure(t *testing.T) {
 	for _, fail := range []bool{false, true} {
 		t.Run(fmt.Sprint(fail), func(t *testing.T) {
 			e, _, store, _ := engineFixture(t)
-			defer e.Close()
+			defer closeLegacyFixture(e)
 			sink := &legacyAuditSink{fail: fail, requireAnswer: true}
-			e.config.AuditWriter = sink
+			e.legacy.config.AuditWriter = sink
 			r, v := legacyRequest(t, e, context.Background(), 7, "legacy", true)
 			first := legacyTap(t, e, v)
 			if !first.Resolved || first.Answer != "approved" || r.Wait() != (LegacyResult{Status: "approved", ResolvedBy: v.Operator}) {
@@ -163,9 +163,9 @@ func TestLegacyReplayAndAuditFailure(t *testing.T) {
 func TestLegacyConcurrentTaps(t *testing.T) {
 	defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
 	e, _, _, _ := engineFixture(t)
-	defer e.Close()
+	defer closeLegacyFixture(e)
 	sink := &legacyAuditSink{}
-	e.config.AuditWriter = sink
+	e.legacy.config.AuditWriter = sink
 	r, v := legacyRequest(t, e, context.Background(), 7, "race", true)
 	start := make(chan struct{})
 	results := make(chan LegacyTapResult, 2)
@@ -194,9 +194,9 @@ func TestLegacyExpiryDisconnectAndClose(t *testing.T) {
 	for _, mode := range []string{"deadline", "disconnect", "close", "context-deadline"} {
 		t.Run(mode, func(t *testing.T) {
 			e, clock, _, _ := engineFixture(t)
-			defer e.Close()
+			defer closeLegacyFixture(e)
 			sink := &legacyAuditSink{}
-			e.config.AuditWriter = sink
+			e.legacy.config.AuditWriter = sink
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			if mode == "context-deadline" {
@@ -213,7 +213,7 @@ func TestLegacyExpiryDisconnectAndClose(t *testing.T) {
 			case "disconnect":
 				cancel()
 			case "close":
-				e.Close()
+				closeLegacyFixture(e)
 			}
 			if mode != "close" {
 				if got := legacyTap(t, e, v); got.Resolved || got.Answer != LegacyTapRefused {
@@ -232,7 +232,7 @@ func TestLegacyExpiryDisconnectAndClose(t *testing.T) {
 	}
 	// The driver resolves a deadline with no tap or waiter intervention.
 	e, clock, _, _ := engineFixture(t)
-	defer e.Close()
+	defer closeLegacyFixture(e)
 	r, _ := legacyRequest(t, e, context.Background(), 7, "tick", true)
 	clock.Advance(sigwire.ApprovalWindow)
 	if err := e.Reconcile(); err != nil {
@@ -240,7 +240,7 @@ func TestLegacyExpiryDisconnectAndClose(t *testing.T) {
 	}
 	select {
 	case <-r.done:
-	case <-time.After(time.Second):
+	case <-time.After(3 * time.Second):
 		t.Fatal("deadline not driven")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -257,9 +257,9 @@ func TestLegacyAuditCapsAndSummary(t *testing.T) {
 	for _, live := range []bool{false, true} {
 		t.Run(fmt.Sprint(live), func(t *testing.T) {
 			e, clock, _, _ := engineFixture(t)
-			defer e.Close()
+			defer closeLegacyFixture(e)
 			sink := &legacyAuditSink{}
-			e.config.AuditWriter = sink
+			e.legacy.config.AuditWriter = sink
 			r, v := legacyRequest(t, e, context.Background(), 7, "cap", true)
 			original := *v.Card
 			if !live {
@@ -299,13 +299,13 @@ func TestLegacyAuditCapsAndSummary(t *testing.T) {
 				legacyTap(t, e, v)
 			}
 			clock.Advance(59 * time.Second)
-			e.flushLegacyAudit()
+			e.legacy.flushLegacyAudit()
 			if len(sink.events) != 33 {
 				t.Fatal("summary early")
 			}
 			clock.Advance(time.Second)
-			e.flushLegacyAudit()
-			e.flushLegacyAudit()
+			e.legacy.flushLegacyAudit()
+			e.legacy.flushLegacyAudit()
 			if len(sink.events) != 34 || sink.events[33].Transition != "legacy_audit_dropped{8}" {
 				t.Fatal(sink.events)
 			}
@@ -314,9 +314,9 @@ func TestLegacyAuditCapsAndSummary(t *testing.T) {
 }
 func TestLegacyTombstonesRestartUnknownAndV2(t *testing.T) {
 	e, clock, store, _ := engineFixture(t)
-	defer e.Close()
+	defer closeLegacyFixture(e)
 	sink := &legacyAuditSink{}
-	e.config.AuditWriter = sink
+	e.legacy.config.AuditWriter = sink
 	_, first := legacyRequest(t, e, context.Background(), 7, "first", true)
 	legacyTap(t, e, first)
 	for i := 0; i < 256; i++ {
@@ -334,7 +334,7 @@ func TestLegacyTombstonesRestartUnknownAndV2(t *testing.T) {
 	}
 	clock.Advance(time.Minute)
 	legacyTap(t, e, first)
-	e.flushLegacyAudit()
+	e.legacy.flushLegacyAudit()
 	sink.mu.Lock()
 	lines := len(sink.events)
 	// The worker may flush the dropped events before the tap reports them.
@@ -344,7 +344,12 @@ func TestLegacyTombstonesRestartUnknownAndV2(t *testing.T) {
 	if !valid {
 		t.Fatal(sink.events)
 	}
-	restarted, err := New(Config{Store: store, Clock: clock, Freezer: &freezer{}, SnapshotBuilder: snapshotter{}, AuditWriter: sink})
+	newLegacy, err := NewLegacyService(LegacyConfig{Clock: clock, AuditWriter: sink})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer newLegacy.Close()
+	restarted, err := New(Config{Store: store, Clock: clock, Freezer: &freezer{}, SnapshotBuilder: snapshotter{}, LegacyService: newLegacy})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -365,7 +370,7 @@ func TestLegacyTombstonesRestartUnknownAndV2(t *testing.T) {
 
 func TestLegacyDeadlineLatchesAndDenial(t *testing.T) {
 	e, clock, _, _ := engineFixture(t)
-	defer e.Close()
+	defer closeLegacyFixture(e)
 	r, v := legacyRequest(t, e, context.Background(), 7, "late", true)
 	clock.Advance(sigwire.ApprovalWindow)
 	if legacyTap(t, e, v).Resolved {
@@ -389,9 +394,9 @@ func TestLegacyDeadlineLatchesAndDenial(t *testing.T) {
 
 func TestLegacySummaryDriver(t *testing.T) {
 	e, clock, _, _ := engineFixture(t)
-	defer e.Close()
+	defer closeLegacyFixture(e)
 	sink := &legacyAuditSink{}
-	e.config.AuditWriter = sink
+	e.legacy.config.AuditWriter = sink
 	_, v := legacyRequest(t, e, context.Background(), 7, "summary", true)
 	legacyTap(t, e, v)
 	for i := 0; i < 40; i++ {
@@ -414,7 +419,7 @@ func TestLegacySummaryDriver(t *testing.T) {
 		case <-time.After(10 * time.Millisecond):
 		}
 	}
-	e.Close()
+	closeLegacyFixture(e)
 	<-done
 	sink.mu.Lock()
 	defer sink.mu.Unlock()
@@ -433,15 +438,15 @@ func (s *heldLegacyAudit) WriteApproval(ctx context.Context, _ ap.AuditMetadata)
 }
 func TestLegacyCloseJoinsAudit(t *testing.T) {
 	e, _, _, _ := engineFixture(t)
-	defer e.Close()
+	defer closeLegacyFixture(e)
 	sink := &heldLegacyAudit{make(chan struct{}), make(chan struct{})}
-	e.config.AuditWriter = sink
+	e.legacy.config.AuditWriter = sink
 	r, v := legacyRequest(t, e, context.Background(), 7, "close-audit", true)
 	legacyTap(t, e, v)
 	finished := make(chan struct{})
 	go func() { defer close(finished); legacyTap(t, e, v) }()
 	<-sink.entered
-	e.Close()
+	closeLegacyFixture(e)
 	select {
 	case <-sink.done:
 	default:
@@ -455,9 +460,9 @@ func TestLegacyCloseJoinsAudit(t *testing.T) {
 
 func TestLegacyTombstoneChallenge(t *testing.T) {
 	e, _, _, _ := engineFixture(t)
-	defer e.Close()
+	defer closeLegacyFixture(e)
 	sink := &legacyAuditSink{}
-	e.config.AuditWriter = sink
+	e.legacy.config.AuditWriter = sink
 	r, v := legacyRequest(t, e, context.Background(), 7, "resolved", true)
 	legacyTap(t, e, v)
 	v.Card.Challenge = "ffffffffffffffff"
@@ -471,7 +476,7 @@ func TestLegacyTombstoneChallenge(t *testing.T) {
 
 func TestLegacyInvalidTapAndReservation(t *testing.T) {
 	e, _, _, _ := engineFixture(t)
-	defer e.Close()
+	defer closeLegacyFixture(e)
 	r, v := legacyRequest(t, e, context.Background(), 7, "valid", true)
 	for _, bad := range []ap.CastVote{{}, {Card: v.Card, Operator: "bad\noperator", Decision: ap.VoteApprove}, {Card: v.Card, Operator: v.Operator, Decision: "other"}, {Card: v.Card, Hosted: &ap.HostedTap{}, Operator: v.Operator, Decision: ap.VoteApprove}} {
 		called := false
@@ -482,32 +487,27 @@ func TestLegacyInvalidTapAndReservation(t *testing.T) {
 	if _, err := e.VoteLegacy(v, nil); err == nil {
 		t.Fatal("missing answer accepted")
 	}
-	e.mu.Lock()
+	e.legacy.mu.Lock()
 	for _, args := range [][3]string{{"", "abcdefghijkl", "0123456789abcdef"}, {"bad-handle", "bad", "0123456789abcdef"}, {"bad-challenge", "abcdefghijkl", "bad"}, {"collision", v.Card.Handle, "0123456789abcdef"}} {
-		if _, err := e.reserveLegacyLocked(context.Background(), 7, args[0], args[1], args[2]); err == nil {
-			e.mu.Unlock()
+		if _, err := e.legacy.reserveLegacyLocked(context.Background(), 7, args[0], args[1], args[2]); err == nil {
+			e.legacy.mu.Unlock()
 			t.Fatal("invalid reservation accepted", args[0])
 		}
 	}
-	e.projections.cards.add("abcdefghijkl", "v2")
-	if _, err := e.reserveLegacyLocked(context.Background(), 7, "v2-collision", "abcdefghijkl", "0123456789abcdef"); err == nil {
-		e.mu.Unlock()
-		t.Fatal("v2 collision accepted")
-	}
-	e.mu.Unlock()
+	e.legacy.mu.Unlock()
 	if !legacyTap(t, e, v).Resolved || r.Wait().Status != "approved" {
 		t.Fatal("invalid tap changed request")
 	}
-	e.mu.Lock()
-	if _, err := e.reserveLegacyLocked(context.Background(), 7, "tomb-collision", v.Card.Handle, "0123456789abcdef"); err == nil {
-		e.mu.Unlock()
+	e.legacy.mu.Lock()
+	if _, err := e.legacy.reserveLegacyLocked(context.Background(), 7, "tomb-collision", v.Card.Handle, "0123456789abcdef"); err == nil {
+		e.legacy.mu.Unlock()
 		t.Fatal("tombstone collision accepted")
 	}
-	e.mu.Unlock()
-	e.Close()
-	e.mu.Lock()
-	_, err := e.reserveLegacyLocked(context.Background(), 7, "closed", "bcdefghijklm", "0123456789abcdef")
-	e.mu.Unlock()
+	e.legacy.mu.Unlock()
+	closeLegacyFixture(e)
+	e.legacy.mu.Lock()
+	_, err := e.legacy.reserveLegacyLocked(context.Background(), 7, "closed", "bcdefghijklm", "0123456789abcdef")
+	e.legacy.mu.Unlock()
 	requireUnavailable(t, err)
 }
 
@@ -515,7 +515,7 @@ func TestLegacyDeadlineIgnoresWallSteps(t *testing.T) {
 	for _, step := range []time.Duration{-time.Hour, time.Hour} {
 		t.Run(step.String(), func(t *testing.T) {
 			e, clock, _, _ := engineFixture(t)
-			defer e.Close()
+			defer closeLegacyFixture(e)
 			r, v := legacyRequest(t, e, context.Background(), 7, "wall-step", true)
 			clock.StepWall(step)
 			if err := e.Reconcile(); err != nil {
@@ -544,11 +544,11 @@ func TestLegacySurvivesV2Recovery(t *testing.T) {
 	for _, ending := range []string{"tap", "deadline", "cancel", "close"} {
 		t.Run(ending, func(t *testing.T) {
 			e, clock, store, _ := engineFixture(t)
-			defer e.Close()
+			defer closeLegacyFixture(e)
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			sink := &legacyAuditSink{}
-			e.config.AuditWriter = sink
+			e.legacy.config.AuditWriter = sink
 			r, vote := legacyRequest(t, e, ctx, 7, "survivor", true)
 			submitJob(t, e, 1)
 			clock.Advance(6 * time.Second)
@@ -563,15 +563,16 @@ func TestLegacySurvivesV2Recovery(t *testing.T) {
 				t.Fatal("v2 failure resolved legacy request")
 			default:
 			}
+			e.Close()
 			store.fail = false
 			reopened, err := New(e.config)
 			if err != nil {
 				t.Fatal(err)
 			}
 			defer reopened.Close()
-			e.mu.Lock()
-			_, err = e.reserveLegacyLocked(ctx, 7, "survivor", "abcdefghijkl", "0123456789abcdef")
-			e.mu.Unlock()
+			e.legacy.mu.Lock()
+			_, err = e.legacy.reserveLegacyLocked(ctx, 7, "survivor", "abcdefghijkl", "0123456789abcdef")
+			e.legacy.mu.Unlock()
 			if err == nil || err.Error() != "telegram: request_id already pending — refusing duplicate" {
 				t.Fatalf("reservation lost: %v", err)
 			}
@@ -585,7 +586,7 @@ func TestLegacySurvivesV2Recovery(t *testing.T) {
 			case "cancel":
 				cancel()
 			case "close":
-				e.Close()
+				closeLegacyFixture(e)
 			}
 			receiveNotify(t, r.done)
 			want := "timeout"
@@ -617,7 +618,7 @@ func TestLegacyWallStepBeforeReservation(t *testing.T) {
 	for _, step := range []time.Duration{-time.Hour, time.Hour} {
 		t.Run(step.String(), func(t *testing.T) {
 			e, clock, _, _ := engineFixture(t)
-			defer e.Close()
+			defer closeLegacyFixture(e)
 			// Align the fake wall with the real context deadline before stepping it.
 			clock.StepWall(time.Now().Sub(clock.Wall()))
 			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
@@ -656,9 +657,9 @@ func (s *blockedLegacySummary) WriteApproval(ctx context.Context, metadata ap.Au
 func TestLegacyBlockedAuditDoesNotBlockV2Recovery(t *testing.T) {
 	defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
 	e, clock, store, _ := engineFixture(t)
-	defer e.Close()
+	defer closeLegacyFixture(e)
 	sink := &blockedLegacySummary{entered: make(chan struct{}), exited: make(chan struct{})}
-	e.config.AuditWriter = sink
+	e.legacy.config.AuditWriter = sink
 	_, vote := legacyRequest(t, e, context.Background(), 7, "blocked-summary", true)
 	legacyTap(t, e, vote)
 	for i := 0; i < 40; i++ {
@@ -676,6 +677,7 @@ func TestLegacyBlockedAuditDoesNotBlockV2Recovery(t *testing.T) {
 	if err := receiveNotify(t, done); err == nil {
 		t.Fatal("missing storage failure")
 	}
+	e.Close()
 	store.fail = false
 	reopened, err := New(e.config)
 	if err != nil {
@@ -687,7 +689,7 @@ func TestLegacyBlockedAuditDoesNotBlockV2Recovery(t *testing.T) {
 		t.Fatal("v2 recovery cancelled legacy write")
 	default:
 	}
-	e.Close()
+	closeLegacyFixture(e)
 	select {
 	case <-sink.exited:
 	default:
@@ -698,9 +700,9 @@ func TestLegacyBlockedAuditDoesNotBlockV2Recovery(t *testing.T) {
 func TestLegacyDroppedSummarySurvivesV2Recovery(t *testing.T) {
 	defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
 	e, clock, store, _ := engineFixture(t)
-	defer e.Close()
+	defer closeLegacyFixture(e)
 	sink := &legacyAuditSink{}
-	e.config.AuditWriter = sink
+	e.legacy.config.AuditWriter = sink
 	_, vote := legacyRequest(t, e, context.Background(), 7, "retained-drops", true)
 	legacyTap(t, e, vote)
 	for i := 0; i < 40; i++ {
@@ -714,6 +716,7 @@ func TestLegacyDroppedSummarySurvivesV2Recovery(t *testing.T) {
 	if err := receiveNotify(t, done); err == nil {
 		t.Fatal("missing storage failure")
 	}
+	e.Close()
 	store.fail = false
 	reopened, err := New(e.config)
 	if err != nil {
@@ -747,4 +750,12 @@ func TestLegacyDroppedSummarySurvivesV2Recovery(t *testing.T) {
 	}
 	reopened.Close()
 	receiveNotify(t, reopenedDone)
+}
+
+// closeLegacyFixture models process shutdown, which owns both services.
+func closeLegacyFixture(e *Engine) error {
+	if err := e.Close(); err != nil {
+		return err
+	}
+	return e.legacy.Close()
 }

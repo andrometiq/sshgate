@@ -13,8 +13,8 @@ import (
 func (e *Engine) Vote(vote ap.CastVote) (ap.Answer, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if e.stopping {
-		return ap.Answer{}, unavailable()
+	if err := e.availabilityLocked(); err != nil {
+		return ap.Answer{}, err
 	}
 	if vote.Card == nil || vote.Hosted != nil {
 		return ap.Answer{}, &ap.CodeError{Code: ap.CodeInvalidRequest}
@@ -32,8 +32,8 @@ func (e *Engine) Vote(vote ap.CastVote) (ap.Answer, error) {
 func (e *Engine) AdminCancel(handle string, cancel ap.AdminCancel) (ap.Answer, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if e.stopping {
-		return ap.Answer{}, unavailable()
+	if err := e.availabilityLocked(); err != nil {
+		return ap.Answer{}, err
 	}
 	key, err := e.projections.handles.resolve(handle)
 	if err != nil {
@@ -50,8 +50,8 @@ func (e *Engine) Report(principal, requestID string, report ap.Report) (ap.Answe
 }
 
 func (e *Engine) mutateLocked(key string, command ap.Command) (ap.Answer, error) {
-	if e.stopping {
-		return ap.Answer{}, unavailable()
+	if err := e.availabilityLocked(); err != nil {
+		return ap.Answer{}, err
 	}
 	before, err := e.load(key)
 	if err != nil {
@@ -70,8 +70,8 @@ func (e *Engine) mutateLocked(key string, command ap.Command) (ap.Answer, error)
 func (e *Engine) Revoke(alias string) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if e.stopping {
-		return unavailable()
+	if err := e.availabilityLocked(); err != nil {
+		return err
 	}
 	keys := make([]string, 0, len(e.projections.grants))
 	for key := range e.projections.grants {
@@ -138,6 +138,9 @@ func (e *Engine) Claim(ctx context.Context, principal, requestID string, claim a
 	if waiter.users == 0 && e.flushWaiters[key] == waiter {
 		delete(e.flushWaiters, key)
 	}
+	if err := e.availabilityLocked(); err != nil {
+		return ap.Answer{}, err
+	}
 	if err := ctx.Err(); err != nil {
 		return ap.Answer{}, err
 	}
@@ -145,8 +148,8 @@ func (e *Engine) Claim(ctx context.Context, principal, requestID string, claim a
 }
 
 func (e *Engine) claimLocked(ctx context.Context, principal, key string, claim ap.Claim) (ap.Answer, error) {
-	if e.stopping {
-		return ap.Answer{}, unavailable()
+	if err := e.availabilityLocked(); err != nil {
+		return ap.Answer{}, err
 	}
 	before, err := e.load(key)
 	if err != nil {

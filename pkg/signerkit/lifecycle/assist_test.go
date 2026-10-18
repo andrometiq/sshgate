@@ -62,6 +62,9 @@ func configureAssist(t *testing.T, e *Engine, a assist.Assessor) *assist.Pool {
 	e.config.AssistPool = p
 	e.config.AssistInputBuilder = assistBuilder{}
 	e.config.Assessor = a
+	if e.legacy != nil {
+		e.legacy.config.Assessor = a
+	}
 	return p
 }
 
@@ -235,7 +238,12 @@ func TestAssistStorageFailureReachesRun(t *testing.T) {
 	if err := e.Run(ctx); err == nil || err.Error() != "injected commit failure" {
 		t.Fatalf("lost effect failure: %v", err)
 	}
-	if assistRecord(t, e, 1).Header.Assist != nil {
+	requireUnavailable(t, e.Availability())
+	record, err := store.Load(ap.RecordKey(st.PrincipalA, st.ID(1)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.Header.Assist != nil {
 		t.Fatal("failed assist commit published")
 	}
 }
