@@ -177,6 +177,9 @@ func TestFileStoreGrantStress(t *testing.T) {
 	if testing.Short() {
 		t.Skip("one simulated hour on disk and tmpfs")
 	}
+	if raceEnabled {
+		t.Skip("the E54 latency gate does not hold under race instrumentation")
+	}
 	for _, base := range []string{".", "/dev/shm"} {
 		t.Run(filepath.Base(base), func(t *testing.T) {
 			root, err := os.MkdirTemp(base, "filestore-stress-")
