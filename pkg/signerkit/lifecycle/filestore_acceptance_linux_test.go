@@ -27,7 +27,8 @@ func TestFileStoreGrantBurst(t *testing.T) {
 			})
 			for id := 1; id <= 150; id++ {
 				sum, err := admissionSubmit(e, id, st.PrincipalA)
-				if !report && id > 100 {
+				// The live grant occupies one of the principal's live slots (SA-6.5).
+				if !report && id >= ap.LocalLivePerPrincipal {
 					checkCode(t, err, ap.CodeQueueFull)
 					continue
 				}
@@ -152,7 +153,7 @@ func BenchmarkFileStoreStartupMeasurement(b *testing.B) {
 		if e.projections.total.records != 65536 || e.projections.total.full != 512 || len(e.projections.quarantined) != 0 {
 			t.Fatal("wrong startup population", e.projections.total)
 		}
-		t.Logf("warm: records=65536 full=512 shed=65024 reload=%s startup_total=%s (race instrumented; reference SSD gate requires an uninstrumented measurement)", loaded, total)
+		t.Logf("warm: records=65536 full=512 shed=65024 reload=%s startup_total=%s (10s reference SSD gate applies without -race)", loaded, total)
 		if err := e.Close(); err != nil {
 			t.Fatal(err)
 		}
