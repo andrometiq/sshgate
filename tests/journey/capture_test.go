@@ -6,7 +6,10 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"io"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -53,7 +56,18 @@ func (w journeyForward) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
+var journeySecretByteArray = func() *regexp.Regexp {
+	parts := make([]string, len(journeySentinel))
+	for i, b := range []byte(journeySentinel) {
+		parts[i] = strconv.Itoa(int(b))
+	}
+	return regexp.MustCompile(`(?:\[|,)\s*` + strings.Join(parts, `\s*,\s*`) + `\s*(?:,|\])`)
+}()
+
 func containsSecret(data []byte) bool {
+	if journeySecretByteArray.Match(data) {
+		return true
+	}
 	secret := make([]byte, 256)
 	for i := range secret {
 		secret[i] = byte(i)
@@ -84,7 +98,13 @@ func TestJourneyLeakCapture(t *testing.T) {
 	}
 	secret = append(secret, []byte(journeySentinel)...)
 	secret = append(secret, 0, 255, '\n')
-	values := []string{journeySentinel, string(secret), "notification: " + journeySentinel}
+	integers := make([]int, len(secret))
+	for i, b := range secret {
+		integers[i] = int(b)
+	}
+	compact, _ := json.Marshal(map[string]any{"_meta": map[string]any{"debug_plaintext": integers}})
+	pretty, _ := json.MarshalIndent(integers, "", "  ")
+	values := []string{string(compact), string(pretty), journeySentinel, string(secret), "notification: " + journeySentinel}
 	for _, raw := range [][]byte{[]byte(journeySentinel), secret} {
 		for _, encoding := range []*base64.Encoding{base64.StdEncoding, base64.RawStdEncoding, base64.URLEncoding, base64.RawURLEncoding} {
 			values = append(values, encoding.EncodeToString(raw))

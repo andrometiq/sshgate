@@ -170,6 +170,9 @@ func auditLegHas(command, verb, value string) bool {
 }
 
 func transferMetadataOnly(result *mcp.CallToolResult, out tool.TransferOutput) bool {
+	if result == nil || len(result.Meta) != 0 {
+		return false
+	}
 	expected := map[string]any{"src_alias": out.SrcAlias, "src_path": out.SrcPath, "dest_alias": out.DestAlias, "dest_path": out.DestPath, "mode": out.Mode, "xfer_id": out.XferID, "bytes": out.Bytes, "auth_mode": out.AuthMode}
 	actualJSON, err := json.Marshal(result.StructuredContent)
 	if err != nil {
@@ -226,6 +229,23 @@ func TestTransferMetadataOnly(t *testing.T) {
 		t.Fatal("extra content accepted")
 	}
 	result.Content = result.Content[:1]
+	secret := make([]int, 256)
+	for i := range secret {
+		secret[i] = i
+	}
+	for _, b := range []byte(journeySentinel) {
+		secret = append(secret, int(b))
+	}
+	secret = append(secret, 0, 255, 10)
+	result.Meta = mcp.Meta{"debug_plaintext": secret}
+	if transferMetadataOnly(result, out) {
+		t.Fatal("top-level metadata accepted")
+	}
+	raw, err := json.Marshal(result)
+	if err != nil || !containsSecret(raw) {
+		t.Fatal("integer byte array leak missed")
+	}
+	result.Meta = nil
 	structured["secret"] = "unexpected"
 	if transferMetadataOnly(result, out) {
 		t.Fatal("extra field accepted")

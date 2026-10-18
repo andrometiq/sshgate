@@ -19,6 +19,8 @@ import (
 
 const journeyEvidenceLimit = 8 << 20
 
+var journeyEvidenceRules = rules.Combined()
+
 type journeyEvidence struct {
 	mu         sync.Mutex
 	directory  string
@@ -33,12 +35,19 @@ func scrubJourneyEvidence(value any) (any, bool) {
 		if containsSecret([]byte(value)) {
 			return "[synthetic plaintext withheld]", true
 		}
-		clean, ok := redact.RedactString(value, [32]byte{}, rules.Combined())
+		clean, ok := redact.RedactString(value, [32]byte{}, journeyEvidenceRules)
 		if !ok {
 			return "[evidence withheld]", true
 		}
 		return clean, false
 	case []any:
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			return "[evidence withheld]", true
+		}
+		if containsSecret(encoded) {
+			return "[synthetic plaintext withheld]", true
+		}
 		leaked := false
 		for i := range value {
 			clean, found := scrubJourneyEvidence(value[i])
@@ -52,6 +61,13 @@ func scrubJourneyEvidence(value any) (any, bool) {
 		for key, item := range value {
 			cleanKey, keyLeak := scrubJourneyEvidence(key)
 			cleanItem, itemLeak := scrubJourneyEvidence(item)
+			// Classify the name using existing assignment rules and a fixed value.
+			for _, rule := range journeyEvidenceRules {
+				if (rule.ID == "sshgate-sensitive-assignment" || rule.ID == "sshgate-password-kv" || rule.ID == "sshgate-pgpassword") && rule.Regex.MatchString(key+"=withheld") {
+					cleanItem = "[sensitive field withheld]"
+					break
+				}
+			}
 			clean[cleanKey.(string)] = cleanItem
 			leaked = leaked || keyLeak || itemLeak
 		}
@@ -79,6 +95,9 @@ func (e *journeyEvidence) append(scenario string, value any) error {
 	data, err = json.Marshal(clean)
 	if err != nil {
 		return err
+	}
+	if len(data) > 1<<20 {
+		return errors.New("scrubbed evidence item exceeds 1 MiB")
 	}
 	// Include separators and the final summary's brackets in the same bound.
 	if e.size+len(data)+1 > journeyEvidenceLimit-2 {
@@ -190,5 +209,77 @@ func TestJourneyIncrementalEvidence(t *testing.T) {
 	summary, err := os.ReadFile(filepath.Join(e.directory, "main-evidence.json"))
 	if err != nil || containsSecret(summary) || strings.Contains(string(summary), secret) {
 		t.Fatal("unsafe summary")
+	}
+}
+
+func TestJourneyEvidenceSensitiveFields(t *testing.T) {
+	e := &journeyEvidence{directory: t.TempDir()}
+	fields := map[string]any{
+		"password": "hunter2", "apiKey": "short", "DB_PWD": 867530912345,
+		"nested":   []any{map[string]any{"clientSecret": map[string]any{"value": "nested-value"}, "token": []any{"token-value"}}},
+		"ordinary": "visible",
+	}
+	if err := e.append("fields", fields); err != nil {
+		t.Fatal(err)
+	}
+	integers := make([]int, len(journeySentinel))
+	for i, b := range []byte(journeySentinel) {
+		integers[i] = int(b)
+	}
+	if err := e.append("integer leak", map[string]any{"_meta": map[string]any{"debug_plaintext": integers}}); err == nil {
+		t.Fatal("integer leak did not fail")
+	}
+	e.summary(t)
+	for _, name := range []string{"main-evidence.jsonl", "main-evidence.json"} {
+		data, err := os.ReadFile(filepath.Join(e.directory, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, secret := range []string{"hunter2", "short", "867530912345", "nested-value", "token-value"} {
+			if strings.Contains(string(data), secret) {
+				t.Fatalf("sensitive field persisted in %s", name)
+			}
+		}
+		if containsSecret(data) || !strings.Contains(string(data), "visible") || !strings.Contains(string(data), "[sensitive field withheld]") {
+			t.Fatalf("incorrect scrub in %s", name)
+		}
+	}
+}
+
+func TestJourneyEvidenceScrubbedItemCap(t *testing.T) {
+	e := &journeyEvidence{directory: t.TempDir()}
+	if err := e.append("initial", "retained"); err != nil {
+		t.Fatal(err)
+	}
+	e.summary(t)
+	before := make(map[string]string)
+	for _, name := range []string{"main-evidence.jsonl", "main-evidence.json"} {
+		data, err := os.ReadFile(filepath.Join(e.directory, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		before[name] = string(data)
+	}
+	size := e.size
+	values := make([]string, 30000)
+	for i := range values {
+		values[i] = "PASSWORD=aaaa"
+	}
+	raw, err := json.Marshal(values)
+	if err != nil || len(raw) >= 1<<20 {
+		t.Fatal("counterexample exceeds input cap")
+	}
+	if err := e.append("expanding", values); err == nil || err.Error() != "scrubbed evidence item exceeds 1 MiB" {
+		t.Fatalf("post-scrub cap: %v", err)
+	}
+	if e.size != size || len(e.transcript) != 1 {
+		t.Fatal("oversized item retained")
+	}
+	e.summary(t)
+	for name, want := range before {
+		data, err := os.ReadFile(filepath.Join(e.directory, name))
+		if err != nil || string(data) != want {
+			t.Fatalf("oversized item changed %s", name)
+		}
 	}
 }

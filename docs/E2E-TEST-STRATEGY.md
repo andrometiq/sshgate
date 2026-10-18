@@ -89,8 +89,9 @@ execution uses an internal Docker network, no published ports and offline Go.
 The real systemd signer talks only to a loopback fake Telegram API. No real
 Telegram account or external assessment provider is used.
 
-The journey covers fresh installation, Tier-1 diagnosis and refusal, immediate
-approval, late batch approval, denial/replay, expiry and rejected post-expiry taps,
+The journey covers fresh installation, candidate Tier-1 diagnosis and unsigned-write
+refusal before signer installation, immediate approval, late batch approval,
+denial/replay, expiry and rejected post-expiry taps,
 signer restart and two-server secret transfer. It checks target effects, cards,
 audits and secret non-disclosure. Published and candidate gate hashes are checked
 separately; `dist/gate` is never rewritten. Targets deliberately report
@@ -103,8 +104,11 @@ make a status check required. The job explicitly opts into the privileged rig,
 allows 28 minutes for preparation plus tests in `make test-journey` within a
 40-minute job; the suite's own go test timeout is 20 minutes, so it fires first.
 Checkout, Go setup, teardown and upload have explicit caps. Evidence is written
-incrementally as JSON lines, so a killed run still leaves it. It never
-reruns a failure automatically. Go module/build caches are keyed by OS,
+incrementally as JSON lines, so a killed run still leaves it. Sensitive field
+values are redacted with their key context, including nested objects. Each
+serialized record is limited to 1 MiB both before and after scrubbing. Transfer
+results reject extra top-level metadata, and leak checks include integer byte
+arrays. It never reruns a failure automatically. Go module/build caches are keyed by OS,
 architecture, toolchain and `go.sum`; installed state is never cached.
 
 Set `JOURNEY_ARTIFACT_DIR` to retain the collector's redacted, at-most-8-MiB

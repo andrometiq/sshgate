@@ -366,17 +366,14 @@ func TestJourneyMain(t *testing.T) {
 	r := newJourneyRig(t)
 	r.evidence = evidence
 	r.addReadOnly(t)
-	r.installSigner(t)
 	r.candidateReadOnly(t)
-	t.Cleanup(func() {
-		r.events(t)
-		for _, host := range []string{"target-a", "target-b", "controller"} {
-			r.audit(t, host)
-		}
-	})
 	client := r.mcp(t)
 	if !t.Run("useful_diagnosis", func(t *testing.T) {
-		before := len(cards(r.events(t)))
+		r.exec(t, "controller", "test", "!", "-e", "/etc/systemd/system/sshgate-signer-telegram.service")
+		var status tool.StatusOutput
+		if result := client.call(t, "status", map[string]any{}, &status); result.IsError || status.SignerSocket.Configured || status.SignerSocket.Reachable {
+			t.Fatal("diagnosis requires a signer-free installation")
+		}
 		r.wait(t, "target-a", "curl", "--silent", "--max-time", "2", "http://127.0.0.1:8080/")
 		r.health(t, "disabled: enabled=0\n503")
 		for _, read := range []struct{ command, contains string }{
@@ -400,13 +397,17 @@ ssh -o UserKnownHostsFile=$HOME/.config/sshgate/known_hosts -o BatchMode=yes -o 
 code=$?
 test "$code" = 77`)
 		r.absent(t, "target-a", "/home/user/unsigned-marker")
-		if len(cards(r.events(t))) != before {
-			t.Fatal("diagnosis solicited approval")
-		}
 	}) {
 		return
 	}
 	client.close(t)
+	r.installSigner(t)
+	t.Cleanup(func() {
+		r.events(t)
+		for _, host := range []string{"target-a", "target-b", "controller"} {
+			r.audit(t, host)
+		}
+	})
 	r.signedCandidate(t)
 	client = r.mcp(t)
 	// Candidate doctor and actual read audit must agree on the intentional fallback.
