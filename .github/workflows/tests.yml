@@ -95,10 +95,12 @@ jobs:
       JOURNEY_ALLOW_PRIVILEGED: "1"
     steps:
       - name: Checkout
-        timeout-minutes: 1
+        timeout-minutes: 2
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           persist-credentials: false
+          # The rig clones a git bundle of HEAD; a shallow checkout's bundle lacks parents.
+          fetch-depth: 0
 
       - name: Set up Go (pinned toolchain from go.mod)
         timeout-minutes: 3
