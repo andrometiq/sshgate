@@ -16,6 +16,7 @@ import (
 )
 
 type journeyMCP struct {
+	evidence                *journeyEvidence
 	session                 *mcp.ClientSession
 	command                 *exec.Cmd
 	processDone             <-chan error
@@ -40,7 +41,7 @@ func (r *journeyRig) mcp(t *testing.T) *journeyMCP {
 	}
 	done := make(chan error, 1)
 	go func() { err := command.Wait(); _ = writer.Close(); done <- err }()
-	result := &journeyMCP{command: command, processDone: done, reader: reader, stdin: stdin, protocol: protocol, input: input, stderr: stderr}
+	result := &journeyMCP{evidence: r.evidence, command: command, processDone: done, reader: reader, stdin: stdin, protocol: protocol, input: input, stderr: stderr}
 	t.Cleanup(func() { result.close(t) })
 	client := mcp.NewClient(&mcp.Implementation{Name: "journey", Version: "1"}, nil)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -113,6 +114,9 @@ func (c *journeyMCP) call(t *testing.T, name string, arguments map[string]any, o
 	result, err := c.session.CallTool(ctx, &mcp.CallToolParams{Name: name, Arguments: arguments})
 	if err != nil {
 		t.Fatalf("tools/call %s: %v", name, err)
+	}
+	if c.evidence != nil {
+		c.evidence.record(t, result)
 	}
 	if output != nil {
 		if result.StructuredContent == nil {

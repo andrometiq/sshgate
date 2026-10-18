@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -29,31 +28,20 @@ type journeyCard struct {
 	requestID string
 	text      string
 }
-type journeyEvidence struct {
-	transcript []json.RawMessage
-}
 
-func (e *journeyEvidence) record(t *testing.T, value any) {
-	t.Helper()
-	data, err := json.Marshal(map[string]any{"at": time.Now().UTC(), "scenario": t.Name(), "value": value})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if containsSecret(data) {
-		t.Fatal("synthetic plaintext leaked; evidence withheld")
-	}
-	if len(data) > 1<<20 {
-		t.Fatal("MCP evidence exceeds bound")
-	}
-	e.transcript = append(e.transcript, data)
-}
 func startCall(c *journeyMCP, name string, args map[string]any) <-chan journeyCall {
 	done := make(chan journeyCall, 1)
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 7*time.Minute)
 		defer cancel()
 		result, err := c.session.CallTool(ctx, &mcp.CallToolParams{Name: name, Arguments: args})
-		done <- journeyCall{result, err, time.Now()}
+		completed := time.Now()
+		if c.evidence != nil {
+			if captureErr := c.evidence.append(name, map[string]any{"result": result, "transport_error": fmt.Sprint(err), "completed_at": completed}); captureErr != nil {
+				err = captureErr
+			}
+		}
+		done <- journeyCall{result, err, completed}
 	}()
 	return done
 }
@@ -101,6 +89,14 @@ func (r *journeyRig) events(t *testing.T) []faketg.Event {
 	}
 	if !response.OK || len(response.Result.Failures) != 0 {
 		t.Fatalf("fake Telegram failures: %v", response.Result.Failures)
+	}
+	if r.evidence != nil {
+		for _, event := range response.Result.Events {
+			if event.Sequence > r.eventSequence {
+				r.evidence.record(t, map[string]any{"telegram": event})
+				r.eventSequence = event.Sequence
+			}
+		}
 	}
 	return response.Result.Events
 }
@@ -186,6 +182,9 @@ func (r *journeyRig) cardEdit(t *testing.T, card journeyCard, text string) {
 	})
 }
 func (r *journeyRig) tap(t *testing.T, card journeyCard, action string, replay bool) {
+	if r.evidence != nil {
+		r.evidence.record(t, map[string]any{"timeline": "tap", "message_id": card.id, "action": action, "replay": replay})
+	}
 	route := "/release"
 	if replay {
 		route = "/replay"
@@ -256,6 +255,13 @@ func (r *journeyRig) audit(t *testing.T, host string) []map[string]any {
 			t.Fatal(err)
 		}
 		rows = append(rows, row)
+	}
+	if r.evidence != nil && raw != r.auditSnapshots[host] {
+		r.evidence.record(t, map[string]any{"audit_host": host, "rows": rows})
+		if r.auditSnapshots == nil {
+			r.auditSnapshots = make(map[string]string)
+		}
+		r.auditSnapshots[host] = raw
 	}
 	return rows
 }
@@ -354,33 +360,18 @@ PY`)
 }
 
 func TestJourneyMain(t *testing.T) {
+	evidence := &journeyEvidence{directory: os.Getenv("JOURNEY_ARTIFACT_DIR")}
+	evidence.record(t, map[string]any{"timeline": "starting rig"})
+	t.Cleanup(func() { evidence.summary(t) })
 	r := newJourneyRig(t)
-	evidence := &journeyEvidence{}
+	r.evidence = evidence
 	r.addReadOnly(t)
 	r.installSigner(t)
 	r.candidateReadOnly(t)
 	t.Cleanup(func() {
-		events := r.events(t)
-		evidence.record(t, events)
+		r.events(t)
 		for _, host := range []string{"target-a", "target-b", "controller"} {
-			evidence.record(t, r.audit(t, host))
-		}
-		if directory := os.Getenv("JOURNEY_ARTIFACT_DIR"); directory != "" && !t.Failed() {
-			data, err := json.Marshal(evidence.transcript)
-			if err != nil {
-				t.Error(err)
-				return
-			}
-			if len(data) > 8<<20 {
-				t.Error("evidence exceeds 8 MiB")
-				return
-			}
-			if err = os.MkdirAll(directory, 0700); err == nil {
-				err = os.WriteFile(filepath.Join(directory, "main-evidence.json"), data, 0600)
-			}
-			if err != nil {
-				t.Error(err)
-			}
+			r.audit(t, host)
 		}
 	})
 	client := r.mcp(t)

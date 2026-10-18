@@ -93,9 +93,12 @@ transfers use MCP; only fixture seeding, lifecycle controls and documented human
 provisioning run outside MCP.
 
 Set `JOURNEY_ARTIFACT_DIR` to retain bounded, timestamped MCP results, Telegram
-events and gate/signer audits in `main-evidence.json` before teardown. Secret
-fixtures and raw journals are never retained; transfer checks scan the synthetic
-sentinel in MCP results, cards, audits, live logs and service journals before
-saving evidence. Missing infrastructure fails rather than skips. Compile-only
+events, gate/signer audit snapshots and timeline marks incrementally in
+`main-evidence.jsonl` (8 MiB total; 1 MiB per item). Each item is scrubbed before
+writing; a synthetic plaintext leak records a withheld marker and fails the test.
+Cleanup retains the final `main-evidence.json` summary, including on failure.
+Upload both files: a process timeout may leave only the JSON lines.
+Secret fixtures and raw journals are never retained; transfer checks also scan
+live logs and service journals. Missing infrastructure fails rather than skips. Compile-only
 validation with `go vet -tags journey ./tests/journey/...` does not execute these
 Docker scenarios.
