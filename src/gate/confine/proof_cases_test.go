@@ -56,7 +56,7 @@ func proofCases() []harness.Case {
 		markers                []string
 	}{
 		{"L-COVER-LOOP", "canary", "directory", []string{"EFFECT:visible", "EFFECT:nonempty"}},
-		{"L-AUTOFS", "trigger", "mounts", []string{"EFFECT:triggered"}},
+		{"L-AUTOFS", "trigger", "mounts", []string{"EFFECT:" + autofsEffect()}},
 		{"L-BINFMT-FIXED-CHAR", "interpreter", "read", nil},
 		{"L-TRACEFS", "drain", "marker", []string{"EFFECT:trace-consumed"}},
 	} {

@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -500,38 +501,122 @@ func TestBackingExtJournal(t *testing.T) {
 	}
 }
 
-// autofsListingError judges the jailed `ls -A` of an automount point: a cover lists
-// empty. Linux 6.1 answers a follow of an automount whose daemon mounted it in
-// another (private) namespace with ELOOP, which only a reached trigger produces.
-func autofsListingError(point string, listing OpOutcome, isTriggered bool) error {
-	crossNamespace := OpOutcome{Stderr: "ls: cannot open directory '" + point + "': Too many levels of symbolic links\n", Exit: 2}
-	if listing == (OpOutcome{}) || isTriggered && listing == crossNamespace {
-		return nil
+// autofsChildView reports whether the jailed child sees the automount point
+// uncovered: GNU stat (statx with AT_NO_AUTOMOUNT, so no trigger) gives the
+// visible device, which must be the child's top mountinfo row at point; that
+// row being autofs means no cover sits over the trigger.
+func autofsChildView(point, statDev, mountinfo string) (bool, error) {
+	dev, err := strconv.ParseUint(strings.TrimSuffix(statDev, "\n"), 10, 64)
+	if err != nil || statDev != strconv.FormatUint(dev, 10)+"\n" {
+		return false, fmt.Errorf("child stat device %q", statDev)
 	}
-	return fmt.Errorf("autofs cover not empty: %+v", listing)
+	entries, err := parseMountInfo(strings.NewReader(mountinfo))
+	if err != nil {
+		return false, fmt.Errorf("child mountinfo: %w", err)
+	}
+	var top *mountEntry
+	for i := range entries {
+		if entries[i].point == point {
+			top = &entries[i]
+		}
+	}
+	if top == nil || top.dev != fmt.Sprintf("%d:%d", unix.Major(dev), unix.Minor(dev)) {
+		return false, fmt.Errorf("child stat device %d is not the top mount at %s: %+v", dev, point, top)
+	}
+	return top.fstype == "autofs", nil
+}
+
+// autofsListing judges the jailed `ls -A point 2>&1` and names the mutation
+// effect it shows, "" for none. A cover lists empty. Linux 6.1 answers a follow
+// of an automount the daemon mounted in another (private) namespace with ELOOP:
+// the trigger fired. From 6.19 (922a6f34c175) autofs ->d_automount refuses a
+// lookup from a foreign mount namespace on a private mount with EPERM before
+// asking the daemon: nothing fires, so EPERM counts only as the child reaching
+// the uncovered trigger (isUncovered), still dormant, on such a kernel.
+func autofsListing(point, output string, exit int, isMounted, isUncovered, isRefusingKernel bool) (string, error) {
+	loop := "ls: cannot open directory '" + point + "': Too many levels of symbolic links\n"
+	refused := "ls: cannot open directory '" + point + "': Operation not permitted\n"
+	switch {
+	case output == "" && exit == 0:
+		if isMounted {
+			return "triggered", nil
+		}
+		return "", nil
+	case output == loop && exit == 2 && isMounted && isUncovered:
+		return "triggered", nil
+	case output == refused && exit == 2 && !isMounted && isUncovered && isRefusingKernel:
+		return "uncovered-refused", nil
+	}
+	return "", fmt.Errorf("autofs cover not empty: %q exit %d mounted=%v uncovered=%v", output, exit, isMounted, isUncovered)
 }
 
 func TestAutofsListing(t *testing.T) {
 	const point = "/tmp/a/automount"
 	loop := "ls: cannot open directory '" + point + "': Too many levels of symbolic links\n"
+	eperm := "ls: cannot open directory '" + point + "': Operation not permitted\n"
 	for _, item := range []struct {
-		listing     OpOutcome
-		isTriggered bool
-		valid       bool
+		output                            string
+		exit                              int
+		isMounted, isUncovered, isRefuser bool
+		effect                            string
+		valid                             bool
 	}{
-		{OpOutcome{}, false, true},
-		{OpOutcome{}, true, true},
-		{OpOutcome{Stderr: loop, Exit: 2}, true, true},
-		{OpOutcome{Stderr: loop, Exit: 2}, false, false},
-		{OpOutcome{Stderr: loop, Exit: 1}, true, false},
-		{OpOutcome{Stderr: "ls: cannot open directory '/tmp/other': Too many levels of symbolic links\n", Exit: 2}, true, false},
-		{OpOutcome{Stderr: "ls: cannot open directory '" + point + "': Permission denied\n", Exit: 2}, true, false},
-		{OpOutcome{Stdout: "f\n", Stderr: loop, Exit: 2}, true, false},
-		{OpOutcome{Stdout: "f\n"}, true, false},
-		{OpOutcome{Exit: 2}, true, false},
+		{"", 0, false, false, false, "", true},
+		{"", 0, false, false, true, "", true},
+		{"", 0, true, true, false, "triggered", true},
+		{loop, 2, true, true, false, "triggered", true},
+		{loop, 2, true, false, false, "", false},
+		{loop, 2, false, true, false, "", false},
+		{loop, 1, true, true, false, "", false},
+		{"ls: cannot open directory '/tmp/other': Too many levels of symbolic links\n", 2, true, true, false, "", false},
+		// The >= 6.19 refusal: only uncovered, dormant, on a refusing kernel.
+		{eperm, 2, false, true, true, "uncovered-refused", true},
+		{eperm, 2, false, false, true, "", false}, // a cover still present: some other denial
+		{eperm, 2, false, true, false, "", false},
+		{eperm, 2, true, true, true, "", false},
+		{eperm, 1, false, true, true, "", false},
+		{"ls: cannot open directory '/tmp/other': Operation not permitted\n", 2, false, true, true, "", false},
+		{"f\n" + eperm, 2, false, true, true, "", false},
+		{"ls: cannot open directory '" + point + "': Permission denied\n", 2, false, true, true, "", false},
+		{"f\n" + loop, 2, true, true, false, "", false},
+		{"f\n", 0, true, true, false, "", false},
+		{"", 2, true, true, true, "", false},
 	} {
-		if err := autofsListingError(point, item.listing, item.isTriggered); (err == nil) != item.valid {
-			t.Errorf("%+v: %v", item, err)
+		effect, err := autofsListing(point, item.output, item.exit, item.isMounted, item.isUncovered, item.isRefuser)
+		if (err == nil) != item.valid || effect != item.effect {
+			t.Errorf("%+v: effect=%q %v", item, effect, err)
+		}
+	}
+	for release, want := range map[string]bool{"6.1.0-26-amd64": false, "6.18.9": false, "6.19.0": true, "7.2.7-arch1-1": true, "x": false, "": false} {
+		if autofsRefusingKernel(release) != want {
+			t.Errorf("%q: want %v", release, want)
+		}
+	}
+}
+
+func TestAutofsChildView(t *testing.T) {
+	const point = "/tmp/a/automount"
+	row := func(id int, dev, fstype string) string {
+		return fmt.Sprintf("%d 1 %s / %s rw,relatime shared:1 - %s src rw\n", id, dev, point, fstype)
+	}
+	root := "1 0 259:2 / / rw,relatime - ext4 /dev/root rw\n"
+	autofsDev, coverDev := strconv.FormatUint(unix.Mkdev(0, 51), 10)+"\n", strconv.FormatUint(unix.Mkdev(0, 77), 10)+"\n"
+	for _, item := range []struct {
+		name, dev, mountinfo string
+		uncovered, valid     bool
+	}{
+		{"uncovered", autofsDev, root + row(30, "0:51", "autofs"), true, true},
+		{"covered", coverDev, root + row(30, "0:51", "autofs") + row(31, "0:77", "tmpfs"), false, true},
+		{"stat sees autofs under a cover row", autofsDev, root + row(30, "0:51", "autofs") + row(31, "0:77", "tmpfs"), false, false},
+		{"stat sees cover not in mountinfo", coverDev, root + row(30, "0:51", "autofs"), false, false},
+		{"point absent", autofsDev, root, false, false},
+		{"bad device", "x\n", root + row(30, "0:51", "autofs"), false, false},
+		{"unterminated device", strings.TrimSuffix(autofsDev, "\n"), root + row(30, "0:51", "autofs"), false, false},
+		{"bad mountinfo", autofsDev, "garbage\n", false, false},
+	} {
+		uncovered, err := autofsChildView(point, item.dev, item.mountinfo)
+		if (err == nil) != item.valid || uncovered != item.uncovered {
+			t.Errorf("%s: uncovered=%v %v", item.name, uncovered, err)
 		}
 	}
 }

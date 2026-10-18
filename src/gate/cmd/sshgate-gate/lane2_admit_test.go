@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -707,3 +708,65 @@ func lane2ReadFile(t *testing.T, path string) []byte {
 }
 
 func TestLane2TrustedSockets(t *testing.T) { lane2TrustedSocketRows(t) }
+
+// TestLane2WritableFileRefused: a valid client, or the loader it names, that is
+// group- or world-writable is refused at admission, before anything runs, even
+// in trusted 0755 directories.
+func TestLane2WritableFileRefused(t *testing.T) {
+	dir := buildLane2Fixtures(t)
+	client := filepath.Join(dir, "systemctl")
+	original, err := os.ReadFile(client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	host := lane2HostInterp(t, client)
+	resolved, err := filepath.EvalSymlinks(host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loader, err := os.ReadFile(resolved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaders := t.TempDir()
+	if err := os.Chmod(loaders, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	plan := func(t *testing.T) string {
+		t.Helper()
+		plan, matched, refusal := lane2Plan("systemctl status test.service", pinState{})
+		plan.Close()
+		if !matched {
+			t.Fatal("present client did not match")
+		}
+		return refusal
+	}
+	lane2Write(t, client, original, 0o755)
+	if refusal := plan(t); refusal != "" {
+		t.Fatalf("SETUP: 0755 client refused %q", refusal)
+	}
+	for _, mode := range []os.FileMode{0o775, 0o757} {
+		t.Run("client "+mode.String(), func(t *testing.T) {
+			lane2Write(t, client, original, mode)
+			defer lane2Write(t, client, original, 0o755)
+			if refusal := plan(t); refusal != "binary" {
+				t.Fatalf("refusal=%q, want binary", refusal)
+			}
+		})
+		t.Run("interpreter "+mode.String(), func(t *testing.T) {
+			path := filepath.Join(loaders, "ld-"+strconv.FormatUint(uint64(mode), 8)+".so")
+			lane2Write(t, path, loader, 0o755)
+			lane2Write(t, client, lane2SetInterp(t, append([]byte(nil), original...), path), 0o755)
+			defer lane2Write(t, client, original, 0o755)
+			if refusal := plan(t); refusal != "" {
+				t.Fatalf("SETUP: 0755 loader refused %q", refusal)
+			}
+			if err := os.Chmod(path, mode); err != nil {
+				t.Fatal(err)
+			}
+			if refusal := plan(t); refusal != "interp" {
+				t.Fatalf("refusal=%q, want interp", refusal)
+			}
+		})
+	}
+}

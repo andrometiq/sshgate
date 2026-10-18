@@ -5,11 +5,13 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/karthikeyan5/sshgate/src/gate/confine"
@@ -21,9 +23,9 @@ import (
 // was exec'd (path, argv, env, stdin) instead of running tests.
 func withLane2Bins(t *testing.T) string {
 	t.Helper()
-	self, err := os.Executable()
+	self, err := lane2Self()
 	if err != nil {
-		t.Fatalf("os.Executable: %v", err)
+		t.Fatalf("SETUP: lane2 client copy: %v", err)
 	}
 	dir := t.TempDir()
 	for _, name := range []string{"systemctl", "docker"} {
@@ -38,6 +40,97 @@ func withLane2Bins(t *testing.T) string {
 	redactRules = []redact.Rule{}
 	t.Cleanup(func() { redactRules = prevRules })
 	return dir
+}
+
+var lane2SelfOnce struct {
+	sync.Once
+	path string
+	err  error
+}
+
+// lane2Self is this test binary copied, once per process, into a 0755
+// directory of its own under TestMain's TMPDIR (removed at exit): go test
+// built the original under the caller's umask, and its directory is not ours
+// to chmod.
+func lane2Self() (string, error) {
+	lane2SelfOnce.Do(func() {
+		self, err := os.Executable()
+		if err != nil {
+			lane2SelfOnce.err = err
+			return
+		}
+		dir, err := os.MkdirTemp("", "lane2-self-")
+		if err != nil {
+			lane2SelfOnce.err = err
+			return
+		}
+		lane2SelfOnce.path, lane2SelfOnce.err = copyExecutable(self, dir)
+	})
+	return lane2SelfOnce.path, lane2SelfOnce.err
+}
+
+// copyExecutable copies src to dir/gate.test and sets the copy 0755 and dir
+// 0755; it changes nothing else.
+func copyExecutable(src, dir string) (string, error) {
+	if err := os.Chmod(dir, 0o755); err != nil {
+		return "", err
+	}
+	in, err := os.Open(src)
+	if err != nil {
+		return "", err
+	}
+	defer in.Close()
+	path := filepath.Join(dir, "gate.test")
+	out, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o700)
+	if err != nil {
+		return "", err
+	}
+	_, err = io.Copy(out, in)
+	if err = errors.Join(err, out.Close()); err != nil {
+		return "", err
+	}
+	return path, os.Chmod(path, 0o755)
+}
+
+// TestCopyExecutableLeavesSource: the copy is 0755 in its 0755 directory, and
+// the source and a shared sticky parent keep their complete modes.
+func TestCopyExecutableLeavesSource(t *testing.T) {
+	shared := filepath.Join(t.TempDir(), "shared")
+	if err := os.Mkdir(shared, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(shared, 0o777|os.ModeSticky); err != nil {
+		t.Fatal(err)
+	}
+	src := filepath.Join(shared, "gate.test")
+	if err := os.WriteFile(src, []byte("binary"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(src, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	dst := filepath.Join(t.TempDir(), "copy")
+	if err := os.Mkdir(dst, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dst, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	path, err := copyExecutable(src, dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []struct {
+		path string
+		mode os.FileMode
+	}{{shared, os.ModeDir | os.ModeSticky | 0o777}, {src, 0o777}, {dst, os.ModeDir | 0o755}, {path, 0o755}} {
+		if info, err := os.Stat(want.path); err != nil || info.Mode() != want.mode {
+			t.Errorf("%s: mode %v (%v), want %v", want.path, info.Mode(), err, want.mode)
+		}
+	}
+	if data, err := os.ReadFile(path); err != nil || string(data) != "binary" {
+		t.Errorf("copy %q, %v", data, err)
+	}
 }
 
 func TestLane2Argv(t *testing.T) {
@@ -179,8 +272,13 @@ func TestRunLane2ExecShellFreeClosedEnv(t *testing.T) {
 	} {
 		t.Setenv(kv[0], kv[1])
 	}
-	self, _ := os.Executable()
-	self, _ = filepath.EvalSymlinks(self)
+	self, err := lane2Self()
+	if err == nil {
+		self, err = filepath.EvalSymlinks(self)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	for _, tc := range []struct {
 		cmd      string

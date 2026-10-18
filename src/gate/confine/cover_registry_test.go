@@ -1,6 +1,36 @@
 package confine
 
-import "github.com/karthikeyan5/sshgate/src/gate/confine/jailmut/harness"
+import (
+	"fmt"
+
+	"github.com/karthikeyan5/sshgate/src/gate/confine/jailmut/harness"
+	"golang.org/x/sys/unix"
+)
+
+// autofsEffect is L-AUTOFS's mutation effect on this host's kernel, shared by
+// the case table, the registry and the leg. From Linux 6.19 (922a6f34c175)
+// autofs refuses a foreign-namespace lookup on a private mount with EPERM before
+// asking the daemon, so the uncovered jail can only show it reached the trigger
+// ("uncovered-refused"); older kernels let it fire ("triggered").
+func autofsEffect() string {
+	var uts unix.Utsname
+	if err := unix.Uname(&uts); err != nil {
+		panic(fmt.Sprintf("SETUP: uname: %v", err))
+	}
+	if autofsRefusingKernel(unix.ByteSliceToString(uts.Release[:])) {
+		return "uncovered-refused"
+	}
+	return "triggered"
+}
+
+// autofsRefusingKernel reports whether release is Linux 6.19 or later.
+func autofsRefusingKernel(release string) bool {
+	var major, minor int
+	if _, err := fmt.Sscanf(release, "%d.%d", &major, &minor); err != nil {
+		return false
+	}
+	return major > 6 || major == 6 && minor >= 19
+}
 
 func coverLeg(name string, markers ...string) harness.Leg {
 	leg := harness.Leg{Name: name, Package: "./src/gate/confine", Names: map[string]string{"native": "TestJailMatrixCovers/native/" + name, "abi1": "TestJailMatrixCovers/abi1/" + name}, Markers: markers}
@@ -20,7 +50,7 @@ func coverRegistry() []prot {
 	trace := effect("L-TRACEFS", "trace-consumed")
 	trace.Root = true
 	trace.CIOnly = true
-	autofs := effect("L-AUTOFS", "triggered")
+	autofs := effect("L-AUTOFS", autofsEffect())
 	autofs.Root, autofs.CIOnly = true, true
 	coverEffect.Legs = append(coverEffect.Legs, trace, autofs)
 	cwdEffect := harness.MutationSet{IDs: []string{"P-CWD", "P-SELFCHECK-MOUNTS"}, Legs: []harness.Leg{effect("L-COVER-CWD", "fuse-ioctl")}}

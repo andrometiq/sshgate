@@ -87,6 +87,9 @@ func validateCatalogueCompletion(name, sink string, control OpOutcome, isHeaderO
 		return fmt.Errorf("abnormal utility exit %d", exit)
 	}
 	if exit == 0 {
+		if strings.Contains(name, "/sysctl_") && stdout == control.Stdout && control.Stderr == "" && isSysctlIgnoredRefusal(stderr) {
+			return nil
+		}
 		if stdout != control.Stdout || stderr != control.Stderr {
 			return fmt.Errorf("successful utility report differs from control: stdout %q stderr %q", stdout, stderr)
 		}
@@ -167,6 +170,22 @@ func isCatalogueOwnDenial(name, sink, line string) bool {
 		return line == "mount: "+sink+": must be superuser to use mount."
 	}
 	return false
+}
+
+// isSysctlIgnoredRefusal matches Ubuntu's procps (debian/patches ignore_eaccess,
+// ignore_erofs): a refused write of the catalogue's one key is warned about and
+// ignored, sysctl exits 0 and still echoes the setting. The write is refused only
+// with the warning; the leg separately proves the value unchanged.
+func isSysctlIgnoredRefusal(stderr string) bool {
+	if stderr == "" {
+		return false
+	}
+	for _, line := range strings.Split(strings.TrimSuffix(stderr, "\n"), "\n") {
+		if line != `sysctl: setting key "kernel.domainname", ignoring: Read-only file system` && line != `sysctl: permission denied on key "kernel.domainname", ignoring` {
+			return false
+		}
+	}
+	return true
 }
 
 // isCatalogueConsequence matches a follow-up line a utility prints after its
@@ -312,5 +331,27 @@ func TestCatalogueM1Status(t *testing.T) {
 	control := OpOutcome{Stdout: "* Applying /etc/sysctl.conf ...\nkernel.domainname = fixture\n"}
 	if err := validateCatalogueCompletion("L-CATALOGUE/sysctl_system", "", control, false, "* Applying /etc/sysctl.conf ...\n", "sysctl: permission denied on key \"kernel.domainname\"\n", 1); err != nil {
 		t.Fatal(err)
+	}
+	erofs := "sysctl: setting key \"kernel.domainname\", ignoring: Read-only file system\n"
+	eacces := "sysctl: permission denied on key \"kernel.domainname\", ignoring\n"
+	for _, item := range []struct {
+		name, stdout, stderr string
+		valid                bool
+	}{
+		{"L-CATALOGUE/sysctl_system", control.Stdout, erofs, true},
+		{"L-CATALOGUE/sysctl_reload_bundle", control.Stdout, eacces, true},
+		{"L-CATALOGUE/sysctl_system", control.Stdout, "", true}, // accepted write: the leg's exit and value checks fail it
+		{"L-CATALOGUE/sysctl_system", "", erofs, false},
+		{"L-CATALOGUE/sysctl_system", control.Stdout, erofs + "extra\n", false},
+		{"L-CATALOGUE/sysctl_system", control.Stdout, "sysctl: setting key \"kernel.hostname\", ignoring: Read-only file system\n", false},
+		{"L-CATALOGUE/sysctl_system", control.Stdout, "sysctl: setting key \"kernel.domainname\": Read-only file system\n", false},
+		{"L-CATALOGUE/git_config_set", control.Stdout, erofs, false},
+	} {
+		if err := validateCatalogueCompletion(item.name, "", control, false, item.stdout, item.stderr, 0); (err == nil) != item.valid {
+			t.Errorf("%+v: %v", item, err)
+		}
+	}
+	if isSysctlIgnoredRefusal("") || !isSysctlIgnoredRefusal(erofs+eacces) {
+		t.Error("ignored refusal classification")
 	}
 }
