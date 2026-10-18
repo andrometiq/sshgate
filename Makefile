@@ -2,7 +2,7 @@
 	sshgate-mcp-darwin sshgate-signer-telegram-darwin darwin cross sshgate-signer-server \
 	preflight e2e smoke gitleaks release-gate verify-dist verify-repro verify-versions mcpb \
 	test-refapp-js test-jail-root test-jail-mutate selftest-testjail selftest-jailmut \
-	verify-gate-closure verify-mcp-closure verify-lifecycle-closure
+	verify-gate-closure verify-mcp-closure verify-lifecycle-closure verify-executor-closure
 
 # ---------------------------------------------------------------------------
 # Verified release channel (spec §11)
@@ -48,16 +48,26 @@ DIST_GATE_BIN := $(DIST_GATE_DIR)/sshgate-gate-linux-amd64
 MCP_PKG                     := github.com/karthikeyan5/sshgate/src/mcp
 MCP_VERSION_FLAGS           := -ldflags '-X $(MCP_PKG).Version=$(VERSION)'
 SIGNER_VERSION_FLAGS        := -ldflags '-X main.version=$(VERSION)'
+EXECUTOR_VERSION_FLAGS      := -ldflags '-X main.version=$(VERSION)'
 SIGNER_SERVER_VERSION_FLAGS := -ldflags '-X main.version=$(VERSION)'
+
+ifeq ($(shell go env GOOS),linux)
+EXECUTOR_TARGET := sshgate-executor
+endif
 
 all: vet test build
 
-build: sshgate-signer-server sshgate-gate-linux
+build: sshgate-signer-server sshgate-gate-linux $(EXECUTOR_TARGET)
 	mkdir -p bin
 	go build $(MCP_VERSION_FLAGS)    -o bin/sshgate-mcp              ./src/mcp/cmd/sshgate-mcp
 	go build $(SIGNER_VERSION_FLAGS) -o bin/sshgate-signer-telegram  ./src/signer/cmd/sshgate-signer-telegram
 	go build -o bin/sshgate-gate             ./src/gate/cmd/sshgate-gate
 	go build -o bin/sshgate                  ./src/cli/cmd/sshgate
+
+.PHONY: sshgate-executor
+sshgate-executor:
+	mkdir -p bin
+	GOOS=linux go build $(EXECUTOR_VERSION_FLAGS) -o bin/sshgate-executor ./src/executor/cmd/sshgate-executor
 
 # sshgate-signer-server: v2 hosted approval daemon (scaffold). Built into
 # bin/ alongside the v1 binaries so a single `make build` produces
@@ -154,10 +164,12 @@ install-local: build
 	go install $(MCP_VERSION_FLAGS)    ./src/mcp/cmd/sshgate-mcp
 	go install $(SIGNER_VERSION_FLAGS) ./src/signer/cmd/sshgate-signer-telegram
 	go install ./src/cli/cmd/sshgate
+	@if [ "$(EXECUTOR_TARGET)" != "" ]; then go install $(EXECUTOR_VERSION_FLAGS) ./src/executor/cmd/sshgate-executor; fi
 	@if [ ! -f $(DIST_GATE_BIN) ]; then \
 		echo "install-local: $(DIST_GATE_BIN) is missing — it is committed to the repo; run 'make release-gate' to (re)build it, or fetch it from the clean tree" >&2; exit 1; fi
 	mkdir -p "$${XDG_CONFIG_HOME:-$$HOME/.config}/sshgate/bin"
 	cp $(DIST_GATE_BIN) "$${XDG_CONFIG_HOME:-$$HOME/.config}/sshgate/bin/sshgate-gate-linux-amd64"
+	@if [ "$(EXECUTOR_TARGET)" != "" ]; then echo "Linux executor binary installed; run scripts/install-executor.sh yourself to enable its user service."; fi
 	@echo "install-local done:"
 	@echo "  <clone>/bin/* -> dev binaries"
 	@echo "  sshgate-mcp, sshgate-signer-telegram, sshgate -> $$(go env GOPATH)/bin (must be on PATH)"
@@ -276,7 +288,7 @@ clean:
 # the CHEAP verified-release-channel checks, and the two-build reproducibility
 # assertion. No Docker, so it runs anywhere in well under a minute.
 preflight: vet test test-refapp-js gitleaks build verify-dist verify-versions verify-repro verify-no-sqlite-local verify-no-humanauth-local \
-	verify-gate-closure verify-mcp-closure verify-lifecycle-closure
+	verify-gate-closure verify-mcp-closure verify-lifecycle-closure verify-executor-closure
 	@echo "preflight: OK — safe to push"
 
 # verify-no-sqlite-local proves the SQLite-containment invariant (D10 / spec
@@ -335,6 +347,14 @@ verify-mcp-closure:
 		echo "verify-mcp-closure: FAIL — the MCP links the packages above" >&2; exit 1; \
 	fi
 	@echo "verify-mcp-closure: OK — the MCP links no signerkit, SQLite or human-auth package"
+
+# The executor uses wire clients, never signer implementation or human auth.
+verify-executor-closure:
+	@deps="$$(GOOS=linux go list -deps ./src/executor/cmd/sshgate-executor)" || { echo "verify-executor-closure: go list failed" >&2; exit 1; }; \
+	if printf '%s\n' "$$deps" | grep -E '/pkg/signerkit|modernc.org/sqlite|go-webauthn|pquerna/otp' >&2; then \
+		echo "verify-executor-closure: forbidden dependency" >&2; exit 1; \
+	fi
+	@echo "verify-executor-closure: OK"
 
 # verify-lifecycle-closure: pkg/signerkit imports the local lifecycle, so the
 # lifecycle must never import signerkit, the hosted packages, SQLite or
@@ -405,8 +425,8 @@ verify-dist:
 	@echo "verify-dist: OK — committed gate matches its .sha256; plugin.json, both server.json release versions, the server MCPB release URL, and gemini-extension.json match VERSION (source↔binary is CI's job, §11.4)"
 
 # verify-versions: the T4 version-stamp drift guard. verify-dist proves the
-# plugin.json↔VERSION pair; this proves the three -X-stamped Go binaries
-# (sshgate-mcp, sshgate-signer-telegram, sshgate-signer-server) report VERSION
+# plugin.json↔VERSION pair; this proves the -X-stamped Go binaries
+# (MCP, signers, and on Linux the executor) report VERSION
 # too. It BUILDS each with its version flags and RUNS `--version`, because a
 # wrong -X symbol path is silently ignored by the linker — only building+running
 # proves the stamp reached the binary. A binary reporting "dev" (stamp did not
@@ -420,16 +440,21 @@ verify-versions:
 	go build $(MCP_VERSION_FLAGS)           -o "$$tmpdir/sshgate-mcp"             ./src/mcp/cmd/sshgate-mcp || exit 1; \
 	go build $(SIGNER_VERSION_FLAGS)        -o "$$tmpdir/sshgate-signer-telegram" ./src/signer/cmd/sshgate-signer-telegram || exit 1; \
 	go build $(SIGNER_SERVER_VERSION_FLAGS) -o "$$tmpdir/sshgate-signer-server"   ./src/signer-server/cmd/sshgate-signer-server || exit 1; \
+	binaries="sshgate-mcp sshgate-signer-telegram sshgate-signer-server"; \
+	if [ "$(EXECUTOR_TARGET)" != "" ]; then \
+		go build $(EXECUTOR_VERSION_FLAGS) -o "$$tmpdir/sshgate-executor" ./src/executor/cmd/sshgate-executor || exit 1; \
+		binaries="$$binaries sshgate-executor"; \
+	fi; \
 	fail=0; \
-	for b in sshgate-mcp sshgate-signer-telegram sshgate-signer-server; do \
-		got=$$("$$tmpdir/$$b" --version 2>/dev/null | awk '{print $$NF}'); \
+	for b in $$binaries; do \
+		got=$$(XDG_RUNTIME_DIR="$$tmpdir/missing-runtime" XDG_CONFIG_HOME="$$tmpdir/config" "$$tmpdir/$$b" --version 2>/dev/null | awk '{print $$NF}'); \
 		if [ "$$got" != "$$vf" ]; then \
 			echo "verify-versions: FAIL — $$b reports '$$got', expected VERSION '$$vf' (broken -X wiring or a reintroduced hardcoded version)" >&2; \
 			fail=1; \
 		fi; \
 	done; \
 	[ $$fail -eq 0 ] || exit 1; \
-	echo "verify-versions: OK — sshgate-mcp / signer-telegram / signer-server all report VERSION $$vf"
+	echo "verify-versions: OK — $$binaries all report VERSION $$vf"
 
 # verify-repro: the STANDING two-build reproducibility assertion (spec §11.8
 # task 14). Builds the gate TWICE with the SHARED flag set (GATE_BUILD_FLAGS)

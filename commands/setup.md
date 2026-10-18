@@ -668,3 +668,18 @@ missing and points back at the relevant section. If the last line reports
 `group:INACTIVE`, do NOT declare Tier 2 ready-for-writes: the MCP server
 cannot reach the `0660 sshgatesigner` socket until the user logs out/in and
 relaunches Claude Code (T2.6) so the `sshgatesigner` group is active.
+
+## Optional Linux async executor
+
+After signer setup, point the operator to
+`docs/install-step-by-step.md#optional-linux-async-executor`. `make install-local`
+installs the executor binary on Linux but does not enable a unit. The operator
+runs `scripts/install-executor.sh --dry-run`, then `scripts/install-executor.sh`
+as their login user, without sudo. Never enable or start this unit automatically.
+They must refresh `sshgatesigner` group membership by logging out and back in,
+or have an administrator restart `user@` if it persists, and run
+`loginctl enable-linger "$USER"` for execution after logout. Restarting `user@`
+terminates user services: save work first. `scripts/uninstall-executor.sh`
+removes the service while retaining jobs and the binary; it also has `--dry-run`.
+macOS, MCPB and Smithery installs have no executor and return
+`executor_unavailable` for async requests.

@@ -313,3 +313,14 @@ Every step above also works by hand. [docs/install-step-by-step.md](docs/install
 has the full walkthrough with copy-paste shell blocks for each tier, the Telegram bot setup, the
 optional LLM command explainer, troubleshooting, and uninstall. For MCP clients other than
 Claude Code, see [docs/install-generic-mcp.md](docs/install-generic-mcp.md).
+
+## Optional async executor (Linux)
+
+After `make install-local`, the operator can run `scripts/install-executor.sh --dry-run`
+and then `scripts/install-executor.sh`, without sudo, to install and start the
+systemd user service. Refresh `sshgatesigner` group membership by logging out and
+back in (or having an administrator restart `user@`), and run
+`loginctl enable-linger "$USER"` to keep it running after logout.
+See [the executor walkthrough](docs/install-step-by-step.md#optional-linux-async-executor)
+for paths, release binaries, diagnostics and removal. macOS, MCPB and Smithery
+installs have no executor; async returns `executor_unavailable` there.

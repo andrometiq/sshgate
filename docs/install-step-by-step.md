@@ -752,3 +752,53 @@ key and audit log — destructive). Pass `--purge` to skip the prompts.
 Removing `/var/lib/sshgatesigner/` invalidates every gate deployment
 keyed against this signer; you'll need to re-provision every server with
 the `sshgate` CLI (`sshgate pubkey` + `sshgate add`) after re-installing.
+
+## Optional Linux async executor
+
+The executor runs as your login user in a systemd user service. Install the
+signer first for signed writes, then refresh `sshgatesigner` group membership:
+log out of **all** sessions and log back in. If the user manager remains alive
+(for example because lingering is enabled), an administrator must restart
+`user@$(id -u).service`; this terminates user services, so save your work first.
+Restart the MCP client too. A stale user manager cannot access the signer socket.
+
+From the clone, as your login user (no sudo):
+
+```bash
+make install-local
+scripts/install-executor.sh --dry-run
+scripts/install-executor.sh
+loginctl enable-linger "$USER"
+systemctl --user status sshgate-executor.service
+journalctl --user -u sshgate-executor.service -n 50 --no-pager
+```
+
+`make install-local` installs the Linux binary but never enables a service.
+The script resolves `sshgate-executor` on PATH; use `--binary /absolute/path/to/sshgate-executor`
+to select another installed binary. The executable path must not contain quotes,
+`$`, backslashes or control characters. Keep it available for service restarts.
+Only invoking the script without `--dry-run` writes the unit and enables/starts it.
+Lingering keeps the user manager and executor alive after logout; the command may
+require administrator authorization. The executor restarts on failure and has a
+90-second stop timeout to let pending work shut down.
+
+The unit uses the install-time `${XDG_CONFIG_HOME:-$HOME/.config}`; use the same
+configuration root for the MCP client. Jobs persist in `$XDG_CONFIG_HOME/sshgate/executor/`
+(on the default configuration, `~/.config/sshgate/executor/`). The socket is
+`$XDG_RUNTIME_DIR/sshgate/executor.sock`. Keep job storage on a local filesystem.
+
+Release assets include `sshgate-executor-linux-amd64` and
+`sshgate-executor-linux-arm64`; choose your host architecture and verify it against
+that release's `SHA256SUMS` before installing. There is no Darwin executor.
+MCPB and Smithery installs do not include the executor; async on those installs
+or macOS returns `executor_unavailable`. Synchronous use needs no executor.
+
+To remove only the user service, as the same user with the same configuration root:
+
+```bash
+scripts/uninstall-executor.sh --dry-run
+scripts/uninstall-executor.sh
+```
+
+Removal stops/disables the unit and reloads the user manager. It retains the
+binary and job records. It does not disable lingering, which other services may use.

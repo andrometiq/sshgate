@@ -40,6 +40,8 @@ func TestSetupScripts_Syntax(t *testing.T) {
 	scripts := []string{
 		"install.sh",
 		"uninstall.sh",
+		"install-executor.sh",
+		"uninstall-executor.sh",
 	}
 
 	for _, name := range scripts {
@@ -63,6 +65,8 @@ func TestSetupScripts_Shellcheck(t *testing.T) {
 	scripts := []string{
 		"install.sh",
 		"uninstall.sh",
+		"install-executor.sh",
+		"uninstall-executor.sh",
 	}
 	args := append([]string{"--severity=warning"}, func() []string {
 		paths := make([]string, 0, len(scripts))
