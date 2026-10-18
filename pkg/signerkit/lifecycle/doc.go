@@ -1,6 +1,11 @@
 // Package lifecycle owns local approval storage and the dependency contracts
 // used by the single-writer approval engine. State transitions belong to
 // approvalplan; transport, rendering and signing adapters belong to callers.
+// Admission keeps decision-ordered reclamation indexes alongside its counters.
+// Payload pressure visits only full records; count pressure also visits shed
+// headers. Confirmed commits update the indexes, and Startup rebuilds them.
+// The pure transitions still enforce every reclamation guard. Full records
+// retain their immutable reservation until Shed or Delete.
 // Storage uncertainty permanently stops a v2 generation under its writer lock.
 // Availability and every v2 operation retain that cause until replacement;
 // Run joins interrupted effects before returning it. Recovery belongs to callers.
