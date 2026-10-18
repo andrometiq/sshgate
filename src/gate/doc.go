@@ -3,6 +3,9 @@
 // command="~/.sshgate-gate/gate" forcing on the SSHGate dedicated key, so
 // every connection using that key is funnelled through this binary.
 //
+// Command execution and the gate binary require Linux. Verification and audit
+// types are also available to clients on other supported platforms.
+//
 // The package exports three pieces used by both the cmd/gate entry
 // point and the integration tests:
 //
