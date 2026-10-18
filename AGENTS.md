@@ -147,6 +147,14 @@ have them check the host's `/var/log/auth.log` and that the key line was pasted 
   path also needs `make test-jail`, `make test-jail-root` (root, disposable host) and
   `make test-jail-mutate MUTATE=<protection IDs>`. `docs/TESTING.md` has every target and
   what it needs.
+- CI runs only after a push, so it is not a pre-push check. Before pushing gate, jail or CI
+  changes, run `make vet && make test` on a stock Ubuntu 24.04 host (`/bin/sh` is `dash`,
+  AppArmor restricts unprivileged user namespaces) and `make test-jail` with `GOMODCACHE`
+  pointed at an empty directory. A dev host with `bash` as `/bin/sh`, no AppArmor clamp and a
+  warm module cache hides failures that CI on `ubuntu-latest` then hits.
+- When something passes in tests but fails live, first check the build revision of the binaries
+  actually deployed (`go version -m <binary>`): a signer and MCP built from different commits
+  fail in ways that look like logic bugs.
 - This repo is public. Operator notes, per-server inventories and design reviews never go
   in a tracked file; keep them in a gitignored local directory (`local-workspace/` and
   `local-notes/` are ignored for this).
