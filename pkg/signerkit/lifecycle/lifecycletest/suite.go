@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/karthikeyan5/sshgate/internal/elapsed/elapsedtest"
@@ -34,7 +35,9 @@ func Run(t *testing.T, factory StoreFactory) {
 	t.Run("Grants", func(t *testing.T) { grants(t, factory) })
 	t.Run("EditRetry", func(t *testing.T) { editRetry(t, factory) })
 	t.Run("LiveFailureContrast", func(t *testing.T) { liveFailure(t, factory) })
-	t.Run("FlushRecovery", func(t *testing.T) { flushRecovery(t, factory) })
+	t.Run("FlushRecovery", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) { flushRecovery(t, factory) })
+	})
 	t.Run("Schedules", func(t *testing.T) { schedules(t, factory) })
 	t.Run("ReleaseSkew", func(t *testing.T) { releaseSkew(t, factory) })
 }
