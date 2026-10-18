@@ -133,19 +133,20 @@ type RegisterTransferKey struct {
 }
 
 // ApprovalDraft is what a requester submits: requester-supplied fields only.
-// It has no validity field (E26) and no rationale origin (E39); the strict
-// decode refuses both, like any unknown field.
+// Requested validity is optional and bounded by K12 (OQ1); the signer applies
+// its configured cap. Rationale origin remains signer-owned (E39).
 type ApprovalDraft struct {
-	Version                int            `json:"version"`
-	Kind                   Kind           `json:"kind"`
-	RequestID              string         `json:"request_id"`
-	Rationale              string         `json:"reason"`
-	ExecutorClaimTokenHash string         `json:"executor_claim_token_hash,omitempty"`
-	SubmitNotAfter         time.Time      `json:"submit_not_after"`
-	Coordinator            Coordinator    `json:"coordinator,omitempty"`
-	CommandJob             *CommandJob    `json:"command_job,omitempty"`
-	StandingGrant          *StandingGrant `json:"standing_grant,omitempty"`
-	Transfer               *Transfer      `json:"transfer,omitempty"`
+	Version                  int            `json:"version"`
+	Kind                     Kind           `json:"kind"`
+	RequestID                string         `json:"request_id"`
+	Rationale                string         `json:"reason"`
+	ExecutorClaimTokenHash   string         `json:"executor_claim_token_hash,omitempty"`
+	SubmitNotAfter           time.Time      `json:"submit_not_after"`
+	Coordinator              Coordinator    `json:"coordinator,omitempty"`
+	CommandJob               *CommandJob    `json:"command_job,omitempty"`
+	StandingGrant            *StandingGrant `json:"standing_grant,omitempty"`
+	Transfer                 *Transfer      `json:"transfer,omitempty"`
+	RequestedValiditySeconds *int           `json:"requested_validity_seconds,omitempty"`
 }
 
 // ApprovalPlanV1 is the frozen plan: the draft plus what the signer resolves
@@ -191,6 +192,9 @@ func DecodeDraft(b []byte) (ApprovalDraft, error) {
 func (d ApprovalDraft) Validate() error {
 	if d.Version != DraftVersion {
 		return invalid("version", "must be %d", DraftVersion)
+	}
+	if seconds := d.RequestedValiditySeconds; seconds != nil && (*seconds < int(ValidityMin/time.Second) || *seconds > int(ValidityMax/time.Second)) {
+		return invalid("requested_validity_seconds", "must be %d..%d", int(ValidityMin/time.Second), int(ValidityMax/time.Second))
 	}
 	if d.Kind == KindRegisterTransferKey {
 		return invalid("kind", "register_transfer_key has no v2 submission (E39)")

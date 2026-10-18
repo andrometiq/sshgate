@@ -15,7 +15,8 @@ const (
 	MaxTotalBytes = 24576
 )
 
-// Validity (K12, E26): always operator-configured, never requester-chosen.
+// Validity bounds (K12, E26). OQ1 permits a requested validity within these
+// bounds; the signer caps it at the operator-configured validity.
 const (
 	ValidityMin     = 300 * time.Second
 	ValidityDefault = 86400 * time.Second
