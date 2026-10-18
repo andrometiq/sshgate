@@ -15,9 +15,11 @@ name: tests
 #                              (-tags=integration); `go test ./...` already
 #                              skips the tagged files, so nothing here selects
 #                              them.
-#   - make e2e / make smoke  — need Docker / a privileged fresh-user rig
-#                              (scripts/smoke-fresh-install.sh); not runnable on
-#                              a plain hosted runner.
+#   - make test-journey      — privileged Docker installation and user journey;
+#                              runs in the separate journey job below.
+#   - make e2e              — includes preflight, integration, smoke and journey;
+#                              not part of the hermetic unit job.
+#   - make smoke            — keyless MCP startup check; retained in local e2e.
 #   - make preflight in full — beyond vet + test, it additionally runs
 #                              test-refapp-js, gitleaks, build, verify-dist,
 #                              verify-versions, verify-repro,
@@ -38,6 +40,10 @@ name: tests
 # Go toolchain: pinned from go.mod via setup-go's go-version-file (same pattern
 # as verify-gate.yml) so CI matches the repo's declared toolchain with no
 # hardcoded version. The race detector needs cgo/gcc, which ubuntu-latest ships.
+
+# Journey runs on disposable Ubuntu 24.04 with synthetic credentials and a
+# loopback fake Telegram API, no secrets. Both jobs run on every PR and push,
+# without path filters. Require journey in branch protection alongside tests.
 
 on:
   push:
@@ -79,3 +85,82 @@ jobs:
           grep -q -- '^--- PASS: TestRunReadClampHostRunsClassifierOnly' clamp.log
           grep -q -- '^--- PASS: TestGateBinaryClampHostClassifierOnly' clamp.log
           if grep -q -- '--- SKIP' clamp.log; then exit 1; fi
+
+  journey:
+    runs-on: ubuntu-24.04
+    # Preparation (image build, ~5 min) + the suite's own 20-minute go test
+    # timeout + teardown and upload.
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    env:
+      JOURNEY_ALLOW_PRIVILEGED: "1"
+    steps:
+      - name: Checkout
+        timeout-minutes: 2
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+          # The rig clones a git bundle of HEAD; a shallow checkout's bundle lacks parents.
+          fetch-depth: 0
+
+      - name: Set up Go (pinned toolchain from go.mod)
+        timeout-minutes: 3
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+          check-latest: false
+          # setup-go keys only module/build caches by OS, arch, Go and go.sum.
+          cache: true
+          cache-dependency-path: go.sum
+
+      # Script preparation and tests share temporary state and one cleanup trap.
+      # Budget: checkout 1 + Go 3 + preparation/tests 20 + teardown 3 + upload 1
+      # = 28 minutes, leaving 2 minutes for runner overhead and action post steps.
+      - name: Prepare image and run installed user journey
+        env:
+          JOURNEY_ARTIFACT_DIR: ${{ runner.temp }}/journey-artifacts
+        # Longer than the suite's 20-minute go test timeout, so Go's own
+        # timeout fires first and its stack dump reaches the log.
+        timeout-minutes: 28
+        run: make test-journey
+
+      - name: Tear down journey resources
+        if: always()
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          # The script traps normal exits. Recover leftovers after cancellation.
+          set -euo pipefail
+          projects=$(mktemp)
+          docker ps -a --format '{{.Label "com.docker.compose.project"}}' >> "$projects"
+          docker volume ls --format '{{.Label "com.docker.compose.project"}}' >> "$projects"
+          docker network ls --format '{{.Label "com.docker.compose.project"}}' >> "$projects"
+          result=0
+          while IFS= read -r project; do
+            [[ "$project" == journey-* ]] || continue
+            JOURNEY_IMAGE="sshgate-journey:$project" docker compose \
+              -p "$project" -f tests/journey/fixtures/compose.yml \
+              down --volumes --remove-orphans --timeout 10 || result=1
+          done < <(sort -u "$projects")
+          rm -f "$projects"
+          images=$(docker image ls --quiet --filter 'reference=sshgate-journey:*')
+          if [[ -n "$images" ]]; then
+            docker image rm $images || result=1
+          fi
+          exit "$result"
+
+      - name: Upload bounded failure evidence
+        timeout-minutes: 1
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: journey-failure
+          # Allowlist only the collector's redacted, size-capped evidence. Never
+          # upload fixture trees, keys, token files, secret fixtures or raw journals.
+          path: |
+            ${{ runner.temp }}/journey-artifacts/main-evidence.json
+            ${{ runner.temp }}/journey-artifacts/main-evidence.jsonl
+          if-no-files-found: ignore
+          retention-days: 7
+          include-hidden-files: false

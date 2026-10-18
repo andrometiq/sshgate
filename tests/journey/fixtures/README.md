@@ -74,3 +74,31 @@ bound protocol/card/audit evidence before retaining it. No raw credentials or jo
 Without Docker, run `python3 tests/journey/fixtures/check-runner.py` for the privileged guard
 and cleanup failure matrix, and `go vet -tags journey ./tests/journey/...` to compile/check the
 Go fixture and its in-memory MCP refusal regression. These do not prove the rig boots.
+
+## Main-line scenarios (J3)
+
+`TestJourneyMain` diagnoses the disabled HTTP fixture through MCP, checks Tier-1 and
+unsigned-SSH refusal, then follows the documented human re-tier procedure for web1.
+It installs the candidate gate on web1 through the CLI and on web2 through
+`update_gate`, verifying both hashes. Immediate approval, denial/replay, restart
+refusal and binary transfer exercise the real signer. Late batch approval at 240
+seconds and two independent expiry requests share one five-minute window.
+
+Each target starts `health.py` on loopback port 8080. Its user-owned
+`/home/user/health.conf` initially contains `enabled=0\n`: requests return 503
+and append `unhealthy: enabled=0` to `health.log`. Setting it to `enabled=1\n`
+returns 200 with `ok\n`; the service rereads the file on each request.
+Observer commands use Docker exec for health, file metadata and audits. Repairs and
+transfers use MCP; only fixture seeding, lifecycle controls and documented human
+provisioning run outside MCP.
+
+Set `JOURNEY_ARTIFACT_DIR` to retain bounded, timestamped MCP results, Telegram
+events, gate/signer audit snapshots and timeline marks incrementally in
+`main-evidence.jsonl` (8 MiB total; 1 MiB per item). Each item is scrubbed before
+writing; a synthetic plaintext leak records a withheld marker and fails the test.
+Cleanup retains the final `main-evidence.json` summary, including on failure.
+Upload both files: a process timeout may leave only the JSON lines.
+Secret fixtures and raw journals are never retained; transfer checks also scan
+live logs and service journals. Missing infrastructure fails rather than skips. Compile-only
+validation with `go vet -tags journey ./tests/journey/...` does not execute these
+Docker scenarios.
