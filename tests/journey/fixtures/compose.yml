@@ -1,0 +1,36 @@
+services:
+  controller:
+    image: ${JOURNEY_IMAGE:?run scripts/test-journey.sh}
+    platform: linux/amd64
+    privileged: true
+    cgroup: private
+    tmpfs:
+      - /run
+      - /run/lock
+      - /tmp
+    volumes:
+      - controller-home:/home/operator
+    networks: [journey]
+    dns: [127.0.0.1]
+    stop_grace_period: 10s
+  target-a: &target
+    image: ${JOURNEY_IMAGE:?run scripts/test-journey.sh}
+    platform: linux/amd64
+    command: ["bash", "/opt/journey/fixtures/target.sh"]
+    security_opt:
+      - seccomp=./no-userns.json
+    volumes:
+      - target-a-home:/home/user
+    networks: [journey]
+    dns: [127.0.0.1]
+  target-b:
+    <<: *target
+    volumes:
+      - target-b-home:/home/user
+networks:
+  journey:
+    internal: true
+volumes:
+  controller-home:
+  target-a-home:
+  target-b-home:
