@@ -5,13 +5,14 @@ package journey
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
 	tool "github.com/karthikeyan5/sshgate/src/mcp/tools"
-	"github.com/karthikeyan5/sshgate/src/xferwire"
 )
 
 const journeySentinel = "JOURNEY_SYNTHETIC_PLAINTEXT_MUST_NOT_ESCAPE"
@@ -83,19 +84,19 @@ print(len(data), hashlib.sha256(data).hexdigest(), oct(p.stat().st_mode & 0o777)
 		for _, row := range r.audit(t, host) {
 			command, _ := row["command"].(string)
 			if host == "target-a" {
-				leg, err := xferwire.ParseSend(command)
-				if err != nil || leg.XferID != out.XferID {
+				// The gate audit redacts the leg's key fields, so match the plain
+				// base64url id and path tokens instead of parsing the leg.
+				if !auditLegHas(command, "SSHGATE_XFER_SEND", out.XferID) {
 					continue
 				}
-				if leg.SrcPath != source {
+				if !auditLegHas(command, "SSHGATE_XFER_SEND", source) {
 					t.Fatal("SEND path mismatch")
 				}
 			} else {
-				leg, err := xferwire.ParseRecv(command)
-				if err != nil || leg.XferID != out.XferID {
+				if !auditLegHas(command, "SSHGATE_XFER_RECV", out.XferID) {
 					continue
 				}
-				if leg.DestPath != destination {
+				if !auditLegHas(command, "SSHGATE_XFER_RECV", destination) {
 					t.Fatal("RECV path mismatch")
 				}
 			}
@@ -161,4 +162,14 @@ print(len(data), hashlib.sha256(data).hexdigest(), oct(p.stat().st_mode & 0o777)
 			t.Fatal("synthetic plaintext leaked into an agent-visible surface")
 		}
 	}
+}
+
+// auditLegHas reports whether a gate-audited transfer leg of the given verb
+// carries value as one of its base64url fields.
+func auditLegHas(command, verb, value string) bool {
+	fields := strings.Fields(command)
+	if len(fields) == 0 || fields[0] != verb {
+		return false
+	}
+	return slices.Contains(fields[1:], base64.RawURLEncoding.EncodeToString([]byte(value)))
 }
