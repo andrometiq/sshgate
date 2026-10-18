@@ -24,6 +24,8 @@ type fileRecord struct {
 // FileStore owns a journal directory until Close, including across Reopen.
 // The lifecycle owner must stop and join its effects before Reopen or Close.
 // Admission, retention and reservation accounting belong to Engine.
+// After an uncertain update or failed reload, Commit, Remove, Load and List
+// return *approvalplan.CodeError with CodeStorageUncertain until Reopen succeeds.
 type FileStore struct {
 	operation         sync.Mutex
 	mu                sync.RWMutex
@@ -40,9 +42,21 @@ type FileStore struct {
 
 var _ Store = (*FileStore)(nil)
 
-// OpenFileStore creates the final directory component if absent. Its parent
-// must already exist. Ownership is acquired before any records are read.
+// OpenFileStore acquires ownership and loads the journal. A load failure returns
+// both the owned store and the error: the caller must retry Reopen or Close it.
+// Only an ownership failure returns a nil store.
 func OpenFileStore(path string, uid uint32) (*FileStore, error) {
+	s, err := AcquireFileStore(path, uid)
+	if err != nil {
+		return nil, err
+	}
+	return s, s.Reopen()
+}
+
+// AcquireFileStore creates the final directory component if absent and acquires
+// its ownership flock without loading records. Its parent must already exist.
+// Call Reopen before use; until then all Store operations are storage_uncertain.
+func AcquireFileStore(path string, uid uint32) (*FileStore, error) {
 	path = filepath.Clean(path)
 	parent, err := unix.Open(filepath.Dir(path), unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
 	if err != nil {
@@ -71,12 +85,7 @@ func OpenFileStore(path string, uid uint32) (*FileStore, error) {
 		}
 		return nil, fmt.Errorf("approval store %s requires a local filesystem with working flock: %w", path, err)
 	}
-	s := &FileStore{holderFD: fd, uid: uid}
-	if err := s.Reopen(); err != nil {
-		s.Close()
-		return nil, err
-	}
-	return s, nil
+	return &FileStore{holderFD: fd, uid: uid, poisoned: true}, nil
 }
 
 // Reopen reloads from the held inode, never from the original pathname. On

@@ -140,6 +140,7 @@ func TestFileStoreUncertainRemove(t *testing.T) {
 				s.beforeStoreUpdate = fault
 			}
 			checkCode(t, s.Remove(key), ap.CodeStorageUncertain)
+			assertFileStorePoisoned(t, s)
 			s.afterStoreUpdate, s.beforeStoreUpdate = nil, nil
 			if err := s.Reopen(); err != nil {
 				t.Fatal(err)

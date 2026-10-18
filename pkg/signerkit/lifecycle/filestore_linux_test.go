@@ -258,8 +258,11 @@ func TestFileStoreDirectorySafety(t *testing.T) {
 				}
 				path = link
 			}
-			if store, err := lc.OpenFileStore(path, uid); err == nil {
-				store.Close()
+			store, err := lc.OpenFileStore(path, uid)
+			if store != nil {
+				defer store.Close()
+			}
+			if err == nil {
 				t.Fatal("unsafe journal opened")
 			}
 		})

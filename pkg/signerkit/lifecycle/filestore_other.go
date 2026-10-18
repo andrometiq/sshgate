@@ -8,7 +8,12 @@ import "log"
 type FileStore struct{ MemStore }
 
 // OpenFileStore uses memory only on non-Linux systems.
-func OpenFileStore(_ string, _ uint32) (*FileStore, error) {
+func OpenFileStore(path string, uid uint32) (*FileStore, error) {
+	return AcquireFileStore(path, uid)
+}
+
+// AcquireFileStore uses memory only on non-Linux systems.
+func AcquireFileStore(_ string, _ uint32) (*FileStore, error) {
 	log.Print("approval store: persistence unavailable on this platform; approvals are memory-only and lost on restart")
 	return &FileStore{}, nil
 }
