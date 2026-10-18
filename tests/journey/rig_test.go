@@ -150,7 +150,7 @@ chown sgop:sgop /home/sgop/.bash_profile`)
 
 func (r *journeyRig) addReadOnly(t *testing.T) {
 	t.Helper()
-	publicKey := strings.TrimSpace(r.operator(t, "sshgate pubkey"))
+	publicKey := strings.TrimSpace(r.operator(t, "sshgate pubkey 2>/dev/null"))
 	if !strings.HasPrefix(publicKey, "ssh-ed25519 ") || strings.ContainsAny(publicKey, "\r\n'") {
 		t.Fatal("unexpected public key format")
 	}
