@@ -4,7 +4,10 @@ package lifecycle
 
 import (
 	"context"
+	"encoding/json"
+	"golang.org/x/sys/unix"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"testing"
@@ -137,25 +140,77 @@ func BenchmarkFileStoreStartupMeasurement(b *testing.B) {
 			t.Fatal(err)
 		}
 	}
-	b.ResetTimer()
-	for range b.N {
-		start := time.Now()
-		if err := s.Reopen(); err != nil {
-			t.Fatal(err)
+
+	// The race suite launches an uninstrumented production startup harness: race
+	// instrumentation is not part of the SSD latency contract.
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	source := filepath.Join(root, "startup.go")
+	if err := os.WriteFile(source, []byte(fileStartupMeasurementProgram), 0600); err != nil {
+		t.Fatal(err)
+	}
+	binary, err := filepath.Abs(filepath.Join(root, "startup"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if output, err := exec.Command("go", "build", "-o", binary, source).CombinedOutput(); err != nil {
+		t.Fatalf("measurement build: %v %s", err, output)
+	}
+	cold := filepath.Join(root, "cold")
+	if err := os.Mkdir(cold, 0700); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if !validKey(entry.Name()) {
+			continue
 		}
-		loaded := time.Since(start)
-		t.Logf("warm reload: 65536 files in %s", loaded)
-		e, err := New(Config{Store: s, Clock: elapsedtest.NewFake(st.T0), Freezer: &freezer{}, SnapshotBuilder: snapshotter{}})
+		data, err := os.ReadFile(filepath.Join(path, entry.Name()))
 		if err != nil {
 			t.Fatal(err)
 		}
-		total := time.Since(start)
-		if e.projections.total.records != 65536 || e.projections.total.full != 512 || len(e.projections.quarantined) != 0 {
-			t.Fatal("wrong startup population", e.projections.total)
-		}
-		t.Logf("warm: records=65536 full=512 shed=65024 reload=%s startup_total=%s (10s reference SSD gate applies without -race)", loaded, total)
-		if err := e.Close(); err != nil {
+		f, err := os.OpenFile(filepath.Join(cold, entry.Name()), os.O_CREATE|os.O_WRONLY, 0600)
+		if err != nil {
 			t.Fatal(err)
+		}
+		if _, err := f.Write(data); err != nil {
+			t.Fatal(err)
+		}
+		if err := f.Sync(); err != nil {
+			t.Fatal(err)
+		}
+		if err := unix.Fadvise(int(f.Fd()), 0, 0, unix.FADV_DONTNEED); err != nil {
+			t.Fatal(err)
+		}
+		if err := f.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	b.ResetTimer()
+	for range b.N {
+		for _, measurement := range []struct{ name, path string }{{"warm", path}, {"cold-fresh-copy", cold}} {
+			output, err := exec.Command(binary, measurement.path).CombinedOutput()
+			if err != nil {
+				t.Fatalf("startup: %v %s", err, output)
+			}
+			var result struct {
+				Reload, Total time.Duration
+				Records, Full int
+			}
+			if err := json.Unmarshal(output, &result); err != nil {
+				t.Fatal(err, string(output))
+			}
+			if result.Records != 65536 || result.Full != 512 {
+				t.Fatal("wrong startup population", result)
+			}
+			t.Logf("%s: records=%d full=%d reload=%s startup_total=%s (uninstrumented production harness)", measurement.name, result.Records, result.Full, result.Reload, result.Total)
+			if measurement.name == "warm" && result.Total > 10*time.Second {
+				t.Errorf("warm SSD startup exceeded 10s: %s", result.Total)
+			}
 		}
 	}
 	b.StopTimer()
@@ -243,3 +298,33 @@ func TestFileStoreGrantStress(t *testing.T) {
 		})
 	}
 }
+
+const fileStartupMeasurementProgram = `package main
+import (
+ "context"
+ "encoding/json"
+ "os"
+ "time"
+ lc "github.com/karthikeyan5/sshgate/pkg/signerkit/lifecycle"
+ ap "github.com/karthikeyan5/sshgate/src/approvalplan"
+ st "github.com/karthikeyan5/sshgate/src/approvalplan/statetest"
+)
+type adapters struct{}
+func(adapters)Wall()time.Time{return st.T0}
+func(adapters)Elapsed()time.Duration{return 0}
+func(adapters)Freeze(context.Context,ap.ApprovalDraft,string,string,time.Time)(ap.ApprovalPlanV1,error){panic("unexpected freeze")}
+func(adapters)BuildSnapshot(context.Context,ap.ApprovalPlanV1)([]byte,string,error){panic("unexpected snapshot")}
+func main(){
+ start:=time.Now()
+ store,err:=lc.OpenFileStore(os.Args[1],uint32(os.Getuid()));if err!=nil{panic(err)}
+ defer store.Close()
+ reload:=time.Since(start)
+ engine,err:=lc.New(lc.Config{Store:store,Clock:adapters{},Freezer:adapters{},SnapshotBuilder:adapters{}});if err!=nil{panic(err)}
+ total:=time.Since(start)
+ defer engine.Close()
+ entries,err:=store.List();if err!=nil{panic(err)}
+ full:=0
+ for _,entry:=range entries{if entry.Quarantined{panic("quarantined record")};rec,err:=store.Load(entry.Key);if err!=nil{panic(err)};if rec.Payload!=nil{full++}}
+ if err:=json.NewEncoder(os.Stdout).Encode(struct{Reload,Total time.Duration;Records,Full int}{reload,total,len(entries),full});err!=nil{panic(err)}
+}
+`

@@ -6,7 +6,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sync"
 	"testing"
 	"time"
 
@@ -118,12 +117,7 @@ func TestFileStoreActorCommitFaults(t *testing.T) {
 				case <-ctx.Done():
 					t.Fatal("actor self-joined or did not stop")
 				}
-				var readers sync.WaitGroup
-				for range 8 {
-					readers.Add(1)
-					go func() { defer readers.Done(); assertFileStorePoisoned(t, s) }()
-				}
-				readers.Wait()
+				assertFileEngineStopped(t, e)
 				if stage != "flush" {
 					expected := 0
 					if stage == "burst-done" || stage == "card-done" || stage == "edit-done" || stage == "status-done" {

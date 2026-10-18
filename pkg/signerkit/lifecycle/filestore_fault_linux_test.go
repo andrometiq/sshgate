@@ -3,12 +3,18 @@
 package lifecycle
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/karthikeyan5/sshgate/internal/securestate"
 	ap "github.com/karthikeyan5/sshgate/src/approvalplan"
@@ -82,28 +88,81 @@ func TestFileStoreUncertainCommit(t *testing.T) {
 }
 
 func TestFileStoreReadersDoNotWaitForDisk(t *testing.T) {
-	s, err := OpenFileStore(filepath.Join(t.TempDir(), "approvals"), uint32(os.Getuid()))
+	e, _, s, _ := fileEngineFixture(t)
+	key, rec := fileRecordFixture(t)
+	steps := make([]st.StepSpec, 6)
+	for i := range steps {
+		steps[i] = st.Write(strings.Repeat("<", ap.MaxStepBytes), 60)
+	}
+	draft := st.JobDraft(st.ID(1), ap.CoordinatorExecutor, st.T0, steps...)
+	var answer ap.Answer
+	rec, answer = ap.Apply(nil, st.SubmitOf(draft, st.PrincipalA, st.T0, time.Hour), ap.Now{Wall: st.T0}, ap.Inputs{Epoch: st.Epoch(1), Settings: ap.LocalSettings})
+	if answer.Code != "" {
+		t.Fatal(answer)
+	}
+	rec.Header.Outbox = nil
+	for i := 1; i <= ap.MaxRequiredApprovals; i++ {
+		rec.Header.Outbox = append(rec.Header.Outbox, ap.OutboxEvent{Seq: uint64(i), Kind: ap.EventVote, Operator: strings.Repeat("o", ap.MaxOperatorIDBytes), Decision: ap.VoteApprove, Detail: strings.Repeat("d", ap.MaxDetailBytes)})
+	}
+	rec.Header.OutboxSeq = uint64(len(rec.Header.Outbox))
+	rec.Header.RequiredApprovals = ap.MaxRequiredApprovals
+	for i := 0; i < ap.MaxRequiredApprovals+ap.VoteSlack; i++ {
+		rec.Header.Votes = append(rec.Header.Votes, ap.Vote{Operator: fmt.Sprintf("%03d", i) + strings.Repeat("x", ap.MaxOperatorIDBytes-3), Decision: ap.VoteApprove, TS: st.T0, Authn: "telegram"})
+	}
+	rec.Payload.ReviewSnapshot = []byte(`{"padding":""}`)
+	data, err := ap.EncodeR1(rec)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s.Close()
-	key, rec := fileRecordFixture(t)
+	padding := (512 << 10) - len(data)
+	if padding < 0 || padding+len(rec.Payload.ReviewSnapshot) > ap.ReviewSnapshotMax {
+		t.Fatal("invalid large fixture padding", padding)
+	}
+	rec.Payload.ReviewSnapshot = []byte(`{"padding":"` + strings.Repeat("x", padding) + `"}`)
+	data, err = ap.EncodeR1(rec)
+	if err != nil || len(data) != 512<<10 {
+		t.Fatal("512-KiB fixture", len(data), err)
+	}
 	if err := s.Commit(key, rec); err != nil {
 		t.Fatal(err)
 	}
+	e = restartFileEngine(t, e, s)
+	// Reuse securestate's private transaction seam without adding a production API.
+	field := reflect.ValueOf(s.disk).Elem().FieldByName("beforeTransactionSync")
+	seam := (*func() error)(unsafe.Pointer(field.UnsafeAddr()))
+	var transactions atomic.Int32
+	*seam = func() error { transactions.Add(1); return nil }
+	defer func() { *seam = nil }()
 	entered, release, done := make(chan struct{}), make(chan struct{}), make(chan error, 1)
-	s.beforeStoreUpdate = func() error { close(entered); <-release; return nil }
-	go func() { done <- s.Commit(key, rec) }()
-	<-entered
+	var once sync.Once
+	defer once.Do(func() { close(release) })
+	go func() {
+		done <- s.disk.Update(func(tx *securestate.Transaction) error {
+			if _, err := tx.WriteCanonicalJSON(key, rec, ap.R1Max); err != nil {
+				return err
+			}
+			close(entered)
+			<-release
+			return nil
+		})
+	}()
+	receiveNotify(t, entered)
+	baseline := transactions.Load()
+	if baseline != 1 {
+		t.Fatal("writer never entered transaction", baseline)
+	}
 	var group sync.WaitGroup
-	for i := 0; i < 8; i++ {
+	for range 8 {
 		group.Add(1)
 		go func() {
 			defer group.Done()
-			if _, err := s.Load(key); err != nil {
+			if _, err := e.Get(st.PrincipalA, st.ID(1)); err != nil {
 				t.Error(err)
 			}
-			if _, err := s.List(); err != nil {
+			if _, err := e.List(st.PrincipalA); err != nil {
+				t.Error(err)
+			}
+			if _, err := e.WaitMany(context.Background(), st.PrincipalA, []string{st.ID(1)}, 0); err != nil {
 				t.Error(err)
 			}
 		}()
@@ -113,11 +172,18 @@ func TestFileStoreReadersDoNotWaitForDisk(t *testing.T) {
 	select {
 	case <-readers:
 	case <-time.After(5 * time.Second):
-		t.Error("readers waited for disk transaction")
+		t.Error("cached readers waited for securestate lock")
 	}
-	close(release)
-	if err := <-done; err != nil {
+	if transactions.Load() != baseline {
+		t.Error("reads opened disk transactions")
+	}
+	once.Do(func() { close(release) })
+	if err := receiveNotify(t, done); err != nil {
 		t.Fatal(err)
+	}
+	receiveNotify(t, readers)
+	if transactions.Load() != baseline {
+		t.Error("reads opened transactions after writer released lock")
 	}
 }
 

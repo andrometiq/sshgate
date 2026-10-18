@@ -4,9 +4,11 @@ package lifecycle
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -88,43 +90,72 @@ func TestFileStoreStartupRebuildsIndexes(t *testing.T) {
 }
 
 func TestFileStoreReservationAndLateReportAfterRestart(t *testing.T) {
-	e, clock, s, path := fileEngineFixture(t)
+	e, clock, store, path := fileEngineFixture(t)
+	budget := int64(ap.LocalPayloadBudget)
+	store.afterStoreUpdate = func() error { checkFileReservations(t, path, budget); return nil }
 	sums := make([]ap.Summary, 8)
 	for i := 1; i <= 8; i++ {
 		sums[i-1] = submitJob(t, e, i)
-		voteApprove(t, e, i)
-		flushRecord(t, e, i)
 	}
-	budget := e.projections.total.reserved
+	budget = e.projections.total.reserved
 	e.config.Caps.PayloadBytes = budget
 	_, err := admissionSubmit(e, 9, st.PrincipalA)
 	checkCode(t, err, ap.CodeQueueFull)
-	e = restartFileEngine(t, e, s)
-	if e.projections.total.reserved != budget {
-		t.Fatal("reservation changed before Claim")
-	}
 	e.config.Minter = mintFunc(func(context.Context, ap.ApprovalPlanV1, time.Time) ([]string, error) {
 		return []string{"signature"}, nil
 	})
 	for i := 1; i <= 8; i++ {
+		tap := readyCard(t, e, i, false)
+		command(t, e, i, ap.AssistDone{Unavailable: "test unavailable"})
+		tap.Card.Handle = strings.Repeat(string(rune('j'+i)), 12)
+		command(t, e, i, ap.EditStart{Handle: tap.Card.Handle, ChalHash: ap.ChallengeHash(tap.Card.Challenge)})
+		command(t, e, i, ap.EditDone{Handle: tap.Card.Handle})
+		if answer, err := e.Vote(tap); err != nil || answer.Noise {
+			t.Fatal(answer, err)
+		}
+	}
+	unflushed := e.projections.unflushed
+	e = restartFileEngine(t, e, store)
+	if e.projections.total.reserved != budget || !reflect.DeepEqual(unflushed, e.projections.unflushed) {
+		t.Fatal("restart lost budget or unflushed work")
+	}
+	for i := 1; i <= 8; i++ {
+		flushRecord(t, e, i)
 		ans, err := e.Claim(context.Background(), st.PrincipalA, st.ID(i), claimOf(i, sums[i-1]))
 		if err != nil || len(ans.Signatures) != 1 {
 			t.Fatal(ans, err)
 		}
-	}
-	var size int64
-	for key, charge := range e.projections.records {
-		info, err := os.Stat(filepath.Join(path, key))
+		rec, _ := store.Load(ap.RecordKey(st.PrincipalA, st.ID(i)))
+		step := ap.NotifyNext(rec, e.now(), e.epoch, e.config.Settings)
+		if step.Kind != ap.NotifyStatus {
+			t.Fatal("missing status edit")
+		}
+		beforeNoise := command(t, e, i, ap.StatusEdited{State: step.State})
+		// The sink stays unavailable: mandatory transitions and noise still fit.
+		for range ap.NoiseFold + 4 {
+			command(t, e, i, ap.CastVote{Operator: st.Operator, Decision: ap.VoteApprove, Authn: "telegram", Card: &ap.CardTap{Handle: "unknowncardx", Challenge: "0123456789abcdef", MsgID: 2}})
+		}
+		afterNoise, err := store.Load(ap.RecordKey(st.PrincipalA, st.ID(i)))
 		if err != nil {
 			t.Fatal(err)
 		}
-		if info.Size() > charge.reserved {
-			t.Fatal("file exceeded reservation")
+		prefix := len(beforeNoise.Header.Outbox)
+		if len(afterNoise.Header.Outbox) != prefix+ap.NoiseFold || afterNoise.Header.OutboxSeq != beforeNoise.Header.OutboxSeq+ap.NoiseFold || afterNoise.Header.NoiseDropped != beforeNoise.Header.NoiseDropped+4 || !reflect.DeepEqual(afterNoise.Header.Outbox[:prefix], beforeNoise.Header.Outbox) {
+			t.Fatal("full outbox lost events or noise accounting")
 		}
-		size += info.Size()
+		for _, event := range afterNoise.Header.Outbox[prefix:] {
+			if event.Kind != ap.EventVoteReplay || !event.Replay {
+				t.Fatal("wrong retained noise", event)
+			}
+		}
 	}
-	if size > budget {
-		t.Fatal("files exceeded budget")
+	if e.projections.total.reserved != budget {
+		t.Fatal("growth escaped reservation")
+	}
+	unflushed = e.projections.unflushed
+	e = restartFileEngine(t, e, store)
+	if e.projections.total.reserved != budget || !reflect.DeepEqual(unflushed, e.projections.unflushed) {
+		t.Fatal("restart lost grown work")
 	}
 	clock.Advance(20 * time.Minute)
 	if err := e.Reconcile(); err != nil {
@@ -133,27 +164,56 @@ func TestFileStoreReservationAndLateReportAfterRestart(t *testing.T) {
 	flushRecord(t, e, 1)
 	ans, err := e.Shed(st.PrincipalA, st.ID(1), true)
 	if err != nil || !ans.Changed {
-		t.Fatal(ans, err)
+		t.Fatal("running record not shed", ans, err)
 	}
 	if ans, err = e.Delete(st.PrincipalA, st.ID(1), true); err != nil || ans.Removed {
-		t.Fatal("awaiting_report deleted", ans, err)
+		t.Fatal("running record deleted", ans, err)
 	}
-	e = restartFileEngine(t, e, s)
-	for range 40 {
-		_, _ = e.Claim(context.Background(), st.PrincipalA, st.ID(1), ap.Claim{Token: st.Token(st.ID(99)), PlanHash: sums[0].PlanHash})
-		_, _ = e.Report(st.PrincipalA, st.ID(1), ap.Report{Token: st.Token(st.ID(99)), PlanHash: sums[0].PlanHash, Body: finalBody(ap.StepIndeterminate)})
+	e = restartFileEngine(t, e, store)
+	e.config.AuditWriter = auditFunc(func(context.Context, ap.AuditMetadata) error { return errors.New("sink unavailable") })
+	if failed, err := e.flushPass(context.Background()); err != nil || !failed {
+		t.Fatal("failing writer acknowledged events")
 	}
-	if _, err := e.Report(st.PrincipalA, st.ID(1), ap.Report{Token: st.Token(st.ID(1)), PlanHash: sums[0].PlanHash, Body: finalBody(ap.StepIndeterminate)}); err != nil {
+	key := ap.RecordKey(st.PrincipalA, st.ID(1))
+	before, err := store.Load(key)
+	if err != nil {
 		t.Fatal(err)
 	}
-	rec, err := s.Load(ap.RecordKey(st.PrincipalA, st.ID(1)))
-	if err != nil || rec.Payload != nil || rec.Header.FinalReport == nil {
-		t.Fatal("late report lost", err)
+	for range 40 {
+		_, err := e.Claim(context.Background(), st.PrincipalA, st.ID(1), ap.Claim{Token: st.Token(st.ID(99)), PlanHash: sums[0].PlanHash})
+		checkCode(t, err, ap.CodeInvalidClaim)
+		_, err = e.Report(st.PrincipalA, st.ID(1), ap.Report{Token: st.Token(st.ID(99)), PlanHash: sums[0].PlanHash, Body: finalBody(ap.StepIndeterminate)})
+		checkCode(t, err, ap.CodeInvalidReport)
 	}
-	info, err := os.Stat(filepath.Join(path, ap.RecordKey(st.PrincipalA, st.ID(1))))
-	if err != nil || info.Size() > ap.ShedMax {
-		t.Fatal("shed record exceeded bound", err)
+	clock.Advance(5 * time.Minute)
+	_, err = e.Report(st.PrincipalA, st.ID(1), ap.Report{Token: st.Token(st.ID(1)), PlanHash: sums[0].PlanHash, Body: finalBody(ap.StepIndeterminate)})
+	if err != nil {
+		t.Fatal("late report rejected", err)
 	}
+	rec, err := store.Load(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rec.Header.Outbox) != 2 || rec.Header.Outbox[0].Kind != ap.EventInvalidClaim || rec.Header.Outbox[1].Kind != ap.EventFinalReport || rec.Header.NoiseDropped-before.Header.NoiseDropped != 79 {
+		t.Fatalf("late report/noise accounting: %+v", rec.Header)
+	}
+	if rec.Header.OutboxSeq-before.Header.OutboxSeq != 2 {
+		t.Fatal("unexpected outbox sequence")
+	}
+	unflushed = e.projections.unflushed
+	e = restartFileEngine(t, e, store)
+	recovered, err := store.Load(key)
+	if err != nil || !reflect.DeepEqual(rec, recovered) || !reflect.DeepEqual(unflushed, e.projections.unflushed) {
+		t.Fatal("restart lost unflushed late report", err)
+	}
+	got, err := e.Get(st.PrincipalA, st.ID(1))
+	if err != nil || !got.Pruned {
+		t.Fatal(got, err)
+	}
+	if e.projections.total.reserved >= budget {
+		t.Fatal("Shed did not release reservation")
+	}
+	submitJob(t, e, 9)
 }
 
 func TestFileStoreDefaultLiveCaps(t *testing.T) {
@@ -212,4 +272,38 @@ func TestFileStoreRetentionAndDeletedReplay(t *testing.T) {
 	}
 	_, err := e.Submit(context.Background(), st.PrincipalA, draft)
 	checkCode(t, err, ap.CodeSubmitWindowClosed)
+}
+
+// Runs after each durable update, before the FileStore publishes its cache.
+func checkFileReservations(t *testing.T, path string, budget int64) {
+	t.Helper()
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var total int64
+	for _, entry := range entries {
+		if !validKey(entry.Name()) {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(path, entry.Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		rec, err := ap.DecodeR1(data)
+		if err != nil {
+			t.Fatal(err)
+		}
+		bound := ap.ShedMax
+		if rec.Payload != nil {
+			bound = ap.R1Reservation(rec)
+			total += int64(len(data))
+		}
+		if len(data) > bound {
+			t.Fatalf("%s size %d exceeds %d", entry.Name(), len(data), bound)
+		}
+	}
+	if total > budget {
+		t.Fatalf("full files %d exceed budget %d", total, budget)
+	}
 }
