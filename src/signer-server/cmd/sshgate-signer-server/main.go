@@ -78,6 +78,7 @@ import (
 	"github.com/karthikeyan5/sshgate/pkg/signerkit/policystore"
 	"github.com/karthikeyan5/sshgate/pkg/signerkit/sqlitestore"
 	"github.com/karthikeyan5/sshgate/pkg/signerkit/store"
+	"github.com/karthikeyan5/sshgate/src/approvalplan"
 	"github.com/karthikeyan5/sshgate/src/policyauthority"
 	"github.com/karthikeyan5/sshgate/src/policyreview"
 	"github.com/karthikeyan5/sshgate/src/redact"
@@ -135,6 +136,11 @@ func run(args []string) int {
 	if *showVersion {
 		fmt.Fprintf(os.Stdout, "signer-server %s\n", version)
 		return 0
+	}
+
+	if *requiredApprovals > approvalplan.MaxRequiredApprovals {
+		logf("--required-approvals must not exceed %d", approvalplan.MaxRequiredApprovals)
+		return 1
 	}
 
 	if *initSigningKey && strings.TrimSpace(*bootstrapOperatorName) != "" {
