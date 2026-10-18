@@ -587,15 +587,16 @@ func (t *TelegramBackend) Request(ctx context.Context, req signerkit.ApprovalReq
 	explanations, explainErr := t.runExplainer(ctx, req.Commands)
 	text := formatApprovalMessage(req, t.reqTimeout, explanations, explainErr, t.RedactSalt, t.RedactRules)
 	msg := tgbotapi.NewMessage(chatID, text)
-	// The approve button label makes a SECRET-REVEAL unmistakable: a normal
-	// write reads "✓ Approve all"; a reveal reads "✓ Approve SECRET-REVEAL" so
-	// the operator cannot tap through on muscle memory. The callback data
-	// ("approve:<reqID>") is identical either way — the gate-enforced
-	// capability lives in the signed payload, not in the button.
+	// Label the capabilities explicitly; callback data still identifies the request.
+	reveal, net := requestHasReveal(req), requestHasNet(req)
 	approveLabel := "✓ Approve all"
 	switch {
-	case requestHasReveal(req):
+	case reveal && net:
+		approveLabel = "✓ Approve SECRET-REVEAL + NETWORK"
+	case reveal:
 		approveLabel = "✓ Approve SECRET-REVEAL"
+	case net:
+		approveLabel = "✓ Approve READ WITH NETWORK"
 	case requestHasUpdate(req):
 		approveLabel = "✓ Approve GATE UPDATE"
 	}
@@ -1118,13 +1119,16 @@ func formatApprovalMessage(req signerkit.ApprovalRequest, timeout time.Duration,
 	if len(req.Commands) > 0 {
 		server = req.Commands[0].Server
 	}
-	reveal := requestHasReveal(req)
+	reveal, net := requestHasReveal(req), requestHasNet(req)
 	if reveal {
 		// A SECRET-REVEAL gets a distinct, scary banner: the operator must
 		// instantly recognise that approving this lets RAW secret values
 		// escape redaction and reach the agent (and the AI provider, and this
 		// chat). This is deliberately alarming — it is not a normal write.
 		b.WriteString("⚠️ SECRET-REVEAL — output will NOT be redacted; raw secret values go to the agent, the AI provider, and this chat.\n\n")
+	}
+	if net {
+		fmt.Fprintf(&b, "🌐 READ WITH NETWORK on %[1]s: may connect anywhere, including services on %[1]s itself that can change state.\n\n", server)
 	}
 	if reveal {
 		b.WriteString("🔓 SSHGate SECRET-REVEAL")
@@ -1136,11 +1140,10 @@ func formatApprovalMessage(req signerkit.ApprovalRequest, timeout time.Duration,
 		b.WriteString(server)
 	}
 	b.WriteString("\n\n")
-	if reveal {
-		// Show the mandatory reason(s) right up top so the human knows WHY raw
-		// secrets are being requested before reading the command.
+	if reveal || net {
+		// Show capability reasons before the commands.
 		for _, c := range req.Commands {
-			if c.Reveal && c.Reason != "" {
+			if (c.Reveal || c.Net) && c.Reason != "" {
 				fmt.Fprintf(&b, "Reason: %s\n", c.Reason)
 			}
 		}
@@ -1347,6 +1350,15 @@ func isSingleLineNoControl(s string) bool {
 func requestHasReveal(req signerkit.ApprovalRequest) bool {
 	for _, c := range req.Commands {
 		if c.Reveal {
+			return true
+		}
+	}
+	return false
+}
+
+func requestHasNet(req signerkit.ApprovalRequest) bool {
+	for _, c := range req.Commands {
+		if c.Net {
 			return true
 		}
 	}

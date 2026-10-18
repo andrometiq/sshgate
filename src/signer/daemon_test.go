@@ -449,9 +449,24 @@ func TestDaemon_RemoteSignPath_PassesSignaturesVerbatim(t *testing.T) {
 	d, pub, audit, auditPath := newDaemon(t, mock)
 	defer audit.Close()
 
+	remoteKey := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
+	encode := func(cmd string) string {
+		t.Helper()
+		payload := sigwire.SigPayload{Cmd: cmd, TS: 1000, Exp: 1060, Nonce: "remote-fixture"}
+		raw, err := json.Marshal(payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		line, err := sigwire.EncodeSigned(ed25519.Sign(remoteKey, raw), payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return line
+	}
+
 	cannedSigs := []signerkit.SignedCmd{
-		{Cmd: "systemctl restart nginx", Sig: "SSHGATE_SIG:remote-sig-1"},
-		{Cmd: "apt install -y certbot", Sig: "SSHGATE_SIG:remote-sig-2"},
+		{Cmd: "systemctl restart nginx", Sig: encode("systemctl restart nginx")},
+		{Cmd: "apt install -y certbot", Sig: encode("apt install -y certbot")},
 	}
 	mock.ApproveWithSignatures("r_remote1", cannedSigs, "operator")
 
@@ -539,12 +554,27 @@ func TestDaemon_RemoteSign_CmdMismatch_RespondsError(t *testing.T) {
 	d, _, audit, auditPath := newDaemon(t, mock)
 	defer audit.Close()
 
+	remoteKey := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
+	encode := func(cmd string) string {
+		t.Helper()
+		payload := sigwire.SigPayload{Cmd: cmd, TS: 1000, Exp: 1060, Nonce: "remote-fixture"}
+		raw, err := json.Marshal(payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		line, err := sigwire.EncodeSigned(ed25519.Sign(remoteKey, raw), payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return line
+	}
+
 	// Length matches but the second sig's Cmd doesn't match the
 	// request's second command — defence against a misbehaving server.
 	mock.ApproveWithSignatures("r_mismatch_cmd",
 		[]signerkit.SignedCmd{
-			{Cmd: "echo a", Sig: "SSHGATE_SIG:x1"},
-			{Cmd: "WRONG", Sig: "SSHGATE_SIG:x2"},
+			{Cmd: "echo a", Sig: encode("echo a")},
+			{Cmd: "WRONG", Sig: encode("WRONG")},
 		},
 		"operator")
 	req := `{"kind":"sign","request_id":"r_mismatch_cmd","commands":[{"server":"p","cmd":"echo a","ttl_seconds":60},{"server":"p","cmd":"echo b","ttl_seconds":60}]}`

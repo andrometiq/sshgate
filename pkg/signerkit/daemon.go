@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/karthikeyan5/sshgate/internal/lineframe"
+	"github.com/karthikeyan5/sshgate/src/classify"
 	"github.com/karthikeyan5/sshgate/src/policywire"
 	"github.com/karthikeyan5/sshgate/src/redact"
 	"github.com/karthikeyan5/sshgate/src/sigwire"
@@ -274,6 +275,10 @@ type signRequestCmd struct {
 	// bool.
 	Reveal bool   `json:"reveal,omitempty"`
 	Reason string `json:"reason,omitempty"`
+	// Net requests a signed NETWORK grant for this command. omitempty keeps a
+	// request without network byte-identical to the pre-network wire, and a
+	// daemon built before the field rejects it as an unknown field.
+	Net bool `json:"net,omitempty"`
 }
 
 // signResponse is the wire-format response. Status is one of "approved",
@@ -542,6 +547,20 @@ func (d *Daemon) HandleSignRequest(ctx context.Context, conn io.ReadWriter) erro
 		Commands:  make([]CommandReq, len(req.Commands)),
 	}
 	for i, c := range req.Commands {
+		if c.Net {
+			if len(req.Commands) != 1 {
+				return d.respondError(conn, req.RequestID, "network requires a single-command request")
+			}
+			if strings.TrimSpace(c.Reason) == "" {
+				return d.respondError(conn, req.RequestID, "network requires a non-empty reason")
+			}
+			if isAdminVerb(c.Cmd) {
+				return d.respondError(conn, req.RequestID, "network is not available for admin verbs")
+			}
+			if classify.Classify(c.Cmd) != classify.KindRead {
+				return d.respondError(conn, req.RequestID, "network grants cover reads only")
+			}
+		}
 		if c.Cmd == "" {
 			return d.respondError(conn, req.RequestID, fmt.Sprintf("commands[%d].cmd is empty", i))
 		}
@@ -572,7 +591,7 @@ func (d *Daemon) HandleSignRequest(ctx context.Context, conn io.ReadWriter) erro
 		if ttl > int64(sigwire.MaxSigValidity/time.Second) {
 			return d.respondError(conn, req.RequestID, fmt.Sprintf("commands[%d].ttl_seconds %d exceeds max %d", i, ttl, int64(sigwire.MaxSigValidity/time.Second)))
 		}
-		apReq.Commands[i] = CommandReq{Server: c.Server, Cmd: c.Cmd, TTLSec: ttl, Reveal: c.Reveal, Reason: c.Reason, HostKeyFP: c.Host}
+		apReq.Commands[i] = CommandReq{Server: c.Server, Cmd: c.Cmd, TTLSec: ttl, Reveal: c.Reveal, Reason: c.Reason, HostKeyFP: c.Host, Net: c.Net}
 	}
 
 	// Lone-admin-verb invariant: an SSHGATE_ admin verb (SSHGATE_UPDATE /
@@ -597,7 +616,7 @@ func (d *Daemon) HandleSignRequest(ctx context.Context, conn io.ReadWriter) erro
 	}
 
 	// Standing-grant auto-approve: if EVERY command matches a live grant
-	// for its alias (and NONE is a reveal — reveals always prompt), skip
+	// for its alias (and none requests reveal or network — both always prompt), skip
 	// the human prompt entirely and synthesise an approval. respond then
 	// signs a NORMAL per-command payload (byte-identical to a
 	// human-approved one), so the gate never learns a grant was involved.
@@ -684,9 +703,8 @@ func (d *Daemon) respond(conn io.Writer, req signRequest, result Result) error {
 		// Two paths:
 		//   1. Remote-signing backend (HostedServerBackend): the server
 		//      holds the key and returned the wire-formatted signatures
-		//      in Result.Signatures. We validate length + per-entry Cmd
-		//      match (defence against a server that returns signatures
-		//      for the wrong commands) and pass through verbatim.
+		//      in Result.Signatures. We validate the count, outer command
+		//      and decoded signing inputs, then pass through verbatim.
 		//   2. Local-signing backend (Telegram / Stub / Mock without
 		//      pre-canned sigs): Result.Signatures is nil, so we sign
 		//      with d.Key.
@@ -699,6 +717,14 @@ func (d *Daemon) respond(conn io.Writer, req signRequest, result Result) error {
 			for i, s := range result.Signatures {
 				if s.Cmd != req.Commands[i].Cmd {
 					return d.respondError(conn, req.RequestID, fmt.Sprintf("remote signature cmd mismatch at index %d", i))
+				}
+				_, payload, err := sigwire.DecodeSigned(s.Sig)
+				if err != nil {
+					return d.respondError(conn, req.RequestID, fmt.Sprintf("remote signature malformed at index %d", i))
+				}
+				command := req.Commands[i]
+				if payload.Cmd != command.Cmd || payload.Host != command.Host || payload.Reveal != command.Reveal || payload.Net != command.Net {
+					return d.respondError(conn, req.RequestID, fmt.Sprintf("remote signature payload mismatch at index %d", i))
 				}
 				sigs[i] = signResponseSig{Cmd: s.Cmd, Sig: s.Sig}
 			}
@@ -1454,17 +1480,16 @@ func (d *Daemon) auditRegisterXferKey(req registerXferKeyRequest, status, approv
 // grant, recording the first is still an accurate "auto-approved under a
 // grant" marker.
 func (d *Daemon) matchGrant(cmds []signRequestCmd) (id string, ok bool) {
-	// Reveal + admin-verb short-circuit FIRST: a reveal OR an administrative
-	// verb (SSHGATE_UPDATE / SSHGATE_REVOKE / any SSHGATE_ gate verb) anywhere
-	// forces a human prompt. A grant must NEVER auto-sign an admin verb: the
-	// gate dispatches on the command prefix regardless of which signer path
+	// Reveal, network and administrative verbs always force a human prompt.
+	// A grant must NEVER auto-sign an admin verb: the gate dispatches on the
+	// command prefix regardless of which signer path
 	// minted the signature, so this carve-out is the ONLY control that stops a
 	// scope=all grant from silently authorizing a gate replacement or teardown
 	// (see docs/proposed/sshgate-update-verb-2026-07.md Finding 1). Checked
 	// first/outermost, like the reveal guard, so no later grant logic can
 	// re-admit it; it fails safe (over-prompt, never under-prompt).
 	for _, c := range cmds {
-		if c.Reveal || isAdminVerb(c.Cmd) {
+		if c.Reveal || c.Net || isAdminVerb(c.Cmd) {
 			return "", false
 		}
 	}
@@ -1567,6 +1592,7 @@ func (d *Daemon) signAll(cmds []signRequestCmd) ([]signResponseSig, error) {
 			// agent never sets this — it is authorised by the approval the
 			// signer is responding to.
 			Reveal: c.Reveal,
+			Net:    c.Net,
 		}
 		// Sign the exact bytes that DecodeSigned will reconstruct on
 		// the verifier side; sigwire.EncodeSigned + verify.go both go

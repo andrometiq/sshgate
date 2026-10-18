@@ -19,6 +19,11 @@ const sigPrefix = "SSHGATE_SIG:"
 // approved commands cannot be replayed long after the human tapped approve.
 const MaxSigValidity time.Duration = 5 * time.Minute
 
+// MaxClockSkew is how far a signature's timestamp may be ahead of the gate's
+// clock. Admission is TS - MaxClockSkew <= now < Exp, so a signature is
+// admissible for at most MaxSigValidity + MaxClockSkew (330 s) of gate time.
+const MaxClockSkew time.Duration = 30 * time.Second
+
 // SigPayload is the signed-command payload defined in the spec. It is the
 // JSON object that signer signs and gate verifies, carried on the wire
 // inside a SSHGATE_SIG envelope.
@@ -53,6 +58,16 @@ type SigPayload struct {
 	// the bool is part of the signed bytes, so it cannot be flipped on the
 	// wire without invalidating the signature.
 	Reveal bool `json:"reveal,omitempty"`
+	// Net, when true, marks this signed command as carrying a NETWORK grant:
+	// the gate may run it with network access. Like Reveal it is a capability
+	// in the SIGNED payload, so only a human approval the signer turns into a
+	// signature can set it, and flipping it on the wire breaks the signature.
+	//
+	// omitempty keeps a net=false payload byte-identical to the pre-network
+	// wire format. A gate built before this field decodes with
+	// DisallowUnknownFields, so it rejects a net-bearing payload (exit 65)
+	// rather than running it without the grant's meaning.
+	Net bool `json:"net,omitempty"`
 }
 
 // sigEncoding is the base64 alphabet used for both halves of the wire

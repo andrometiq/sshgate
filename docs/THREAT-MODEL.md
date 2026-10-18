@@ -24,7 +24,9 @@ wall.**
   against the signing pubkey deployed on that host. No pubkey on the host
   (read-only / Tier 1) ⇒ no write can be signed ⇒ the gate refuses it
   locally, before any approval channel is even consulted.
-- The signature carries a **bounded validity window** (at most 5 minutes) and a
+- The signature carries a **bounded validity window** (admissible for at most 330 s
+  of gate time: 300 s of validity plus a 30 s clock-skew allowance; expiry limits
+  admission, not a command already running) and a
   **per-host binding** (the target's TOFU-pinned host-key fingerprint), so an
   approved write cannot be replayed indefinitely or against a different host. It
   *can* be replayed on the same host inside its window: the gate keeps no nonce

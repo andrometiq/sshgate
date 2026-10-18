@@ -548,3 +548,11 @@ test-fidelity-smoke:
 	[ -f "$$tmp/status" ] && [ "$$(cat "$$tmp/status")" = 0 ] && [ "$$tee_st" = 0 ] || exit 1; \
 	! grep -qE -- '--- SKIP|no tests to run' "$$tmp/log" || exit 1; \
 	grep -qE '^--- PASS: TestFidelitySmoke( |$$)' "$$tmp/log"
+
+# Source overlays affect only code compiled into the selected test binary.
+.PHONY: test-srcmut selftest-srcmut
+test-srcmut:
+	SRCMUT='$(SRCMUT)' go run ./scripts/srcmut -timeout 30m
+
+selftest-srcmut:
+	go test -count=1 -timeout 30m ./scripts/srcmut ./scripts/srcmut/execwrap ./internal/srcmut

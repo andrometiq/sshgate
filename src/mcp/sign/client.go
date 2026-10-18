@@ -82,6 +82,8 @@ type CmdReq struct {
 	// ordinary writes. Reveal is single-command only — there is no batch reveal.
 	Reveal bool
 	Reason string
+	// Net requests a signed network grant for this command.
+	Net bool
 }
 
 // Signed is one signed result returned from signer on approval.
@@ -103,6 +105,7 @@ type signRequestCmd struct {
 	Host   string `json:"host,omitempty"`
 	Reveal bool   `json:"reveal,omitempty"`
 	Reason string `json:"reason,omitempty"`
+	Net    bool   `json:"net,omitempty"`
 }
 
 type signRequest struct {
@@ -204,7 +207,7 @@ func (c *Client) Sign(ctx context.Context, requestID string, cmds []CmdReq) (Sig
 		ProtoVersion: sigwire.ProtoVersion,
 	}
 	for i, cmd := range cmds {
-		body.Commands[i] = signRequestCmd{Server: cmd.Server, Cmd: cmd.Cmd, TTLSec: cmd.TTLSec, Host: cmd.Host, Reveal: cmd.Reveal, Reason: cmd.Reason}
+		body.Commands[i] = signRequestCmd{Server: cmd.Server, Cmd: cmd.Cmd, TTLSec: cmd.TTLSec, Host: cmd.Host, Reveal: cmd.Reveal, Reason: cmd.Reason, Net: cmd.Net}
 	}
 	wire, err := json.Marshal(body)
 	if err != nil {

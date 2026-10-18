@@ -1,0 +1,102 @@
+[
+  {
+    "id": "P-S-HOSTED-NET",
+    "name": "hosted-net-refusal",
+    "package": "./src/signer/backend",
+    "file": "pkg/signerkit/hosted.go",
+    "old": "\t\tif c.Net {\n\t\t\treturn nil, errors.New(sigwire.SignerNetUnsupported + \" network grants are not supported on the hosted signer\")\n\t\t}\n",
+    "new": "\t\t_ = sigwire.SignerNetUnsupported\n",
+    "red": [
+      {
+        "test": "TestHostedRefusesNet",
+        "markers": [
+          "hosted-http-net"
+        ]
+      }
+    ],
+    "green": [
+      "TestHostedServerBackend_RejectsReveal"
+    ]
+  },
+  {
+    "id": "P-S-GRANT-NET",
+    "name": "grant-net-guard",
+    "package": "./src/signer",
+    "file": "pkg/signerkit/daemon.go",
+    "old": "if c.Reveal || c.Net || isAdminVerb(c.Cmd) {",
+    "new": "if c.Reveal || isAdminVerb(c.Cmd) {",
+    "red": [
+      {
+        "test": "TestMatchGrantNeverAutoSignsNet",
+        "markers": [
+          "grant-autosigned-net"
+        ]
+      }
+    ],
+    "green": [
+      "TestGrant_RevealNeverAutoSigned"
+    ]
+  },
+  {
+    "id": "P-S-REMOTE-SIGNATURE",
+    "name": "remote-signature-inputs",
+    "package": "./src/signer",
+    "file": "pkg/signerkit/daemon.go",
+    "old": "\t\t\t\t_, payload, err := sigwire.DecodeSigned(s.Sig)\n\t\t\t\tif err != nil {\n\t\t\t\t\treturn d.respondError(conn, req.RequestID, fmt.Sprintf(\"remote signature malformed at index %d\", i))\n\t\t\t\t}\n\t\t\t\tcommand := req.Commands[i]\n\t\t\t\tif payload.Cmd != command.Cmd || payload.Host != command.Host || payload.Reveal != command.Reveal || payload.Net != command.Net {\n\t\t\t\t\treturn d.respondError(conn, req.RequestID, fmt.Sprintf(\"remote signature payload mismatch at index %d\", i))\n\t\t\t\t}\n",
+    "new": "",
+    "red": [
+      {
+        "test": "TestRemoteSignatureCmdMismatch/cmd",
+        "markers": [
+          "remote-signature-cmd"
+        ]
+      },
+      {
+        "test": "TestRemoteSignatureCmdMismatch/host",
+        "markers": [
+          "remote-signature-host"
+        ]
+      },
+      {
+        "test": "TestRemoteSignatureCmdMismatch/reveal-added",
+        "markers": [
+          "remote-signature-reveal-added"
+        ]
+      },
+      {
+        "test": "TestRemoteSignatureCmdMismatch/reveal-dropped",
+        "markers": [
+          "remote-signature-reveal-dropped"
+        ]
+      },
+      {
+        "test": "TestRemoteSignatureCmdMismatch/net-added",
+        "markers": [
+          "remote-signature-net-added"
+        ]
+      },
+      {
+        "test": "TestRemoteSignatureCmdMismatch/net-dropped",
+        "markers": [
+          "remote-signature-net-dropped"
+        ]
+      },
+      {
+        "test": "TestRemoteSignatureCmdMismatch/malformed",
+        "markers": [
+          "remote-signature-malformed"
+        ]
+      },
+      {
+        "test": "TestRemoteSignatureCmdMismatch/second-command",
+        "markers": [
+          "remote-signature-second-command"
+        ]
+      }
+    ],
+    "green": [
+      "TestRemoteSignatureCmdMismatch/matching",
+      "TestRemoteSignatureCmdMismatch/matching-reveal-net"
+    ]
+  }
+]
