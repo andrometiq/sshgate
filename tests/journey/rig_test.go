@@ -14,9 +14,12 @@ import (
 )
 
 type journeyRig struct {
-	project     string
-	composeFile string
-	controller  string
+	evidence       *journeyEvidence
+	eventSequence  int
+	auditSnapshots map[string]string
+	project        string
+	composeFile    string
+	controller     string
 }
 
 func commandOutput(ctx context.Context, name string, args ...string) (string, error) {

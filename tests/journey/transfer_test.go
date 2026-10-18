@@ -3,16 +3,18 @@
 package journey
 
 import (
-	"bytes"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	tool "github.com/karthikeyan5/sshgate/src/mcp/tools"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 const journeySentinel = "JOURNEY_SYNTHETIC_PLAINTEXT_MUST_NOT_ESCAPE"
@@ -39,7 +41,7 @@ os.chmod(p,0o600)
 		return r.exec(t, host, "python3", "-c", `import hashlib, pathlib, sys
 p=pathlib.Path(sys.argv[1])
 data=p.read_bytes()
-print(len(data), hashlib.sha256(data).hexdigest(), oct(p.stat().st_mode & 0o777))
+print(len(data), hashlib.sha256(data).hexdigest(), oct(p.stat().st_mode & 0o7777))
 `, path)
 	}
 	expected := fmt.Sprintf("%d %s 0o600\n", len(secret), hash)
@@ -51,7 +53,10 @@ print(len(data), hashlib.sha256(data).hexdigest(), oct(p.stat().st_mode & 0o777)
 	before := cards(r.events(t))
 	args := map[string]any{"src_alias": "web1", "src_path": source, "dest_alias": "web2", "dest_path": destination}
 	var out tool.TransferOutput
-	finishCall(t, evidence, startCall(client, "transfer", args), &out, false)
+	call := finishCall(t, evidence, startCall(client, "transfer", args), &out, false)
+	if !transferMetadataOnly(call.result, out) {
+		t.Fatal("transfer returned non-metadata content")
+	}
 	if out.XferID == "" || out.Bytes != int64(len(secret)) || out.AuthMode != "human" || out.Mode != "0600" ||
 		out.SrcAlias != "web1" || out.DestAlias != "web2" || out.SrcPath != source || out.DestPath != destination {
 		t.Fatal("transfer metadata mismatch")
@@ -80,50 +85,39 @@ print(len(data), hashlib.sha256(data).hexdigest(), oct(p.stat().st_mode & 0o777)
 		t.Fatal("missing SECRET TRANSFER banner")
 	}
 	for _, host := range []string{"target-a", "target-b"} {
-		count := 0
-		for _, row := range r.audit(t, host) {
-			command, _ := row["command"].(string)
-			if host == "target-a" {
-				// The gate audit redacts the leg's key fields, so match the plain
-				// base64url id and path tokens instead of parsing the leg.
-				if !auditLegHas(command, "SSHGATE_XFER_SEND", out.XferID) {
-					continue
+		pollJourney(t, "transfer gate audit", 30*time.Second, func() bool {
+			count := 0
+			for _, row := range r.audit(t, host) {
+				command, _ := row["command"].(string)
+				if host == "target-a" {
+					// The gate audit redacts the leg's key fields, so match the plain
+					// base64url id and path tokens instead of parsing the leg.
+					if !auditLegHas(command, "SSHGATE_XFER_SEND", out.XferID) {
+						continue
+					}
+					if !auditLegHas(command, "SSHGATE_XFER_SEND", source) {
+						t.Fatal("SEND path mismatch")
+					}
+				} else {
+					if !auditLegHas(command, "SSHGATE_XFER_RECV", out.XferID) {
+						continue
+					}
+					if !auditLegHas(command, "SSHGATE_XFER_RECV", destination) {
+						t.Fatal("RECV path mismatch")
+					}
 				}
-				if !auditLegHas(command, "SSHGATE_XFER_SEND", source) {
-					t.Fatal("SEND path mismatch")
-				}
-			} else {
-				if !auditLegHas(command, "SSHGATE_XFER_RECV", out.XferID) {
-					continue
-				}
-				if !auditLegHas(command, "SSHGATE_XFER_RECV", destination) {
-					t.Fatal("RECV path mismatch")
+				count++
+				if row["approval_status"] != "signed" || row["exit_code"] != float64(0) {
+					t.Fatal("transfer gate leg failed")
 				}
 			}
-			count++
-			if row["approval_status"] != "signed" || row["exit_code"] != float64(0) {
-				t.Fatal("transfer gate leg failed")
+			if count > 1 {
+				t.Fatal("duplicate transfer gate leg")
 			}
-		}
-		if count != 1 {
-			t.Fatalf("%s: expected exactly one correlated transfer leg, got %d", host, count)
-		}
+			return count == 1
+		})
 	}
-	approved := 0
-	for _, row := range r.audit(t, "controller") {
-		commands, _ := row["commands"].([]any)
-		for _, command := range commands {
-			if strings.Contains(fmt.Sprint(command), "xfer="+out.XferID+" ") {
-				if row["status"] != "approved" || row["auth_mode"] != "human" {
-					t.Fatal("transfer signer verdict mismatch")
-				}
-				approved++
-			}
-		}
-	}
-	if approved != 1 {
-		t.Fatal("expected one correlated signer approval")
-	}
+	r.transferDecision(t, card, out.XferID, "approved")
 	before = cards(r.events(t))
 	signerBefore := len(r.audit(t, "controller"))
 	gateA := len(r.audit(t, "target-a"))
@@ -134,9 +128,9 @@ print(len(data), hashlib.sha256(data).hexdigest(), oct(p.stat().st_mode & 0o777)
 	denied := r.nextCard(t, before)
 	r.cardEdit(t, denied, "Denied")
 	r.absent(t, "target-b", "/home/user/denied-transfer.bin")
-	signerAfter := r.audit(t, "controller")
-	if len(signerAfter) != signerBefore+1 || signerAfter[signerBefore]["status"] != "denied" {
-		t.Fatal("denied transfer signer audit mismatch")
+	r.transferDecision(t, denied, "", "denied")
+	if len(r.audit(t, "controller")) != signerBefore+1 {
+		t.Fatal("denied transfer signer count mismatch")
 	}
 	if len(cards(r.events(t))) != len(before)+1 {
 		t.Fatal("denied transfer decision count mismatch")
@@ -148,6 +142,7 @@ print(len(data), hashlib.sha256(data).hexdigest(), oct(p.stat().st_mode & 0o777)
 		t.Fatal("denial changed source")
 	}
 
+	client.close(t)
 	// Scan before persisting any evidence. Never print the offending content.
 	surfaces := []any{evidence.transcript, r.events(t), r.audit(t, "controller"), r.audit(t, "target-a"), r.audit(t, "target-b")}
 	surfaces = append(surfaces, r.exec(t, "controller", "journalctl", "--no-pager", "-u", "sshgate-signer-telegram", "-u", "journey-fake-telegram", "-o", "cat", "-n", "10000"))
@@ -157,7 +152,7 @@ print(len(data), hashlib.sha256(data).hexdigest(), oct(p.stat().st_mode & 0o777)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if bytes.Contains(data, []byte(journeySentinel)) {
+		if containsSecret(data) {
 			evidence.transcript = nil
 			t.Fatal("synthetic plaintext leaked into an agent-visible surface")
 		}
@@ -172,4 +167,67 @@ func auditLegHas(command, verb, value string) bool {
 		return false
 	}
 	return slices.Contains(fields[1:], base64.RawURLEncoding.EncodeToString([]byte(value)))
+}
+
+func transferMetadataOnly(result *mcp.CallToolResult, out tool.TransferOutput) bool {
+	expected := map[string]any{"src_alias": out.SrcAlias, "src_path": out.SrcPath, "dest_alias": out.DestAlias, "dest_path": out.DestPath, "mode": out.Mode, "xfer_id": out.XferID, "bytes": out.Bytes, "auth_mode": out.AuthMode}
+	actualJSON, err := json.Marshal(result.StructuredContent)
+	if err != nil {
+		return false
+	}
+	expectedJSON, _ := json.Marshal(expected)
+	var actual, want any
+	if json.Unmarshal(actualJSON, &actual) != nil || json.Unmarshal(expectedJSON, &want) != nil || !reflect.DeepEqual(actual, want) {
+		return false
+	}
+	text := fmt.Sprintf("transferred %s:%s → %s:%s (xfer=%s bytes=%d mode=%s auth=%s)", out.SrcAlias, out.SrcPath, out.DestAlias, out.DestPath, out.XferID, out.Bytes, out.Mode, out.AuthMode)
+	return !result.IsError && reflect.DeepEqual(result.Content, []mcp.Content{&mcp.TextContent{Text: text}})
+}
+
+func (r *journeyRig) transferDecision(t *testing.T, card journeyCard, id, status string) {
+	t.Helper()
+	// Resolve the identities from the operator's registry, independently of the audit.
+	var registry map[string]struct {
+		HostKeyFingerprint string `json:"fingerprint"`
+	}
+	raw := r.operator(t, "cat ~/.config/sshgate/servers.json")
+	if err := json.Unmarshal([]byte(raw), &registry); err != nil {
+		t.Fatal(err)
+	}
+	src, dest := registry["web1"].HostKeyFingerprint, registry["web2"].HostKeyFingerprint
+	if src == "" || dest == "" {
+		t.Fatal("missing transfer host identities")
+	}
+	cardID := ""
+	for _, line := range strings.Split(card.text, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "Xfer:") {
+			cardID = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "Xfer:"))
+		}
+	}
+	if cardID == "" || (id != "" && cardID != id) {
+		t.Fatal("transfer ID does not match card")
+	}
+	id = cardID
+	command := fmt.Sprintf("transfer src=%s dest=%s xfer=%s mode=0600", src, dest, id)
+	r.signerDecision(t, card, []string{command}, []string{src, dest}, status)
+}
+
+func TestTransferMetadataOnly(t *testing.T) {
+	out := tool.TransferOutput{SrcAlias: "a", DestAlias: "b", XferID: "id", Bytes: 12, Mode: "0600", AuthMode: "human"}
+	encoded, _ := json.Marshal(out)
+	var structured map[string]any
+	_ = json.Unmarshal(encoded, &structured)
+	result := &mcp.CallToolResult{StructuredContent: structured, Content: []mcp.Content{&mcp.TextContent{Text: "transferred a: → b: (xfer=id bytes=12 mode=0600 auth=human)"}}}
+	if !transferMetadataOnly(result, out) {
+		t.Fatal("valid metadata rejected")
+	}
+	result.Content = append(result.Content, &mcp.TextContent{Text: base64.StdEncoding.EncodeToString([]byte(journeySentinel))})
+	if transferMetadataOnly(result, out) {
+		t.Fatal("extra content accepted")
+	}
+	result.Content = result.Content[:1]
+	structured["secret"] = "unexpected"
+	if transferMetadataOnly(result, out) {
+		t.Fatal("extra field accepted")
+	}
 }

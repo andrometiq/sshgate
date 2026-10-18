@@ -14,7 +14,7 @@ CLEANUP = SCRIPT[SCRIPT.index('cleanup() {'):SCRIPT.index('trap cleanup EXIT')]
 class RunnerChecks(unittest.TestCase):
     def test_privileged_guard(self):
         for ci, opt_in, allowed in [('', '', False), ('false', '', False),
-                                    ('true', '', True), ('', '1', True),
+                                    ('true', '', False), ('', '1', True), ('true', '1', True),
                                     ('', 'true', False)]:
             with self.subTest(ci=ci, opt_in=opt_in):
                 result = subprocess.run(['bash', '-c', 'set -eu\n' + GUARD],
