@@ -62,6 +62,21 @@ gate's read path also needs `make test-jail` (and the lanes in §12) green.
 > `CGO_ENABLED=0`. If you are on a machine without a C toolchain, run plain
 > `go test ./...` directly.
 
+### Executor stored-result consistency
+
+On Linux, `TestJobStoreResultConsistency` in
+`src/executor/store_result_linux_test.go` checks both Commit and reopening a real
+store: inconsistent status/exit-code pairs return `report_auth_lost`, and reopening
+quarantines the record without rewriting it. Success requires exit 0; failure
+requires a positive exit; `failed_not_started` permits no exit or exit 77 (unsigned
+read jail refusal). Indeterminate, expired-unexecuted and stale-target results
+require no exit. Other statuses are not stored results.
+
+`TestStoredResultProducerDrift` drives the real jobplan runner through success,
+failure, jail refusal, missing exit and phased errors, and checks that the store
+accepts its results. It also covers `NoOutputResult` recovery/refusal records.
+These checks supplement the frozen record schema and the store's lifecycle checks.
+
 ---
 
 ## 1. The no-sudo mandate & why
