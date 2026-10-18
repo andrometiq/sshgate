@@ -98,6 +98,11 @@ func TestMutationRegistryJSON(t *testing.T) {
 	if err := harness.Validate(registry); err != nil {
 		t.Fatal(err)
 	}
+	// The memfd markers came from the probe: a failed probe is an
+	// infrastructure failure, so the harness refuses rather than judges.
+	if _, err := memfdProbeOnce(); err != nil {
+		t.Fatalf("infrastructure: %v", err)
+	}
 	data, err := json.Marshal(registry)
 	if err != nil {
 		t.Fatal(err)

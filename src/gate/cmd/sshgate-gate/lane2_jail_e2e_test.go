@@ -107,12 +107,16 @@ func legLane2PluginNoExec(t *testing.T, abi string) {
 }
 
 // legLane2MemfdNoExec is G-L2-MEMFD-NOEXEC: the client cannot run a memfd copy
-// of its plugin either.
+// of its plugin either. The filter refuses its creation; with the deny mutated
+// away, Landlock may still refuse its execution, which the memfd probe
+// predicts for the registry.
 func legLane2MemfdNoExec(t *testing.T, abi string) {
-	legLane2Program(t, abi, "G-L2-MEMFD-NOEXEC", "memfd", "memfd-ran", "memfd:EPERM\n")
+	legLane2Program(t, abi, "G-L2-MEMFD-NOEXEC", "memfd", "memfd-ran", "memfd:EPERM\n", "memfd-exec:EACCES\n")
 }
 
-func legLane2Program(t *testing.T, abi, name, mode, effect, refused string) {
+// legLane2Program: the client's plugin either ran, or the client printed one of
+// the refused lines and exited 1.
+func legLane2Program(t *testing.T, abi, name, mode, effect string, refused ...string) {
 	p := newProof(t, name)
 	dir, gateDir := lane2JailLeg(t, abi)
 	mode = lane2Mode(t, mode)
@@ -121,8 +125,8 @@ func legLane2Program(t *testing.T, abi, name, mode, effect, refused string) {
 	p.Control("exec", err == nil && string(direct) == ran)
 	code, out, _ := runWith(t, "systemctl status "+mode)
 	p.Effect(effect, out == ran)
-	p.Jailed("lane2", lane2RanJailed(t, gateDir) && (out == ran && code == 0 || out == refused && code == 1))
-	p.Observed("output", out == ran || out == refused)
+	p.Jailed("lane2", lane2RanJailed(t, gateDir) && (out == ran && code == 0 || slices.Contains(refused, out) && code == 1))
+	p.Observed("output", out == ran || slices.Contains(refused, out))
 	p.Finish()
 }
 
@@ -435,4 +439,123 @@ func legLane2Abstract(t *testing.T, abi string) {
 	}
 	p.Jailed("abstract", out == "abstract:EPERM\n" && accepted == "" && lane2RanJailed(t, gateDir))
 	p.Finish()
+}
+
+// TestLane2HeldFDsClosedJailed: no admitted fd outlives a daemon read that ran
+// in the jail, or one whose jail Failed at the identity check. Each row's audit
+// proves the jail path ran; an Absent jail fails the test (requireJail skips,
+// and the target fails on any skip).
+func TestLane2HeldFDsClosedJailed(t *testing.T) {
+	requireJail(t)
+	buildLane2Fixtures(t)
+	for _, row := range []struct {
+		name   string
+		change func(*confine.Spec)
+		code   int
+		ran    func(map[string]any) bool
+	}{
+		{"run", nil, exitOK, func(r map[string]any) bool {
+			return r["enforcement"] == "daemon-read" && r["profile"] == confine.ProfileROv1 && r["net"] == false
+		}},
+		{"failed setup", func(spec *confine.Spec) { spec.InjectFailAt = "lane2id:EACCES" }, exitNoPermVal,
+			func(r map[string]any) bool { return r["deny_reason"] == "jail:failed:lane2id:EACCES" }},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			dir := t.TempDir()
+			withGateDir(t, dir)
+			withReadSpec(t, "native", row.change)
+			lane2HeldFDsRow(t, dir, row.code, row.ran)
+		})
+	}
+}
+
+// lane2Contacts accepts every connection on listener, recording each one's
+// first line and closing it, until the returned stop is called.
+func lane2Contacts(listener *net.UnixListener) (stop func() []string) {
+	lines := make(chan []string, 1)
+	go func() {
+		var got []string
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				lines <- got
+				return
+			}
+			_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+			line, _ := bufio.NewReader(conn).ReadString('\n')
+			conn.Close()
+			got = append(got, strings.TrimSpace(line))
+		}
+	}()
+	return func() []string {
+		_ = listener.SetDeadline(time.Now())
+		return <-lines
+	}
+}
+
+// TestLane2DockerHostContact: the installed docker client contacts exactly the
+// socket admission admitted. docker trims trailing white space from --host, so
+// for a trusted link to "sg.sock " it would dial "sg.sock", a name another
+// user may be able to create: the control shows the client doing so, and the
+// gate refuses that endpoint before anything runs. For a name docker keeps,
+// jailed and as the forced-Absent fallback, only the admitted listener is
+// contacted.
+func TestLane2DockerHostContact(t *testing.T) {
+	requireJail(t)
+	const client = "/usr/bin/docker"
+	if _, err := os.Stat(client); err != nil {
+		t.Fatalf("SETUP: docker client missing: %v", err)
+	}
+	previousUIDs, previousEndpoints := lane2TrustedUIDs, lane2SystemEndpoints
+	lane2TrustedUIDs = []uint32{0, uint32(os.Getuid())}
+	t.Cleanup(func() { lane2TrustedUIDs, lane2SystemEndpoints = previousUIDs, previousEndpoints })
+	watch := func(dir, name string) func() []string {
+		return lane2Contacts(lane2UnixListen(t, filepath.Join(dir, name)))
+	}
+	link := func(dir, name string) {
+		lane2SystemEndpoints.docker = filepath.Join(dir, "docker")
+		if err := os.Symlink(name, lane2SystemEndpoints.docker); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Run("rewritten name refused", func(t *testing.T) {
+		dir := lane2SocketDir(t)
+		admitted, dialed := watch(dir, "sg.sock "), watch(dir, "sg.sock")
+		control := exec.Command(client, "--host=unix://"+filepath.Join(dir, "sg.sock "), "ps")
+		control.Env = confine.Lane2Env()
+		_ = control.Run()
+		if a, d := admitted(), dialed(); len(a) != 0 || len(d) == 0 {
+			t.Fatalf("CONTROL: docker did not rewrite the name: admitted %q, dialed %q", a, d)
+		}
+		dir = lane2SocketDir(t)
+		admitted, dialed = watch(dir, "sg.sock "), watch(dir, "sg.sock")
+		link(dir, "sg.sock ")
+		gateDir := t.TempDir()
+		withGateDir(t, gateDir)
+		code, out, _ := runWith(t, "docker ps")
+		if a, d := admitted(), dialed(); code != exitNoPermVal || out != "" || len(a) != 0 || len(d) != 0 || !lane2DeniedAt(t, gateDir, "lane2:admit:endpoint") {
+			t.Fatalf("exit %d %q, admitted %q, dialed %q, audit %v; want refused at admission with no contact", code, out, a, d, auditRecords(t, gateDir))
+		}
+	})
+	for _, route := range []struct {
+		name   string
+		change func(*confine.Spec)
+		jailed bool
+	}{{"jailed", nil, true}, {"fallback", func(spec *confine.Spec) { spec.ForceABI = confine.ForceNoLandlock }, false}} {
+		t.Run("admitted name "+route.name, func(t *testing.T) {
+			dir := lane2SocketDir(t)
+			admitted, other := watch(dir, "sg sock"), watch(dir, "sg")
+			link(dir, "sg sock")
+			gateDir := t.TempDir()
+			withGateDir(t, gateDir)
+			withReadSpec(t, "native", route.change)
+			runWith(t, "docker ps") // the fake daemon answers nothing: only the contact counts
+			records := auditRecords(t, gateDir)
+			ran := len(records) == 1 && records[0]["enforcement"] == "daemon-read" && (records[0]["profile"] == confine.ProfileROv1) == route.jailed
+			if a, o := admitted(), other(); !ran || len(a) == 0 || len(o) != 0 {
+				t.Fatalf("admitted %q, other %q, audit %v; want only the admitted socket contacted on the %s route", a, o, records, route.name)
+			}
+		})
+	}
 }

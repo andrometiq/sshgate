@@ -13,7 +13,9 @@
  * exec: execve <own dir>/plugins/sg-plugin <nonce>, or print exec:<errno>.
  * reexec: execve /proc/self/exe as sg-report.<nonce>.
  * loader: execve the system loader on /usr/bin/id, or print loader:<errno>.
- * memfd: run a memfd copy of sg-plugin, or print memfd:<errno>.
+ * memfd: run a memfd copy of sg-plugin; print memfd:<errno> if the memfd
+ *        cannot be created, memfd-exec:<errno> if it cannot be executed.
+ * memfd-flags: print memfd-flags:<the flags memfd mode first requests>.
  * memfd-secret: print memfd-secret:<errno or created>.
  * dgram: print dgram:<errno or created> for socket(AF_UNIX, SOCK_DGRAM).
  * unix-<n>: connect to each of the first n paths in <own dir>/sockets, sending
@@ -42,6 +44,18 @@
 #include <stddef.h>
 #include <sys/un.h>
 #include <unistd.h>
+
+/* The memfd mode requests MFD_EXEC whatever the build headers say, exactly as
+ * the confine memfd probe does, and falls back without it only on the
+ * kernel's EINVAL (before 6.3, where every memfd is executable).
+ * SG_UNDEF_MFD_EXEC builds as with headers that predate it. */
+#ifdef SG_UNDEF_MFD_EXEC
+#undef MFD_EXEC
+#endif
+#ifndef MFD_EXEC
+#define MFD_EXEC 0x0010U
+#endif
+#define SG_MEMFD_FLAGS (MFD_CLOEXEC | MFD_EXEC)
 
 extern char **environ;
 
@@ -176,11 +190,7 @@ static int plugin(char **argv, const char *nonce, int memfd) {
 		return 1;
 	}
 	FILE *source = fopen(path, "r");
-	unsigned flags = MFD_CLOEXEC;
-#ifdef MFD_EXEC
-	flags |= MFD_EXEC;
-#endif
-	int fd = memfd_create("sg", flags);
+	int fd = memfd_create("sg", SG_MEMFD_FLAGS);
 	if (fd < 0 && errno == EINVAL)
 		fd = memfd_create("sg", MFD_CLOEXEC);
 	if (fd < 0) {
@@ -193,7 +203,7 @@ static int plugin(char **argv, const char *nonce, int memfd) {
 		if (write(fd, buffer, n) != (ssize_t)n)
 			break;
 	fexecve(fd, args, environ);
-	printf("memfd:%s\n", errname(errno));
+	printf("memfd-exec:%s\n", errname(errno));
 	return 1;
 }
 
@@ -310,6 +320,10 @@ int main(int argc, char **argv) {
 		execve(args[0], args, environ);
 		printf("loader:%s\n", errname(errno));
 		return 1;
+	}
+	if (strcmp(mode, "memfd-flags") == 0) {
+		printf("memfd-flags:%#x\n", (unsigned)SG_MEMFD_FLAGS);
+		return 0;
 	}
 	if (strcmp(mode, "memfd-secret") == 0) {
 		long fd = syscall(447, 0);

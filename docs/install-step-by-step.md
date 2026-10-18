@@ -283,7 +283,9 @@ scratch area at `/dev/shm` (and `/dev/null`). It cannot write files or file
 metadata on the host, connect to a local daemon over a Unix socket, or signal
 or trace other processes. A short, fixed list of `systemctl` and `docker`
 read commands reaches those daemons' sockets from a narrower form of the jail,
-without network. Signed writes never run in the jail.
+without network (only from Landlock ABI 9 is that jail held to the daemon's own
+socket); on an unpinned host without a usable jail they run unjailed, like
+other reads there. Signed writes never run in the jail.
 
 **Network.** Unsigned reads in the jail have **no network** by default: they
 cannot open TCP or UDP sockets, not even to services on localhost. A host

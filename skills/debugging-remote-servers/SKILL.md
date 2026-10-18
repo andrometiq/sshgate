@@ -101,7 +101,8 @@ itself, not just in the classifier. What this means for you:
   Hosts without the jail run reads classifier-only, with network.
 - **No local daemons over Unix sockets.** A fixed set of `systemctl` and
   `docker` reads still works, because the gate runs them in a narrower jail
-  that can reach their own daemon (never network), but only in their plain
+  that can reach their own daemon (never network; from Landlock ABI 9 only
+  that socket), but only in their plain
   form: one command, no pipe, no quotes.
   - `systemctl status | is-active | is-failed | list-units |
     list-unit-files | show | cat | get-default`, with display flags such as

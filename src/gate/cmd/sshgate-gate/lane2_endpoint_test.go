@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -225,12 +227,47 @@ func TestLane2CanonicalArgvGolden(t *testing.T) {
 	}
 }
 
-// TestLane2HeldFDsClosed: no admitted fd outlives the read on any path: an
-// admission refusal, a run in the jail, the Absent fallback, a Failed jail and
-// a cancelled session. The client is the C fixture, never the race-built test
-// binary under the jail's filter.
+// TestLane2HeldFDsClosed: no admitted fd outlives the read on the paths that
+// need no jail: an admission refusal, the forced-Absent fallback and a
+// cancelled session. Each row's audit proves which path ran. The jailed run
+// and a Failed jail are TestLane2HeldFDsClosedJailed (jail_e2e). The client is
+// the C fixture, never the race-built test binary.
 func TestLane2HeldFDsClosed(t *testing.T) {
 	buildLane2Fixtures(t)
+	base, previousHook, previousExecute := lane2SystemEndpoints, readSpecHook, executeCommand
+	for _, row := range []struct {
+		name  string
+		setup func()
+		code  int
+		ran   func(record map[string]any) bool
+	}{
+		{"admit refusal", func() { lane2SystemEndpoints.docker = filepath.Join(t.TempDir(), "missing") }, exitNoPermVal,
+			func(r map[string]any) bool { return r["deny_reason"] == "lane2:admit:endpoint" }},
+		{"absent fallback", func() { readSpecHook = func(spec *confine.Spec) { spec.ForceABI = confine.ForceNoLandlock } }, exitOK,
+			func(r map[string]any) bool {
+				return r["enforcement"] == "daemon-read" && r["profile"] == nil && r["net"] == true && r["jail_absent"] != nil
+			}},
+		{"cancelled", func() {
+			executeCommand = func(context.Context, string, gate.ExecOpts) (gate.ExecResult, error) {
+				return gate.ExecResult{ExitCode: -1}, context.Canceled
+			}
+		}, exitCancelled, func(r map[string]any) bool { return r["deny_reason"] == "cancelled" }},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			dir := t.TempDir()
+			withGateDir(t, dir)
+			t.Cleanup(func() { lane2SystemEndpoints, readSpecHook, executeCommand = base, previousHook, previousExecute })
+			row.setup()
+			lane2HeldFDsRow(t, dir, row.code, row.ran)
+		})
+	}
+}
+
+// lane2HeldFDsRow runs one daemon read twice (the first opens the gate's own
+// long-lived files) and requires the second to exit code, leave the process's
+// fd count unchanged and be audited as ran describes.
+func lane2HeldFDsRow(t *testing.T, gateDir string, code int, ran func(map[string]any) bool) {
+	t.Helper()
 	count := func() int {
 		entries, err := os.ReadDir("/proc/self/fd")
 		if err != nil {
@@ -238,37 +275,17 @@ func TestLane2HeldFDsClosed(t *testing.T) {
 		}
 		return len(entries)
 	}
-	base, previousHook, previousExecute := lane2SystemEndpoints, readSpecHook, executeCommand
-	for _, row := range []struct {
-		name  string
-		setup func()
-		code  int
-	}{
-		{"run", func() {}, exitOK},
-		{"admit refusal", func() { lane2SystemEndpoints.docker = filepath.Join(t.TempDir(), "missing") }, exitNoPermVal},
-		{"absent fallback", func() { readSpecHook = func(spec *confine.Spec) { spec.ForceABI = confine.ForceNoLandlock } }, exitOK},
-		{"failed setup", func() { readSpecHook = func(spec *confine.Spec) { spec.InjectFailAt = "lane2id:EACCES" } }, exitNoPermVal},
-		{"cancelled", func() {
-			executeCommand = func(context.Context, string, gate.ExecOpts) (gate.ExecResult, error) {
-				return gate.ExecResult{ExitCode: -1}, context.Canceled
-			}
-		}, exitCancelled},
-	} {
-		t.Run(row.name, func(t *testing.T) {
-			dir := t.TempDir()
-			withGateDir(t, dir)
-			t.Cleanup(func() { lane2SystemEndpoints, readSpecHook, executeCommand = base, previousHook, previousExecute })
-			row.setup()
-			command := "docker inspect sg-report.0"
-			runWith(t, command) // the first read opens the gate's own long-lived files
-			before := count()
-			if code, _, stderr := runWith(t, command); code != row.code {
-				t.Fatalf("exit = %d, want %d: %s", code, row.code, stderr)
-			}
-			if after := count(); after != before {
-				t.Errorf("fds before %d, after %d", before, after)
-			}
-		})
+	const command = "docker inspect sg-report.0"
+	runWith(t, command)
+	before := count()
+	if got, _, stderr := runWith(t, command); got != code {
+		t.Fatalf("exit = %d, want %d: %s", got, code, stderr)
+	}
+	if after := count(); after != before {
+		t.Errorf("fds before %d, after %d", before, after)
+	}
+	if records := auditRecords(t, gateDir); len(records) != 2 || !ran(records[1]) {
+		t.Errorf("the read did not take the row's path: audit %v", records)
 	}
 }
 
@@ -315,4 +332,50 @@ func lane2SpecRefused(spec confine.Spec, argv []string) error {
 		jailed.Abort()
 	}
 	return err
+}
+
+// TestLane2DockerHostExact: docker trims Unicode white space from --host and
+// refuses a second "://" (docker/cli opts.ParseHost), so a docker socket whose
+// resolved name it would rewrite is refused at admission. Each refused row has
+// two listeners: the admitted name, and the name docker would dial instead.
+func TestLane2DockerHostExact(t *testing.T) {
+	withLane2Bins(t)
+	base := lane2SystemEndpoints
+	for _, row := range []struct {
+		name     string
+		admitted bool
+	}{
+		{"sg.sock", true}, {"sg sock", true}, {" sg.sock", true},
+		{"sg.sock ", false}, {"sg.sock\t", false}, {"sg.sock\n", false}, {"sg.sock\v", false}, {"sg.sock\f", false},
+		{"sg.sock\r", false}, {"sg.sock\u0085", false}, {"sg.sock\u00a0", false}, {"sg.sock\u2003", false}, {"sg.sock\u3000", false},
+	} {
+		t.Run(strconv.Quote(row.name), func(t *testing.T) {
+			t.Cleanup(func() { lane2SystemEndpoints = base })
+			dir := lane2SocketDir(t)
+			admitted := lane2Listen(t, dir, row.name, 0o660)
+			if !row.admitted {
+				lane2Listen(t, dir, "sg.sock", 0o660)
+			}
+			// A trusted link to the socket, as in /run/docker.sock -> /tmp/sg.sock<space>.
+			lane2SystemEndpoints.docker = filepath.Join(dir, "docker")
+			if err := os.Symlink(row.name, lane2SystemEndpoints.docker); err != nil {
+				t.Fatal(err)
+			}
+			plan, matched, refusal := lane2Plan("docker ps", pinState{})
+			plan.Close()
+			switch {
+			case !matched:
+				t.Fatal("docker ps is not a daemon read")
+			case row.admitted && (refusal != "" || !slices.Contains(plan.argv, "--host=unix://"+admitted)):
+				t.Errorf("refusal %q, argv %q; want admitted with --host=unix://%s", refusal, plan.argv, admitted)
+			case !row.admitted && refusal != "endpoint":
+				t.Errorf("refusal %q, argv %q; want endpoint", refusal, plan.argv)
+			}
+		})
+	}
+	for path, want := range map[string]bool{"/run/docker.sock": true, "/a:/b": true, "/a://b": false, "/a/b ": false, "/a/b\u2028": false} {
+		if got := lane2DockerDials(path); got != want {
+			t.Errorf("lane2DockerDials(%q) = %v, want %v", path, got, want)
+		}
+	}
 }

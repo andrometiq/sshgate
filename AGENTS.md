@@ -98,7 +98,7 @@ have them check the host's `/var/log/auth.log` and that the key line was pasted 
 - **Read jail.** On hosts with unprivileged user namespaces and Landlock, reads run in a
   kernel jail: they cannot change host files, reach Unix-socket daemons (a few fixed
   `systemctl`/`docker` read verbs reach their own daemon, in a narrower jail without
-  network) or touch other processes. They see
+  network; only from Landlock ABI 9 can the kernel hold them to that one socket) or touch other processes. They see
   the host's `/tmp` and `/var/tmp` read-only; their only writable space is a private
   `/dev/shm` (`TMPDIR` points there), so a tool that insists on writing to `/tmp` fails.
   Whether jailed reads have network (even localhost TCP) is set per host by the operator's

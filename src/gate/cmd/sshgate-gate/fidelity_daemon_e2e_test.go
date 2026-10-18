@@ -3,11 +3,9 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
-	"slices"
 	"strings"
 	"testing"
 
@@ -78,52 +76,4 @@ func daemonReadRun(t *testing.T, line string, change func(*confine.Spec), profil
 		t.Fatalf("%q ran as %v (stderr %q), want profile %q", line, records, stderr, profile)
 	}
 	return daemonReadResult{out, fmt.Sprintf(" exit=%d", code)}
-}
-
-// projectStatus keeps status's first line, its Loaded: line and its Active:
-// state word.
-func projectStatus(out string) string {
-	lines := strings.Split(out, "\n")
-	projected := []string{lines[0]}
-	for _, line := range lines {
-		fields := strings.Fields(line)
-		switch {
-		case len(fields) > 0 && fields[0] == "Loaded:":
-			projected = append(projected, strings.TrimSpace(line))
-		case len(fields) > 1 && fields[0] == "Active:":
-			projected = append(projected, "Active: "+fields[1])
-		}
-	}
-	return strings.Join(projected, "\n")
-}
-
-// projectDockerPs keeps each container's ID, names and image, sorted.
-func projectDockerPs(out string) string {
-	var rows []string
-	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
-		var container struct{ ID, Names, Image string }
-		if line == "" || json.Unmarshal([]byte(line), &container) != nil {
-			rows = append(rows, "unparsed:"+line)
-			continue
-		}
-		rows = append(rows, container.ID+" "+container.Names+" "+container.Image)
-	}
-	slices.Sort(rows)
-	return strings.Join(rows, "\n")
-}
-
-// projectDockerVersion keeps the client and server versions and the API
-// version.
-func projectDockerVersion(out string) string {
-	var version struct {
-		Client struct{ Version string }
-		Server struct {
-			Version    string
-			APIVersion string `json:"ApiVersion"`
-		}
-	}
-	if json.Unmarshal([]byte(out), &version) != nil || version.Server.APIVersion == "" {
-		return "unparsed:" + out
-	}
-	return version.Client.Version + " " + version.Server.Version + " " + version.Server.APIVersion
 }

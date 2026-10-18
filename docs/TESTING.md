@@ -624,6 +624,8 @@ them.
   test binaries), Landlock, seccomp, `/dev/fuse` and `fusermount3`, at least two
   CPUs, both `dash` and `bash`, and a C compiler (`cc`): the daemon-read legs build
   their test clients from `src/gate/cmd/sshgate-gate/testdata/lane2client`. The
+  `docker` client at `/usr/bin/docker` (no daemon needed) for
+  `TestLane2DockerHostContact`, which checks it dials exactly the admitted socket. The
   CI workflow `.github/workflows/jail.yml` shows a complete runner setup.
 - **Root lane (`make test-jail-root`):** everything above, run as root, plus
   systemd, `systemd-mount`, loop devices, `losetup`, `mkfs.ext4`, `binfmt_misc`,
@@ -659,7 +661,9 @@ read router's decision tables (`TestPhase2Tables`) and its gate legs
 (`TestJailMatrixPhase2`, `TestGateBinaryNetworkPin`), the in-process read's
 recorded seal (`TestInProcessReadLeavesDumpable`), the `SSHGATE_JAIL` verb through
 the real binary (`TestGateBinaryJailVerb`), and the real binary's `gate doctor`
-rehearsal and `--pin` on the host (`TestDoctorRehearsalRealHost`). The two tests that prove
+rehearsal and `--pin` on the host (`TestDoctorRehearsalRealHost`), and the jailed
+daemon-read rows that need a working jail (`TestLane2HeldFDsClosedJailed`,
+`TestLane2DockerHostContact`). The two tests that prove
 classifier-only reads on a host with Ubuntu's AppArmor userns restriction
 (`TestRunReadClampHostRunsClassifierOnly`, `TestGateBinaryClampHostClassifierOnly`) are not
 in this target, which needs a working jail; `make test` runs them, and CI requires them to pass

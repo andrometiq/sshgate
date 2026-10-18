@@ -225,14 +225,19 @@ gate never re-runs a command the jail may have started. The operator runs
 `~/.sshgate-gate/gate doctor` on the host to see which case applies.
 
 A fixed allowlist of `systemctl` and `docker` read verbs that need a daemon
-socket runs in a narrower form of the jail: Unix stream sockets to its pinned
-daemon only, `EXECUTE` only on the admitted client and its interpreter, no
-`memfd`, never network. It runs shell-free, from a fixed path, as a canonical
-command built from a typed flag grammar, with a closed environment, after
-admission checks the client, its loader and the daemon socket (THREAT-MODEL.md
-has the rules). Two things deliberately stay outside the jail: signed
-writes; and the admin verbs (`SSHGATE_REVOKE`, `SSHGATE_UPDATE`,
-`SSHGATE_XFER_*`). A jail problem never blocks a signed write or an admin verb.
+socket runs in a narrower form of the jail: Unix stream sockets (from Landlock
+ABI 9 only to its pinned daemon; below ABI 9 to any socket the SSH user may
+reach, and below ABI 6 abstract sockets too), `EXECUTE` only on the admitted
+client and its interpreter, no `memfd`, never network. It runs shell-free, from
+a fixed path, as a canonical command built from a typed flag grammar, with a
+closed environment, after admission checks the client, its loader and the
+daemon socket (THREAT-MODEL.md has the rules and residuals). Where an ordinary
+read would run classifier-only (an unpinned host whose jail is Absent, the read
+not required to run confined), a daemon read runs unjailed instead, with
+network, keeping the grammar, admission and closed environment. Otherwise two
+things deliberately stay outside the jail: signed writes; and the admin verbs
+(`SSHGATE_REVOKE`, `SSHGATE_UPDATE`, `SSHGATE_XFER_*`). A jail problem never
+blocks a signed write or an admin verb.
 
 For a jailed read the gate returns the command's real exit code or signal when
 the worker's status is known, also when the read was cancelled or the client went

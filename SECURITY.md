@@ -86,13 +86,15 @@ it; the threat model spells out exactly what each layer does and does not stop.
 - A **classifier bypass** that routes a state-changing command as a read.
 - A **read jail escape**: on a host where `gate doctor` reports `reads:
   kernel-jailed`, a read that writes or changes metadata of a host file, connects
-  to a local daemon over a Unix socket, signals or traces another process, or
+  to a local daemon over a Unix socket (other than a daemon read reaching its own
+  daemon), signals or traces another process, or
   otherwise does something [`docs/THREAT-MODEL.md`](docs/THREAT-MODEL.md) says a
   jailed read cannot do.
 - A read that **runs unconfined when it should not**: on a jail-capable host, or
   on a pinned host, a read that runs outside the jail, a jailed read that opens a
   network socket where the host's pin does not allow it, a `systemctl`/`docker`
-  daemon read that reaches anything but its own daemon or runs another program,
+  daemon read that reaches anything but its own daemon (from Landlock ABI 9;
+  below it, see the residuals in the threat model) or runs another program,
   or one of those fixed verbs being made to change state.
 - Anything that lets the **agent read the signing key** or forge a signature.
 - A **signature replayed** outside its validity window or against a different

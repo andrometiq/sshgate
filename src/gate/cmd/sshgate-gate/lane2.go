@@ -5,17 +5,20 @@ import (
 )
 
 // Lane 2 is the daemon-read allowlist: a few systemctl and docker read verbs
-// that must talk to a local daemon over AF_UNIX, which the read jail denies. A
-// match is a line the typed grammar accepts (lane2grammar.go), and it runs
-// SHELL-FREE and UNJAILED, so the door is deliberately narrow: the gate runs
-// its own canonical argv, never the agent's tokens, with a gate-chosen prefix
-// that pins the daemon endpoint, from /, with a closed environment built from
-// scratch and /dev/null stdin. Admission (lane2admit.go) first checks the
-// client binary from a fixed directory (never $PATH), its ELF search paths,
-// its interpreter and its endpoint against the trusted-path rule; a failed
-// check refuses the read with exit 77. Anything that is not a grammar match
-// takes the normal (jailed) read path. docker.sock is root-equivalent, so
-// every new entry here is review-gated.
+// that must talk to a local daemon over AF_UNIX, which an ordinary read's jail
+// denies. A match is a line the typed grammar accepts (lane2grammar.go), and it
+// runs SHELL-FREE in its own narrower jail (readjail.go: only the admitted
+// client and interpreter executable, Unix sockets bound to the admitted
+// endpoints from Landlock ABI 9, no memfd, no network). Only where an ordinary
+// read would run classifier-only does it run unjailed instead. Either way the
+// gate runs its own canonical argv, never the agent's tokens, with a
+// gate-chosen prefix that pins the daemon endpoint, from /, with a closed
+// environment built from scratch and /dev/null stdin. Admission
+// (lane2admit.go) first checks the client binary from a fixed directory (never
+// $PATH), its ELF search paths, its interpreter and its endpoint against the
+// trusted-path rule; a failed check refuses the read with exit 77. Anything
+// that is not a grammar match takes the ordinary read path. docker.sock is
+// root-equivalent, so every new entry here is review-gated.
 
 // lane2BinDirs is the fixed search list for an allowlisted binary. It is a var
 // only so tests can point it at a fake binary; it is never derived from $PATH

@@ -286,12 +286,18 @@ a host that lacks the jail (user namespaces off, the AppArmor restriction, no La
 classifier-only, and only when it is not pinned. A `jail-floor` file from 0.1.x with no `jail`
 pin makes the gate refuse reads until the host is re-pinned or the file is removed.
 
-**Daemon reads, and what runs outside the jail.** A short, fixed list of `systemctl` and `docker`
-read commands (such as `systemctl status` and `docker ps`) needs the daemons' Unix sockets. They
-run in a narrower form of the jail that can reach only their own daemon, run only the client
-program, and never has network, without a shell, with a fixed grammar of flags, after the gate
-checks that the client program and the daemon socket belong to root. Signed writes and the gate's own admin commands
-run exactly as before, and a jail problem never blocks them.
+**Daemon reads, and what runs outside the jail.** A jailed ordinary read cannot reach a local daemon:
+the jail refuses Unix-socket connections. A short, fixed list of `systemctl` and `docker` read commands
+(such as `systemctl status` and `docker ps`) needs the daemons' Unix sockets, so these run in a
+narrower form of the jail, without a shell and with a fixed grammar of flags, after the gate checks
+that the client program and the daemon socket belong to root (a pinned `docker_socket`, to the
+gate's user). Jailed, such a read may execute only the client and its ELF interpreter, cannot create
+a `memfd`, and never has network. From Landlock ABI 9 it can connect only to its own daemon's
+socket; below ABI 9 the kernel cannot pin the socket, so it can reach any socket the SSH user can
+(and, below ABI 6, abstract sockets), though the client itself is only ever pointed at its own
+daemon. On an unpinned host without a usable jail, where ordinary reads run classifier-only, these
+reads run unjailed, with network, keeping only the grammar and the gate's checks. Signed writes and
+the gate's own admin commands run exactly as before, and a jail problem never blocks them.
 
 **What it does not stop.** Network where a read is allowed it, and some narrow residual effects.
 Both are listed in [docs/THREAT-MODEL.md](docs/THREAT-MODEL.md).

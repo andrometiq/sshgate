@@ -257,7 +257,7 @@ func ExecWithRedaction(ctx context.Context, cmd string, opts ExecOpts) (res Exec
 // ExecArgvWithRedaction runs argv directly — no shell, no jail — with exactly
 // env as the child's environment, through the same stdout/stderr redaction,
 // counting, /dev/null stdin and process-group plumbing as ExecWithRedaction.
-// It is the shell-free exec for the gate's Lane-2 daemon-read allowlist: argv[0]
+// It is the shell-free exec for a Lane-2 daemon read's unjailed fallback: argv[0]
 // and execPath must be absolute paths (never a $PATH lookup). execPath selects
 // the file while argv[0] preserves the admitted client name. A nil env yields an EMPTY
 // environment, never the gate's inherited one, and the child's cwd is /. opts.Confine must be nil — this

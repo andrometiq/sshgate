@@ -351,7 +351,8 @@ Status: done.
   the program headers; all of this is hygiene (the gate trusts the installed client's
   dependency closure and does not certify it); endpoint pinning: `docker` gets
   `--host=unix://<socket>` (`/run/docker.sock` owned by root, or the pin's `docker_socket` owned
-  by the gate's uid); `systemctl` gets `--no-pager --no-ask-password` and the system bus (plus
+  by the gate's uid; a resolved name that docker's `--host` parsing would rewrite, such as one
+  ending in white space, is refused, so the client dials the admitted socket); `systemctl` gets `--no-pager --no-ask-password` and the system bus (plus
   `/run/systemd/private` for a root SSH user), each a root-owned socket, and an absent one must
   lie under a directory only root can write; `--user`, `--host`, `--machine`, `--root`,
   `--image`, `--global`, `--context` and `-c` are never accepted; a failed check refuses the

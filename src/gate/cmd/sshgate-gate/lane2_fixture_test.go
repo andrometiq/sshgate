@@ -138,3 +138,23 @@ func withLane2Seams(t *testing.T, dir string) {
 		lane2BinDirs, lane2TrustedUIDs, lane2SystemEndpoints = previousDirs, previousUIDs, previousEndpoints
 	})
 }
+
+// TestLane2FixtureMemfdFlags: the fixture's memfd mode requests MFD_CLOEXEC|
+// MFD_EXEC (0x11), the confine memfd probe's flags, also when built as with
+// headers that lack MFD_EXEC, and either build runs its memfd copy unjailed.
+func TestLane2FixtureMemfdFlags(t *testing.T) {
+	dir := buildLane2Fixtures(t)
+	oldHeaders := filepath.Join(dir, "old-headers")
+	if output, err := exec.Command("cc", "-O2", "-Wall", "-Werror", "-DSG_UNDEF_MFD_EXEC", "-o", oldHeaders, "testdata/lane2client/main.c").CombinedOutput(); err != nil {
+		t.Fatalf("SETUP: build without MFD_EXEC: %v\n%s", err, output)
+	}
+	for _, client := range []string{filepath.Join(dir, "systemctl"), oldHeaders} {
+		if out, err := exec.Command(client, "status", "sg-memfd-flags.0").Output(); err != nil || string(out) != "memfd-flags:0x11\n" {
+			t.Errorf("%s: %q, %v; want memfd-flags:0x11", client, out, err)
+		}
+		mode := lane2Mode(t, "memfd")
+		if out, err := exec.Command(client, "status", mode).Output(); err != nil || string(out) != "PLUGIN-RAN "+strings.TrimPrefix(mode, "sg-memfd.")+"\n" {
+			t.Errorf("%s memfd: %q, %v", client, out, err)
+		}
+	}
+}

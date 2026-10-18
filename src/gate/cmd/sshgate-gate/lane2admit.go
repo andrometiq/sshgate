@@ -240,7 +240,8 @@ func (p *lane2Execution) admitInterp(executable *elf.File) (refusal string, err 
 // admitEndpoints checks and holds the daemon sockets the client will reach and
 // returns docker's, for its --host. A pinned docker_socket is owned by the
 // gate's euid under directories owned by root or that euid; a system socket
-// is owned by a trusted uid. systemctl reaches the system bus, and as root
+// is owned by a trusted uid, and its resolved name must be one docker dials
+// unchanged (lane2DockerDials). systemctl reaches the system bus, and as root
 // first systemd's private socket: each present one is checked, an absent one
 // must lie under a trusted existing directory, and at least one must be
 // present.
@@ -251,11 +252,13 @@ func (p *lane2Execution) admitEndpoints(client string, pin pinState, euid uint32
 			path, directoryOwners, owners = pin.pin.DockerSocket, []uint32{0, euid}, []uint32{euid}
 		}
 		socket, trusted, err := p.holdEndpoint(path, directoryOwners, owners)
-		if err != nil || !trusted {
+		if err != nil || !trusted || !lane2DockerDials(socket.path) {
 			return socket.path, "endpoint", err
 		}
 		return socket.path, "", nil
 	}
+	// systemctl gets no address from the gate: it dials its compiled-in paths,
+	// which are these, and the kernel resolves them as the walk did.
 	paths := []string{lane2SystemEndpoints.bus}
 	if euid == 0 {
 		paths = append(paths, lane2SystemEndpoints.private)
@@ -283,6 +286,17 @@ func (p *lane2Execution) admitEndpoints(client string, pin pinState, euid uint32
 		return "", "endpoint", os.ErrNotExist
 	}
 	return "", refusal, nil
+}
+
+// lane2DockerDials reports whether docker, given --host=unix://<path>, dials
+// path itself. docker/cli opts.ParseHost trims Unicode white space from the
+// whole value and refuses a second "://"; moby client.ParseHostURL then dials
+// what follows "unix://" as is. A name docker would rewrite is refused, so the
+// socket it contacts is the one admitted.
+func lane2DockerDials(path string) bool {
+	host := strings.TrimSpace("unix://" + path)
+	proto, addr, _ := strings.Cut(host, "://")
+	return proto == "unix" && addr == path && !strings.Contains(addr, "://")
 }
 
 // holdEndpoint walks path, opens the socket it resolves to O_PATH, requires

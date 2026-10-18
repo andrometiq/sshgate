@@ -198,14 +198,16 @@ so these **daemon reads** run in the same `ro-v1` jail with three differences,
 all scoped to the admitted client: they may open Unix stream sockets (and from
 Landlock ABI 9 connect only to the admitted daemon sockets); only the admitted
 client and its interpreter may be executed (no plugins, hooks or pagers); and
-they may not create a `memfd`. A daemon read never has network, whatever the
-pin. Just before the client runs, the jail re-checks every admitted object
+they may not create a `memfd`. A jailed daemon read never has network, whatever
+the pin; below Landlock ABI 9 it can reach other Unix sockets (see the residual
+risks). Just before the client runs, the jail re-checks every admitted object
 (client, interpreter, sockets) against the inode admission held, so one
 replaced in between is refused (`jail:failed:lane2id`); a daemon restart that
 recreates its socket at that moment fails that one read. Only where a plain read
 would run classifier-only (an unpinned host whose jail is Absent, the read not
-required to run confined) does a daemon read run unjailed, shell-free, with the
-same grammar, admission and closed environment. A typed
+required to run confined) does a daemon read run unjailed: shell-free, with the
+same grammar, admission and closed environment, but with network and nothing
+limiting which sockets it reaches or what it executes. A typed
 grammar decides what counts as one: each verb has a fixed set of flags with
 typed values and a bounded number of arguments, and any other line is an
 ordinary read. The gate then runs its own canonical command, never the agent's
@@ -222,6 +224,8 @@ directory on its `DT_RPATH`/`DT_RUNPATH`, and the daemon socket must be owned by
 root and replaceable by no other user; a pinned `docker_socket` must be owned by
 the gate's user instead. A socket's own mode bits are not checked (they allow
 connecting, not replacing it); its owner and the directories above it are. A
+`docker` socket whose resolved name `docker --host` would rewrite (it trims
+trailing white space) is refused, so the client dials the socket admitted. A
 `systemctl` socket that is absent must lie under a directory only root can
 write, so no other user can create it before the client connects. A relative,
 empty or `$ORIGIN`-style search path, a loader audit module, or a library name
@@ -259,7 +263,9 @@ and refuses the read if any check fails. With that, a jailed read **cannot**:
   timestamps, extended attributes) anywhere on the host, including writing into
   or resizing an existing named pipe (FIFO);
 - connect to a local daemon over a Unix socket, or reach the host's System V or
-  POSIX IPC objects or kernel keyrings;
+  POSIX IPC objects or kernel keyrings. The exception is a daemon read: it
+  connects to its admitted daemon, and below Landlock ABI 9 to any path socket
+  its user may (below ABI 6, abstract sockets too);
 - signal, trace or re-tune (priority, CPU affinity) a process outside the jail,
   or read its memory, file descriptors or environment (so tools such as `lsof`
   cannot see which process holds a file or socket);
@@ -387,7 +393,7 @@ item 1; others are outside what a read jail can promise.
   present endpoint.
 - **Unpinned hosts without a jail** still run daemon reads unjailed (the
   classifier-only fallback), with the grammar, admission and closed
-  environment.
+  environment, and with network.
 - **The daemon-read client's dependency closure is trusted.** Admission refuses
   search paths, interpreters and sockets another user could replace; it does
   not certify the installed packages. The libraries the system loader finds
