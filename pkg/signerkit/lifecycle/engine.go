@@ -51,6 +51,15 @@ type Engine struct {
 	config        Config
 	epoch         string
 	projections   projections
+
+	legacyContext      context.Context
+	cancelLegacy       context.CancelFunc
+	legacyClosed       bool
+	legacyJoined       sync.WaitGroup
+	legacy             legacyTable
+	legacyAudit        *legacyAuditWorker
+	legacyUnknownEnd   time.Duration
+	legacyUnknownCount int
 }
 
 // New recovers the store before exposing the engine. The caller owns running Run.
@@ -82,6 +91,7 @@ func New(c Config) (*Engine, error) {
 		e.cancelEffects()
 		return nil, err
 	}
+	e.legacyContext, e.cancelLegacy = context.WithCancel(context.Background())
 	return e, nil
 }
 

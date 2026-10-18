@@ -17,6 +17,11 @@ func (e *Engine) stop() {
 func (e *Engine) Close() error {
 	e.stop()
 	e.mu.Lock()
+	e.legacyClosed = true
+	e.cancelLegacy()
+	for _, r := range e.legacy.requests {
+		e.resolveLegacyLocked(r, LegacyResult{Status: "timeout"})
+	}
 	done := e.runDone
 	e.mu.Unlock()
 	if e.config.AssistPool != nil {
@@ -26,6 +31,7 @@ func (e *Engine) Close() error {
 		<-done
 	}
 	e.waitJoined.Wait()
+	e.legacyJoined.Wait()
 	return nil
 }
 

@@ -11,7 +11,8 @@ import (
 
 // Run drives the due index, outbox flusher and per-record notifier actors.
 // Cancellation or a storage failure permanently stops this instance and joins
-// its effects. Recovery requires a new Engine over the store.
+// its v2 effects. Recovery requires a new Engine over the store. Keep routing
+// legacy requests to this instance until service shutdown calls Close.
 func (e *Engine) Run(ctx context.Context) error {
 	e.mu.Lock()
 	if e.stopping {
@@ -89,6 +90,7 @@ func (e *Engine) Reconcile() error {
 	}
 	now := e.now()
 	e.projections.expireGrants(now)
+	e.expireLegacyLocked(now)
 	for _, key := range e.dueKeys(now) {
 		if err := e.reconcileLocked(key, now); err != nil {
 			return err
