@@ -100,9 +100,10 @@ The `journey` job in `tests.yml` runs on every PR and push (including main), wit
 no path filters, read-only permissions and no secrets, on `ubuntu-24.04`.
 Configure branch protection to require `journey`; workflow YAML alone cannot
 make a status check required. The job explicitly opts into the privileged rig,
-allows 20 minutes for preparation plus tests in `make test-journey` within a
-30-minute job. Checkout, Go setup, teardown and upload have explicit caps totaling
-8 minutes, leaving 2 minutes for overhead and action post steps. It never
+allows 28 minutes for preparation plus tests in `make test-journey` within a
+40-minute job; the suite's own go test timeout is 20 minutes, so it fires first.
+Checkout, Go setup, teardown and upload have explicit caps. Evidence is written
+incrementally as JSON lines, so a killed run still leaves it. It never
 reruns a failure automatically. Go module/build caches are keyed by OS,
 architecture, toolchain and `go.sum`; installed state is never cached.
 

@@ -88,7 +88,9 @@ jobs:
 
   journey:
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    # Preparation (image build, ~5 min) + the suite's own 20-minute go test
+    # timeout + teardown and upload.
+    timeout-minutes: 40
     permissions:
       contents: read
     env:
@@ -118,7 +120,9 @@ jobs:
       - name: Prepare image and run installed user journey
         env:
           JOURNEY_ARTIFACT_DIR: ${{ runner.temp }}/journey-artifacts
-        timeout-minutes: 20
+        # Longer than the suite's 20-minute go test timeout, so Go's own
+        # timeout fires first and its stack dump reaches the log.
+        timeout-minutes: 28
         run: make test-journey
 
       - name: Tear down journey resources
@@ -152,9 +156,11 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: journey-failure
-          # Allowlist only the collector's redacted, <=8 MiB JSON. Never upload
-          # fixture trees, keys, token files, secret fixtures or raw journals.
-          path: ${{ runner.temp }}/journey-artifacts/main-evidence.json
+          # Allowlist only the collector's redacted, size-capped evidence. Never
+          # upload fixture trees, keys, token files, secret fixtures or raw journals.
+          path: |
+            ${{ runner.temp }}/journey-artifacts/main-evidence.json
+            ${{ runner.temp }}/journey-artifacts/main-evidence.jsonl
           if-no-files-found: ignore
           retention-days: 7
           include-hidden-files: false

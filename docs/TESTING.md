@@ -612,10 +612,12 @@ Tier-1 refusal, immediate and late approval, denial, expiry/post-expiry taps,
 restart and secret transfer. It asserts classifier fallback, not kernel jail
 coverage. Missing infrastructure fails rather than skips.
 
-The `journey` CI job runs every PR and push on Ubuntu 24.04, with a 20-minute
-combined preparation/test step inside a 30-minute job. Checkout and Go setup
-are capped at 1 and 3 minutes, teardown at 3, and artifact upload at 1, leaving
-2 minutes for runner overhead and action post steps. The script stages modules,
+The `journey` CI job runs every PR and push on Ubuntu 24.04, with a 28-minute
+combined preparation/test step inside a 40-minute job. The suite's own go test
+timeout is 20 minutes, so it fires before the step limit and its stack dump
+reaches the log. Checkout and Go setup are capped at 2 and 3 minutes, teardown
+at 3, and artifact upload at 1. Evidence is written incrementally, so a killed
+run still leaves it. The script stages modules,
 the toolchain and fake API binary, then builds the image before running tests;
 its temporary state and cleanup trap span both phases. Require it in branch protection. Only Go modules
 and build results are cached by OS/arch/toolchain/`go.sum`, never installed state.
