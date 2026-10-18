@@ -36,6 +36,8 @@ type fakeTelegram struct {
 	editedMessages   []editedMessage
 	callbackAnswers  []callbackAnswer
 	getUpdatesCalled atomic.Int64
+	processedOffset  int
+	progress         chan struct{}
 	nextMessageID    int
 	getMeAlwaysFail  bool
 
@@ -56,7 +58,8 @@ type fakeTelegram struct {
 	sendMessageDropAt int
 	// sendMessageHook runs after a successful acceptance and before the fake
 	// response. Policy tests use it to cancel between multipart sends.
-	sendMessageHook func(call int)
+	sendMessageHook    func(call int)
+	answerCallbackHook func()
 
 	// getUpdatesFailCodes is a FIFO queue of API error_codes that
 	// respondGetUpdates returns (as {"ok":false,...}) before falling back
@@ -164,6 +167,10 @@ func (f *fakeTelegram) respondGetUpdates(w http.ResponseWriter, r *http.Request)
 
 	timeoutSec, _ := strconv.Atoi(r.FormValue("timeout"))
 	offset, _ := strconv.Atoi(r.FormValue("offset"))
+	f.mu.Lock()
+	f.processedOffset = offset
+	f.signalProgress()
+	f.mu.Unlock()
 
 	// Block-with-timeout semantics: if no pending updates, wait up to
 	// timeoutSec seconds (capped at 1s to keep tests snappy) for any
@@ -249,8 +256,13 @@ func (f *fakeTelegram) respondAnswerCallback(w http.ResponseWriter, r *http.Requ
 	id := r.FormValue("callback_query_id")
 	text := r.FormValue("text")
 	f.mu.Lock()
+	hook := f.answerCallbackHook
 	f.callbackAnswers = append(f.callbackAnswers, callbackAnswer{CallbackID: id, Text: text})
+	f.signalProgress()
 	f.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
 	writeAPIResult(w, json.RawMessage(`true`))
 }
 
