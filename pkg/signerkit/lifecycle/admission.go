@@ -2,9 +2,6 @@ package lifecycle
 
 import (
 	"errors"
-	"slices"
-	"strings"
-	"time"
 
 	ap "github.com/karthikeyan5/sshgate/src/approvalplan"
 )
@@ -81,34 +78,25 @@ func (e *Engine) admitLocked(candidate ap.R1, now ap.Now) error {
 	if !payloadFull() && !countFull() {
 		return nil
 	}
-	// Ages and pressure order use the committed decision, never creation time.
-	type decidedRecord struct {
-		key string
-		at  time.Time
-	}
-	var candidates []decidedRecord
-	for key := range e.projections.records {
-		rec, err := e.load(key)
-		if err != nil {
-			return err
+	// Keep skipped candidates out of this pass, then restore them from the
+	// confirmed projections. Apply remains the authority for eligibility,
+	// including Clock, audit gates, live grants and the replay floor.
+	var visited []string
+	defer func() {
+		for _, key := range visited {
+			e.projections.indexReclamation(key)
 		}
-		if rec == nil {
-			return keyError()
+	}()
+	for payloadFull() || countFull() {
+		queue := &e.projections.shedCandidates
+		if countFull() {
+			queue = &e.projections.deleteCandidates
 		}
-		if rec.Header.Decision != nil {
-			candidates = append(candidates, decidedRecord{key, rec.Header.Decision.DecidedAt})
+		if queue.Len() == 0 {
+			break
 		}
-	}
-	slices.SortFunc(candidates, func(a, b decidedRecord) int {
-		if order := a.at.Compare(b.at); order != 0 {
-			return order
-		}
-		return strings.Compare(a.key, b.key)
-	})
-	for _, candidate := range candidates {
-		if !payloadFull() && !countFull() {
-			return nil
-		}
+		candidate := queue.candidates[0]
+		visited = append(visited, candidate.key)
 		rec, err := e.load(candidate.key)
 		if err != nil {
 			return err
@@ -135,6 +123,8 @@ func (e *Engine) admitLocked(candidate ap.R1, now ap.Now) error {
 				return err
 			}
 		}
+		e.projections.shedCandidates.remove(candidate.key)
+		e.projections.deleteCandidates.remove(candidate.key)
 	}
 	if payloadFull() || countFull() {
 		return &ap.CodeError{Code: ap.CodeQueueFull}
@@ -157,8 +147,8 @@ func (e *Engine) Delete(principal, requestID string, pressure bool) (ap.Answer, 
 }
 
 func (e *Engine) reclaimLocked(key string, cmd ap.Command) (ap.Answer, error) {
-	if e.stopping {
-		return ap.Answer{}, unavailable()
+	if err := e.availabilityLocked(); err != nil {
+		return ap.Answer{}, err
 	}
 	rec, err := e.load(key)
 	if err != nil {

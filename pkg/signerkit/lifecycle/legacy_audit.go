@@ -16,29 +16,29 @@ type legacyAuditCall struct {
 }
 
 // The legacy owner keeps this worker across v2 recovery. Its counters use
-// Engine.mu; only the worker writes to the sink.
+// LegacyService.mu; only the worker writes to the sink.
 type legacyAuditWorker struct {
 	calls     chan legacyAuditCall
 	dropped   uint64
 	lastAudit time.Duration
 }
 
-func (e *Engine) startLegacyAuditLocked() {
-	if e.legacy.audit != nil {
+func (e *LegacyService) startLegacyAuditLocked() {
+	if e.audit != nil {
 		return
 	}
-	e.legacy.audit = &legacyAuditWorker{calls: make(chan legacyAuditCall)}
-	e.legacy.joined.Add(1)
-	go e.runLegacyAudit(e.legacy.audit)
+	e.audit = &legacyAuditWorker{calls: make(chan legacyAuditCall)}
+	e.joined.Add(1)
+	go e.runLegacyAudit(e.audit)
 }
 
-func (e *Engine) runLegacyAudit(worker *legacyAuditWorker) {
-	defer e.legacy.joined.Done()
+func (e *LegacyService) runLegacyAudit(worker *legacyAuditWorker) {
+	defer e.joined.Done()
 	ticker := newReconcileTicker()
 	defer ticker.Stop()
 	for {
 		select {
-		case <-e.legacy.ctx.Done():
+		case <-e.ctx.Done():
 			return
 		case call := <-worker.calls:
 			e.attemptLegacyAudit(worker, call.metadata)
@@ -49,37 +49,37 @@ func (e *Engine) runLegacyAudit(worker *legacyAuditWorker) {
 	}
 }
 
-func (e *Engine) writeLegacyAudit(metadata ap.AuditMetadata) {
+func (e *LegacyService) writeLegacyAudit(metadata ap.AuditMetadata) {
 	e.callLegacyAudit(&metadata)
 }
 
-func (e *Engine) flushLegacyAudit() { e.callLegacyAudit(nil) }
+func (e *LegacyService) flushLegacyAudit() { e.callLegacyAudit(nil) }
 
-func (e *Engine) callLegacyAudit(metadata *ap.AuditMetadata) {
+func (e *LegacyService) callLegacyAudit(metadata *ap.AuditMetadata) {
 	e.mu.Lock()
-	if e.legacy.closed {
+	if e.closed {
 		e.mu.Unlock()
 		return
 	}
 	e.startLegacyAuditLocked()
-	worker := e.legacy.audit
+	worker := e.audit
 	e.mu.Unlock()
 	call := legacyAuditCall{metadata: metadata, done: make(chan struct{})}
 	select {
-	case <-e.legacy.ctx.Done():
+	case <-e.ctx.Done():
 		return
 	case worker.calls <- call:
 	}
 	select {
-	case <-e.legacy.ctx.Done():
+	case <-e.ctx.Done():
 	case <-call.done:
 	}
 }
 
 // Fail-open lines are never retried or put in the durable outbox.
-func (e *Engine) attemptLegacyAudit(worker *legacyAuditWorker, metadata *ap.AuditMetadata) {
+func (e *LegacyService) attemptLegacyAudit(worker *legacyAuditWorker, metadata *ap.AuditMetadata) {
 	e.mu.Lock()
-	if e.legacy.closed || e.config.AuditWriter == nil {
+	if e.closed || e.config.AuditWriter == nil {
 		e.mu.Unlock()
 		return
 	}
@@ -97,7 +97,7 @@ func (e *Engine) attemptLegacyAudit(worker *legacyAuditWorker, metadata *ap.Audi
 	worker.lastAudit = now
 	writer := e.config.AuditWriter
 	e.mu.Unlock()
-	if err := writer.WriteApproval(e.legacy.ctx, *metadata); err != nil {
+	if err := writer.WriteApproval(e.ctx, *metadata); err != nil {
 		slog.Warn("lifecycle: legacy audit write failed")
 	}
 }
