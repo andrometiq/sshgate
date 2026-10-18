@@ -57,3 +57,28 @@ failures are fatal, including unavailable Docker and systemd. Go tests run under
 lock (`JOURNEY_TEST_LOCK`, default `${XDG_CACHE_HOME:-$HOME/.cache}/sshgate-lanes/test.lock`).
 Failure diagnostics here are container status only; J3's artifact collector must redact and
 bound protocol/card/audit evidence before retaining it. No raw credentials or journals are dumped.
+
+## Main-line scenarios (J3)
+
+`TestJourneyMain` diagnoses the disabled HTTP fixture through MCP, checks Tier-1 and
+unsigned-SSH refusal, then follows the documented human re-tier procedure for web1.
+It installs the candidate gate on web1 through the CLI and on web2 through
+`update_gate`, verifying both hashes. Immediate approval, denial/replay, restart
+refusal and binary transfer exercise the real signer. Late batch approval at 240
+seconds and two independent expiry requests share one five-minute window.
+
+Each target starts `health.py` on loopback port 8080. Its user-owned
+`/home/user/health.conf` initially contains `enabled=0\n`: requests return 503
+and append `unhealthy: enabled=0` to `health.log`. Setting it to `enabled=1\n`
+returns 200 with `ok\n`; the service rereads the file on each request.
+Observer commands use Docker exec for health, file metadata and audits. Repairs and
+transfers use MCP; only fixture seeding, lifecycle controls and documented human
+provisioning run outside MCP.
+
+Set `JOURNEY_ARTIFACT_DIR` to retain bounded, timestamped MCP results, Telegram
+events and gate/signer audits in `main-evidence.json` before teardown. Secret
+fixtures and raw journals are never retained; transfer checks scan the synthetic
+sentinel in MCP results, cards, audits, live logs and service journals before
+saving evidence. Missing infrastructure fails rather than skips. Compile-only
+validation with `go vet -tags journey ./tests/journey/...` does not execute these
+Docker scenarios.
