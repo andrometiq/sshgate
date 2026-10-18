@@ -19,12 +19,15 @@ import (
 )
 
 type journeyCall struct {
-	result *mcp.CallToolResult
-	err    error
+	result    *mcp.CallToolResult
+	err       error
+	completed time.Time
 }
 type journeyCard struct {
-	id int
-	at time.Time
+	id        int
+	at        time.Time
+	requestID string
+	text      string
 }
 type journeyEvidence struct {
 	transcript []json.RawMessage
@@ -36,7 +39,7 @@ func (e *journeyEvidence) record(t *testing.T, value any) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(data), journeySentinel) {
+	if containsSecret(data) {
 		t.Fatal("synthetic plaintext leaked; evidence withheld")
 	}
 	if len(data) > 1<<20 {
@@ -50,11 +53,11 @@ func startCall(c *journeyMCP, name string, args map[string]any) <-chan journeyCa
 		ctx, cancel := context.WithTimeout(context.Background(), 7*time.Minute)
 		defer cancel()
 		result, err := c.session.CallTool(ctx, &mcp.CallToolParams{Name: name, Arguments: args})
-		done <- journeyCall{result, err}
+		done <- journeyCall{result, err, time.Now()}
 	}()
 	return done
 }
-func finishCall(t *testing.T, e *journeyEvidence, done <-chan journeyCall, output any, wantError bool) {
+func finishCall(t *testing.T, e *journeyEvidence, done <-chan journeyCall, output any, wantError bool) journeyCall {
 	t.Helper()
 	select {
 	case call := <-done:
@@ -77,9 +80,11 @@ func finishCall(t *testing.T, e *journeyEvidence, done <-chan journeyCall, outpu
 				t.Fatal(err)
 			}
 		}
+		return call
 	case <-time.After(7 * time.Minute):
 		t.Fatal("MCP completion deadline")
 	}
+	return journeyCall{}
 }
 func (r *journeyRig) events(t *testing.T) []faketg.Event {
 	t.Helper()
@@ -110,10 +115,14 @@ func cards(events []faketg.Event) map[int]journeyCard {
 			continue
 		}
 		approve, deny := false, false
+		requestID := ""
 		for _, row := range keyboard.InlineKeyboard {
 			for _, button := range row {
 				if button.CallbackData == nil {
 					continue
+				}
+				if strings.HasPrefix(*button.CallbackData, "approve:") {
+					requestID = strings.TrimPrefix(*button.CallbackData, "approve:")
 				}
 				approve = approve || strings.Contains(strings.ToLower(button.Text), "approve")
 				deny = deny || strings.Contains(strings.ToLower(button.Text), "deny")
@@ -128,7 +137,7 @@ func cards(events []faketg.Event) map[int]journeyCard {
 		}
 		if message.MessageID != 0 {
 			if _, ok := found[message.MessageID]; !ok {
-				found[message.MessageID] = journeyCard{message.MessageID, event.Time}
+				found[message.MessageID] = journeyCard{message.MessageID, event.Time, requestID, message.Text}
 			}
 		}
 	}
@@ -191,8 +200,28 @@ func (r *journeyRig) replayRefused(t *testing.T, card journeyCard, action string
 	}
 	r.tap(t, card, action, true)
 	pollJourney(t, "stale callback refusal", 30*time.Second, func() bool {
-		for _, event := range r.events(t) {
-			if event.Sequence > sequence && event.Method == "answerCallbackQuery" && strings.Contains(event.Fields["text"], "expired or already resolved") {
+		events := r.events(t)
+		callbackID := ""
+		for _, event := range events {
+			if event.Sequence <= sequence || event.Method != "getUpdates" {
+				continue
+			}
+			var updates []tg.Update
+			if json.Unmarshal(event.Result, &updates) != nil {
+				t.Fatal("invalid callback delivery evidence")
+			}
+			for _, update := range updates {
+				cb := update.CallbackQuery
+				if cb != nil && cb.Message != nil && cb.Message.MessageID == card.id && cb.Data == action+":"+card.requestID {
+					callbackID = cb.ID
+				}
+			}
+		}
+		if callbackID == "" {
+			return false
+		}
+		for _, event := range events {
+			if event.Sequence > sequence && event.Method == "answerCallbackQuery" && event.Fields["callback_query_id"] == callbackID && strings.Contains(event.Fields["text"], "expired or already resolved") {
 				return true
 			}
 		}
@@ -232,37 +261,40 @@ func (r *journeyRig) audit(t *testing.T, host string) []map[string]any {
 }
 func (r *journeyRig) auditCount(t *testing.T, host, command, status string, want int) {
 	t.Helper()
-	count := 0
-	for _, row := range r.audit(t, host) {
-		match := row["command"] == command
-		if host == "controller" {
-			match = false
-			if commands, ok := row["commands"].([]any); ok {
-				for _, c := range commands {
-					match = match || c == command
+	pollJourney(t, "audit "+host+" "+command, 30*time.Second, func() bool {
+		count := 0
+		for _, row := range r.audit(t, host) {
+			match := row["command"] == command
+			if host == "controller" {
+				match = false
+				if commands, ok := row["commands"].([]any); ok {
+					for _, c := range commands {
+						match = match || c == command
+					}
 				}
 			}
-		}
-		if !match {
-			continue
-		}
-		field := "approval_status"
-		if host == "controller" {
-			field = "status"
-		}
-		if status == "" || row[field] == status || (status == "approved" && strings.HasPrefix(fmt.Sprint(row[field]), "approved")) {
-			if status == "approved" && want > 0 && (row[field] != "approved" || row["auth_mode"] != "human" || row["request_id"] == "") {
-				t.Fatal("signer approval was not delivered with human authorization")
+			if !match {
+				continue
 			}
-			if status == "signed" && row["exit_code"] != float64(0) {
-				t.Fatal("signed gate execution failed")
+			field := "approval_status"
+			if host == "controller" {
+				field = "status"
 			}
-			count++
+			if status == "" || row[field] == status || (status == "approved" && strings.HasPrefix(fmt.Sprint(row[field]), "approved")) {
+				if status == "approved" && want > 0 && (row[field] != "approved" || row["auth_mode"] != "human" || !nonemptyString(row["request_id"])) {
+					t.Fatal("signer approval was not delivered with human authorization")
+				}
+				if status == "signed" && row["exit_code"] != float64(0) {
+					t.Fatal("signed gate execution failed")
+				}
+				count++
+			}
 		}
-	}
-	if count != want {
-		t.Fatalf("%s audit count for %q (%s)=%d, want %d", host, command, status, count, want)
-	}
+		if count > want {
+			t.Fatalf("%s audit count=%d, want %d", host, count, want)
+		}
+		return count == want
+	})
 }
 func assertRun(t *testing.T, out tool.RunOutput, stdout string) {
 	t.Helper()
@@ -326,13 +358,14 @@ func TestJourneyMain(t *testing.T) {
 	evidence := &journeyEvidence{}
 	r.addReadOnly(t)
 	r.installSigner(t)
+	r.candidateReadOnly(t)
 	t.Cleanup(func() {
 		events := r.events(t)
 		evidence.record(t, events)
 		for _, host := range []string{"target-a", "target-b", "controller"} {
 			evidence.record(t, r.audit(t, host))
 		}
-		if directory := os.Getenv("JOURNEY_ARTIFACT_DIR"); directory != "" {
+		if directory := os.Getenv("JOURNEY_ARTIFACT_DIR"); directory != "" && !t.Failed() {
 			data, err := json.Marshal(evidence.transcript)
 			if err != nil {
 				t.Error(err)
@@ -363,7 +396,7 @@ func TestJourneyMain(t *testing.T) {
 			var out tool.RunOutput
 			result := client.call(t, "run", runArgs(read.command), &out)
 			evidence.record(t, result)
-			if out.ExitCode != 0 || out.Kind != "read" || out.Approved || !strings.Contains(out.Stdout, read.contains) {
+			if result.IsError || out.Denial != nil || out.Stderr != "" || out.ExitCode != 0 || out.Kind != "read" || out.Approved || !strings.Contains(out.Stdout, read.contains) {
 				t.Fatalf("diagnostic result: %+v", out)
 			}
 		}
@@ -395,28 +428,40 @@ test "$code" = 77`)
 		t.Fatalf("unexpected doctor fallback: %s", doctor)
 	}
 	evidence.record(t, report)
-	client.call(t, "run", runArgs("head -n 1 /home/user/health.conf"), nil)
-	found := false
-	for _, row := range r.audit(t, "target-a") {
-		if row["command"] == "head -n 1 /home/user/health.conf" {
-			found = true
-			if row["enforcement"] != "classifier" || row["pinned"] != false || row["jail_absent"] == nil || row["jail_absent"] == "" {
-				t.Fatal("read audit does not establish classifier fallback")
+	var read tool.RunOutput
+	result := client.call(t, "run", runArgs("head -n 1 /home/user/health.conf"), &read)
+	if result.IsError || read.ExitCode != 0 || read.Stdout != "enabled=0\n" || read.Stderr != "" || read.Denial != nil {
+		t.Fatal("candidate head failed")
+	}
+	pollJourney(t, "successful candidate read audit", 30*time.Second, func() bool {
+		found := false
+		for _, row := range r.audit(t, "target-a") {
+			if row["command"] == "head -n 1 /home/user/health.conf" {
+				found = true
+				if row["exit_code"] != float64(0) || row["enforcement"] != "classifier" || row["pinned"] != false || row["jail_absent"] == nil || row["jail_absent"] == "" {
+					t.Fatal("read audit does not establish classifier fallback")
+				}
 			}
 		}
-	}
-	if !found {
-		t.Fatal("missing read audit")
-	}
+		return found
+	})
 	if !t.Run("approve_immediately", func(t *testing.T) {
 		command := "printf 'marker\\n' > /home/user/immediate; printf 'approved\\n'"
 		r.absent(t, "target-a", "/home/user/immediate")
 		before := cards(r.events(t))
-		r.telegramAdmin(t, "/policy", `{"policy":"approve_now"}`)
-		var out tool.RunOutput
-		finishCall(t, evidence, startCall(client, "run", runArgs(command)), &out, false)
-		assertRun(t, out, "approved\n")
+		r.telegramAdmin(t, "/policy", `{"policy":"hold"}`)
+		done := startCall(client, "run", runArgs(command))
 		card := r.nextCard(t, before)
+		r.absent(t, "target-a", "/home/user/immediate")
+		select {
+		case <-done:
+			t.Fatal("call completed before tap")
+		default:
+		}
+		r.tap(t, card, "approve", false)
+		var out tool.RunOutput
+		finishCall(t, evidence, done, &out, false)
+		assertRun(t, out, "approved\n")
 		r.cardEdit(t, card, "Approved")
 		if len(cards(r.events(t))) != len(before)+1 {
 			t.Fatal("expected one decision")
@@ -424,7 +469,7 @@ test "$code" = 77`)
 		if r.exec(t, "target-a", "cat", "/home/user/immediate") != "marker\n" {
 			t.Fatal("marker bytes differ")
 		}
-		r.auditCount(t, "controller", command, "approved", 1)
+		r.signerDecision(t, card, []string{command}, []string{"web1"}, "approved")
 		r.auditCount(t, "target-a", command, "signed", 1)
 	}) {
 		return
@@ -440,7 +485,7 @@ test "$code" = 77`)
 		r.cardEdit(t, card, "Denied")
 		r.replayRefused(t, card, "deny")
 		r.absent(t, "target-a", "/home/user/denied")
-		r.auditCount(t, "controller", command, "denied", 1)
+		r.signerDecision(t, card, []string{command}, []string{"web1"}, "denied")
 		r.auditCount(t, "controller", command, "", 1)
 		r.auditCount(t, "target-a", command, "", 0)
 		if len(cards(r.events(t))) != len(before)+1 {
@@ -524,7 +569,7 @@ func testJourneyWindow(t *testing.T, r *journeyRig, client *journeyMCP, evidence
 		}
 		r.auditCount(t, "target-a", commands[i], "signed", 1)
 	}
-	r.auditCount(t, "controller", commands[0], "approved", 1)
+	r.signerDecision(t, lateCard, commands, []string{"web1", "web1"}, "approved")
 	r.health(t, "ok\n200")
 	if r.exec(t, "target-a", "cat", "/home/user/health.conf") != "enabled=1\n" || r.exec(t, "target-a", "cat", "/home/user/fix-counter") != "once\n" {
 		t.Fatal("repair effects differ")
@@ -539,11 +584,19 @@ func testJourneyWindow(t *testing.T, r *journeyRig, client *journeyMCP, evidence
 		{expired, expiredCard, expiredCommand, "/home/user/expired-marker"},
 	} {
 		var out tool.RunOutput
-		finishCall(t, evidence, request.done, &out, true)
+		call := finishCall(t, evidence, request.done, &out, true)
+		assertWindow(t, request.card, call.completed)
+		evidence.record(t, map[string]any{"request_id": request.card.requestID, "card_at": request.card.at, "completed_at": call.completed})
 		assertDenial(t, out, "approval_timeout")
 		r.cardEdit(t, request.card, "Expired")
+		for _, event := range r.events(t) {
+			if event.Method == "editMessageText" && event.Fields["message_id"] == fmt.Sprint(request.card.id) && strings.Contains(event.Fields["text"], "Expired") {
+				assertWindow(t, request.card, event.Time)
+			}
+		}
 		r.absent(t, "target-a", request.path)
 		r.auditCount(t, "target-a", request.command, "", 0)
+		r.signerDecision(t, request.card, []string{request.command}, []string{"web1"}, "timeout")
 		r.auditCount(t, "controller", request.command, "approved", 0)
 	}
 	r.replayRefused(t, expiredCard, "approve")
@@ -552,5 +605,65 @@ func testJourneyWindow(t *testing.T, r *journeyRig, client *journeyMCP, evidence
 	r.auditCount(t, "target-a", expiredCommand, "", 0)
 	if len(cards(r.events(t))) != len(before)+3 {
 		t.Fatal("expected one decision per independent request")
+	}
+}
+
+func nonemptyString(value any) bool { s, ok := value.(string); return ok && s != "" }
+
+func assertWindow(t *testing.T, card journeyCard, completed time.Time) {
+	t.Helper()
+	if !strings.Contains(card.text, "5m0s") {
+		t.Fatal("card does not advertise five-minute validity")
+	}
+	elapsed := completed.Sub(card.at)
+	if elapsed < 295*time.Second || elapsed > 330*time.Second {
+		t.Fatalf("approval window elapsed %s, want 300s with transport tolerance", elapsed)
+	}
+}
+
+func (r *journeyRig) signerDecision(t *testing.T, card journeyCard, commands, servers []string, status string) {
+	t.Helper()
+	if card.requestID == "" {
+		t.Fatal("card has no request identity")
+	}
+	pollJourney(t, "correlated signer decision", 30*time.Second, func() bool {
+		count := 0
+		for _, row := range r.audit(t, "controller") {
+			if row["request_id"] != card.requestID {
+				continue
+			}
+			count++
+			encodedCommands, _ := json.Marshal(row["commands"])
+			wantCommands, _ := json.Marshal(commands)
+			encodedServers, _ := json.Marshal(row["servers"])
+			wantServers, _ := json.Marshal(servers)
+			if string(encodedCommands) != string(wantCommands) || string(encodedServers) != string(wantServers) || row["status"] != status || (status == "approved" && row["auth_mode"] != "human") {
+				t.Fatal("correlated signer decision differs")
+			}
+		}
+		if count > 1 {
+			t.Fatal("duplicate signer decision")
+		}
+		return count == 1
+	})
+}
+
+func (r *journeyRig) candidateReadOnly(t *testing.T) {
+	publicKey := strings.TrimSpace(r.operator(t, "sshgate pubkey 2>/dev/null"))
+	if strings.ContainsAny(publicKey, "'\r\n") {
+		t.Fatal("invalid public key")
+	}
+	r.exec(t, "target-a", "bash", "-ec", "printf '%s\\n' '"+publicKey+"' > /home/user/.ssh/authorized_keys; rm -rf /home/user/.sshgate-gate")
+	r.operator(t, `python3 - <<'PYTHON'
+import json
+from pathlib import Path
+p=Path.home()/".config/sshgate/servers.json"
+data=json.loads(p.read_text()); del data["web1"]; p.write_text(json.dumps(data))
+PYTHON`)
+	r.operator(t, "SSHGATE_GATE_BIN=$HOME/src/SSHGate/bin/sshgate-gate-linux-amd64 sshgate add web1 user@target-a --read-only")
+	r.exec(t, "target-a", "test", "!", "-e", "/home/user/.sshgate-gate/gate.pub")
+	expected := strings.Fields(r.operator(t, "sha256sum ~/src/SSHGate/bin/sshgate-gate-linux-amd64"))[0]
+	if strings.Fields(r.exec(t, "target-a", "sha256sum", "/home/user/.sshgate-gate/gate"))[0] != expected {
+		t.Fatal("Tier-1 candidate hash mismatch")
 	}
 }

@@ -5,6 +5,7 @@ package journey
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"os/exec"
 	"reflect"
 	"sort"
@@ -14,22 +15,41 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-type journeyMCP struct{ session *mcp.ClientSession }
+type journeyMCP struct {
+	session                 *mcp.ClientSession
+	command                 *exec.Cmd
+	processDone             <-chan error
+	reader                  *io.PipeReader
+	stdin                   io.WriteCloser
+	protocol, input, stderr *journeyCapture
+}
 
 func (r *journeyRig) mcp(t *testing.T) *journeyMCP {
 	t.Helper()
 	command := exec.Command("docker", "exec", "-i", r.controller, "runuser", "-l", "sgop", "-c", "exec sshgate-mcp")
-	// CommandTransport keeps protocol stdout separate. Stderr is deliberately not
-	// persisted here: scenarios own redacted/bounded artifact collection.
+	protocol, input, stderr := &journeyCapture{}, &journeyCapture{}, &journeyCapture{}
+	reader, writer := io.Pipe()
+	command.Stdout = journeyForward{protocol, writer}
+	command.Stderr = stderr
+	stdin, err := command.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { err := command.Wait(); _ = writer.Close(); done <- err }()
+	result := &journeyMCP{command: command, processDone: done, reader: reader, stdin: stdin, protocol: protocol, input: input, stderr: stderr}
+	t.Cleanup(func() { result.close(t) })
 	client := mcp.NewClient(&mcp.Implementation{Name: "journey", Version: "1"}, nil)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	session, err := client.Connect(ctx, &mcp.CommandTransport{Command: command, TerminateDuration: 5 * time.Second}, nil)
+	session, err := client.Connect(ctx, &mcp.IOTransport{Reader: reader, Writer: journeyInput{stdin, input}}, nil)
 	if err != nil {
 		t.Fatalf("MCP initialize: %v", err)
 	}
-	result := &journeyMCP{session: session}
-	t.Cleanup(func() { result.close(t) })
+	result.session = session
 	return result
 }
 
@@ -40,6 +60,23 @@ func (c *journeyMCP) close(t *testing.T) {
 			t.Errorf("close MCP: %v", err)
 		}
 		c.session = nil
+	}
+	if c.command != nil {
+		_ = c.reader.Close()
+		_ = c.stdin.Close()
+		command := c.command
+		timer := time.AfterFunc(5*time.Second, func() { _ = command.Process.Kill() })
+		err := <-c.processDone
+		timer.Stop()
+		if err != nil {
+			t.Errorf("MCP process shutdown failed: %v", err)
+		}
+		c.command = nil
+	}
+	if c.protocol != nil {
+		c.protocol.check(t)
+		c.input.check(t)
+		c.stderr.check(t)
 	}
 }
 
