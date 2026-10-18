@@ -49,6 +49,9 @@ func (e *Engine) runFlusher(ctx context.Context) error {
 // flushPass is called only by the flusher. Sink failures stop this pass;
 // storage failures stop the driver. Neither acknowledges unwritten events.
 func (e *Engine) flushPass(ctx context.Context) (bool, error) {
+	if err := e.Availability(); err != nil {
+		return false, err
+	}
 	if e.config.AuditWriter == nil {
 		return true, nil
 	}
@@ -109,6 +112,9 @@ func (e *Engine) flushPass(ctx context.Context) (bool, error) {
 }
 
 func (e *Engine) flushThroughLocked(ctx context.Context, key string, through uint64) error {
+	if err := e.availabilityLocked(); err != nil {
+		return err
+	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}

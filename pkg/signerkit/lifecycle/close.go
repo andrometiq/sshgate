@@ -1,6 +1,9 @@
 package lifecycle
 
-import ap "github.com/karthikeyan5/sshgate/src/approvalplan"
+import (
+	"errors"
+	ap "github.com/karthikeyan5/sshgate/src/approvalplan"
+)
 
 func unavailable() error { return &ap.CodeError{Code: ap.CodeLifecycleUnavailable} }
 
@@ -17,30 +20,43 @@ func (e *Engine) stop() {
 func (e *Engine) Close() error {
 	e.stop()
 	e.mu.Lock()
-	e.legacy.closed = true
-	e.legacy.cancel()
-	for _, r := range e.legacy.requests {
-		e.resolveLegacyLocked(r, LegacyResult{Status: "timeout"})
-	}
 	done := e.runDone
 	e.mu.Unlock()
 	if e.config.AssistPool != nil {
 		e.config.AssistPool.Close()
 	}
-	e.legacy.assistPool.Close()
 	if done != nil {
 		<-done
 	}
 	e.waitJoined.Wait()
-	e.legacy.joined.Wait()
 	return nil
 }
 
-func (e *Engine) checkAvailable() error {
+// Availability reports the permanent stop cause for this generation.
+func (e *Engine) Availability() error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	return e.availabilityLocked()
+}
+
+func (e *Engine) checkAvailable() error { return e.Availability() }
+
+func (e *Engine) availabilityLocked() error {
+	if e.stopCause != nil {
+		return e.stopCause
+	}
 	if e.stopping {
 		return unavailable()
 	}
 	return nil
+}
+
+func (e *Engine) storageErrorLocked(err error) error {
+	var coded *ap.CodeError
+	if errors.As(err, &coded) && coded.Code == ap.CodeStorageUncertain {
+		e.stopCause = err
+		e.stopping = true
+		e.cancelEffects()
+	}
+	return err
 }

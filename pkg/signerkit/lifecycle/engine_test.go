@@ -48,7 +48,12 @@ func (s *failingStore) Commit(key string, r ap.R1) error {
 func engineFixture(t *testing.T) (*Engine, *elapsedtest.Fake, *failingStore, *freezer) {
 	t.Helper()
 	clock, store, f := elapsedtest.NewFake(st.T0), &failingStore{}, &freezer{}
-	e, err := New(Config{Store: store, Clock: clock, Freezer: f, SnapshotBuilder: snapshotter{}})
+	legacy, err := NewLegacyService(LegacyConfig{Clock: clock})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { legacy.Close() })
+	e, err := New(Config{Store: store, Clock: clock, Freezer: f, SnapshotBuilder: snapshotter{}, LegacyService: legacy})
 	if err != nil {
 		t.Fatal(err)
 	}
