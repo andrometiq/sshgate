@@ -3,13 +3,12 @@
 Run from an amd64 Linux host with Docker Compose and cgroup v2:
 
 ```sh
-JOURNEY_UBUNTU_IMAGE=ubuntu:24.04@sha256:<reviewed-manifest-digest> \
-  scripts/test-journey.sh -run TestJourneyRig
+scripts/test-journey.sh -run TestJourneyRig
 ```
 
-The base image digest is required explicitly; floating image tags are rejected. The sandbox
-used to build this fixture could not reach Docker or the image registry, so no unverified digest
-is supplied. Pin the reviewed value in the CI caller. Preparation installs Ubuntu packages,
+The default base is `ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac`.
+Override it with `JOURNEY_UBUNTU_IMAGE`; floating image tags are rejected.
+Preparation installs Ubuntu packages,
 stages the exact go.mod toolchain, vendors dependencies, and bundles HEAD from the local checkout.
 The controller clones that bundle into a fresh operator home. Uncommitted production changes are
 not installed: commit the candidate before acceptance. The host test files themselves run from
@@ -29,17 +28,17 @@ and MCP launch uses a new login, activating the installer's supplementary group 
 
 ## Fake-process contract (J1 integration)
 
-By default preparation builds `tests/journey/cmd/fake-telegram`. Until J1 is available, set
-`JOURNEY_FAKE_TELEGRAM_BIN` to an amd64 Linux executable or executable launcher script. The image
-contains Python 3 and bash. `JOURNEY_FAKE_TELEGRAM_ARGS_JSON` optionally supplies an argument array;
-no shell evaluation is performed. The executable runs as the `journey-fake-telegram` system unit.
-It must bind the Bot API to `127.0.0.1:18080` and any admin API to `127.0.0.1:18081`.
+Preparation builds `tests/journey/cmd/fake-telegram` by default. To substitute a compatible
+amd64 Linux executable or launcher, set `JOURNEY_FAKE_TELEGRAM_BIN`. The image contains Python 3
+and bash. `JOURNEY_FAKE_TELEGRAM_ARGS_JSON` optionally appends an argument array without shell
+evaluation. The executable runs as the `journey-fake-telegram` system unit with
+`--api 127.0.0.1:18080 --admin 127.0.0.1:18081 --user-id 424242`.
 
-For `TestJourneyRig`, the fake must enqueue a private `/start` update for user/chat 424242 through
-`getUpdates` and approve the actual transfer-enrollment button for web2. It must support the real
-Bot API methods used by the signer. A fake that merely returns getMe succeeds at readiness but
-cannot satisfy enrollment. Do not pre-write the signer's chat store. J1's policy/admin interface
-must be connected to this contract when the lanes integrate; this lane does not invent that API.
+`TestJourneyRig` POSTs `/start` with `{"chat_id":424242}` to the admin API before installing the
+signer. It waits for the signer to persist that chat through real `getUpdates` processing; the
+fixture never writes the chat store. It then POSTs `/policy` with `{"policy":"approve_now"}`
+for web2 transfer enrollment, verifies CLI enrollment success, restores `hold`, and checks the
+fake transcript for API failures. Approval uses the actual rendered button and callback identity.
 
 ## Helpers and acceptance
 
@@ -55,5 +54,6 @@ The fixture logs both published and candidate gate hashes/build metadata without
 Cleanup is registered before container startup and repeated by the shell EXIT/INT/TERM trap;
 containers, volumes, temporary preparation files and the per-run image are removed. Infrastructure
 failures are fatal, including unavailable Docker and systemd. Go tests run under the shared lane
-lock. Failure diagnostics here are container status only; J3's artifact collector must redact and
+lock (`JOURNEY_TEST_LOCK`, default `${XDG_CACHE_HOME:-$HOME/.cache}/sshgate-lanes/test.lock`).
+Failure diagnostics here are container status only; J3's artifact collector must redact and
 bound protocol/card/audit evidence before retaining it. No raw credentials or journals are dumped.

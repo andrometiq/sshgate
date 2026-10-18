@@ -170,13 +170,26 @@ func (r *journeyRig) addReadOnly(t *testing.T) {
 	t.Log(r.operator(t, "cd ~/src/SSHGate && sha256sum bin/sshgate-gate-linux-amd64 && go version -m bin/sshgate-gate-linux-amd64 && go version -m dist/gate/sshgate-gate-linux-amd64"))
 }
 
+func (r *journeyRig) telegramAdmin(t *testing.T, route, body string) {
+	t.Helper()
+	output := r.exec(t, "controller", "curl", "--fail", "--silent", "--show-error", "--max-time", "5",
+		"-H", "Content-Type: application/json", "--data", body, "http://127.0.0.1:18081"+route)
+	var response struct {
+		OK bool `json:"ok"`
+	}
+	if err := json.Unmarshal([]byte(output), &response); err != nil || !response.OK {
+		t.Fatalf("fake Telegram %s failed: %s (%v)", route, output, err)
+	}
+}
+
 func (r *journeyRig) installSigner(t *testing.T) {
 	t.Helper()
 	// The fixture process must listen on loopback :18080, with admin on :18081.
 	r.exec(t, "controller", "bash", "-ec", `mkdir -p /etc/systemd/system/sshgate-signer-telegram.service.d
 printf '%s\n' '[Service]' 'Environment=SSHGATE_TELEGRAM_API_URL=http://127.0.0.1:18080' > /etc/systemd/system/sshgate-signer-telegram.service.d/journey.conf
 `)
-	args := []string{"systemd-run", "--unit=journey-fake-telegram", "/opt/journey/fake-telegram"}
+	args := []string{"systemd-run", "--unit=journey-fake-telegram", "/opt/journey/fake-telegram",
+		"--api", "127.0.0.1:18080", "--admin", "127.0.0.1:18081", "--user-id", "424242"}
 	if raw := os.Getenv("JOURNEY_FAKE_TELEGRAM_ARGS_JSON"); raw != "" {
 		var extra []string
 		if err := json.Unmarshal([]byte(raw), &extra); err != nil {
@@ -186,15 +199,28 @@ printf '%s\n' '[Service]' 'Environment=SSHGATE_TELEGRAM_API_URL=http://127.0.0.1
 	}
 	r.exec(t, "controller", args...)
 	r.wait(t, "controller", "curl", "--fail", "--silent", "http://127.0.0.1:18080/bot123456:journey_fixture_only/getMe")
+	r.wait(t, "controller", "systemctl", "is-active", "journey-fake-telegram")
+	r.wait(t, "controller", "curl", "--fail", "--silent", "--max-time", "5", "http://127.0.0.1:18081/events")
+	r.telegramAdmin(t, "/start", `{"chat_id":424242}`)
 	r.operator(t, "python3 /opt/journey/fixtures/install-pty.py")
 	r.wait(t, "controller", "systemctl", "is-active", "sshgate-signer-telegram")
 	r.exec(t, "controller", "bash", "-ec", `test "$(stat -c '%U:%a' /var/lib/sshgatesigner/keys/gate.key)" = sshgatesigner:600`)
 	r.operator(t, "test ! -r /var/lib/sshgatesigner/keys/gate.key && test ! -r /var/lib/sshgatesigner/tokens/telegram.token && id -nG | tr ' ' '\n' | grep -qx sshgatesigner")
+	r.wait(t, "controller", "python3", "-c", `import json
+with open('/var/lib/sshgatesigner/config/peer.json') as peer:
+    assert json.load(peer)['chat_id'] == 424242`)
+	r.telegramAdmin(t, "/policy", `{"policy":"approve_now"}`)
 	// A new login is also used for every subsequent MCP process.
 	output := r.operator(t, "sshgate add web2 user@target-b")
+	r.telegramAdmin(t, "/policy", `{"policy":"hold"}`)
 	if !strings.Contains(output, `transfer:    registered (label "web2")`) {
 		t.Fatal("web2 transfer enrollment did not succeed")
 	}
+	r.exec(t, "controller", "python3", "-c", `import json, urllib.request
+with urllib.request.urlopen('http://127.0.0.1:18081/events', timeout=5) as response:
+    transcript = json.load(response)
+assert transcript['ok']
+assert not transcript['result']['failures'], transcript['result']['failures']`)
 }
 
 func TestJourneyRig(t *testing.T) {

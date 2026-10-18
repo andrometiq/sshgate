@@ -5,7 +5,7 @@ cd "$(dirname "$0")/.."
 docker info >/dev/null
 docker compose version >/dev/null
 [[ "$(uname -m)" = x86_64 ]] || { echo "Journey requires an amd64 runner (published gate architecture)" >&2; exit 1; }
-: "${JOURNEY_UBUNTU_IMAGE:?Set to ubuntu:24.04@sha256:<reviewed image digest>}"
+: "${JOURNEY_UBUNTU_IMAGE:=ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac}"
 [[ "$JOURNEY_UBUNTU_IMAGE" =~ ^ubuntu:24\.04@sha256:[a-f0-9]{64}$ ]] || { echo 'Ubuntu image must be pinned by digest' >&2; exit 1; }
 prep=$(mktemp -d)
 export JOURNEY_PROJECT="journey-$(date +%s)-$$-$RANDOM"
@@ -16,6 +16,7 @@ cleanup() {
     trap - EXIT
     docker compose -p "$JOURNEY_PROJECT" -f "$JOURNEY_COMPOSE_FILE" down --volumes --remove-orphans --timeout 10 || result=1
     docker image rm "$JOURNEY_IMAGE" >/dev/null 2>&1 || true
+    chmod -R u+w "$prep" 2>/dev/null || true
     rm -rf "$prep"
     exit "$result"
 }
@@ -35,11 +36,13 @@ cp -a tests/journey/fixtures "$prep/fixtures"
 if [[ -n "${JOURNEY_FAKE_TELEGRAM_BIN:-}" ]]; then
     cp "$JOURNEY_FAKE_TELEGRAM_BIN" "$prep/fake-telegram"
 else
-    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOTOOLCHAIN="$toolchain" go build -o "$prep/fake-telegram" ./tests/journey/cmd/fake-telegram
+    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOTOOLCHAIN="$toolchain" go build -buildvcs=false -o "$prep/fake-telegram" ./tests/journey/cmd/fake-telegram
 fi
 chmod 0755 "$prep/fake-telegram"
 docker build --platform linux/amd64 --build-arg "UBUNTU_IMAGE=$JOURNEY_UBUNTU_IMAGE" -t "$JOURNEY_IMAGE" -f tests/journey/fixtures/Dockerfile "$prep"
 export PATH="$prep/go/bin:$PATH"
 export GOPROXY=off GOSUMDB=off GOTOOLCHAIN=local
 # The shared lock also serializes this lane with the project's other Go test processes.
-flock /home/karthi/.cache/sshgate-lanes/test.lock go test -race -timeout 30m -tags journey -count=1 ./tests/journey/... "$@"
+test_lock="${JOURNEY_TEST_LOCK:-${XDG_CACHE_HOME:-$HOME/.cache}/sshgate-lanes/test.lock}"
+mkdir -p "$(dirname "$test_lock")"
+flock "$test_lock" go test -race -timeout 30m -tags journey -count=1 ./tests/journey/... "$@"
