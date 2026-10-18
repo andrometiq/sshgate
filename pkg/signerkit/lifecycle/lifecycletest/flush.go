@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	ap "github.com/karthikeyan5/sshgate/src/approvalplan"
@@ -41,24 +42,26 @@ func flushRecovery(t *testing.T, factory StoreFactory) {
 	})
 	f.open()
 	f.run()
-	// With N > FlushBatch, all records must drain via retry passes despite no
-	// wall-clock deadline becoming due and no command arriving after Startup.
-	eventuallyWithin(t, time.Minute, func() bool {
-		entries, err := f.store.List()
+	// The injected clock stays fixed so no record becomes due. The synctest
+	// clock drives only the runner's timers, waiting for each pass to finish.
+	synctest.Wait() // Startup's first sink write fails.
+	for flushed := 0; flushed < records; flushed += ap.FlushBatch {
+		time.Sleep(time.Second)
+		synctest.Wait()
+	}
+	entries, err := f.store.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		rec, err := f.store.Load(entry.Key)
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, entry := range entries {
-			rec, err := f.store.Load(entry.Key)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if ap.Unflushed(rec) {
-				return false
-			}
+		if ap.Unflushed(rec) {
+			t.Fatalf("record %s remains unflushed", entry.Key)
 		}
-		return true
-	})
+	}
 	mu.Lock()
 	defer mu.Unlock()
 	if len(writes) != records {
