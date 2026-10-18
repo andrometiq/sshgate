@@ -6,7 +6,7 @@ as an afterthought:
 | When | Command | Needs |
 | --- | --- | --- |
 | **Before every push** | `make preflight` | nothing special |
-| **After a large build / before a release** | `make e2e` | Docker |
+| **After a large build / before a release** | `make e2e` | disposable amd64 Linux host, Docker Compose, cgroup v2 |
 | **After any change to the gate's read path or the jail** | `make test-jail` (+ the jail checks below) | a Linux host with unprivileged user namespaces and Landlock |
 
 All three are real gates. A green `preflight` is the bar for pushing; a green `e2e`
@@ -68,6 +68,56 @@ Runs everything in `preflight`, then:
     and asserts it reaches `ready` instead of hard-exiting. Guards the
     chicken-and-egg bug where the server refused to start before `/sshgate:setup`
     created the key, leaving a fresh read-only user with a dead tool surface.
+13. `make test-journey` — `scripts/test-journey.sh`, the installed user journey
+    described below. Missing infrastructure or a scheduled scenario is a failure.
+
+## Installed user journey (disposable runner only)
+
+On an amd64 Linux VM with Docker Compose and cgroup v2, commit the candidate first:
+installation uses a bundle of HEAD, while host tests use the working tree. Run:
+
+```sh
+JOURNEY_ALLOW_PRIVILEGED=1 make test-journey
+# The full release gate needs the same disposable host and explicit opt-in:
+JOURNEY_ALLOW_PRIVILEGED=1 make e2e
+```
+
+The controller runs privileged Docker and passwordless sudo; it can access host
+disks. Use a disposable machine with no secrets, never a persistent developer
+host. Preparation downloads the pinned Ubuntu image, Go toolchain and modules;
+execution uses an internal Docker network, no published ports and offline Go.
+The real systemd signer talks only to a loopback fake Telegram API. No real
+Telegram account or external assessment provider is used.
+
+The journey covers fresh installation, Tier-1 diagnosis and refusal, immediate
+approval, late batch approval, denial/replay, expiry and rejected post-expiry taps,
+signer restart and two-server secret transfer. It checks target effects, cards,
+audits and secret non-disclosure. Published and candidate gate hashes are checked
+separately; `dist/gate` is never rewritten. Targets deliberately report
+`enforcement=classifier`; this does not prove the kernel jail.
+
+The `journey` job in `tests.yml` runs on every PR and push (including main), with
+no path filters, read-only permissions and no secrets, on `ubuntu-24.04`.
+Configure branch protection to require `journey`; workflow YAML alone cannot
+make a status check required. The job explicitly opts into the privileged rig,
+allows 20 minutes for preparation plus tests in `make test-journey` within a
+30-minute job. Checkout, Go setup, teardown and upload have explicit caps totaling
+8 minutes, leaving 2 minutes for overhead and action post steps. It never
+reruns a failure automatically. Go module/build caches are keyed by OS,
+architecture, toolchain and `go.sum`; installed state is never cached.
+
+Set `JOURNEY_ARTIFACT_DIR` to retain the collector's redacted, at-most-8-MiB
+`main-evidence.json` before teardown. CI uploads only this file on failure for
+seven days, excluding keys, tokens, secret fixtures and raw journals. An early
+setup failure may have no evidence file. Shell traps remove containers, volumes
+and the per-run image; an always-run CI step also removes leftover journey
+resources after interruption. Runner disposal remains the final boundary if the
+job is forcibly terminated before cleanup can finish.
+
+Release acceptance requires two consecutive green local and CI runs within the
+20-minute budget, plus an outside tester's cold install from the README.
+See [the fixture guide](../tests/journey/fixtures/README.md) for prerequisites
+and [the journey contract](../tests/journey/README.md) for the fake API.
 
 ## Kernel read jail checks (Linux host with user namespaces + Landlock)
 
@@ -96,9 +146,10 @@ features reports failure, not a false green.
 
 ## What can't be headless — the manual fresh-user install check
 
-The Claude Code plugin + slash-command layer (`/plugin install`,
-`/sshgate:setup`) and the human `sshgate` provisioning CLI can't be driven from
-`go test`. After changes to the install flow, the binaries, or the MCP startup,
+The journey drives the installer and human provisioning CLI in its disposable
+fixture. The real Claude Code plugin + slash-command layer (`/plugin install`,
+`/sshgate:setup`) still needs a manual client check. After changes to the install
+flow, the binaries, or the MCP startup,
 do one real fresh-user pass on a clean machine (or a throwaway user / container)
 and confirm the **Tier-1 read-only** path end-to-end:
 
@@ -168,9 +219,8 @@ who performed the external action. A failed or skipped row is a release blocker
 unless the maintainers explicitly narrow the release scope; no agent should
 silently waive it.
 
-The **Tier-2** signer + Telegram-approval path needs the operator's hardware
-(the master key under `sshgatesigner`, a Telegram bot, a real phone tap) and is
-verified with the one-time live checklist, not in CI.
+CI exercises the **Tier-2** signer with synthetic credentials and fake Telegram.
+The real Telegram bot and phone-tap boundary still require the live checklist.
 
 The Tier-2 install is a single interactive `scripts/install.sh` pass: one run
 prompts for the Telegram user_id and the bot token, appends the

@@ -5,11 +5,14 @@ This is a part-by-part guide to testing SSHGate. The standing invariant is:
 > `go test ./...` stays green at every commit **with no sudo, Docker, network,
 > systemd or CGO**.
 
-Three groups of tests sit outside that unit gate, each behind a build tag or a
+Four groups of tests sit outside that unit gate, each behind a build tag or a
 make target:
 
 - **Docker integration** — the red-team live test under `internal/redteam` and
   the suite under `tests/integration` (see §11).
+- **Installed user journey** — `tests/journey`, tagged `journey`, runs the real
+  installer, systemd signer and MCP against two SSH targets on a disposable
+  privileged Docker host (see §11.1).
 - **The kernel read jail** — the jail's acceptance matrix and mutation proof need
   a Linux host with unprivileged user namespaces and Landlock, and some lanes need
   root on a disposable machine (see §12).
@@ -44,7 +47,8 @@ All the make targets that run tests or checks:
 | `make release-gate` | the **only** target that writes `dist/gate/`: a reproducible gate build with the pinned toolchain, checked to contain no test hooks | network access the first time (Go downloads the pinned toolchain) | at release only |
 | `make test-integration` | the Docker suites (§11) | Docker | exercising real `sshd` |
 | `make smoke` | `scripts/smoke-fresh-install.sh` (keyless first-run startup) | — | fresh-user regression |
-| `make e2e` | `preflight test-integration smoke` | Docker | after a large build / before release |
+| `make test-journey` | `scripts/test-journey.sh` (§11.1) | disposable amd64 Linux host, Docker Compose, cgroup v2; explicit privileged opt-in | every PR / push and release |
+| `make e2e` | `preflight test-integration smoke test-journey` | same disposable host as journey | after a large build / before release |
 | `make test-jail` | the read jail's acceptance matrix, non-root lane (§12) | Linux with unprivileged user namespaces that can mount, Landlock, FUSE | any change to the jail or the gate's read path |
 | `make test-jail-root` | the same matrix as root | root on a **disposable** machine | same |
 | `make test-jail-mutate MUTATE=<IDs>` | the mutation proof: removes protections and checks a named test catches each (§12) | as `test-jail` (root lane: run it as root) | when you add or touch a jail protection |
@@ -72,7 +76,7 @@ is structurally avoided:
 | Never required | How it's avoided |
 | --- | --- |
 | **sudo / root** | Permission assertions run as the ordinary test user; tests that depend on unix perms being *enforced* skip when `os.Geteuid() == 0` (root bypasses mode bits — see §10). Components that refuse to run as root are tested via `assertNonRoot()`, not by actually being root. |
-| **Docker** | Docker-backed tests are integration-tagged under `internal/redteam` and `tests/integration`, so plain `go test ./...` excludes them. |
+| **Docker** | Docker-backed tests are integration-tagged under `internal/redteam` and `tests/integration`, and journey-tagged under `tests/journey`, so plain `go test ./...` excludes them. |
 | **network** | Every "socket" is a Unix-domain socket on `t.TempDir()` or a loopback `127.0.0.1:0` listener. The three HTTP collaborators (Telegram Bot API, OpenAI-compatible LLM, hosted v2 signer) are faked with `httptest.Server` on loopback. The MCP server uses the SDK **in-memory** transport — no TCP at all. |
 | **systemd** | Nothing under test talks to systemd. The signer's single-instance guarantee is a `flock` on a lockfile in `t.TempDir()` (`TestFlockOrFail_SecondLockBlocks`), not a unit. |
 | **CGO** | `sqlite` is pure-Go: `modernc.org/sqlite` in `go.mod` (no `mattn/go-sqlite3`). Plain `go test ./...` passes with `CGO_ENABLED=0`. CGO is only pulled in by `-race`. |
@@ -591,6 +595,37 @@ host port and verifies the filesystem write tripwire. The two package groups
 therefore run serially and uncached in the release gate.
 
 The full list of make targets is the table in §0.
+
+---
+
+### 11.1 Installed user journey
+
+Run `JOURNEY_ALLOW_PRIVILEGED=1 make test-journey` only on a disposable amd64
+Linux VM with Docker Compose and cgroup v2, without host secrets. The privileged
+controller can access host disks. Commit the candidate before acceptance: the
+installer uses bundled HEAD, not uncommitted production changes. The same opt-in
+is needed for `make e2e`, which now includes this target.
+
+Preparation uses the network; execution uses only an internal Docker network
+and fake Telegram on controller loopback. The journey covers installation,
+Tier-1 refusal, immediate and late approval, denial, expiry/post-expiry taps,
+restart and secret transfer. It asserts classifier fallback, not kernel jail
+coverage. Missing infrastructure fails rather than skips.
+
+The `journey` CI job runs every PR and push on Ubuntu 24.04, with a 20-minute
+combined preparation/test step inside a 30-minute job. Checkout and Go setup
+are capped at 1 and 3 minutes, teardown at 3, and artifact upload at 1, leaving
+2 minutes for runner overhead and action post steps. The script stages modules,
+the toolchain and fake API binary, then builds the image before running tests;
+its temporary state and cleanup trap span both phases. Require it in branch protection. Only Go modules
+and build results are cached by OS/arch/toolchain/`go.sum`, never installed state.
+`JOURNEY_ARTIFACT_DIR/main-evidence.json` holds bounded (8 MiB), redacted evidence;
+CI uploads only this file on failure, with seven-day retention. No keys, tokens,
+secret fixtures or raw journals are uploaded. Evidence is collected before
+teardown; the runner traps exits and CI always attempts leftover cleanup.
+
+See [E2E-TEST-STRATEGY.md](E2E-TEST-STRATEGY.md#installed-user-journey-disposable-runner-only)
+and [the fixture guide](../tests/journey/fixtures/README.md) for the full contract.
 
 ---
 

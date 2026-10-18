@@ -1,4 +1,4 @@
-.PHONY: all build install-local test test-jail test-integration vet clean sshgate-gate-linux \
+.PHONY: all build install-local test test-jail test-integration test-journey vet clean sshgate-gate-linux \
 	sshgate-mcp-darwin sshgate-signer-telegram-darwin darwin cross sshgate-signer-server \
 	preflight e2e smoke gitleaks release-gate verify-dist verify-repro verify-versions mcpb \
 	test-refapp-js test-jail-root test-jail-mutate selftest-testjail selftest-jailmut
@@ -493,11 +493,14 @@ gitleaks:
 		echo "gitleaks: NOT INSTALLED — install before pushing (https://github.com/gitleaks/gitleaks)"; \
 	fi
 
+test-journey:
+	scripts/test-journey.sh
+
 # e2e: the full end-to-end strategy. Everything in preflight, plus the Docker
 # integration suite (real gate deploy + read / write-denial over SSH against a
-# live sshd) and the fresh-install keyless-startup smoke. Run this after a
-# large build or before cutting a release. Requires Docker.
-e2e: preflight test-integration smoke
+# live sshd), the keyless-startup smoke, and the installed user journey.
+# Run on a disposable amd64 Linux Docker host before cutting a release.
+e2e: preflight test-integration smoke test-journey
 	@echo "e2e: OK — full end-to-end strategy passed"
 
 # smoke: the headless fresh-user regression — the MCP server must start with
