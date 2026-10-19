@@ -4,8 +4,10 @@ import (
 	"context"
 	"crypto"
 	"crypto/ed25519"
+	"errors"
 	"fmt"
 	"io"
+	"sync"
 	"time"
 
 	"github.com/karthikeyan5/sshgate/src/redact"
@@ -63,8 +65,13 @@ type Config struct {
 // + Attach* surface should instead be promoted onto this Service type is an
 // open owner ratification (see carve-2026-07-18/DESIGN-carve.md S2).
 type Service struct {
-	daemon *Daemon
-	audit  AuditSink
+	daemon      *Daemon
+	audit       AuditSink
+	approvalsMu sync.Mutex
+	approvals   *ApprovalRuntime
+	closed      bool
+	closeOnce   sync.Once
+	closeErr    error
 }
 
 // New validates cfg and returns a *Service. Validation is New-ONLY and honest
@@ -133,14 +140,41 @@ func (s *Service) HandleSignRequest(ctx context.Context, conn io.ReadWriter) err
 	return s.daemon.HandleSignRequest(ctx, conn)
 }
 
-// Close releases the optional policy journal's pinned descriptors. It is safe
-// to call more than once. Other Service resources remain caller-owned.
+// AttachApprovals binds the stable runtime once, before serving requests.
+// Service.Close owns the attached runtime; other resources remain caller-owned.
+func (s *Service) AttachApprovals(runtime *ApprovalRuntime) error {
+	if s == nil || runtime == nil {
+		return errors.New("signer: approval runtime is required")
+	}
+	s.approvalsMu.Lock()
+	defer s.approvalsMu.Unlock()
+	if s.closed || s.approvals != nil {
+		return errors.New("signer: approvals already attached or service closed")
+	}
+	s.approvals = runtime
+	return nil
+}
+
+// Close joins the attached approval runtime before closing the policy journal.
+// It is safe to call concurrently and more than once.
 func (s *Service) Close() error {
-	if s == nil || s.daemon == nil || s.daemon.policyJournal == nil {
+	if s == nil {
 		return nil
 	}
-	s.daemon.stopHostedPolicyRecovery()
-	return s.daemon.policyJournal.Close()
+	s.closeOnce.Do(func() {
+		s.approvalsMu.Lock()
+		s.closed = true
+		runtime := s.approvals
+		s.approvalsMu.Unlock()
+		if runtime != nil {
+			s.closeErr = runtime.Close()
+		}
+		if s.daemon != nil && s.daemon.policyJournal != nil {
+			s.daemon.stopHostedPolicyRecovery()
+			s.closeErr = errors.Join(s.closeErr, s.daemon.policyJournal.Close())
+		}
+	})
+	return s.closeErr
 }
 
 // PolicyRecoveryError reports why the dedicated policy RPC is temporarily
