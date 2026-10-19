@@ -7,6 +7,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/karthikeyan5/sshgate/pkg/signerkit/assist"
@@ -177,62 +178,65 @@ func editRetry(t *testing.T, factory StoreFactory) {
 			name = "stops"
 		}
 		t.Run(name, func(t *testing.T) {
-			f := newFixture(t, factory)
-			rec := recoveryTrace(t)[5]
-			if err := f.store.Store.Commit(ap.RecordKey(st.PrincipalA, st.ID(1)), rec); err != nil {
-				t.Fatal(err)
-			}
-			var returned atomic.Bool
-			var armedOnce sync.Once
-			armed := make(chan struct{})
-			f.store.afterLoad = func() {
-				if returned.Load() {
-					armedOnce.Do(func() { close(armed) })
-				}
-			}
-			var calls atomic.Int32
-			n := &notifier{hook: func(_ context.Context, kind string) error {
-				if kind == "edit" && calls.Add(1) == 1 {
-					returned.Store(true)
-					return context.DeadlineExceeded
-				}
-				return nil
-			}}
-			f.config.Notifier = n
-			f.open()
-			f.run()
-			// The actor reads again only after arming its retry timer. No test-side
-			// Load is made until this synchronization point.
-			receive(t, armed)
-			if stop {
-				count, before := f.store.count(), f.record()
-				if err := f.engine.Close(); err != nil {
+			synctest.Test(t, func(t *testing.T) {
+				f := newFixture(t, factory)
+				rec := recoveryTrace(t)[5]
+				if err := f.store.Store.Commit(ap.RecordKey(st.PrincipalA, st.ID(1)), rec); err != nil {
 					t.Fatal(err)
 				}
-				timer := time.NewTimer(1100 * time.Millisecond)
-				defer timer.Stop()
-				<-timer.C
-				if calls.Load() != 1 || f.store.count() != count || !reflect.DeepEqual(before, f.record()) {
-					t.Fatal("retry continued after stop")
+				var returned atomic.Bool
+				var armedOnce sync.Once
+				armed := make(chan struct{})
+				f.store.afterLoad = func() {
+					if returned.Load() {
+						armedOnce.Do(func() { close(armed) })
+					}
 				}
-				f.config.Notifier = &notifier{}
+				var calls atomic.Int32
+				n := &notifier{hook: func(_ context.Context, kind string) error {
+					if kind == "edit" && calls.Add(1) == 1 {
+						returned.Store(true)
+						return context.DeadlineExceeded
+					}
+					return nil
+				}}
+				f.config.Notifier = n
 				f.open()
 				f.run()
-				eventually(t, func() bool {
-					r := f.record()
-					cards := r.Payload.CardEntries
-					return len(cards) == 3 && cards[1].Retired && cards[2].Confirmed
-				})
-			} else {
-				eventually(t, func() bool {
-					r := f.record()
-					cards := r.Payload.CardEntries
-					return len(cards) == 2 && cards[1].Confirmed
-				})
-				if calls.Load() != 2 {
-					t.Fatal("possible send was not retried exactly once")
+				// The actor reads again only after arming its retry timer. No test-side
+				// Load is made until this synchronization point.
+				receive(t, armed)
+				synctest.Wait()
+				if stop {
+					count, before := f.store.count(), f.record()
+					if err := f.engine.Close(); err != nil {
+						t.Fatal(err)
+					}
+					timer := time.NewTimer(1100 * time.Millisecond)
+					defer timer.Stop()
+					<-timer.C
+					if calls.Load() != 1 || f.store.count() != count || !reflect.DeepEqual(before, f.record()) {
+						t.Fatal("retry continued after stop")
+					}
+					f.config.Notifier = &notifier{}
+					f.open()
+					f.run()
+					eventually(t, func() bool {
+						r := f.record()
+						cards := r.Payload.CardEntries
+						return len(cards) == 3 && cards[1].Retired && cards[2].Confirmed
+					})
+				} else {
+					eventually(t, func() bool {
+						r := f.record()
+						cards := r.Payload.CardEntries
+						return len(cards) == 2 && cards[1].Confirmed
+					})
+					if calls.Load() != 2 {
+						t.Fatal("possible send was not retried exactly once")
+					}
 				}
-			}
+			})
 		})
 	}
 }
