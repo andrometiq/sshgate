@@ -3,13 +3,22 @@ package signerkit
 import (
 	"context"
 	"crypto/rand"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
+	"os"
+	"slices"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/karthikeyan5/sshgate/pkg/signerkit/lifecycle"
 	ap "github.com/karthikeyan5/sshgate/src/approvalplan"
 	"github.com/karthikeyan5/sshgate/src/approvalreview"
+	aw "github.com/karthikeyan5/sshgate/src/approvalwire"
 	"github.com/karthikeyan5/sshgate/src/xfer"
 	"github.com/karthikeyan5/sshgate/src/xferwire"
 )
@@ -25,9 +34,11 @@ type RecoverableStore interface {
 // NewEngine must construct fresh generation-owned dependencies and clean them
 // up on failure. It must use the supplied store and persistent Legacy service.
 type ApprovalRuntimeConfig struct {
-	Store     RecoverableStore
-	Legacy    *lifecycle.LegacyService
-	NewEngine func(lifecycle.Store) (*lifecycle.Engine, error)
+	// AllowedUIDs restricts local v2 calls when nonempty.
+	AllowedUIDs []uint32
+	Store       RecoverableStore
+	Legacy      *lifecycle.LegacyService
+	NewEngine   func(lifecycle.Store) (*lifecycle.Engine, error)
 }
 
 // ApprovalRuntime owns replaceable v2 generations and the persistent v1 owner.
@@ -52,6 +63,7 @@ func NewApprovalRuntime(c ApprovalRuntimeConfig) (*ApprovalRuntime, error) {
 	if c.Store == nil || c.Legacy == nil || c.NewEngine == nil {
 		return nil, errors.New("signer: approval store, legacy service and engine factory are required")
 	}
+	c.AllowedUIDs = slices.Clone(c.AllowedUIDs)
 	ctx, cancel := context.WithCancel(context.Background())
 	r := &ApprovalRuntime{config: c, ctx: ctx, cancel: cancel, done: make(chan struct{}), wait: waitApprovalRecovery}
 	if err := r.rebuild(); err != nil {
@@ -435,4 +447,148 @@ func (b approvalSnapshotBuilder) BuildSnapshot(ctx context.Context, plan ap.Appr
 	}
 	encoded, err := snapshot.Encode()
 	return encoded, view.Reason, err
+}
+
+type approvalCallerKey struct{}
+type approvalCaller struct {
+	runtime   *ApprovalRuntime
+	principal string
+	uid       uint32
+	hasPeer   bool
+}
+
+// HandleSignRequestWithPeer binds v2 ownership to the kernel's connection identity.
+func (s *Service) HandleSignRequestWithPeer(ctx context.Context, conn io.ReadWriter, peer *PeerCredentials) error {
+	s.approvalsMu.Lock()
+	caller := approvalCaller{runtime: s.approvals}
+	s.approvalsMu.Unlock()
+	if peer != nil {
+		caller.uid, caller.hasPeer = peer.UID, true
+		caller.principal = fmt.Sprintf("local-uid:%d", peer.UID)
+	}
+	return s.daemon.HandleSignRequest(context.WithValue(ctx, approvalCallerKey{}, caller), conn)
+}
+
+func (d *Daemon) handleApproval(ctx context.Context, conn io.ReadWriter, line []byte) error {
+	caller, _ := ctx.Value(approvalCallerKey{}).(approvalCaller)
+	// Refusal metadata is derived only from the caller's frame, never a record.
+	var meta struct {
+		Kind      string `json:"kind"`
+		RequestID string `json:"request_id"`
+		Draft     struct {
+			RequestID string `json:"request_id"`
+		} `json:"draft"`
+	}
+	_ = json.Unmarshal(line, &meta)
+	if meta.Kind == aw.KindSubmit {
+		meta.RequestID = meta.Draft.RequestID
+	}
+	request, err := aw.DecodeLocalRequest(line)
+	var response aw.Response
+	var recorded bool
+	if err == nil {
+		switch {
+		case caller.runtime == nil:
+			err = &ap.CodeError{Code: ap.CodeLifecycleUnavailable}
+		case !caller.hasPeer:
+			err = &ap.CodeError{Code: ap.CodeInvalidRequest}
+		case len(caller.runtime.config.AllowedUIDs) > 0 && !slices.Contains(caller.runtime.config.AllowedUIDs, caller.uid):
+			err = &ap.CodeError{Code: ap.CodeNotFound}
+		default:
+			var engine *lifecycle.Engine
+			engine, err = caller.runtime.Current()
+			if err == nil {
+				response, recorded, err = dispatchApproval(ctx, engine, caller.principal, request)
+			}
+		}
+	}
+	if err != nil {
+		code := ap.CodeLifecycleUnavailable
+		var coded *ap.CodeError
+		if errors.As(err, &coded) && coded.Code.Valid() {
+			code = coded.Code
+		}
+		// Never reflect internal errors or requester-controlled parser text.
+		response = aw.ErrorResponse(code, string(code))
+	}
+	frame, marshalErr := aw.MarshalLocalResponse(meta.Kind, response)
+	if marshalErr != nil {
+		return marshalErr
+	}
+	setWriteGrace(conn)
+	n, writeErr := conn.Write(frame)
+	if writeErr == nil && n != len(frame) {
+		writeErr = io.ErrShortWrite
+	}
+	if err != nil && !recorded {
+		metadata := ap.AuditMetadata{Kind: ap.Kind(meta.Kind), RequestID: meta.RequestID, Principal: caller.principal, Transition: "refused{" + string(response.Error.Code) + "}"}
+		if auditErr := d.Audit.Write(AuditEvent{TS: d.now(), RequestID: meta.RequestID, Status: "error", Approval: &metadata}); auditErr != nil {
+			fmt.Fprintf(os.Stderr, "signer: audit write failed: %v\n", auditErr)
+		}
+	}
+	return writeErr
+}
+
+// The boolean reports a committed noise event; those refusals use the outbox.
+func dispatchApproval(ctx context.Context, engine *lifecycle.Engine, principal string, request any) (aw.Response, bool, error) {
+	response := aw.Response{ApprovalProto: aw.Proto, OK: true}
+	var err error
+	var answer ap.Answer
+	switch request := request.(type) {
+	case aw.SubmitRequest:
+		var summary ap.Summary
+		summary, err = engine.Submit(ctx, principal, request.Draft)
+		response.Summary = &summary
+	case aw.GetRequest:
+		var summary ap.Summary
+		summary, err = engine.Get(principal, request.RequestID)
+		response.Summary = &summary
+	case aw.ListRequest:
+		response.Summaries, response.NextCursor, err = approvalPage(engine, principal, request)
+	case aw.WaitRequest:
+		var result lifecycle.WaitResult
+		result, err = engine.WaitMany(ctx, principal, request.RequestIDs, time.Duration(request.WaitSeconds)*time.Second)
+		response.Summaries = result.Summaries
+	case aw.ClaimRequest:
+		token, _ := hex.DecodeString(request.ClaimToken) // Strict wire validation checked length and alphabet.
+		answer, err = engine.Claim(ctx, principal, request.RequestID, ap.Claim{Token: [32]byte(token), PlanHash: request.PlanHash})
+		response.Claim = &aw.ClaimAnswer{Status: answer.Claim, Reason: answer.Reason, Class: answer.Class, Signatures: answer.Signatures}
+		if answer.Claim == ap.ClaimSignatures {
+			response.Claim.DecidedAt = &answer.DecidedAt
+		}
+	case aw.ReportRequest:
+		token, _ := hex.DecodeString(request.ClaimToken)
+		body := request.Report
+		answer, err = engine.Report(principal, request.RequestID, ap.Report{Token: [32]byte(token), PlanHash: request.PlanHash, Body: ap.FinalReport{
+			Class: body.Class, Steps: body.Steps, ExecutedOrdinals: body.ExecutedOrdinals, Partial: body.Partial, ResultDigest: body.ResultDigest,
+		}})
+	}
+	return response, answer.Noise, err
+}
+
+func approvalPage(engine *lifecycle.Engine, principal string, request aw.ListRequest) ([]ap.Summary, string, error) {
+	var after string
+	if request.Cursor != "" {
+		decoded, err := base64.RawURLEncoding.DecodeString(request.Cursor)
+		if err != nil || !ap.ValidRequestID(string(decoded)) {
+			return nil, "", &ap.CodeError{Code: ap.CodeInvalidRequest}
+		}
+		after = string(decoded)
+	}
+	summaries, err := engine.List(principal)
+	if err != nil {
+		return nil, "", err
+	}
+	slices.SortFunc(summaries, func(a, b ap.Summary) int { return strings.Compare(a.RequestID, b.RequestID) })
+	start := 0
+	for start < len(summaries) && summaries[start].RequestID <= after {
+		start++
+	}
+	page := summaries[start:]
+	next := ""
+	if len(page) > request.Limit {
+		page = page[:request.Limit]
+		next = base64.RawURLEncoding.EncodeToString([]byte(page[len(page)-1].RequestID))
+	}
+	return page, next, nil
 }

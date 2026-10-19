@@ -507,6 +507,9 @@ func (d *Daemon) HandleSignRequest(ctx context.Context, conn io.ReadWriter) erro
 		return d.respondError(conn, peek.RequestID, "signer: no approval backend configured (Config.Backend was nil)")
 	}
 	switch peek.Kind {
+	case "approval_submit_v2", "approval_get_v2", "approval_list_v2",
+		"approval_wait_v2", "approval_claim_v2", "approval_report_v2":
+		return d.handleApproval(ctx, conn, line)
 	case "request_grant":
 		return d.handleRequestGrant(ctx, conn, line)
 	case "revoke_grant":

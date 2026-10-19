@@ -136,8 +136,9 @@ func New(cfg Config) (*Service, error) {
 // would produce: a non-*AuditLog sink (hosted-plane Service, no local log) and
 // a nil Backend. When both are wired (the local front-end), it is a transparent
 // pass-through — byte-for-byte the same behavior as calling the Daemon directly.
+// V2 callers must use HandleSignRequestWithPeer to supply kernel credentials.
 func (s *Service) HandleSignRequest(ctx context.Context, conn io.ReadWriter) error {
-	return s.daemon.HandleSignRequest(ctx, conn)
+	return s.HandleSignRequestWithPeer(ctx, conn, nil)
 }
 
 // AttachApprovals binds the stable runtime once, before serving requests.
