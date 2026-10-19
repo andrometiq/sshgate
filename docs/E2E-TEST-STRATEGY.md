@@ -37,8 +37,8 @@ The current target requires all of these checks:
    single clean line. (The reproducible source↔binary rebuild is CI's job —
    `verify-gate.yml`.)
 7. `make verify-versions` — builds the MCP, local Telegram signer, and hosted
-   signer with their release stamps and confirms each `--version` equals
-   `VERSION`.
+   signer (plus the Linux executor) with their release stamps and confirms each
+   `--version` equals `VERSION`.
 8. `make verify-repro` — builds the gate twice with the shared flag set into
    throwaway paths and fails if the two hashes differ, catching flag-set
    nondeterminism regressions before push.
@@ -180,3 +180,46 @@ idempotently. When re-walking the manual Tier-2 check
 or [`commands/setup.md`](../commands/setup.md) T2.2), confirm ONE
 `sudo ./scripts/install.sh` reaches both the `user_id` and the `token` prompts
 and the daemon comes up `active` afterward.
+
+## Executor packaging checks (no live units)
+
+Run `make verify-executor-closure verify-versions`; preflight includes both.
+The executor closure excludes signerkit, SQLite and human-auth implementations.
+The integration setup-script tests lint both executor scripts with `bash -n`
+and shellcheck when installed. Both scripts refuse root and support `--dry-run`.
+Render a unit without installing it, using the built executor:
+
+```bash
+scratch=$(mktemp -d)
+scripts/install-executor.sh --dry-run --binary "$PWD/bin/sshgate-executor" > "$scratch/sshgate-executor.service"
+systemd-analyze --user verify "$scratch/sshgate-executor.service"
+rm -r -- "$scratch"
+```
+
+Verification requires a working systemd user-manager environment. Never enable,
+start, stop or restart live units during these checks. The unit has no syscall
+filter; if one is added, retain `@default` and verify `clock_gettime` is allowed
+with `systemd-analyze syscall-filter`. Its stop timeout must remain at least 90 s.
+Async end-to-end tests use temporary `XDG_RUNTIME_DIR` and `XDG_CONFIG_HOME`, never
+the operator's socket, lock or job store.
+
+`TestExecutorInstallerFlow` checks script arguments, command order, error
+propagation and rollback using canned systemctl responses. It does not model
+systemd. Upgrade means re-running install: every successful install restarts.
+The scripts obtain their unit directory from the manager and refuse missing
+persistent directories and conflicting loaded paths; install also refuses a
+symlink destination. The name `sshgate-executor.service` is reserved for SSHGate.
+
+The separate real-systemd smoke uses a pinned Ubuntu container with systemd as
+PID 1 and a lingering non-root user manager:
+
+```bash
+INSTALL_SMOKE_ALLOW_PRIVILEGED=1 make test-install-smoke
+```
+
+It refuses without that opt-in and is not part of `make test`. It builds the
+executor with `-buildvcs=false` and prints PASS/FAIL for install, re-install
+(with a changed invocation ID), uninstall, uninstall after manual unit deletion,
+and conflict refusal. It checks process exit, enablement removal and retention
+of the binary and job records, then removes its container on exit. Run only on
+a disposable host authorized for privileged Docker containers.

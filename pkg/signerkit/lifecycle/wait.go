@@ -17,9 +17,9 @@ type WaitResult struct {
 // WaitMany waits for a confirmed change to any requested record. A zero budget
 // reads immediately. Missing and foreign IDs both answer not_found.
 func (e *Engine) WaitMany(ctx context.Context, principal string, requestIDs []string, wait time.Duration) (WaitResult, error) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if err := e.availabilityLocked(); err != nil {
+	e.published.mu.Lock()
+	defer e.published.mu.Unlock()
+	if err := e.published.availabilityLocked(); err != nil {
 		return WaitResult{}, err
 	}
 	if len(requestIDs) == 0 || len(requestIDs) > ap.AwaitMaxIDs || wait < 0 || wait > ap.AwaitMaxWait {
@@ -37,36 +37,35 @@ func (e *Engine) WaitMany(ctx context.Context, principal string, requestIDs []st
 	if err := ctx.Err(); err != nil {
 		return WaitResult{}, err
 	}
-	summaries, err := e.waitSummariesLocked(keys)
+	records, err := e.published.captureLocked(keys)
 	if err != nil {
 		return WaitResult{}, err
 	}
 	if wait == 0 {
-		return WaitResult{Summaries: summaries, WaitElapsed: true}, nil
+		e.published.mu.Unlock()
+		summaries, err := e.publishedViews(records)
+		e.published.mu.Lock()
+		if stopped := e.published.availabilityLocked(); stopped != nil {
+			return WaitResult{}, stopped
+		}
+		return WaitResult{Summaries: summaries, WaitElapsed: true}, err
 	}
 	e.waitJoined.Add(1)
 	defer e.waitJoined.Done()
 	ready := make(chan struct{}, 1)
-	if e.waiters == nil {
-		e.waiters = make(map[string]map[chan struct{}]struct{})
+	if e.published.waiters == nil {
+		e.published.waiters = make(map[string]map[chan struct{}]struct{})
 	}
 	for _, key := range keys {
-		if e.waiters[key] == nil {
-			e.waiters[key] = make(map[chan struct{}]struct{})
+		if e.published.waiters[key] == nil {
+			e.published.waiters[key] = make(map[chan struct{}]struct{})
 		}
-		e.waiters[key][ready] = struct{}{}
+		e.published.waiters[key][ready] = struct{}{}
 	}
-	defer func() {
-		for _, key := range keys {
-			delete(e.waiters[key], ready)
-			if len(e.waiters[key]) == 0 {
-				delete(e.waiters, key)
-			}
-		}
-	}()
+
 	timer := newWaitTimer(wait)
 	defer timer.Stop()
-	e.mu.Unlock()
+	e.published.mu.Unlock()
 	elapsed := false
 	select {
 	case <-e.effectContext.Done():
@@ -75,8 +74,14 @@ func (e *Engine) WaitMany(ctx context.Context, principal string, requestIDs []st
 		elapsed = true
 	case <-ctx.Done():
 	}
-	e.mu.Lock()
-	if err := e.availabilityLocked(); err != nil {
+	e.published.mu.Lock()
+	for _, key := range keys {
+		delete(e.published.waiters[key], ready)
+		if len(e.published.waiters[key]) == 0 {
+			delete(e.published.waiters, key)
+		}
+	}
+	if err := e.published.availabilityLocked(); err != nil {
 		return WaitResult{}, err
 	}
 	if err := ctx.Err(); err != nil {
@@ -88,39 +93,17 @@ func (e *Engine) WaitMany(ctx context.Context, principal string, requestIDs []st
 		elapsed = false
 	default:
 	}
-	summaries, err = e.waitSummariesLocked(keys)
+	records, err = e.published.captureLocked(keys)
 	if err != nil {
 		return WaitResult{}, err
 	}
-	return WaitResult{Summaries: summaries, WaitElapsed: elapsed}, nil
-}
-
-func (e *Engine) waitSummariesLocked(keys []string) ([]ap.Summary, error) {
-	if err := e.availabilityLocked(); err != nil {
-		return nil, err
+	e.published.mu.Unlock()
+	summaries, err := e.publishedViews(records)
+	e.published.mu.Lock()
+	if stopped := e.published.availabilityLocked(); stopped != nil {
+		return WaitResult{}, stopped
 	}
-	summaries := make([]ap.Summary, 0, len(keys))
-	now := e.now()
-	for _, key := range keys {
-		rec, err := e.load(key)
-		if err != nil {
-			return nil, err
-		}
-		if rec == nil {
-			return nil, &ap.CodeError{Code: ap.CodeNotFound}
-		}
-		summaries = append(summaries, e.view(key, *rec, now))
-	}
-	return summaries, nil
-}
-
-func (e *Engine) wakeWaitersLocked(key string) {
-	for ready := range e.waiters[key] {
-		select {
-		case ready <- struct{}{}:
-		default:
-		}
-	}
+	return WaitResult{Summaries: summaries, WaitElapsed: elapsed}, err
 }
 
 // This timer bounds polling only and confers no authority.

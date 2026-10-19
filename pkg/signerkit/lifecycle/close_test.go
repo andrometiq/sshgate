@@ -207,9 +207,12 @@ func TestCloseWaitersAndClaim(t *testing.T) {
 	}
 	requireUnavailable(t, receiveWait(t, waiting).err)
 	requireUnavailable(t, receiveNotify(t, claimDone))
+	e.published.mu.Lock()
+	publishedWaiters := len(e.published.waiters)
+	e.published.mu.Unlock()
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if len(e.waiters) != 0 || len(e.flushWaiters) != 0 {
+	if publishedWaiters != 0 || len(e.flushWaiters) != 0 {
 		t.Fatal("waiters not joined")
 	}
 }
@@ -219,7 +222,9 @@ func TestCloseLatchWithoutCancellation(t *testing.T) {
 	submitJob(t, e, 1)
 	before, _ := store.Load(ap.RecordKey(st.PrincipalA, st.ID(1)))
 	e.mu.Lock()
-	e.stopping = true
+	e.published.mu.Lock()
+	e.published.stopping = true
+	e.published.mu.Unlock()
 	_, _, err := e.commitLocked(ap.RecordKey(st.PrincipalA, st.ID(1)), &before, ap.AssistDone{Unavailable: "test"}, e.now(), ap.Inputs{})
 	e.mu.Unlock()
 	requireUnavailable(t, err)
@@ -326,7 +331,7 @@ func TestRunCancellationLatchesBeforeEffects(t *testing.T) {
 	if err := receiveNotify(t, done); !errors.Is(err, context.Canceled) {
 		t.Fatal(err)
 	}
-	if !e.stopping || e.effectContext.Err() == nil {
+	if e.Availability() == nil || e.effectContext.Err() == nil {
 		t.Fatal("Run failed to stop owner")
 	}
 	requireUnavailable(t, e.Run(context.Background()))
@@ -441,7 +446,7 @@ func TestStopLatchBeforeIO(t *testing.T) {
 			command(t, e, 1, ap.AdminCancel{Admin: st.Admin, PlanHash: rec.Header.PlanHash})
 			// The load holds the owner mutex. Stop here without canceling the context
 			// to isolate the latch check between the read and the next external call.
-			e.config.Store = &observedLoadStore{Store: store, loaded: func() { e.stopping = true }}
+			e.config.Store = &observedLoadStore{Store: store, loaded: func() { e.published.mu.Lock(); e.published.stopping = true; e.published.mu.Unlock() }}
 			if effect == "notifier" {
 				e.config.Notifier = &testNotifier{status: func(string) { t.Error("transport call after latch") }}
 				requireUnavailable(t, (&notifyActor{engine: e, key: ap.RecordKey(st.PrincipalA, st.ID(1))}).run(context.Background()))
