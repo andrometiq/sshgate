@@ -17,6 +17,7 @@ func (e *Engine) startup() error {
 	if err != nil {
 		return err
 	}
+	e.published.epoch = e.epoch
 	now := e.now()
 	for _, entry := range entries {
 		if !validKey(entry.Key) || entry.EncodedSize < 0 {
@@ -30,6 +31,7 @@ func (e *Engine) startup() error {
 		}
 		if entry.Quarantined {
 			e.projections.quarantined[entry.Key] = entry.EncodedSize
+			e.published.quarantined[entry.Key] = true
 			e.projections.total.records++
 			e.projections.total.full++
 			e.projections.total.live++
@@ -44,7 +46,9 @@ func (e *Engine) startup() error {
 			return fmt.Errorf("lifecycle: listed record missing")
 		}
 		e.projections.update(entry.Key, nil, *rec, now, e.epoch, e.config.Settings)
+		e.published.loadLocked(entry.Key, rec)
 	}
+	e.publishStartupGrants()
 	// Build every index before any recovery commit can publish dependent work.
 	for _, entry := range entries {
 		if !entry.Quarantined {

@@ -28,6 +28,7 @@ type fileRecord struct {
 // return *approvalplan.CodeError with CodeStorageUncertain until Reopen succeeds.
 type FileStore struct {
 	operation         sync.Mutex
+	publication       *publishedState
 	mu                sync.RWMutex
 	holderFD          int
 	uid               uint32
@@ -99,9 +100,8 @@ func (s *FileStore) Reopen() error {
 		s.mu.Unlock()
 		return unavailable()
 	}
-	s.poisoned = true
-	s.records = nil
 	s.mu.Unlock()
+	s.poison()
 	if s.disk != nil {
 		if err := s.disk.Close(); err != nil {
 			return err
@@ -217,6 +217,30 @@ func (s *FileStore) List() ([]StoreEntry, error) {
 	return entries, nil
 }
 
+// bindPublication is called before Startup, after the previous owner joined.
+func (s *FileStore) bindPublication(p *publishedState) {
+	s.operation.Lock()
+	defer s.operation.Unlock()
+	s.publication = p
+}
+
+func (s *FileStore) poison() {
+	p := s.publication
+	if p != nil {
+		p.mu.Lock()
+	}
+	s.mu.Lock()
+	s.poisoned, s.records = true, nil
+	if p != nil {
+		p.poisonLocked(storageUncertain())
+	}
+	s.mu.Unlock()
+	if p != nil {
+		p.mu.Unlock()
+		p.cancel()
+	}
+}
+
 func (s *FileStore) update(fn func(*securestate.Transaction) error) error {
 	var err error
 	if s.beforeStoreUpdate != nil {
@@ -231,9 +255,7 @@ func (s *FileStore) update(fn func(*securestate.Transaction) error) error {
 		}
 	}
 	if errors.Is(err, securestate.ErrCommitUncertain) {
-		s.mu.Lock()
-		s.poisoned, s.records = true, nil
-		s.mu.Unlock()
+		s.poison()
 		return storageUncertain()
 	}
 	return err

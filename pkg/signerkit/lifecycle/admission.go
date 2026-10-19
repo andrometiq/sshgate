@@ -158,7 +158,7 @@ func (e *Engine) reclaimLocked(key string, cmd ap.Command) (ap.Answer, error) {
 		return ap.Answer{}, &ap.CodeError{Code: ap.CodeNotFound}
 	}
 	now := e.now()
-	e.projections.expireGrants(now)
+	e.expireGrantsLocked(now)
 	_, answer, err := e.commitLocked(key, rec, cmd, now, ap.Inputs{})
 	if err != nil {
 		return ap.Answer{}, err
