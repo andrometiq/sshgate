@@ -202,3 +202,24 @@ filter; if one is added, retain `@default` and verify `clock_gettime` is allowed
 with `systemd-analyze syscall-filter`. Its stop timeout must remain at least 90 s.
 Async end-to-end tests use temporary `XDG_RUNTIME_DIR` and `XDG_CONFIG_HOME`, never
 the operator's socket, lock or job store.
+
+`TestExecutorInstallerFlow` checks script arguments, command order, error
+propagation and rollback using canned systemctl responses. It does not model
+systemd. Upgrade means re-running install: every successful install restarts.
+The scripts obtain their unit directory from the manager and refuse missing
+persistent directories and conflicting loaded paths; install also refuses a
+symlink destination. The name `sshgate-executor.service` is reserved for SSHGate.
+
+The separate real-systemd smoke uses a pinned Ubuntu container with systemd as
+PID 1 and a lingering non-root user manager:
+
+```bash
+INSTALL_SMOKE_ALLOW_PRIVILEGED=1 make test-install-smoke
+```
+
+It refuses without that opt-in and is not part of `make test`. It builds the
+executor with `-buildvcs=false` and prints PASS/FAIL for install, re-install
+(with a changed invocation ID), uninstall, uninstall after manual unit deletion,
+and conflict refusal. It checks process exit, enablement removal and retention
+of the binary and job records, then removes its container on exit. Run only on
+a disposable host authorized for privileged Docker containers.

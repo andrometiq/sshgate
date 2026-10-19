@@ -782,6 +782,15 @@ Lingering keeps the user manager and executor alive after logout; the command ma
 require administrator authorization. The executor restarts on failure and has a
 90-second stop timeout to let pending work shut down.
 
+The unit directory comes from the user manager's first persistent
+`systemd/user.control` entry in `UnitPath`, with `.control` removed.
+`XDG_CONFIG_HOME` selects the executor's data root, not its unit directory.
+Both scripts reload the manager before checking for conflicts. They refuse if
+no persistent directory is available or the manager loads the unit from another
+path; remove that conflicting installation and retry. Install also refuses a
+symlink destination. If the manager does not load the written unit, install
+restores the previous unit and refuses.
+
 The unit uses the install-time `${XDG_CONFIG_HOME:-$HOME/.config}`; use the same
 configuration root for the MCP client. Jobs persist in `$XDG_CONFIG_HOME/sshgate/executor/`
 (on the default configuration, `~/.config/sshgate/executor/`). The socket is
@@ -793,6 +802,11 @@ that release's `SHA256SUMS` before installing. There is no Darwin executor.
 MCPB and Smithery installs do not include the executor; async on those installs
 or macOS returns `executor_unavailable`. Synchronous use needs no executor.
 
+After replacing the executor binary, re-run `scripts/install-executor.sh`
+(with the same `--binary PATH` and data configuration root, if used). Every
+successful installation enables and restarts the service. Retry a failed
+installation by running the same command again.
+
 To remove only the user service, as the same user with the same configuration root:
 
 ```bash
@@ -800,5 +814,9 @@ scripts/uninstall-executor.sh --dry-run
 scripts/uninstall-executor.sh
 ```
 
-Removal stops/disables the unit and reloads the user manager. It retains the
-binary and job records. It does not disable lingering, which other services may use.
+The name `sshgate-executor.service` is reserved for SSHGate. Uninstall stops it
+even if its file was deleted, disables it, removes the unit and any remaining
+links to it in the verified directory's `*.target.wants` directories, then reloads
+the manager. Systemd disable may remove other links with this reserved name.
+The binary and job records are retained.
+Removal does not disable lingering, which other services may use.

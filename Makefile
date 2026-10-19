@@ -176,7 +176,7 @@ install-local: build
 	@echo "  COMMITTED $(DIST_GATE_BIN) COPIED -> $${XDG_CONFIG_HOME:-$$HOME/.config}/sshgate/bin/ (the verified bytes update_gate pushes)"
 
 test:
-	go test -race ./...
+	go test -race -timeout 30m ./...
 
 # test-jail: the kernel-jail acceptance matrix (confine package, #22) PLUS
 # the gate-package real-effect confine tests (TestExecWithRedactionConfine*), which
@@ -581,3 +581,8 @@ test-srcmut:
 
 selftest-srcmut:
 	go test -count=1 -timeout 30m ./scripts/srcmut ./scripts/srcmut/execwrap ./internal/srcmut
+
+# Opt-in: disposable privileged container, never the operator's user manager.
+.PHONY: test-install-smoke
+test-install-smoke:
+	bash tests/install-smoke/run.sh
