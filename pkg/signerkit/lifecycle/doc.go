@@ -6,7 +6,16 @@
 // headers. Confirmed commits update the indexes, and Startup rebuilds them.
 // The pure transitions still enforce every reclamation guard. Full records
 // retain their immutable reservation until Shed or Delete.
-// Storage uncertainty permanently stops a v2 generation under its writer lock.
+// Get, List and WaitMany capture immutable committed records under a separate
+// publication lock; they never wait for the writer or call storage. Record and
+// grant-membership changes publish together after persistence. Readers never
+// expire grants. The additional decoded cache holds one copy per admitted record
+// (full-record reservations plus bounded shed headers); encoded limits do not
+// include Go object overhead or in-flight reader snapshots.
+// FileStore poison and the generation stop latch share the publication gate;
+// even empty reads immediately report storage uncertainty. Recovery joins the
+// old generation, reopens storage, and completes New with a fresh epoch before
+// the caller atomically swaps its engine pointer. Old references stay stopped.
 // Availability and every v2 operation retain that cause until replacement;
 // Run joins interrupted effects before returning it. Recovery belongs to callers.
 // NewLegacyService creates the independent v1 owner. Pass the same service in

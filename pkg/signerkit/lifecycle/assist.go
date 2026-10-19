@@ -23,7 +23,7 @@ func (e *Engine) startAssistLocked(key string, rec ap.R1) (ap.R1, error) {
 		}
 		e.mu.Lock()
 		defer e.mu.Unlock()
-		if e.stopping {
+		if e.availabilityLocked() != nil {
 			return
 		}
 		if _, err := e.finishAssistLocked(key, snapshot); err != nil {

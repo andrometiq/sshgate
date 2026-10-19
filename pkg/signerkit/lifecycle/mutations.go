@@ -167,7 +167,7 @@ func (e *Engine) claimLocked(ctx context.Context, principal, key string, claim a
 
 	// Resolve the deciding grant, never a different grant that now covers the plan.
 	if id, ok := strings.CutPrefix(before.Header.Decision.DecidedBy, ap.GrantDecidedPrefix); ok {
-		e.projections.expireGrants(now)
+		e.expireGrantsLocked(now)
 		grantKey := ap.RecordKey(principal, id)
 		grant, err := e.load(grantKey)
 		if err != nil {

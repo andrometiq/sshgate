@@ -19,10 +19,11 @@ import (
 // engine must enforce its own stop even if a store has already been reopened.
 type uncertainStore struct {
 	Store
-	landed  bool
-	calls   atomic.Int32
-	entered chan struct{}
-	release chan struct{}
+	landed      bool
+	calls       atomic.Int32
+	entered     chan struct{}
+	release     chan struct{}
+	publication *publishedState
 }
 
 func (s *uncertainStore) Commit(key string, record ap.R1) error {
@@ -44,6 +45,12 @@ func (s *uncertainStore) Remove(key string) error {
 	return s.fail()
 }
 func (s *uncertainStore) fail() error {
+	if p := s.publication; p != nil {
+		p.mu.Lock()
+		p.poisonLocked(&ap.CodeError{Code: ap.CodeStorageUncertain})
+		p.mu.Unlock()
+		p.cancel()
+	}
 	if s.entered != nil {
 		close(s.entered)
 		<-s.release
@@ -160,7 +167,7 @@ func TestStorageUncertaintyPublicCommands(t *testing.T) {
 						}
 					}
 				}
-				store := &uncertainStore{Store: base, landed: landed, entered: make(chan struct{}), release: make(chan struct{})}
+				store := &uncertainStore{Store: base, landed: landed, entered: make(chan struct{}), release: make(chan struct{}), publication: &e.published}
 				defer func() {
 					select {
 					case <-store.release:
@@ -172,7 +179,7 @@ func TestStorageUncertaintyPublicCommands(t *testing.T) {
 				done := make(chan error, 1)
 				go func() { done <- action() }()
 				receiveNotify(t, store.entered)
-				// All eight callers contend with the uncertain commit's writer lock.
+				// Poison is published while the mutation still holds its writer lock.
 				var joined sync.WaitGroup
 				for range 8 {
 					joined.Add(1)
@@ -399,8 +406,14 @@ func (s uncertainReadStore) Load(string) (ap.R1, error) {
 func TestStorageUncertaintyReadLatchesAcrossStoreRecovery(t *testing.T) {
 	e, _, base, _ := engineFixture(t)
 	defer e.Close()
+	submitJob(t, e, 1)
 	e.config.Store = uncertainReadStore{Store: base}
-	_, err := e.Get(st.PrincipalA, st.ID(1))
+	// Readers use the published view; a writer's Load observes this store fault.
+	summary, err := e.Get(st.PrincipalA, st.ID(1))
+	if err != nil || summary.ApprovalStatus != ap.ApprovalPending {
+		t.Fatal("published read touched storage", summary, err)
+	}
+	_, err = admissionSubmit(e, 2, st.PrincipalA)
 	checkCode(t, err, ap.CodeStorageUncertain)
 	// Clearing the store cannot revive an old generation or its projections.
 	e.config.Store = base

@@ -37,8 +37,7 @@ type Config struct {
 type Engine struct {
 	mu            sync.Mutex
 	running       bool
-	stopping      bool
-	stopCause     error
+	published     publishedState
 	effectContext context.Context
 	cancelEffects context.CancelFunc
 	runDone       chan struct{}
@@ -49,7 +48,6 @@ type Engine struct {
 	effectErrors  chan error
 	flushNudge    chan struct{}
 	flushWaiters  map[string]*flushWaiter
-	waiters       map[string]map[chan struct{}]struct{}
 	config        Config
 	epoch         string
 	projections   projections
@@ -82,6 +80,14 @@ func New(c Config) (*Engine, error) {
 	}
 	e := &Engine{config: c, effectErrors: make(chan error, 1), projections: newProjections(), flushNudge: make(chan struct{}, 1), flushWaiters: make(map[string]*flushWaiter)}
 	e.effectContext, e.cancelEffects = context.WithCancel(context.Background())
+	e.published.records = make(map[string]*ap.R1)
+	e.published.grants = make(map[string]bool)
+	e.published.quarantined = make(map[string]bool)
+	e.published.epoch, e.published.settings = "", c.Settings
+	e.published.cancel = e.cancelEffects
+	if store, ok := c.Store.(interface{ bindPublication(*publishedState) }); ok {
+		store.bindPublication(&e.published)
+	}
 	e.mu.Lock()
 	err := e.startup()
 	e.mu.Unlock()
@@ -140,11 +146,17 @@ func (e *Engine) commitLocked(key string, before *ap.R1, cmd ap.Command, now ap.
 			return ap.R1{}, ap.Answer{}, e.storageErrorLocked(err)
 		}
 		e.projections.remove(key)
+		e.publishLocked(key, nil)
 	} else if answer.Changed {
+		owned, err := copyPublishedRecord(after)
+		if err != nil {
+			return ap.R1{}, ap.Answer{}, err
+		}
 		if err := e.config.Store.Commit(key, after); err != nil {
 			return ap.R1{}, ap.Answer{}, e.storageErrorLocked(err)
 		}
 		e.projections.update(key, before, after, now, e.epoch, e.config.Settings)
+		e.publishLocked(key, owned)
 		e.nudgeNotifyLocked(key)
 		if before == nil || after.Header.OutboxSeq > before.Header.OutboxSeq {
 			e.nudgeFlush()
@@ -156,9 +168,6 @@ func (e *Engine) commitLocked(key string, before *ap.R1, cmd ap.Command, now ap.
 				delete(e.flushWaiters, key)
 			}
 		}
-	}
-	if answer.Changed || answer.Removed {
-		e.wakeWaitersLocked(key)
 	}
 	return after, answer, nil
 }
@@ -206,7 +215,7 @@ func (e *Engine) Submit(ctx context.Context, principal string, draft ap.Approval
 		}
 		command.Plan, command.ReviewSnapshot, command.RationaleRedacted = plan, snapshot, reason
 		command.RequiredApprovals, command.AssistDeadline = 1, now.Wall.Add(e.config.AssistTimeout)
-		e.projections.expireGrants(now)
+		e.expireGrantsLocked(now)
 		in.Grant, err = e.matchGrant(plan)
 		if err != nil {
 			return ap.Summary{}, err
@@ -262,51 +271,4 @@ func (e *Engine) matchGrant(plan ap.ApprovalPlanV1) (*ap.GrantRef, error) {
 
 func (e *Engine) view(key string, rec ap.R1, now ap.Now) ap.Summary {
 	return ap.View(rec, now, e.epoch, e.config.Settings, e.projections.grants[key] != nil)
-}
-
-// Get reads committed slots only; it never advances Clock or grant expiry.
-func (e *Engine) Get(principal, requestID string) (ap.Summary, error) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if err := e.availabilityLocked(); err != nil {
-		return ap.Summary{}, err
-	}
-	key := ap.RecordKey(principal, requestID)
-	rec, err := e.load(key)
-	if err != nil {
-		return ap.Summary{}, err
-	}
-	if rec == nil {
-		return ap.Summary{}, &ap.CodeError{Code: ap.CodeNotFound}
-	}
-	return e.view(key, *rec, e.now()), nil
-}
-
-// List returns the caller's committed records in record-key order.
-func (e *Engine) List(principal string) ([]ap.Summary, error) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if err := e.availabilityLocked(); err != nil {
-		return nil, err
-	}
-	now := e.now()
-	keys := make([]string, 0)
-	for key, charge := range e.projections.records {
-		if charge.principal == principal {
-			keys = append(keys, key)
-		}
-	}
-	slices.Sort(keys)
-	out := make([]ap.Summary, 0, len(keys))
-	for _, key := range keys {
-		rec, err := e.load(key)
-		if err != nil {
-			return nil, err
-		}
-		if rec == nil {
-			return nil, keyError()
-		}
-		out = append(out, e.view(key, *rec, now))
-	}
-	return out, nil
 }
