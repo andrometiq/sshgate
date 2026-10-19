@@ -51,7 +51,8 @@ SIGNER_VERSION_FLAGS        := -ldflags '-X main.version=$(VERSION)'
 EXECUTOR_VERSION_FLAGS      := -ldflags '-X main.version=$(VERSION)'
 SIGNER_SERVER_VERSION_FLAGS := -ldflags '-X main.version=$(VERSION)'
 
-ifeq ($(shell go env GOOS),linux)
+# uname, not go env: parse-time go calls would perturb make fixtures that stub go.
+ifeq ($(shell uname -s),Linux)
 EXECUTOR_TARGET := sshgate-executor
 endif
 
