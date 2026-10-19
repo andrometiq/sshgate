@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/karthikeyan5/sshgate/internal/elapsed"
+	"github.com/karthikeyan5/sshgate/pkg/signerkit"
 	"github.com/karthikeyan5/sshgate/pkg/signerkit/lifecycle"
 	"github.com/karthikeyan5/sshgate/pkg/signerkit/sqlitestore"
 	"github.com/karthikeyan5/sshgate/pkg/signerkit/store"
@@ -31,6 +32,7 @@ type ApprovalV2Store interface {
 // run inside Submit's transaction and must not query the database outside it.
 type ApprovalV2Config struct {
 	Store             ApprovalV2Store
+	Minter            lifecycle.Minter
 	Clock             elapsed.Clock
 	Freezer           lifecycle.Freezer
 	SnapshotBuilder   lifecycle.SnapshotBuilder
@@ -154,8 +156,10 @@ func (e *ApprovalV2Engine) transact(ctx context.Context, key sqlitestore.V2Key, 
 	if answer.Code == ap.CodeRecordCorrupt {
 		return ap.R1{}, ap.Answer{}, approvalAnswerError(answer)
 	}
+	// Approval or its audit flush may have landed after Claim's plain read.
+	// No mint input means the caller retries; custody never runs under tx.
 	if answer.MintRequired {
-		return ap.R1{}, ap.Answer{}, errors.New("hosted: missing mint input")
+		return after, ap.Answer{Claim: ap.ClaimNotReady}, nil
 	}
 	if !answer.Changed && !answer.Removed {
 		return after, answer, approvalAnswerError(answer)
@@ -288,6 +292,28 @@ func (e *ApprovalV2Engine) List(ctx context.Context, client, sub string, cursor 
 	return result, nil
 }
 
+func (e *ApprovalV2Engine) registerWaiter(keys []sqlitestore.V2Key) (<-chan struct{}, func()) {
+	ready := make(chan struct{}, 1)
+	e.mu.Lock()
+	for _, key := range keys {
+		if e.waiters[key] == nil {
+			e.waiters[key] = make(map[chan struct{}]struct{})
+		}
+		e.waiters[key][ready] = struct{}{}
+	}
+	e.mu.Unlock()
+	return ready, func() {
+		e.mu.Lock()
+		defer e.mu.Unlock()
+		for _, key := range keys {
+			delete(e.waiters[key], ready)
+			if len(e.waiters[key]) == 0 {
+				delete(e.waiters, key)
+			}
+		}
+	}
+}
+
 // WaitMany registers before reading, closing the read/subscribe race without
 // holding a transaction or blocking writers while it waits.
 func (e *ApprovalV2Engine) WaitMany(ctx context.Context, client, sub string, ids []string, wait time.Duration) (lifecycle.WaitResult, error) {
@@ -303,25 +329,8 @@ func (e *ApprovalV2Engine) WaitMany(ctx context.Context, client, sub string, ids
 		seen[id] = true
 		keys[i] = sqlitestore.V2Key{ClientID: client, SubPrincipal: sub, RequestID: id}
 	}
-	ready := make(chan struct{}, 1)
-	e.mu.Lock()
-	for _, key := range keys {
-		if e.waiters[key] == nil {
-			e.waiters[key] = make(map[chan struct{}]struct{})
-		}
-		e.waiters[key][ready] = struct{}{}
-	}
-	e.mu.Unlock()
-	defer func() {
-		e.mu.Lock()
-		defer e.mu.Unlock()
-		for _, key := range keys {
-			delete(e.waiters[key], ready)
-			if len(e.waiters[key]) == 0 {
-				delete(e.waiters, key)
-			}
-		}
-	}()
+	ready, unregister := e.registerWaiter(keys)
+	defer unregister()
 	read := func() (lifecycle.WaitResult, error) {
 		result := lifecycle.WaitResult{Summaries: make([]ap.Summary, 0, len(keys))}
 		for _, key := range keys {
@@ -364,4 +373,148 @@ func (e *ApprovalV2Engine) WaitMany(ctx context.Context, client, sub string, ids
 	result, err = read()
 	result.WaitElapsed = expired
 	return result, err
+}
+
+// Vote accepts a verified hosted challenge from the human adapter, which owns
+// role and step-up checks. Apply derives policy from the row inside this commit.
+func (e *ApprovalV2Engine) Vote(ctx context.Context, key sqlitestore.V2Key, vote ap.CastVote) (ap.Answer, error) {
+	if vote.Hosted == nil || vote.Card != nil {
+		return ap.Answer{}, &ap.CodeError{Code: ap.CodeInvalidRequest}
+	}
+	_, answer, err := e.mutate(ctx, key, vote, ap.Inputs{})
+	return answer, err
+}
+
+// Report acknowledges only a confirmed commit, including token refusals.
+func (e *ApprovalV2Engine) Report(ctx context.Context, key sqlitestore.V2Key, report ap.Report) (ap.Answer, error) {
+	_, answer, err := e.mutate(ctx, key, report, ap.Inputs{})
+	return answer, err
+}
+
+// Claim waits up to two seconds for the decision audit, then retries once.
+// Waiting and custody I/O hold no transaction; Apply rechecks guards under the
+// writer lock and returns the winning persisted signature set.
+func (e *ApprovalV2Engine) Claim(ctx context.Context, key sqlitestore.V2Key, claim ap.Claim) (ap.Answer, error) {
+	answer, err := e.claimOnce(ctx, key, claim)
+	if err != nil || answer.Claim != ap.ClaimNotReady {
+		return answer, err
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	ready, unregister := e.registerWaiter([]sqlitestore.V2Key{key})
+	defer unregister()
+	for {
+		if err := ctx.Err(); err != nil {
+			return ap.Answer{}, err
+		}
+		if waitCtx.Err() != nil {
+			break
+		}
+		// Register before rechecking so a concurrent Flush cannot be missed.
+		row, err := e.config.Store.ReadV2(waitCtx, key)
+		if err != nil {
+			if ctx.Err() != nil {
+				return ap.Answer{}, ctx.Err()
+			}
+			if waitCtx.Err() != nil {
+				break
+			}
+			return ap.Answer{}, approvalReadError(err)
+		}
+		if row.Record.Header.Decision == nil {
+			return answer, nil
+		}
+		_, probe := ap.Apply(&row.Record, claim, e.now(), ap.Inputs{Epoch: e.epoch, Settings: e.config.Settings})
+		if probe.Claim != ap.ClaimNotReady {
+			break
+		}
+		select {
+		case <-waitCtx.Done():
+		case <-ready:
+		}
+	}
+	return e.claimOnce(ctx, key, claim)
+}
+
+func (e *ApprovalV2Engine) claimOnce(ctx context.Context, key sqlitestore.V2Key, claim ap.Claim) (ap.Answer, error) {
+	row, err := e.config.Store.ReadV2(ctx, key)
+	if err != nil {
+		return ap.Answer{}, approvalReadError(err)
+	}
+	inputs := ap.Inputs{Epoch: e.epoch, Settings: e.config.Settings}
+	_, probe := ap.Apply(&row.Record, claim, e.now(), inputs)
+	if probe.Code == ap.CodeRecordCorrupt {
+		return ap.Answer{}, approvalAnswerError(probe)
+	}
+	if probe.MintRequired {
+		if e.config.Minter == nil {
+			return ap.Answer{}, &ap.CodeError{Code: ap.CodeLifecycleUnavailable}
+		}
+		inputs.Minted, err = e.config.Minter.Mint(ctx, row.Record.Payload.Plan, row.Record.Header.Decision.DecidedAt)
+		var coded *ap.CodeError
+		if errors.As(err, &coded) && coded.Code == ap.CodeRecordCorrupt {
+			return ap.Answer{}, err
+		}
+		inputs.MintFailed = err != nil
+		if inputs.Minted == nil && !inputs.MintFailed {
+			inputs.Minted = []string{}
+		}
+	}
+	_, answer, err := e.transact(ctx, key, func(_ *sql.Tx, current *ap.R1, _ ap.Now) (ap.Command, ap.Inputs, error) {
+		// Never apply material from a replaced record to a different approval.
+		if probe.MintRequired && current != nil && (current.Header.PlanHash != row.Record.Header.PlanHash ||
+			current.Header.Decision == nil || *current.Header.Decision != *row.Record.Header.Decision) {
+			return claim, ap.Inputs{}, nil
+		}
+		return claim, inputs, nil
+	})
+	return answer, err
+}
+
+// ApprovalV2Minter adapts the hosted custody choke point without altering v1.
+// Validate the entire plan before signing any leg, including E71's byte checks.
+type ApprovalV2Minter struct{ Core HostedCore }
+
+func (m ApprovalV2Minter) Mint(ctx context.Context, plan ap.ApprovalPlanV1, decidedAt time.Time) ([]string, error) {
+	if err := plan.Validate(); err != nil {
+		return nil, &ap.CodeError{Code: ap.CodeRecordCorrupt}
+	}
+	if plan.CommandJob == nil {
+		return nil, &ap.CodeError{Code: ap.CodeInvalidRequest}
+	}
+	commands := make([]signerkit.HostedSignCommand, 0, len(plan.CommandJob.Steps))
+	for _, step := range plan.CommandJob.Steps {
+		switch step.Route {
+		case ap.RouteUnsignedRead:
+			continue
+		case ap.RouteSignedWrite, ap.RouteSignedAdmin:
+			commands = append(commands, signerkit.HostedSignCommand{Cmd: step.ExactCommand, HostKeyFP: step.Target.TrustedHostFingerprint, TTLSeconds: int64(step.SignatureTTLSeconds)})
+		default:
+			return nil, &ap.CodeError{Code: ap.CodeInvalidRequest}
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if m.Core == nil {
+		return nil, &ap.CodeError{Code: ap.CodeLifecycleUnavailable}
+	}
+	if len(commands) == 0 {
+		return []string{}, nil
+	}
+	results, err := m.Core.SignApproved(commands, decidedAt)
+	if err != nil {
+		return nil, err
+	}
+	if len(results) != len(commands) {
+		return nil, errors.New("hosted: signer returned wrong signature count")
+	}
+	signatures := make([]string, len(results))
+	for i, result := range results {
+		if result.Cmd != commands[i].Cmd || result.Sig == "" {
+			return nil, errors.New("hosted: signer returned invalid signature result")
+		}
+		signatures[i] = result.Sig
+	}
+	return signatures, nil
 }
