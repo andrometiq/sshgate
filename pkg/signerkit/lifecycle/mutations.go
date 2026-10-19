@@ -2,6 +2,7 @@ package lifecycle
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"strings"
 
@@ -99,6 +100,14 @@ func (e *Engine) Revoke(alias string) error {
 	}
 	return nil
 }
+
+// StaleEnrollmentError carries the digests observed at the custody boundary.
+// An unavailable enrollment has an empty digest; later reads must not replace this evidence.
+type StaleEnrollmentError struct {
+	Digests ap.XferDigests
+}
+
+func (*StaleEnrollmentError) Error() string { return ap.MintReasonStaleTransferKey }
 
 // Claim is the only operation returning signatures. Every impure input and the
 // mint itself are resolved under the single writer lock, after Apply's guards.
@@ -202,6 +211,10 @@ func (e *Engine) claimLocked(ctx context.Context, principal, key string, claim a
 	}
 	in.Minted, err = e.config.Minter.Mint(ctx, before.Payload.Plan, before.Header.Decision.DecidedAt)
 	in.MintFailed = err != nil
+	var stale *StaleEnrollmentError
+	if errors.As(err, &stale) && before.Payload.Plan.Transfer != nil {
+		in.XferDigests = &stale.Digests
+	}
 	if in.Minted == nil && !in.MintFailed {
 		in.Minted = []string{}
 	}

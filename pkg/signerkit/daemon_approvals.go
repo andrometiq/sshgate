@@ -2,12 +2,16 @@ package signerkit
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"sync"
 	"time"
 
 	"github.com/karthikeyan5/sshgate/pkg/signerkit/lifecycle"
 	ap "github.com/karthikeyan5/sshgate/src/approvalplan"
+	"github.com/karthikeyan5/sshgate/src/approvalreview"
+	"github.com/karthikeyan5/sshgate/src/xfer"
+	"github.com/karthikeyan5/sshgate/src/xferwire"
 )
 
 // RecoverableStore retains exclusive ownership across failed reloads.
@@ -214,11 +218,26 @@ func (m approvalMinter) Mint(ctx context.Context, plan ap.ApprovalPlanV1, at tim
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	// Recheck the stored plan, including E71, before any custody call.
 	if err := plan.Validate(); err != nil {
-		return nil, err
+		return nil, &ap.CodeError{Code: ap.CodeRecordCorrupt}
 	}
 	if plan.Transfer != nil {
 		transfer := plan.Transfer
+		registry := m.daemon.XferRegistry
+		if registry == nil {
+			return nil, &lifecycle.StaleEnrollmentError{}
+		}
+		registry.mu.RLock()
+		defer registry.mu.RUnlock()
+		source, sourceErr := registry.snapshotLocked(transfer.Source.Target.TrustedHostFingerprint)
+		destination, destinationErr := registry.snapshotLocked(transfer.Destination.Target.TrustedHostFingerprint)
+		if sourceErr != nil || destinationErr != nil || source.EntryDigest != transfer.Source.KeyEntryDigest || destination.EntryDigest != transfer.Destination.KeyEntryDigest {
+			return nil, &lifecycle.StaleEnrollmentError{Digests: ap.XferDigests{Source: source.EntryDigest, Destination: destination.EntryDigest}}
+		}
+		if !validFrozenTransferLegs(*transfer, source, destination) {
+			return nil, &ap.CodeError{Code: ap.CodeRecordCorrupt}
+		}
 		send, recv, err := m.daemon.signTransferLegsAt(transfer.SendCommand, transfer.Source.Target.TrustedHostFingerprint,
 			transfer.RecvCommand, transfer.Destination.Target.TrustedHostFingerprint, int64(transfer.SignatureTTLSeconds), at.Unix())
 		if err != nil {
@@ -251,4 +270,169 @@ func (m approvalMinter) Mint(ctx context.Context, plan ap.ApprovalPlanV1, at tim
 		out[i] = signature.Sig
 	}
 	return out, nil
+}
+
+// Validate both legs before custody; signing still uses the original frozen bytes.
+func validFrozenTransferLegs(transfer ap.Transfer, source, destination XferKeySnapshot) bool {
+	send, err := xferwire.ParseSend(transfer.SendCommand)
+	if err != nil {
+		return false
+	}
+	recv, err := xferwire.ParseRecv(transfer.RecvCommand)
+	if err != nil {
+		return false
+	}
+	return xfer.BoxPublicText(send.BoxPub) == destination.BoxPub &&
+		transfer.Destination.PublicKey == destination.BoxPub &&
+		xfer.IDPublicText(recv.IDPub) == source.IDPub &&
+		transfer.Source.PublicKey == source.IDPub &&
+		send.XferID == transfer.TransferID && recv.XferID == transfer.TransferID &&
+		send.DestID == transfer.Destination.Target.TrustedHostFingerprint &&
+		recv.DestID == transfer.Destination.Target.TrustedHostFingerprint &&
+		recv.SrcID == transfer.Source.Target.TrustedHostFingerprint &&
+		send.SrcPath == transfer.Source.Path && recv.DestPath == transfer.Destination.Path &&
+		recv.Mode == transfer.Mode
+}
+
+// ApprovalAuditWriter projects outbox metadata through the configured audit sink.
+// A sink failure is returned to the lifecycle so audited_through cannot advance.
+func (s *Service) ApprovalAuditWriter() lifecycle.AuditWriter { return approvalAuditWriter{s} }
+
+type approvalAuditWriter struct{ service *Service }
+
+func (w approvalAuditWriter) WriteApproval(ctx context.Context, metadata ap.AuditMetadata) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if w.service.audit == nil {
+		return ErrNoAudit
+	}
+	return w.service.audit.Call(ctx, AuditCall{Time: w.service.daemon.now(), RequestID: metadata.RequestID, Lifecycle: "approval-" + metadata.Transition, Approval: &metadata})
+}
+
+// ApprovalXferDigests reads both enrollments from the same registry generation.
+func (s *Service) ApprovalXferDigests() lifecycle.XferDigests {
+	return approvalXferDigests{s.daemon.XferRegistry}
+}
+
+type approvalXferDigests struct{ registry *XferRegistry }
+
+func (d approvalXferDigests) Current(ctx context.Context, transfer ap.Transfer) (ap.XferDigests, error) {
+	if err := ctx.Err(); err != nil {
+		return ap.XferDigests{}, err
+	}
+	if d.registry == nil {
+		return ap.XferDigests{}, errors.New("transfer registry unavailable")
+	}
+	d.registry.mu.RLock()
+	defer d.registry.mu.RUnlock()
+	return transferDigestsLocked(d.registry, transfer)
+}
+func transferDigestsLocked(registry *XferRegistry, transfer ap.Transfer) (ap.XferDigests, error) {
+	source, err := registry.snapshotLocked(transfer.Source.Target.TrustedHostFingerprint)
+	if err != nil {
+		return ap.XferDigests{}, err
+	}
+	destination, err := registry.snapshotLocked(transfer.Destination.Target.TrustedHostFingerprint)
+	if err != nil {
+		return ap.XferDigests{}, err
+	}
+	return ap.XferDigests{Source: source.EntryDigest, Destination: destination.EntryDigest}, nil
+}
+
+// ApprovalFreezer binds authenticated ownership and configured validity. Route
+// snapshots remain requester-supplied; transfer keys come only from the signer.
+func (s *Service) ApprovalFreezer(validity time.Duration) lifecycle.Freezer {
+	return approvalFreezer{s.daemon.XferRegistry, validity}
+}
+
+type approvalFreezer struct {
+	registry *XferRegistry
+	validity time.Duration
+}
+
+func (f approvalFreezer) Freeze(ctx context.Context, draft ap.ApprovalDraft, principal, sub string, now time.Time) (ap.ApprovalPlanV1, error) {
+	if err := ctx.Err(); err != nil {
+		return ap.ApprovalPlanV1{}, err
+	}
+	if err := draft.Validate(); err != nil {
+		return ap.ApprovalPlanV1{}, err
+	}
+	inputs := ap.FreezeInputs{RequesterPrincipal: principal, RequesterSub: sub, Now: now, Validity: f.validity}
+	if draft.Transfer != nil {
+		transfer, err := f.freezeTransfer(*draft.Transfer)
+		if err != nil {
+			return ap.ApprovalPlanV1{}, err
+		}
+		inputs.Transfer = transfer
+	}
+	return ap.FreezeDraft(draft, inputs)
+}
+func (f approvalFreezer) freezeTransfer(transfer ap.Transfer) (*ap.TransferFreezeInputs, error) {
+	if f.registry == nil {
+		return nil, errors.New("transfer registry unavailable")
+	}
+	f.registry.mu.RLock()
+	source, err := f.registry.snapshotLocked(transfer.Source.Target.TrustedHostFingerprint)
+	if err != nil {
+		f.registry.mu.RUnlock()
+		return nil, err
+	}
+	destination, err := f.registry.snapshotLocked(transfer.Destination.Target.TrustedHostFingerprint)
+	f.registry.mu.RUnlock()
+	if err != nil {
+		return nil, err
+	}
+	id, err := newXferID()
+	if err != nil {
+		return nil, err
+	}
+	box, err := xfer.ParseBoxPublicText(destination.BoxPub)
+	if err != nil {
+		return nil, err
+	}
+	identity, err := xfer.ParseIDPublicText(source.IDPub)
+	if err != nil {
+		return nil, err
+	}
+	send, err := xferwire.EncodeSend(box, id, transfer.Destination.Target.TrustedHostFingerprint, transfer.Source.Path)
+	if err != nil {
+		return nil, err
+	}
+	recv, err := xferwire.EncodeRecv(identity, id, transfer.Source.Target.TrustedHostFingerprint, transfer.Destination.Target.TrustedHostFingerprint, transfer.Mode, transfer.Destination.Path)
+	if err != nil {
+		return nil, err
+	}
+	return &ap.TransferFreezeInputs{
+		Source:      ap.TransferKeySnapshot{HostFingerprint: transfer.Source.Target.TrustedHostFingerprint, Label: source.Label, PublicKey: source.IDPub, EntryDigest: source.EntryDigest},
+		Destination: ap.TransferKeySnapshot{HostFingerprint: transfer.Destination.Target.TrustedHostFingerprint, Label: destination.Label, PublicKey: destination.BoxPub, EntryDigest: destination.EntryDigest},
+		TransferID:  id, SendCommand: send, RecvCommand: recv,
+	}, nil
+}
+
+// ApprovalSnapshotBuilder uses the shared renderer with a fresh per-request salt.
+func (s *Service) ApprovalSnapshotBuilder() lifecycle.SnapshotBuilder {
+	return approvalSnapshotBuilder{s.daemon}
+}
+
+type approvalSnapshotBuilder struct{ daemon *Daemon }
+
+func (b approvalSnapshotBuilder) BuildSnapshot(ctx context.Context, plan ap.ApprovalPlanV1) ([]byte, string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, "", err
+	}
+	var salt [32]byte
+	if _, err := rand.Read(salt[:]); err != nil {
+		return nil, "", err
+	}
+	snapshot, err := approvalreview.BuildSnapshot(plan, &salt, b.daemon.RedactRules)
+	if err != nil {
+		return nil, "", err
+	}
+	view, err := approvalreview.BuildView(snapshot, approvalreview.Assist{State: ap.AssistPreparing})
+	if err != nil {
+		return nil, "", err
+	}
+	encoded, err := snapshot.Encode()
+	return encoded, view.Reason, err
 }

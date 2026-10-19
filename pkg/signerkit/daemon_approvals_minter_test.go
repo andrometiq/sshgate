@@ -4,9 +4,6 @@ import (
 	"context"
 	"crypto"
 	"crypto/ed25519"
-	"crypto/sha256"
-	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"io"
 	"testing"
@@ -74,25 +71,23 @@ func TestApprovalMinterRoutePayloads(t *testing.T) {
 		}
 	}
 	check(plan, expected)
+
+	admin := st.Freeze(st.JobDraft(st.ID(4), ap.CoordinatorExecutor, at, st.StepSpec{Route: ap.RouteSignedAdmin, Command: "SSHGATE_REVOKE", TTL: 60, Alias: "web-1"}), st.PrincipalA, at, time.Hour)
+	check(admin, []sigwire.SigPayload{{Cmd: "SSHGATE_REVOKE", Host: st.Fingerprint("web-1"), TS: at.Unix(), Exp: at.Unix() + 60}})
 	before := signer.calls
 	unsigned := st.Freeze(st.JobDraft(st.ID(2), ap.CoordinatorExecutor, at, st.Read("uptime")), st.PrincipalA, at, time.Hour)
 	if signatures, err := mint.Mint(context.Background(), unsigned, at); err == nil || len(signatures) != 0 || signer.calls != before {
 		t.Fatal("invalid unsigned-only plan reached signing")
 	}
 
-	digest := func(text string) string { sum := sha256.Sum256([]byte(text)); return hex.EncodeToString(sum[:]) }
-	endpoint := func(alias, path string) ap.TransferEndpoint {
-		target := st.Route(alias)
-		pub := "sshgate-id-pub-v1 " + base64.StdEncoding.EncodeToString(make([]byte, 32))
-		if alias == "db-1" {
-			pub = "sshgate-box-pub-v1 " + base64.StdEncoding.EncodeToString(make([]byte, 32))
-		}
-		return ap.TransferEndpoint{Target: target, RegistryEntryDigest: target.Digest(), Path: path, KeyLabel: alias, PublicKey: pub, PublicKeySHA256: digest(pub), KeyEntryDigest: digest(alias)}
+	transferService, draft := adapterTransfer(t, at)
+	daemon.XferRegistry = transferService.daemon.XferRegistry
+	plan, err := transferService.ApprovalFreezer(time.Hour).Freeze(context.Background(), draft, st.PrincipalA, "", at)
+	if err != nil {
+		t.Fatal(err)
 	}
-	transfer := &ap.Transfer{Source: endpoint("web-1", "/etc/secret"), Destination: endpoint("db-1", "/srv/secret"), Mode: ap.TransferMode, SignatureTTLSeconds: 37,
-		TransferID: "x8Kq3YVvH4f2m9WqZr0B1g", SendCommand: "SSHGATE_XFER_SEND Ym94 eDhL ZGVzdA L2V0Yy9zZWNyZXQ", RecvCommand: "SSHGATE_XFER_RECV aWQ eDhL c3Jj ZGVzdA MDYwMA L3Nydi9zZWNyZXQ"}
-	transfer.SendCommandSHA256, transfer.RecvCommandSHA256 = digest(transfer.SendCommand), digest(transfer.RecvCommand)
-	plan.Kind, plan.CommandJob, plan.Transfer = ap.KindTransfer, nil, transfer
+	transfer := plan.Transfer
+
 	check(plan, []sigwire.SigPayload{
 		{Cmd: transfer.SendCommand, Host: transfer.Source.Target.TrustedHostFingerprint, TS: at.Unix(), Exp: at.Unix() + 37},
 		{Cmd: transfer.RecvCommand, Host: transfer.Destination.Target.TrustedHostFingerprint, TS: at.Unix(), Exp: at.Unix() + 37},
