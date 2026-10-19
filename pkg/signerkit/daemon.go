@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -513,9 +514,9 @@ func (d *Daemon) HandleSignRequest(ctx context.Context, conn io.ReadWriter) erro
 	case "request_grant":
 		return d.handleRequestGrant(ctx, conn, line)
 	case "revoke_grant":
-		return d.handleRevokeGrant(conn, line)
+		return d.handleRevokeGrant(ctx, conn, line)
 	case "list_grants":
-		return d.handleListGrants(conn, line)
+		return d.handleListGrants(ctx, conn, line)
 	case "transfer":
 		return d.handleTransfer(ctx, conn, line)
 	case "register_xfer_key":
@@ -908,11 +909,9 @@ func (d *Daemon) handleRequestGrant(ctx context.Context, conn io.ReadWriter, lin
 	return nil
 }
 
-// handleRevokeGrant processes a "revoke_grant" request: drop the standing
-// grant for the alias. Revoke is de-escalation — it only ever shrinks
-// capability — so it needs NO human approval and never touches the
-// backend. Revoking a non-existent grant is a successful no-op.
-func (d *Daemon) handleRevokeGrant(conn io.ReadWriter, line []byte) error {
+// handleRevokeGrant drops the v1 grant and every principal's live v2 grant
+// for the alias. De-escalation needs no approval. An absent grant is a no-op.
+func (d *Daemon) handleRevokeGrant(ctx context.Context, conn io.ReadWriter, line []byte) error {
 	var req revokeGrantRequest
 	dec := json.NewDecoder(bytes.NewReader(line))
 	dec.DisallowUnknownFields()
@@ -931,6 +930,17 @@ func (d *Daemon) handleRevokeGrant(conn io.ReadWriter, line []byte) error {
 		delete(d.grants, req.Alias)
 	}
 	d.grantsMu.Unlock()
+
+	caller, _ := ctx.Value(approvalCallerKey{}).(approvalCaller)
+	if caller.runtime != nil {
+		engine, err := caller.runtime.Current()
+		if err == nil {
+			err = engine.Revoke(req.Alias)
+		}
+		if err != nil {
+			return d.respondRevokeGrantError(conn, req.RequestID, err.Error())
+		}
+	}
 
 	resp := revokeGrantResponse{RequestID: req.RequestID, Status: "approved", ProtoVersion: sigwire.ProtoVersion}
 	if err := writeJSONLine(conn, resp); err != nil {
@@ -953,7 +963,7 @@ func (d *Daemon) respondGrantError(conn io.Writer, reqID, reason string) error {
 }
 
 // handleListGrants processes a "list_grants" request: a READ-ONLY query of
-// the in-memory standing-grant table. Like revoke_grant it needs NO human
+// the v1 table and the peer principal's live v2 grants. It needs no human
 // approval and never touches the backend — it only reports state, it grants
 // no capability and leaks no key material. It exists so the MCP can re-learn
 // the daemon's authoritative grant state after a request_grant whose
@@ -964,7 +974,7 @@ func (d *Daemon) respondGrantError(conn io.Writer, reqID, reason string) error {
 // alias filter, and copies the commands slice defensively. Every request
 // produces exactly one audit row, matching the daemon's "every request is
 // audited" contract.
-func (d *Daemon) handleListGrants(conn io.ReadWriter, line []byte) error {
+func (d *Daemon) handleListGrants(ctx context.Context, conn io.ReadWriter, line []byte) error {
 	var req listGrantsRequest
 	dec := json.NewDecoder(bytes.NewReader(line))
 	dec.DisallowUnknownFields()
@@ -996,6 +1006,29 @@ func (d *Daemon) handleListGrants(conn io.ReadWriter, line []byte) error {
 		})
 	}
 	d.grantsMu.RUnlock()
+
+	caller, _ := ctx.Value(approvalCallerKey{}).(approvalCaller)
+	if caller.runtime != nil && caller.hasPeer {
+		engine, err := caller.runtime.Current()
+		if err != nil {
+			return d.respondListGrantsError(conn, req.RequestID, err.Error())
+		}
+		grants, err := engine.ListGrants(caller.principal)
+		if err != nil {
+			return d.respondListGrantsError(conn, req.RequestID, err.Error())
+		}
+		for _, g := range grants {
+			if req.Alias == "" || req.Alias == g.Alias {
+				out = append(out, grantInfo{Alias: g.Alias, Scope: string(g.Scope), Commands: g.Commands, GrantID: g.RequestID, ExpiryUnix: g.ExpiresAt.Unix()})
+			}
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].Alias != out[j].Alias {
+			return out[i].Alias < out[j].Alias
+		}
+		return out[i].GrantID < out[j].GrantID
+	})
 
 	resp := listGrantsResponse{RequestID: req.RequestID, Status: "ok", Grants: out, ProtoVersion: sigwire.ProtoVersion}
 	if err := writeJSONLine(conn, resp); err != nil {
