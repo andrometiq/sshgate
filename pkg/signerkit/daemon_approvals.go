@@ -3,6 +3,7 @@ package signerkit
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -10,15 +11,18 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/karthikeyan5/sshgate/pkg/signerkit/assist"
 	"github.com/karthikeyan5/sshgate/pkg/signerkit/lifecycle"
 	ap "github.com/karthikeyan5/sshgate/src/approvalplan"
 	"github.com/karthikeyan5/sshgate/src/approvalreview"
 	aw "github.com/karthikeyan5/sshgate/src/approvalwire"
+	"github.com/karthikeyan5/sshgate/src/sigwire"
 	"github.com/karthikeyan5/sshgate/src/xfer"
 	"github.com/karthikeyan5/sshgate/src/xferwire"
 )
@@ -38,7 +42,10 @@ type ApprovalRuntimeConfig struct {
 	AllowedUIDs []uint32
 	Store       RecoverableStore
 	Legacy      *lifecycle.LegacyService
-	NewEngine   func(lifecycle.Store) (*lifecycle.Engine, error)
+	// PrepareLegacy installs the artifact in the same notifier configured on Legacy.
+	// Nil keeps the frozen Backend path; a configured adapter must never send here.
+	PrepareLegacy func(*lifecycle.PreparedLegacyApproval) error
+	NewEngine     func(lifecycle.Store) (*lifecycle.Engine, error)
 }
 
 // ApprovalRuntime owns replaceable v2 generations and the persistent v1 owner.
@@ -591,4 +598,250 @@ func approvalPage(engine *lifecycle.Engine, principal string, request aw.ListReq
 		next = base64.RawURLEncoding.EncodeToString([]byte(page[len(page)-1].RequestID))
 	}
 	return page, next, nil
+}
+
+// legacyApprove preserves the direct backend path unless a local legacy notifier
+// is attached. Synthesized plans exist only inside legacyAssistInput.
+func (d *Daemon) legacyApprove(ctx context.Context, request any, transferCommands []string) (<-chan Result, *lifecycle.PreparedLegacyApproval, error) {
+	caller, _ := ctx.Value(approvalCallerKey{}).(approvalCaller)
+	if caller.runtime == nil || caller.runtime.config.PrepareLegacy == nil {
+		var ch <-chan Result
+		var err error
+		switch req := request.(type) {
+		case ApprovalRequest:
+			ch, err = d.Backend.Request(ctx, req)
+		case GrantApprovalRequest:
+			ch, err = d.Backend.RequestGrant(ctx, req)
+		case TransferApprovalRequest:
+			ch, err = d.Backend.RequestTransfer(ctx, req)
+		case RegisterApprovalRequest:
+			ch, err = d.Backend.RequestRegisterKey(ctx, req)
+		default:
+			err = errors.New("unsupported legacy approval")
+		}
+		return ch, nil, err
+	}
+	if !caller.hasPeer {
+		return nil, nil, errors.New("legacy approval requires peer credentials")
+	}
+	submitted := d.now()
+	if req, ok := request.(ApprovalRequest); ok {
+		submitted = req.Submitted
+	}
+	ctx, cancel := context.WithTimeout(ctx, submitted.Add(sigwire.ApprovalWindow).Sub(d.now()))
+	defer cancel()
+	artifact, reservation, err := d.prepareLegacy(ctx, caller, request, transferCommands)
+	if err != nil {
+		return legacyPreparationFailure(ctx, err)
+	}
+	legacy := caller.runtime.Legacy()
+	defer legacy.CancelLegacy(reservation)
+	if err := caller.runtime.config.PrepareLegacy(artifact); err != nil {
+		return nil, nil, legacyRenderError(artifact.Data().Inputs)
+	}
+	if err := legacy.DeliverLegacy(reservation, artifact); err != nil {
+		switch err.Error() {
+		case "legacy approval render does not match the request":
+			err = legacyRenderError(artifact.Data().Inputs)
+		case "backend: legacy card delivery failed":
+			err = errors.New("legacy card delivery failed")
+		}
+		return legacyPreparationFailure(ctx, err)
+	}
+	resolved := reservation.Request().Wait()
+	result := Result{Status: StatusTimeout, ApprovedBy: resolved.ResolvedBy}
+	switch resolved.Status {
+	case "approved":
+		result.Status = StatusApproved
+	case "denied":
+		result.Status = StatusDenied
+	}
+	ch := make(chan Result, 1)
+	ch <- result
+	close(ch)
+	return ch, artifact, nil
+}
+
+func legacyPreparationFailure(ctx context.Context, err error) (<-chan Result, *lifecycle.PreparedLegacyApproval, error) {
+	if ctx.Err() == nil {
+		return nil, nil, err
+	}
+	ch := make(chan Result, 1)
+	ch <- Result{Status: StatusTimeout}
+	close(ch)
+	return ch, nil, nil
+}
+
+func legacyRenderError(inputs []ap.LegacySignInput) error {
+	for _, input := range inputs {
+		if input.Net {
+			return errors.New("net_unsupported: network reads need a card that shows them")
+		}
+	}
+	return errors.New("legacy approval render does not match the request")
+}
+
+func legacySignInputs(commands []CommandReq) []ap.LegacySignInput {
+	inputs := make([]ap.LegacySignInput, len(commands))
+	for i, c := range commands {
+		sum := sha256.Sum256([]byte(c.Cmd))
+		inputs[i] = ap.LegacySignInput{Server: c.Server, HostFingerprint: c.HostKeyFP, Command: c.Cmd, CommandSHA256: hex.EncodeToString(sum[:]), TTLSeconds: c.TTLSec, Reveal: c.Reveal, Net: c.Net, Reason: c.Reason}
+	}
+	return inputs
+}
+
+func (d *Daemon) prepareLegacy(ctx context.Context, caller approvalCaller, request any, transferCommands []string) (*lifecycle.PreparedLegacyApproval, *lifecycle.LegacyReservation, error) {
+	var instanceBytes [16]byte
+	if _, err := rand.Read(instanceBytes[:]); err != nil {
+		return nil, nil, err
+	}
+	instance := hex.EncodeToString(instanceBytes[:])
+	var salt [32]byte
+	if _, err := rand.Read(salt[:]); err != nil {
+		return nil, nil, err
+	}
+	defer clear(salt[:])
+	submitted := d.now()
+	req := approvalreview.LegacyRequest{Requester: caller.principal, SubmittedAt: submitted, ExpiresAt: submitted.Add(sigwire.ApprovalWindow)}
+	var inputs []ap.LegacySignInput
+	switch r := request.(type) {
+	case ApprovalRequest:
+		req.RequestID = r.RequestID
+		req.SubmittedAt, req.ExpiresAt = r.Submitted, r.Submitted.Add(sigwire.ApprovalWindow)
+		inputs = legacySignInputs(r.Commands)
+	case GrantApprovalRequest:
+		req.RequestID = r.RequestID
+		req.Grant = &approvalreview.LegacyGrant{Alias: r.Alias, Scope: r.Scope, Commands: slices.Clone(r.Commands), Duration: r.Duration}
+	case TransferApprovalRequest:
+		req.RequestID = r.RequestID
+		req.Transfer = &approvalreview.LegacyTransfer{TransferID: r.XferID, SourceLabel: r.SrcLabel, SourceFingerprint: r.SrcFP, SourcePath: r.SrcPath, DestLabel: r.DestLabel, DestFingerprint: r.DestFP, DestPath: r.DestPath, Mode: r.Mode}
+	case RegisterApprovalRequest:
+		req.RequestID = r.RequestID
+		req.Register = &ap.RegisterTransferKey{HostFingerprint: r.HostFP, Label: r.Label, BoxPub: r.BoxPub, IDPub: r.IDPub}
+	default:
+		return nil, nil, errors.New("unsupported legacy approval")
+	}
+	var snapshot approvalreview.ReviewSnapshot
+	var err error
+	snapshotSalt := salt
+	if len(inputs) > 0 {
+		snapshot, err = approvalreview.BuildPreparedSignSnapshot(instance, inputs, approvalreview.LegacyMeta{RequestID: req.RequestID, Requester: req.Requester, SubmittedAt: req.SubmittedAt, ExpiresAt: req.ExpiresAt}, &snapshotSalt, d.RedactRules)
+	} else {
+		snapshot, err = approvalreview.BuildLegacySnapshot(req, &snapshotSalt, d.RedactRules)
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(inputs) > 0 && !legacySnapshotMatches(instance, inputs, snapshot) {
+		return nil, nil, legacyRenderError(inputs)
+	}
+	encoded, err := snapshot.Encode()
+	if err != nil {
+		return nil, nil, err
+	}
+	input, err := d.legacyAssistInput(req, inputs, transferCommands, salt)
+	redactionFailed := errors.Is(err, assist.ErrNoPolicy) || errors.Is(err, assist.ErrRedactFailed)
+	if err != nil && !redactionFailed {
+		return nil, nil, err
+	}
+	legacy := caller.runtime.Legacy()
+	reservation, err := legacy.ReserveLegacy(ctx, lifecycle.LegacyInstance{ID: instance, UID: caller.uid, RequestID: req.RequestID, RedactionFailed: redactionFailed}, encoded, input)
+	if err != nil {
+		return nil, nil, err
+	}
+	artifact, err := renderLegacy(instance, inputs, snapshot, reservation)
+	if err != nil {
+		legacy.CancelLegacy(reservation)
+		return nil, nil, err
+	}
+	return artifact, reservation, nil
+}
+
+func legacySnapshotMatches(instance string, inputs []ap.LegacySignInput, snapshot approvalreview.ReviewSnapshot) bool {
+	digest, ok := ap.LegacySignDigest(instance, inputs)
+	if !ok || snapshot.SignDigest != digest || len(snapshot.Steps) != len(inputs) {
+		return false
+	}
+	for i, input := range inputs {
+		step := snapshot.Steps[i]
+		route := ap.RouteSignedWrite
+		if isAdminVerb(input.Command) {
+			route = ap.RouteSignedAdmin
+		} else if input.Reveal {
+			route = ap.RouteSignedReveal
+		}
+		alias := strings.ReplaceAll(approvalreview.NeutralizeText(input.Server), " ", `\x20`)
+		if step.Ordinal != i+1 || step.Target.Alias != alias || step.Target.Fingerprint != input.HostFingerprint || step.TTLSeconds != int(input.TTLSeconds) || step.Route != route || step.Reveal != input.Reveal || step.Net != input.Net || step.Command.SHA256 != input.CommandSHA256 {
+			return false
+		}
+	}
+	return true
+}
+
+// The invalid-for-v2 plan is advisory input only: never return it to a caller,
+// validate it, persist it, or pass it to a freezer, authorizer or minter.
+func (d *Daemon) legacyAssistInput(req approvalreview.LegacyRequest, inputs []ap.LegacySignInput, transferCommands []string, salt [32]byte) (assist.Input, error) {
+	plan := ap.ApprovalPlanV1{RationaleOrigin: ap.OriginSynthesizedLegacyV1, Rationale: ap.LegacyRationaleText}
+	switch {
+	case len(inputs) > 0:
+		plan.Kind = ap.KindCommandJob
+		plan.CommandJob = &ap.CommandJob{}
+		for _, input := range inputs {
+			plan.CommandJob.Steps = append(plan.CommandJob.Steps, ap.Step{ExactCommand: input.Command})
+		}
+	case req.Grant != nil:
+		plan.Kind = ap.KindStandingGrant
+		plan.StandingGrant = &ap.StandingGrant{Scope: ap.GrantScope(req.Grant.Scope), DurationSeconds: int(req.Grant.Duration / time.Second), Commands: slices.Clone(req.Grant.Commands)}
+	case req.Transfer != nil:
+		if len(transferCommands) != 2 {
+			return assist.Input{}, errors.New("legacy transfer needs both signer-built legs")
+		}
+		plan.Kind = ap.KindTransfer
+		plan.Transfer = &ap.Transfer{SendCommand: transferCommands[0], RecvCommand: transferCommands[1]}
+	case req.Register != nil:
+		plan.Kind, plan.RegisterTransferKey = ap.KindRegisterTransferKey, req.Register
+	}
+	return assist.RedactForProvider(plan, salt, d.RedactRules)
+}
+
+func renderLegacy(instance string, inputs []ap.LegacySignInput, snapshot approvalreview.ReviewSnapshot, reservation *lifecycle.LegacyReservation) (*lifecycle.PreparedLegacyApproval, error) {
+	render := reservation.RenderContext()
+	metadata, err := json.Marshal(approvalreview.LegacyMeta{RequestID: snapshot.RequestID, Requester: snapshot.Requester, SubmittedAt: snapshot.SubmittedAt, ExpiresAt: snapshot.ExpiresAt})
+	if err != nil {
+		return nil, err
+	}
+	render.Metadata = metadata
+	view, err := approvalreview.BuildView(snapshot, approvalreview.Assist{State: render.Assist.State, Result: render.Assist.Result, Reason: render.Assist.Reason})
+	if err != nil {
+		return nil, err
+	}
+	parts, err := approvalreview.PackParts(view, render.Handle)
+	if err != nil {
+		return nil, err
+	}
+	card, err := approvalreview.DecisionCard(view, render.Handle, len(parts))
+	if err != nil {
+		return nil, err
+	}
+	payload := make([]lifecycle.LegacyMessage, 0, len(parts)+1)
+	for _, part := range parts {
+		payload = append(payload, lifecycle.LegacyMessage{Bytes: []byte(part)})
+	}
+	payload = append(payload, lifecycle.LegacyMessage{Bytes: []byte(card), ApproveLabel: view.ApproveLabel, DenyLabel: view.DenyLabel})
+	return lifecycle.NewPreparedLegacyApproval(lifecycle.LegacyPreparedData{Instance: instance, Inputs: inputs, SignDigest: snapshot.SignDigest, Snapshot: reservation.Snapshot(), Context: render, Payload: payload})
+}
+
+func (d *Daemon) respondLegacy(conn io.Writer, req signRequest, result Result, artifact *lifecycle.PreparedLegacyApproval) error {
+	if artifact != nil && result.Status == StatusApproved {
+		data := artifact.Data()
+		commands := make([]signRequestCmd, len(data.Inputs))
+		for i, input := range data.Inputs {
+			commands[i] = signRequestCmd{Server: input.Server, Host: input.HostFingerprint, Cmd: input.Command, TTLSec: input.TTLSeconds, Reveal: input.Reveal, Net: input.Net, Reason: input.Reason}
+		}
+		if !reflect.DeepEqual(commands, req.Commands) || result.Signatures != nil {
+			return d.respondError(conn, req.RequestID, legacyRenderError(data.Inputs).Error())
+		}
+		req.Commands = commands
+	}
+	return d.respond(conn, req, result)
 }

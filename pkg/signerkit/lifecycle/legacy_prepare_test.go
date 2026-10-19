@@ -793,3 +793,86 @@ func TestPreparedLegacyStringBackingCopies(t *testing.T) {
 		t.Fatal("getter retained string backing")
 	}
 }
+
+func TestLegacyRedactionFailureOutcome(t *testing.T) {
+	e, n := preparedFixture(t)
+	var calls atomic.Int32
+	e.legacy.config.Assessor = assessorFunc(func(context.Context, assist.Input) (ap.AssistResult, error) {
+		calls.Add(1)
+		return readyAssist(), nil
+	})
+	instance := LegacyInstance{ID: legacyInstanceID(401), UID: 7, RequestID: "redaction", RedactionFailed: true}
+	r, err := e.ReserveLegacy(context.Background(), instance, []byte("snapshot"), legacyInput(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := r.RenderContext().Assist; got.State != ap.AssistUnavailable || got.Reason != assist.ReasonRedaction || got.Result != nil {
+		t.Fatalf("assist=%+v", got)
+	}
+	if calls.Load() != 0 {
+		t.Fatal("provider called")
+	}
+	other := instance
+	other.ID = legacyInstanceID(402)
+	if _, err := e.ReserveLegacy(context.Background(), other, []byte("snapshot"), legacyInput(t)); err == nil || err.Error() != "telegram: request_id already pending — refusing duplicate" {
+		t.Fatalf("duplicate: %v", err)
+	}
+	vote := reservationVote(r)
+	if result, err := e.VoteLegacy(vote, func(LegacyTapResult) {}); err != nil || result.Resolved {
+		t.Fatal("undelivered approval accepted")
+	}
+	n.artifact = preparedArtifact(t, r)
+	if err := e.DeliverLegacy(r, n.artifact); err != nil {
+		t.Fatal(err)
+	}
+	if result, err := e.VoteLegacy(vote, func(LegacyTapResult) {}); err != nil || !result.Resolved {
+		t.Fatalf("human vote: %+v %v", result, err)
+	}
+	if result := r.Request().Wait(); result.Status != "approved" || result.ResolvedBy != vote.Operator {
+		t.Fatalf("resolution=%+v", result)
+	}
+	if calls.Load() != 0 || n.calls.Load() != 1 {
+		t.Fatal("wrong provider/delivery count")
+	}
+}
+
+func TestLegacyRedactionFailureStillChecksDelivery(t *testing.T) {
+	for _, mode := range []string{"deadline", "disconnect", "failed-delivery"} {
+		t.Run(mode, func(t *testing.T) {
+			e, n := preparedFixture(t)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			r, err := e.ReserveLegacy(ctx, LegacyInstance{ID: legacyInstanceID(403), UID: 7, RequestID: "redaction", RedactionFailed: true}, []byte("snapshot"), assist.Input{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			n.artifact = preparedArtifact(t, r)
+			n.deliver = func(context.Context, *PreparedLegacyApproval) (LegacyDelivery, error) {
+				switch mode {
+				case "deadline":
+					e.legacy.mu.Lock()
+					r.request.deadline = e.config.Clock.Elapsed()
+					e.legacy.mu.Unlock()
+				case "disconnect":
+					cancel()
+				case "failed-delivery":
+					return LegacyDelivery{}, errors.New("delivery failed")
+				}
+				return LegacyDelivery{AllDelivered: true}, nil
+			}
+			if err := e.DeliverLegacy(r, n.artifact); err == nil {
+				t.Fatal("invalid delivery activated approval")
+			}
+			want := "timeout"
+			if mode == "failed-delivery" {
+				want = "error"
+			}
+			if got := r.Request().Wait(); got.Status != want {
+				t.Fatalf("resolution=%+v", got)
+			}
+			if result, err := e.VoteLegacy(reservationVote(r), func(LegacyTapResult) {}); err != nil || result.Resolved {
+				t.Fatal("invalid delivery accepted human vote")
+			}
+		})
+	}
+}

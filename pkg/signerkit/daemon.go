@@ -627,7 +627,7 @@ func (d *Daemon) HandleSignRequest(ctx context.Context, conn io.ReadWriter) erro
 		return d.respond(conn, req, Result{Status: StatusApproved, ApprovedBy: "grant:" + id})
 	}
 
-	resultCh, err := d.Backend.Request(ctx, apReq)
+	resultCh, prepared, err := d.legacyApprove(ctx, apReq, nil)
 	if err != nil {
 		return d.respondError(conn, req.RequestID, fmt.Sprintf("backend: %v", err))
 	}
@@ -644,7 +644,7 @@ func (d *Daemon) HandleSignRequest(ctx context.Context, conn io.ReadWriter) erro
 		result = Result{Status: StatusTimeout}
 	}
 
-	return d.respond(conn, req, result)
+	return d.respondLegacy(conn, req, result, prepared)
 }
 
 // frameDeclaresPolicyKind scans only top-level object members and returns as
@@ -844,13 +844,13 @@ func (d *Daemon) handleRequestGrant(ctx context.Context, conn io.ReadWriter, lin
 	}
 	duration := time.Duration(req.DurationSec) * time.Second
 
-	resultCh, err := d.Backend.RequestGrant(ctx, GrantApprovalRequest{
+	resultCh, _, err := d.legacyApprove(ctx, GrantApprovalRequest{
 		RequestID: req.RequestID,
 		Alias:     req.Alias,
 		Scope:     req.Scope,
 		Commands:  req.Commands,
 		Duration:  duration,
-	})
+	}, nil)
 	if err != nil {
 		return d.respondGrantError(conn, req.RequestID, fmt.Sprintf("backend: %v", err))
 	}
@@ -1173,7 +1173,7 @@ func (d *Daemon) handleTransfer(ctx context.Context, conn io.ReadWriter, line []
 
 	// One human approval. The banner labels come from the REGISTRY, not the MCP
 	// alias, so a lying MCP cannot mislabel src/dest.
-	resultCh, err := d.Backend.RequestTransfer(ctx, TransferApprovalRequest{
+	resultCh, _, err := d.legacyApprove(ctx, TransferApprovalRequest{
 		RequestID: req.RequestID,
 		XferID:    xferID,
 		SrcLabel:  srcLabel,
@@ -1183,7 +1183,7 @@ func (d *Daemon) handleTransfer(ctx context.Context, conn io.ReadWriter, line []
 		DestFP:    req.DestFP,
 		DestPath:  req.DestPath,
 		Mode:      req.Mode,
-	})
+	}, []string{sendCmd, recvCmd})
 	if err != nil {
 		return d.respondTransferError(conn, req.RequestID, fmt.Sprintf("backend: %v", err))
 	}
@@ -1363,13 +1363,13 @@ func (d *Daemon) handleRegisterXferKey(ctx context.Context, conn io.ReadWriter, 
 		return d.respondRegisterXferKeyError(conn, req.RequestID, "invalid label")
 	}
 
-	resultCh, err := d.Backend.RequestRegisterKey(ctx, RegisterApprovalRequest{
+	resultCh, _, err := d.legacyApprove(ctx, RegisterApprovalRequest{
 		RequestID: req.RequestID,
 		HostFP:    req.HostFP,
 		Label:     req.Label,
 		BoxPub:    req.BoxPub,
 		IDPub:     req.IDPub,
-	})
+	}, nil)
 	if err != nil {
 		return d.respondRegisterXferKeyError(conn, req.RequestID, fmt.Sprintf("backend: %v", err))
 	}
