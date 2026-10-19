@@ -313,3 +313,33 @@ Every step above also works by hand. [docs/install-step-by-step.md](docs/install
 has the full walkthrough with copy-paste shell blocks for each tier, the Telegram bot setup, the
 optional LLM command explainer, troubleshooting, and uninstall. For MCP clients other than
 Claude Code, see [docs/install-generic-mcp.md](docs/install-generic-mcp.md).
+
+## Optional async executor (Linux)
+
+After `make install-local`, the operator can run `scripts/install-executor.sh --dry-run`
+and then `scripts/install-executor.sh`, without sudo, to install and start the
+systemd user service. Refresh `sshgatesigner` group membership by logging out and
+back in (or having an administrator restart `user@`), and run
+`loginctl enable-linger "$USER"` to keep it running after logout.
+See [the executor walkthrough](docs/install-step-by-step.md#optional-linux-async-executor)
+for paths, release binaries, diagnostics and removal. macOS, MCPB and Smithery
+installs have no executor; async returns `executor_unavailable` there.
+
+For executor binary upgrades, re-run `scripts/install-executor.sh` as the login
+user, with the same data configuration root and `--binary PATH` if used. Every
+successful install enables and restarts the service, even when its unit is unchanged.
+
+The unit directory comes from the user manager's first persistent
+`systemd/user.control` entry in `UnitPath`, with `.control` removed.
+`XDG_CONFIG_HOME` selects the executor's data root, not its unit directory.
+Both scripts reload the manager before checking for conflicts. They refuse if
+no persistent directory is available or the manager loads the unit from another
+path; remove that conflicting installation and retry. Install also refuses a
+symlink destination. If the manager does not load the written unit, install
+restores the previous unit and refuses.
+
+The name `sshgate-executor.service` is reserved for SSHGate. Uninstall stops it
+even if its file was deleted, disables it, removes the unit and any remaining
+links to it in the verified directory's `*.target.wants` directories, then reloads
+the manager. Systemd disable may remove other links with this reserved name.
+The binary and job records are retained.

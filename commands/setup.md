@@ -668,3 +668,37 @@ missing and points back at the relevant section. If the last line reports
 `group:INACTIVE`, do NOT declare Tier 2 ready-for-writes: the MCP server
 cannot reach the `0660 sshgatesigner` socket until the user logs out/in and
 relaunches Claude Code (T2.6) so the `sshgatesigner` group is active.
+
+## Optional Linux async executor
+
+After signer setup, point the operator to
+`docs/install-step-by-step.md#optional-linux-async-executor`. `make install-local`
+installs the executor binary on Linux but does not enable a unit. The operator
+runs `scripts/install-executor.sh --dry-run`, then `scripts/install-executor.sh`
+as their login user, without sudo. Never enable or start this unit automatically.
+They must refresh `sshgatesigner` group membership by logging out and back in,
+or have an administrator restart `user@` if it persists, and run
+`loginctl enable-linger "$USER"` for execution after logout. Restarting `user@`
+terminates user services: save work first. `scripts/uninstall-executor.sh`
+removes the service while retaining jobs and the binary; it also has `--dry-run`.
+macOS, MCPB and Smithery installs have no executor and return
+`executor_unavailable` for async requests.
+
+For executor binary upgrades, re-run `scripts/install-executor.sh` as the login
+user, with the same data configuration root and `--binary PATH` if used. Every
+successful install enables and restarts the service, even when its unit is unchanged.
+
+The unit directory comes from the user manager's first persistent
+`systemd/user.control` entry in `UnitPath`, with `.control` removed.
+`XDG_CONFIG_HOME` selects the executor's data root, not its unit directory.
+Both scripts reload the manager before checking for conflicts. They refuse if
+no persistent directory is available or the manager loads the unit from another
+path; remove that conflicting installation and retry. Install also refuses a
+symlink destination. If the manager does not load the written unit, install
+restores the previous unit and refuses.
+
+The name `sshgate-executor.service` is reserved for SSHGate. Uninstall stops it
+even if its file was deleted, disables it, removes the unit and any remaining
+links to it in the verified directory's `*.target.wants` directories, then reloads
+the manager. Systemd disable may remove other links with this reserved name.
+The binary and job records are retained.
