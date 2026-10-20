@@ -406,10 +406,10 @@ of reliability, safety and ergonomics gaps, ranked by impact.
 ## Deferred
 
 - **Tier-3 hosted signer: policy authority and extensions (#83).** The
-  `pkg/signerkit` library and `sshgate-signer-server` provide a foundation, but
-  the hosted policy authority still needs design and implementation work before
-  it is a release-ready approval boundary; that is scheduled for v0.3 (see
-  above). A stable HTTPS hostname is a deployment prerequisite because passkeys
+  `pkg/signerkit` library and `sshgate-signer-server` implement the hosted
+  policy authority, but it is not yet a release-ready approval boundary;
+  getting it there is scheduled for v0.3 (see above). A stable HTTPS hostname
+  is a deployment prerequisite because passkeys
   and mutation-origin checks are origin-bound. Deferred extensions: per-client
   credentials, hosted Telegram/grants/reveal/transfer, HA, a policy-management UI,
   and metrics. See [approval-architecture.md](approval-architecture.md) and
