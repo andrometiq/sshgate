@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"strings"
 	"testing"
 	"time"
 
@@ -128,11 +127,8 @@ func TestAuthMode_ApprovedUndelivered_StillHuman(t *testing.T) {
 	}
 }
 
-// TestAuthMode_GrantUndelivered_StillGrant is the grant twin of the above: a
-// grant auto-sign whose response write fails must STILL record
-// auth_mode="grant:<id>" (the C1 fix must not strip an approved-undelivered's
-// grant marker either).
-func TestAuthMode_GrantUndelivered_StillGrant(t *testing.T) {
+// A live v1 grant cannot change human attribution when response delivery fails.
+func TestAuthMode_V1GrantUndelivered_IsHuman(t *testing.T) {
 	t.Parallel()
 	mock := signerkit.NewMockBackend()
 	d, _, audit, auditPath, _ := newGrantDaemon(t, mock, time.Unix(1000, 0))
@@ -144,7 +140,7 @@ func TestAuthMode_GrantUndelivered_StillGrant(t *testing.T) {
 		t.Fatalf("grant status = %q; want approved (err=%q)", gr.Status, gr.Error)
 	}
 
-	// Sign reqID UNARMED — only the grant can resolve it — but the write fails.
+	mock.Approve("s_grantundel", "operator")
 	req := signReqLine(t, "s_grantundel", "prod", "systemctl restart nginx", grantHost)
 	conn := &failWriteConn{in: bytes.NewReader(req)}
 	if err := d.HandleSignRequest(context.Background(), conn); err == nil {
@@ -155,11 +151,11 @@ func TestAuthMode_GrantUndelivered_StillGrant(t *testing.T) {
 		t.Fatalf("audit status = %q; want approved-undelivered", got)
 	}
 	got := authModeFor(t, auditPath, "s_grantundel")
-	if !strings.HasPrefix(got, "grant:") {
-		t.Errorf("audit auth_mode = %q; want grant:<id> (an approved-undelivered grant keeps its marker)", got)
+	if got != "human" {
+		t.Errorf("audit auth_mode = %q; want human", got)
 	}
-	if got != "grant:"+gr.GrantID {
-		t.Errorf("audit auth_mode = %q; want grant:%s", got, gr.GrantID)
+	if got := approverFor(t, auditPath, "s_grantundel"); got != "operator" {
+		t.Errorf("audit approved_by = %q; want operator", got)
 	}
 }
 

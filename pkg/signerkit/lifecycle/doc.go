@@ -23,6 +23,8 @@
 // Engine.Close joins only v2 work; the runtime separately closes LegacyService
 // at process shutdown, joining its audit worker, assist pool and requests.
 // ReserveLegacy admits a preparing request and waits for its sole assist attempt.
+// A per-request RedactionFailed outcome skips the provider and freezes unavailable
+// with ReasonRedaction; admission, deadline and delivery checks still apply.
 // The caller builds one immutable PreparedLegacyApproval from the returned
 // snapshot and render context, then DeliverLegacy compares the notifier copy
 // and activates only on AllDelivered while the request is unresolved. Each
