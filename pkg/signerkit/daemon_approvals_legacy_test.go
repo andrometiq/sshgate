@@ -135,9 +135,11 @@ func newLegacyHarness(t *testing.T) *legacyHarness {
 	}
 	t.Cleanup(func() { audit.Close() })
 	service.daemon.Audit = audit
+	service.audit = audit
+	service.daemon.lifecycleSink = audit
 	service.daemon.Backend = &StubBackend{}
 	service.daemon.RedactRules = []redact.Rule{redact.CompileRule("secret", "secret", `secret-value`, nil, 0, 0, 0)}
-	legacy, err := lc.NewLegacyService(lc.LegacyConfig{Clock: elapsed.Real(), LegacyNotifier: h.notifier, Assessor: h.assessor})
+	legacy, err := lc.NewLegacyService(lc.LegacyConfig{Clock: elapsed.Real(), LegacyNotifier: h.notifier, Assessor: h.assessor, AuditWriter: service.ApprovalAuditWriter()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -479,7 +481,8 @@ func TestPreparedLegacyRefusesMismatch(t *testing.T) {
 					h.vote(t, ap.VoteApprove)
 					synctest.Wait()
 					<-done
-					t.Fatalf("render-mismatch-signed: %s", response)
+					t.Logf("render-mismatch-signed: %s", response)
+					t.Fatal("MUTATION-EFFECT legacy-prepared-skip-check")
 				}
 				if err := <-done; err != nil {
 					t.Fatal(err)
@@ -520,7 +523,7 @@ func TestPreparedLegacyImmutable(t *testing.T) {
 				t.Fatal(err)
 			}
 			if !bytes.Equal(frozen, after) {
-				t.Fatal("artifact-mutated")
+				t.Fatal("MUTATION-EFFECT legacy-prepared-shallow-copy")
 			}
 			got = artifact.Data()
 			got.Inputs[0].Command = "wrong"
@@ -529,7 +532,7 @@ func TestPreparedLegacyImmutable(t *testing.T) {
 			got.Context.Assist.Result.Effects[0] = "wrong"
 			got.Payload[0].ApproveLabel = "wrong"
 			if !reflect.DeepEqual(before, artifact.Data()) {
-				t.Fatal("artifact-mutated")
+				t.Fatal("MUTATION-EFFECT legacy-prepared-shallow-copy")
 			}
 			copy, err := lc.NewPreparedLegacyApproval(before)
 			if err != nil {
@@ -788,12 +791,26 @@ func TestLegacyTimeoutAndDisconnect(t *testing.T) {
 				}
 				h.isolated(t, 0)
 				if mode != "preparing-disconnect" {
+					original := bytes.Clone(response.Bytes())
 					data := h.notifier.delivered[0].Data()
 					result, err := h.runtime.Legacy().VoteLegacy(ap.CastVote{Operator: st.Operator, Decision: ap.VoteApprove, Card: &ap.CardTap{Handle: data.Context.Handle, Challenge: data.Context.Challenge}}, func(lc.LegacyTapResult) {})
 					if err != nil || result.Resolved || result.Answer != lc.LegacyTapRefused {
 						t.Fatal("late tap accepted")
 					}
+					if !bytes.Equal(original, response.Bytes()) {
+						t.Fatal("late tap changed response bytes")
+					}
 					h.isolated(t, 0)
+					rows := approvalAuditRows(t, h.service, h.auditPath)
+					count := 0
+					for _, row := range rows {
+						if row.Approval != nil && row.Approval.Transition == "legacy_vote_refused{expired}" {
+							count++
+						}
+					}
+					if count != 1 {
+						t.Fatalf("late tap audit rows: %+v", rows)
+					}
 				}
 			})
 		})

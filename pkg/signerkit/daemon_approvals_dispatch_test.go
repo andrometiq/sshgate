@@ -45,6 +45,10 @@ type approvalDispatchHarness struct {
 }
 
 func newApprovalDispatchHarness(t *testing.T, attached bool, configure ...func(*lc.Config)) *approvalDispatchHarness {
+	return newApprovalDispatchHarnessDraft(t, attached, approvalDispatchDraft(st.ID(1), ap.CoordinatorExecutor, st.T0, st.Write("touch /tmp/approved", 60)), configure...)
+}
+
+func newApprovalDispatchHarnessDraft(t *testing.T, attached bool, draft ap.ApprovalDraft, configure ...func(*lc.Config)) *approvalDispatchHarness {
 	t.Helper()
 	h := &approvalDispatchHarness{store: &runtimeStore{}, uid: uint32(os.Getuid()), auditPath: filepath.Join(t.TempDir(), "audit.jsonl")}
 	h.principal = fmt.Sprintf("local-uid:%d", h.uid)
@@ -62,7 +66,6 @@ func newApprovalDispatchHarness(t *testing.T, attached bool, configure ...func(*
 	if !attached {
 		return h
 	}
-	draft := approvalDispatchDraft(st.ID(1), ap.CoordinatorExecutor, st.T0, st.Write("touch /tmp/approved", 60))
 	var record *ap.R1
 	inputs := ap.Inputs{Epoch: st.Epoch(1), Settings: ap.LocalSettings}
 	for _, cmd := range []ap.Command{

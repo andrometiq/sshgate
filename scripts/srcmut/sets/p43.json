@@ -79,5 +79,43 @@
       "TestRemoteSignatureCmdMismatch/matching",
       "TestRemoteSignatureCmdMismatch/matching-reveal-net"
     ]
+  },
+  {
+    "id": "P-S-LEGACY-PREPARED",
+    "name": "legacy-prepared-skip-check",
+    "package": "./pkg/signerkit",
+    "file": "pkg/signerkit/lifecycle/legacy_prepare.go",
+    "old": "if err != nil || !sameLegacyPrepared(artifact, prepared) {",
+    "new": "if err != nil || (false && !sameLegacyPrepared(artifact, prepared)) {",
+    "red": [
+      {
+        "test": "TestPreparedLegacyRefusesMismatch/headline",
+        "markers": [
+          "legacy-prepared-skip-check"
+        ]
+      }
+    ],
+    "green": [
+      "TestPreparedLegacySendsArtifact"
+    ]
+  },
+  {
+    "id": "P-S-LEGACY-PREPARED",
+    "name": "legacy-prepared-shallow-copy",
+    "package": "./pkg/signerkit",
+    "file": "pkg/signerkit/lifecycle/legacy_prepared.go",
+    "old": "func (p *PreparedLegacyApproval) Data() LegacyPreparedData { return cloneLegacyData(p.data) }",
+    "new": "func (p *PreparedLegacyApproval) Data() LegacyPreparedData { return p.data }",
+    "red": [
+      {
+        "test": "TestPreparedLegacyImmutable/getter-payload",
+        "markers": [
+          "legacy-prepared-shallow-copy"
+        ]
+      }
+    ],
+    "green": [
+      "TestPreparedLegacySendsArtifact"
+    ]
   }
 ]

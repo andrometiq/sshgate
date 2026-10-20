@@ -2,6 +2,7 @@ package lifecycle
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -354,14 +355,20 @@ func TestFirstClaimCorruptStoredPlan(t *testing.T) {
 		return nil, nil
 	})
 	key := ap.RecordKey(st.PrincipalA, st.ID(1))
-	var raw map[string]any
+	var raw ap.R1
 	if err := json.Unmarshal(store.records[key], &raw); err != nil {
 		t.Fatal(err)
 	}
-	plan := raw["payload"].(map[string]any)["plan"].(map[string]any)
-	step := plan["command_job"].(map[string]any)["steps"].([]any)[0].(map[string]any)
-	step["exact_command"] = "SSHGATE_XFER_SEND forbidden"
-	data, err := json.Marshal(raw)
+	step := &raw.Payload.Plan.CommandJob.Steps[0]
+	step.ExactCommand = "SSHGATE_XFER_SEND forbidden"
+	step.CommandSHA256 = fmt.Sprintf("%x", sha256.Sum256([]byte(step.ExactCommand)))
+	var err error
+	raw.Header.PlanHash, err = ap.PlanHash(raw.Payload.Plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum.PlanHash = raw.Header.PlanHash
+	data, err := ap.Canonical(raw)
 	if err != nil {
 		t.Fatal(err)
 	}
