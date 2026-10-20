@@ -106,7 +106,7 @@
 **0.2 Working tree.** At plan time `go.sum` carries an uncommitted 6-line addition of `/go.mod` hashes for six modules: `cloud.google.com/go/compute/metadata v0.3.0`, `github.com/fxamacker/webauthn v0.6.1`, `github.com/kr/pretty v0.1.0`, `golang.org/x/net v0.54.0`, `golang.org/x/text v0.37.0` and `gopkg.in/check.v1`. This plan did not make it. The orchestrator must find out who owns it (probably the #22 lane or a tool run) before A0. It must never ride inside a #76/#65 commit.
 
 **0.3 Tests are not concurrency-safe.**
-- Only one test-running process may run at a time across all lanes. Wrap every `go test`, `make test`, `make preflight` and `make test-integration` call in `flock local-workspace/release-2026-10-02/.test.lock <cmd>`. This plan calls that `$LOCK`.
+- Only one test-running process may run at a time across all lanes. Wrap every `go test`, `make test`, `make preflight` and `make test-integration` call in `flock <lock file> <cmd>`, using one shared lock file outside any worktree (for example `/tmp/sshgate-test.lock`; flock creates the file, not its directory). This plan calls that `$LOCK`.
 - Integration and e2e own host port 2222, and only the orchestrator runs them.
 
 **0.4 Never do any of these:**
@@ -122,7 +122,6 @@ A golden or ratchet test may change only where §3 names the change as spec-mand
 - Each sub-phase is one commit or a few, and every commit is green.
 - Commit trailers follow the contributor's own attribution policy.
 - No session links. Check with `git show -s --format=%B HEAD`.
-- Code-writing subagents get the coding-agent prompt pasted into their prompt.
 - The orchestrator appends a publishable WORKLOG entry at the end of each phase.
 - **(r5.8, review 9 #3) Each commit passes on its own predecessors.** A sub-phase's tests and acceptance use only code it owns and code its §5 predecessors have merged. An assertion that needs a later sub-phase's code belongs in that later sub-phase's tests. An implementation that an earlier sub-phase's acceptance needs moves into the earlier sub-phase, and its ownership and acceptance move with it.
 

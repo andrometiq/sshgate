@@ -323,7 +323,7 @@ they are not reopened by accident.
   gate dispatcher and sign matrix, a signer `sign-envelope` kind, MCP
   `redact.*`/`unredact.*` tools, operator anchor literals, and a
   standard/thorough `redact.mode` switch (plus a depth-1 decode pass). The
-  implementation lives on the `feat/v1.2-redactor` branch but is not mergeable —
+  implementation lives on an unpublished `feat/v1.2-redactor` reference branch and is not mergeable —
   main rewrote the redaction scanner underneath it — so reviving it is a **port
   of the design onto the current scanner**, reusing the branch's store, envelope
   and signer pieces and its signing-model design doc. The branch's "filemode"
