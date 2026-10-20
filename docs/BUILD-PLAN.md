@@ -39,6 +39,72 @@ counts as done. Anyone picking up the repository, a developer or a coding agent,
 
 ## Current state
 
+### Release v0.2: paused 2026-10-20
+
+Development is paused. This section says what is done, where it lives and how to resume.
+
+**Scope.** v0.2 is the rest of work item 1 (the read jail, #22 Phases 3–7), all of work item 2
+(the approval lifecycle, #76 and #65) and green CI, including the journey job. Everything else
+waits for v0.3 ([ROADMAP.md](ROADMAP.md)). Detailed plans: [plans/v0.2/](plans/v0.2/README.md).
+
+**Branches.** `main` is the working baseline: the shipped tool surface plus #22 Phases 1–2.
+Unfinished v0.2 work lives on feature branches, which stay off `main` until v0.2 passes its
+release gate.
+
+| Branch | Holds | State |
+|---|---|---|
+| `main` | The shipped baseline and #22 Phases 1–2 | Working and tested. The base for v0.2. |
+| `feat/journey-e2e` | Real-use journey test with a fake Telegram Bot API, `make test-journey`, the CI `journey` job, and a signer fix for a tap that arrives before its card is registered | Reviewed. Merge into `main` before v0.2; the first hosted CI run is still pending. |
+| `feat/22-p3` | #22 Phase 3 (P3.0–P3.2): daemon-read verbs inside the jail | Code complete. Phase-end runs on Debian 12 and Arch VMs, the CI union, the phase review and the merge to `main` remain. |
+| `feat/22-p4-g` | #22 Phase 4 gate lane G (G-1a only) | G-1b to G-3 wait for Phase 3 on `main`. |
+| `feat/76-65-approval-lifecycle` | Work item 2 integration, plus #22 P4.0 and the signer and MCP sides of the per-read network permission (P4 lanes S and M) | `make test` green. See the lane list below. |
+| `wip/a10-5`, `wip/a8-1` | Interrupted, unreviewed work in progress | Don't merge. Rebuild these steps from the lane contracts. |
+
+**Work item 2 lanes.** The contracts are in [wave3-lanes.md](plans/v0.2/wave3-lanes.md) §3, with
+dated rulings at the end of that file. The spec is
+[approval-lifecycle-spec.md](plans/v0.2/approval-lifecycle-spec.md).
+
+- **Merged into the integration branch:** B0, A1a (with A1a-net, A1a-fr and A1a-oq1), A1b, A2,
+  A3, A4, A5, A6 (with A6E, A6R and A6P), A9, A13a, B1s, C1, C4, A7 (all nine commits) and A10
+  commits 1–4.
+- **In progress:**
+  - A10 commit 5: assist pool and `Server.Close`. Its last review found three issues: a
+    concurrent policy-close race, a restart-before-deadline test and a deadline-termination
+    test.
+  - A8 commit 1: start with the derived card-handle ruling at the end of `wave3-lanes.md`.
+- **Not started:** A10 commits 6–8, A11, A12, A13b (with its docs), D2, B1w, B2, D1a, D1b, C2,
+  C3, C5, A0b, D3, and the phase-end reviews for Phases A–D.
+
+**Work item 1.** Phase 3 needs the steps on its branch row above. Phase 4 needs lane G
+(P4.2), then P4.3 and P4.4 close. Phases 5–7 have not started.
+
+**Release gate after the code.**
+- A PII audit of the repository and `make preflight`.
+- `make vet && make test` on a stock Ubuntu 24.04 host.
+- `make test-jail` on Debian 12 with an empty `GOMODCACHE`.
+- The journey job green on CI.
+- A cold install by an outside tester.
+- A final independent review of the full diff.
+- Tag only on the owner's word.
+
+**Arrangements to know before resuming.** No feature flag or temporary workaround was added
+for this pause.
+- On the integration branch, the v2 approval code is not yet wired into any binary. The signer
+  `main.go` is A8, the hosted server is A10 commit 7, and the MCP client is A13b. Until then, the
+  v1 paths behave as on `main`, with one deliberate difference from the owner's OQ3 ruling: a v1
+  `sign` never auto-signs under a standing grant.
+- The disposable VMs used for phase-end and stock-Ubuntu checks were deleted to free disk. Create
+  fresh Debian 12, Ubuntu 24.04 and Arch VMs before the Phase 3 phase-end runs.
+
+**How to resume.**
+1. Read this section, then `wave3-lanes.md` §2 (the dependency graph), §3 (lane contracts) and
+   its closing rulings.
+2. Test runs share one lock file (spec §0.3). Run the frozen selectors (spec "Frozen
+   selectors") at every merge.
+3. Mutation checks use `go test -overlay` and never edit files in place.
+4. Each lane commit gets an independent review, and a step back after a third fix round on the
+   same subsystem.
+
 ### Shipped baseline
 
 The eleven-tool MCP surface (`run`, `run_batch`, `list_servers`, `status`, `ping`,

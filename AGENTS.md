@@ -129,6 +129,8 @@ have them check the host's `/var/log/auth.log` and that the key line was pasted 
 
 - Read `docs/BUILD-PLAN.md` before starting any development work. It is the committed build
   order: work items and their steps run top to bottom, and each step has its own acceptance.
+  The v0.2 release is paused mid-build: its "Release v0.2" section maps the branches, the
+  lanes still open and how to resume, and `docs/plans/v0.2/` holds the detailed plans.
 - Take the first step that is not `done` and whose dependencies are done. Don't start work that
   is not in the plan; unscheduled ideas live in `docs/ROADMAP.md`.
 - When a step lands, set its status to `done` in the same commit. A change to the order or
@@ -147,6 +149,8 @@ have them check the host's `/var/log/auth.log` and that the key line was pasted 
   path also needs `make test-jail`, `make test-jail-root` (root, disposable host) and
   `make test-jail-mutate MUTATE=<protection IDs>`. `docs/TESTING.md` has every target and
   what it needs.
+- Mutation checks never edit source files in place: pass the mutant with `go test -overlay`.
+  An agent killed mid-run leaves an in-place mutant behind, and it then looks like shipped code.
 - CI runs only after a push, so it is not a pre-push check. Before pushing gate, jail or CI
   changes, run `make vet && make test` on a stock Ubuntu 24.04 host (`/bin/sh` is `dash`,
   AppArmor restricts unprivileged user namespaces) and `make test-jail` with `GOMODCACHE`
