@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/karthikeyan5/sshgate/pkg/signerkit"
+	"github.com/karthikeyan5/sshgate/pkg/signerkit/assist"
 	"github.com/karthikeyan5/sshgate/pkg/signerkit/sqlitestore"
 	"github.com/karthikeyan5/sshgate/pkg/signerkit/store"
 	ap "github.com/karthikeyan5/sshgate/src/approvalplan"
@@ -459,4 +460,103 @@ func (e *ApprovalV2Engine) approvalKeys(ctx context.Context, query string, args 
 		return nil, approvalTransactionError(err)
 	}
 	return keys, nil
+}
+
+// StartOrdinaryWorkers transfers ownership of engine and its assist pool to the
+// server. Call before serving; Close joins them before the caller closes SQLite.
+// Effects use an independent context so HTTP shutdown cannot look like failure.
+func (s *Server) StartOrdinaryWorkers(engine *ApprovalV2Engine) error {
+	s.ordinaryMu.Lock()
+	defer s.ordinaryMu.Unlock()
+	if engine == nil {
+		return errors.New("hosted: approval engine is required")
+	}
+	if s.ordinaryClosed {
+		return errors.New("hosted: ordinary workers are closed")
+	}
+	if s.ordinaryEngine != nil {
+		return errors.New("hosted: ordinary workers already started")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	s.ordinaryEngine, s.ordinaryCancel, s.ordinaryJoined = engine, cancel, make(chan struct{})
+	go func() {
+		defer close(s.ordinaryJoined)
+		if err := engine.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			s.Logger.Printf("approval worker stopped: %v", err)
+		}
+	}()
+	return nil
+}
+
+func (s *Server) closeOrdinaryWorkers() {
+	s.ordinaryClose.Do(func() {
+		s.ordinaryMu.Lock()
+		s.ordinaryClosed = true
+		engine, cancel, joined := s.ordinaryEngine, s.ordinaryCancel, s.ordinaryJoined
+		s.ordinaryMu.Unlock()
+		if engine == nil {
+			return
+		}
+		// Cancel callbacks as well as providers: a callback may be retrying busy BEGIN.
+		engine.assistMu.Lock()
+		engine.assistCancel()
+		engine.assistMu.Unlock()
+		cancel()
+		if engine.config.AssistPool != nil {
+			engine.config.AssistPool.Close()
+		}
+		engine.assistJobs.Wait()
+		<-joined
+	})
+}
+
+func (e *ApprovalV2Engine) startAssist(key sqlitestore.V2Key, rec ap.R1) {
+	if e.config.AssistPool == nil || rec.Header.Assist != nil || rec.Payload == nil {
+		return
+	}
+	e.assistMu.Lock()
+	if e.assistContext.Err() != nil {
+		e.assistMu.Unlock()
+		return
+	}
+	e.assistJobs.Add(1)
+	e.assistMu.Unlock()
+	defer e.assistJobs.Done()
+	input, inputErr := e.config.AssistInputBuilder.BuildAssistInput(rec.Payload.Plan)
+	assessor := e.config.Assessor
+	if inputErr != nil {
+		assessor = nil
+		input = assist.Input{}
+	}
+	outcome := e.config.AssistPool.TrySubmit(e.assistContext, assessor, input, rec.Header.AssistDeadline, func(snapshot assist.Snapshot) {
+		if inputErr != nil && snapshot.Reason == assist.ReasonFailed {
+			snapshot.Reason = assist.ReasonRedaction
+		}
+		e.finishAssist(key, rec.Header.AssistDeadline, snapshot)
+	})
+	if outcome == assist.Full {
+		e.finishAssist(key, rec.Header.AssistDeadline, assist.Snapshot{Reason: assist.ReasonBusy})
+	}
+}
+
+// Retry only a definite busy BEGIN, retaining the single provider result.
+func (e *ApprovalV2Engine) finishAssist(key sqlitestore.V2Key, deadline time.Time, snapshot assist.Snapshot) {
+	for backoff := 250 * time.Millisecond; e.assistContext.Err() == nil && e.now().Wall.Before(deadline); backoff = min(backoff*2, 2*time.Second) {
+		_, _, err := e.mutate(e.assistContext, key, ap.AssistDone{Result: snapshot.Result, Unavailable: snapshot.Reason}, ap.Inputs{})
+		if err == nil || e.assistContext.Err() != nil {
+			return
+		}
+		var coded *ap.CodeError
+		if !errors.As(err, &coded) || coded.Code != ap.CodeBusy {
+			e.config.Logger.Printf("approval assist commit: %v", err)
+			return
+		}
+		timer := time.NewTimer(min(backoff, deadline.Sub(e.now().Wall)))
+		select {
+		case <-e.assistContext.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+	}
 }
