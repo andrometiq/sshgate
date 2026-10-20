@@ -2,6 +2,9 @@ package sqlitestore
 
 import (
 	"context"
+	"crypto/sha256"
+	"database/sql"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -10,15 +13,15 @@ import (
 
 // ExpireLegacy ends an overdue pending request even if a vote's audit stalled.
 func (s *DB) ExpireLegacy(ctx context.Context, id string, now time.Time) (bool, []*store.Vote, error) {
-	return s.resolveLegacy(ctx, id, `UPDATE requests SET status='error', terminal_reason='expired', resolved_at=? WHERE request_id=? AND status='pending' AND request_expires_at<=?`, now.Unix(), id, now.Unix())
+	return s.resolveLegacy(ctx, id, &now, `UPDATE requests SET status='error', terminal_reason='expired', resolved_at=? WHERE request_id=? AND status='pending' AND request_expires_at<=?`, now.Unix(), id, now.Unix())
 }
 
 // CancelLegacy ends a pending request without waiting for vote audit completion.
 func (s *DB) CancelLegacy(ctx context.Context, id string, now time.Time) (bool, []*store.Vote, error) {
-	return s.resolveLegacy(ctx, id, `UPDATE requests SET status='denied', terminal_reason='canceled', resolved_at=? WHERE request_id=? AND status='pending'`, now.Unix(), id)
+	return s.resolveLegacy(ctx, id, nil, `UPDATE requests SET status='denied', terminal_reason='canceled', resolved_at=? WHERE request_id=? AND status='pending'`, now.Unix(), id)
 }
 
-func (s *DB) resolveLegacy(ctx context.Context, id, query string, args ...any) (bool, []*store.Vote, error) {
+func (s *DB) resolveLegacy(ctx context.Context, id string, expiredAt *time.Time, query string, args ...any) (bool, []*store.Vote, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return false, nil, fmt.Errorf("resolve legacy: begin: %w", err)
@@ -61,6 +64,11 @@ func (s *DB) resolveLegacy(ctx context.Context, id, query string, args ...any) (
 	if err := rows.Close(); err != nil {
 		return false, nil, fmt.Errorf("resolve legacy: close votes: %w", err)
 	}
+	if expiredAt != nil {
+		if err := snapshotLegacyExpiry(ctx, tx, id, *expiredAt, votes); err != nil {
+			return false, nil, err
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return false, nil, fmt.Errorf("resolve legacy: commit: %w", err)
 	}
@@ -68,3 +76,13 @@ func (s *DB) resolveLegacy(ctx context.Context, id, query string, args ...any) (
 }
 
 var _ store.LegacyResolver = (*DB)(nil)
+
+func snapshotLegacyExpiry(ctx context.Context, tx *sql.Tx, id string, at time.Time, votes []*store.Vote) error {
+	evidence, err := json.Marshal(votes)
+	if err != nil {
+		return err
+	}
+	key := fmt.Sprintf("legacy-expiry:%x:%d", sha256.Sum256([]byte(id)), at.Unix())
+	_, err = tx.ExecContext(ctx, `INSERT INTO legacy_expiry_outbox(event_key,request_id,resolved_at,evidence) VALUES (?,?,?,?)`, key, id, at.Unix(), evidence)
+	return err
+}

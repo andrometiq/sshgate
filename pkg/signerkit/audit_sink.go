@@ -62,7 +62,8 @@ type DurableAuditSink interface {
 // AuditCall is a backwards-compatible discriminated union. Lifecycle == "" is
 // an incoming hosted sign request on the machine plane, before any human has
 // voted; RequestID, HostKeyFP, and Command carry that request. A non-empty
-// Lifecycle starting with "approval-" is an approval lifecycle event. Other
+// Lifecycle starting with "approval-" is an approval lifecycle event;
+// "legacy-expired" carries terminal vote evidence in LegacyExpiry. Other
 // non-empty values are custody transitions ("lock", "unlock", or "rotate"); Reason and
 // Operator carry the authorization context and the request fields are empty.
 // Existing AuditSink implementations that only understand hosted calls remain
@@ -92,8 +93,24 @@ type AuditCall struct {
 	// Recovery is non-nil only for the durable sink's audit_log_recovered
 	// lifecycle record. Its position and omitempty tag preserve every existing
 	// ordinary, custody, and policy encoding.
-	Recovery *AuditRecoveryMetadata      `json:"recovery,omitempty"`
-	Approval *approvalplan.AuditMetadata `json:"approval,omitempty"`
+	Recovery     *AuditRecoveryMetadata      `json:"recovery,omitempty"`
+	Approval     *approvalplan.AuditMetadata `json:"approval,omitempty"`
+	LegacyExpiry *LegacyExpiryAuditMetadata  `json:"legacy_expiry,omitempty"`
+}
+
+// LegacyExpiryAuditMetadata snapshots terminal evidence, including unaudited votes.
+type LegacyExpiryAuditMetadata struct {
+	EventKey   string                  `json:"event_key"`
+	ResolvedAt time.Time               `json:"resolved_at"`
+	Votes      []LegacyExpiryAuditVote `json:"votes"`
+}
+
+type LegacyExpiryAuditVote struct {
+	Operator    string    `json:"operator"`
+	Decision    string    `json:"decision"`
+	AuthnMethod string    `json:"authn_method"`
+	Time        time.Time `json:"time"`
+	Audited     bool      `json:"audited"`
 }
 
 // AuditVerdict is the event recorded for every vote on the hosted human plane.

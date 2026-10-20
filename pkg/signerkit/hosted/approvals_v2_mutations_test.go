@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/karthikeyan5/sshgate/pkg/signerkit"
@@ -713,18 +714,20 @@ func (s *approvalDeadlineRead) ReadV2(ctx context.Context, key sqlitestore.V2Key
 func TestApprovalV2ClaimFlushDeadline(t *testing.T) {
 	for _, mode := range []string{"blocked", "notifications"} {
 		t.Run(mode, func(t *testing.T) {
-			e, db, _ := approvalEngineFixture(t, false)
-			submitApproval(t, e, 1)
-			approvalVote(t, e, db, "operator", ap.VoteDeny, ap.VoteFlags{DenyVeto: true})
-			r := readApproval(t, db, 1).Record
-			store := &approvalDeadlineRead{ApprovalV2Store: db, engine: e, mode: mode}
-			e.config.Store = store
-			start := time.Now()
-			answer, err := e.Claim(context.Background(), approvalKey(1), ap.Claim{Token: statetest.Token(statetest.ID(1)), PlanHash: r.Header.PlanHash})
-			elapsed := time.Since(start)
-			if err != nil || answer.Claim != ap.ClaimNotReady || elapsed < 1800*time.Millisecond || elapsed > 2600*time.Millisecond || store.finalReads != 1 || store.expiredReads != 0 {
-				t.Fatalf("deadline: %+v, %v, elapsed %s, final retries %d", answer, err, elapsed, store.finalReads)
-			}
+			synctest.Test(t, func(t *testing.T) {
+				e, db, _ := approvalEngineFixture(t, false)
+				submitApproval(t, e, 1)
+				approvalVote(t, e, db, "operator", ap.VoteDeny, ap.VoteFlags{DenyVeto: true})
+				r := readApproval(t, db, 1).Record
+				store := &approvalDeadlineRead{ApprovalV2Store: db, engine: e, mode: mode}
+				e.config.Store = store
+				start := time.Now()
+				answer, err := e.Claim(context.Background(), approvalKey(1), ap.Claim{Token: statetest.Token(statetest.ID(1)), PlanHash: r.Header.PlanHash})
+				elapsed := time.Since(start)
+				if err != nil || answer.Claim != ap.ClaimNotReady || elapsed < 1800*time.Millisecond || elapsed > 2600*time.Millisecond || store.finalReads != 1 || store.expiredReads != 0 {
+					t.Fatalf("deadline: %+v, %v, elapsed %s, final retries %d", answer, err, elapsed, store.finalReads)
+				}
+			})
 		})
 	}
 }

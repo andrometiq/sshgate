@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"errors"
+	"log"
 	"sync"
 	"time"
 
@@ -26,6 +27,8 @@ type ApprovalV2Store interface {
 	CountV2(context.Context, *sql.Tx) (sqlitestore.V2Counts, error)
 	ReadV2(context.Context, sqlitestore.V2Key) (*sqlitestore.V2Row, error)
 	ListV2(context.Context, string, string, *sqlitestore.V2Cursor, int) ([]*sqlitestore.V2Row, error)
+	DueV2(context.Context, time.Time, int) ([]*sqlitestore.V2Row, error)
+	UnflushedV2(context.Context, int) ([]*sqlitestore.V2Row, error)
 }
 
 // ApprovalV2Config contains only signer-owned inputs. Freezer and SnapshotBuilder
@@ -41,17 +44,32 @@ type ApprovalV2Config struct {
 	AssistTimeout     time.Duration
 	MaxFullRows       int64
 	MaxRows           int64
+	// Use ProcessAuditSink for file output; custom sinks must honor cancellation.
+	AuditSink signerkit.AuditSink
+	Logger    *log.Logger
+	// LegacyStore must share Store's database; the hosted expiry outbox is atomic with its transitions.
+	LegacyStore interface {
+		ListPending(context.Context) ([]*store.Request, error)
+		ExpireLegacy(context.Context, string, time.Time) (bool, []*store.Vote, error)
+	}
 }
 
 // ApprovalV2Engine has no record cache or local-engine recovery latch. After an
 // uncertain commit, the next request re-reads SQLite's committed state.
 type ApprovalV2Engine struct {
-	config     ApprovalV2Config
-	epoch      string
-	commit     func(*sql.Tx) error
-	mu         sync.Mutex // waiter registration only; never held during database I/O
-	waiters    map[sqlitestore.V2Key]map[chan struct{}]struct{}
-	flushNudge chan struct{}
+	config            ApprovalV2Config
+	epoch             string
+	commit            func(*sql.Tx) error
+	mu                sync.Mutex // waiter registration only; never held during database I/O
+	waiters           map[sqlitestore.V2Key]map[chan struct{}]struct{}
+	flushNudge        chan struct{}
+	writerAdmission   chan struct{}
+	grantsMu          sync.Mutex
+	newest            map[approvalGrantOwner]sqlitestore.V2Key
+	grants            map[sqlitestore.V2Key]ap.Held
+	runMu             sync.Mutex
+	running           bool
+	legacyAuditCursor string
 }
 
 func NewApprovalV2Engine(c ApprovalV2Config) (*ApprovalV2Engine, error) {
@@ -84,11 +102,18 @@ func NewApprovalV2Engine(c ApprovalV2Config) (*ApprovalV2Engine, error) {
 		c.Settings.Retention = 7 * 24 * time.Hour
 	}
 	c.Settings.Hosted = true
+	if c.Logger == nil {
+		c.Logger = log.Default()
+	}
 	epoch, err := ap.NewEpoch(rand.Reader)
 	if err != nil {
 		return nil, err
 	}
-	return &ApprovalV2Engine{config: c, epoch: epoch, commit: func(tx *sql.Tx) error { return tx.Commit() }, waiters: make(map[sqlitestore.V2Key]map[chan struct{}]struct{}), flushNudge: make(chan struct{}, 1)}, nil
+	return &ApprovalV2Engine{
+		config: c, epoch: epoch, writerAdmission: make(chan struct{}, 1), commit: func(tx *sql.Tx) error { return tx.Commit() },
+		waiters: make(map[sqlitestore.V2Key]map[chan struct{}]struct{}), flushNudge: make(chan struct{}, 1),
+		newest: make(map[approvalGrantOwner]sqlitestore.V2Key), grants: make(map[sqlitestore.V2Key]ap.Held),
+	}, nil
 }
 
 // IsApprovalBusy recognizes SQLite primary and extended BUSY codes through
@@ -101,6 +126,9 @@ func IsApprovalBusy(err error) bool {
 func approvalReadError(err error) error {
 	if err == nil {
 		return nil
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return errors.Join(&ap.CodeError{Code: ap.CodeStorageUncertain}, err)
 	}
 	if IsApprovalBusy(err) {
 		return &ap.CodeError{Code: ap.CodeBusy}
@@ -127,12 +155,18 @@ func (e *ApprovalV2Engine) now() ap.Now {
 }
 
 func (e *ApprovalV2Engine) view(rec ap.R1, now ap.Now) ap.Summary {
-	return ap.View(rec, now, e.epoch, e.config.Settings, false)
+	return ap.View(rec, now, e.epoch, e.config.Settings, e.grantLive(rec))
 }
 
 // transact is the sole mutation path. Preparation resolves inputs using tx;
 // Apply owns Clock ordering, including Delete's exception. Effects follow COMMIT.
 func (e *ApprovalV2Engine) transact(ctx context.Context, key sqlitestore.V2Key, prepare func(*sql.Tx, *ap.R1, ap.Now) (ap.Command, ap.Inputs, error)) (ap.R1, ap.Answer, error) {
+	select {
+	case e.writerAdmission <- struct{}{}:
+		defer func() { <-e.writerAdmission }()
+	case <-ctx.Done():
+		return ap.R1{}, ap.Answer{}, approvalReadError(ctx.Err())
+	}
 	tx, err := e.config.Store.BeginV2(ctx)
 	if err != nil {
 		return ap.R1{}, ap.Answer{}, approvalReadError(err)
@@ -147,11 +181,15 @@ func (e *ApprovalV2Engine) transact(ctx context.Context, key sqlitestore.V2Key, 
 		before = &row.Record
 	}
 	now := e.now()
+	e.expireGrants(now)
 	command, inputs, err := prepare(tx, before, now)
 	if err != nil {
 		return ap.R1{}, ap.Answer{}, err
 	}
 	inputs.Epoch, inputs.Settings = e.epoch, e.config.Settings
+	if before != nil {
+		inputs.GrantLive = e.grantLive(*before)
+	}
 	after, answer := ap.Apply(before, command, now, inputs)
 	if answer.Code == ap.CodeRecordCorrupt {
 		return ap.R1{}, ap.Answer{}, approvalAnswerError(answer)
@@ -161,20 +199,32 @@ func (e *ApprovalV2Engine) transact(ctx context.Context, key sqlitestore.V2Key, 
 	if answer.MintRequired {
 		return after, ap.Answer{Claim: ap.ClaimNotReady}, nil
 	}
-	if !answer.Changed && !answer.Removed {
+	// Settings can invalidate projections without changing an R1 slot.
+	_, refresh := command.(ap.Tick)
+	refresh = refresh && row != nil
+	if refresh && !answer.Changed && !answer.Removed {
+		view := e.view(after, now)
+		due := ap.Next(after, now, e.epoch, e.config.Settings, inputs.GrantLive).DueAt
+		refresh = approvalProjectionChanged(row, view, due)
+	}
+	if !answer.Changed && !answer.Removed && !refresh {
 		return after, answer, approvalAnswerError(answer)
 	}
 	if answer.Removed {
 		err = e.config.Store.DeleteV2(ctx, tx, key)
 	} else {
-		err = e.config.Store.PutV2(ctx, tx, key, after, sqlitestore.V2Projection{Now: now, Epoch: e.epoch, Settings: e.config.Settings})
+		err = e.config.Store.PutV2(ctx, tx, key, after, sqlitestore.V2Projection{Now: now, Epoch: e.epoch, Settings: e.config.Settings, GrantLive: inputs.GrantLive || (after.Header.Kind == ap.KindStandingGrant && (before == nil || before.Header.Decision == nil) && ap.GrantLive(after, now, e.epoch, true))})
 	}
 	if err != nil {
 		return ap.R1{}, ap.Answer{}, approvalTransactionError(err)
 	}
 	if err := e.commit(tx); err != nil {
+		e.grantsMu.Lock()
+		clear(e.grants)
+		e.grantsMu.Unlock()
 		return ap.R1{}, ap.Answer{}, &ap.CodeError{Code: ap.CodeStorageUncertain}
 	}
+	e.updateGrant(before, after, answer.Removed, now)
 	e.mu.Lock()
 	for ready := range e.waiters[key] {
 		select {
@@ -183,7 +233,7 @@ func (e *ApprovalV2Engine) transact(ctx context.Context, key sqlitestore.V2Key, 
 		}
 	}
 	e.mu.Unlock()
-	if !answer.Removed && ap.Unflushed(after) {
+	if !answer.Removed && ap.Unflushed(after) && (before == nil || after.Header.OutboxSeq > before.Header.OutboxSeq) {
 		select {
 		case e.flushNudge <- struct{}{}:
 		default:
@@ -214,6 +264,17 @@ func (e *ApprovalV2Engine) Submit(ctx context.Context, client, sub string, draft
 		return ap.Summary{}, err
 	}
 	key := sqlitestore.V2Key{ClientID: client, SubPrincipal: sub, RequestID: draft.RequestID}
+	// Reclamation is outside the admission transaction. Recheck all caps inside it.
+	if _, err := e.config.Store.ReadV2(ctx, key); errors.Is(err, store.ErrNotFound) {
+		if err := ap.CheckSubmitWindow(e.now().Wall, draft.SubmitNotAfter, ap.HostedSkew); err != nil {
+			return ap.Summary{}, err
+		}
+		if err := e.reclaimForSubmit(ctx); err != nil {
+			return ap.Summary{}, err
+		}
+	} else if err != nil {
+		return ap.Summary{}, approvalReadError(err)
+	}
 	after, _, err := e.transact(ctx, key, func(tx *sql.Tx, before *ap.R1, now ap.Now) (ap.Command, ap.Inputs, error) {
 		command := ap.Submit{Draft: draft, Allowance: ap.HostedSkew}
 		if before != nil {
@@ -393,7 +454,9 @@ func (e *ApprovalV2Engine) Report(ctx context.Context, key sqlitestore.V2Key, re
 
 // Claim waits up to two seconds for the decision audit, then retries once.
 // Waiting and custody I/O hold no transaction; Apply rechecks guards under the
-// writer lock and returns the winning persisted signature set.
+// writer lock and returns the winning persisted signature set. Cancellation and
+// deadline errors map to storage_uncertain, as store reads do, retaining the
+// context error for errors.Is. They never commit a permanent mint failure.
 func (e *ApprovalV2Engine) Claim(ctx context.Context, key sqlitestore.V2Key, claim ap.Claim) (ap.Answer, error) {
 	answer, err := e.claimOnce(ctx, key, claim)
 	if err != nil || answer.Claim != ap.ClaimNotReady {
@@ -405,7 +468,7 @@ func (e *ApprovalV2Engine) Claim(ctx context.Context, key sqlitestore.V2Key, cla
 	defer unregister()
 	for {
 		if err := ctx.Err(); err != nil {
-			return ap.Answer{}, err
+			return ap.Answer{}, approvalReadError(err)
 		}
 		if waitCtx.Err() != nil {
 			break
@@ -414,7 +477,7 @@ func (e *ApprovalV2Engine) Claim(ctx context.Context, key sqlitestore.V2Key, cla
 		row, err := e.config.Store.ReadV2(waitCtx, key)
 		if err != nil {
 			if ctx.Err() != nil {
-				return ap.Answer{}, ctx.Err()
+				return ap.Answer{}, approvalReadError(ctx.Err())
 			}
 			if waitCtx.Err() != nil {
 				break
@@ -451,8 +514,14 @@ func (e *ApprovalV2Engine) claimOnce(ctx context.Context, key sqlitestore.V2Key,
 			return ap.Answer{}, &ap.CodeError{Code: ap.CodeLifecycleUnavailable}
 		}
 		inputs.Minted, err = e.config.Minter.Mint(ctx, row.Record.Payload.Plan, row.Record.Header.Decision.DecidedAt)
+		if ctx.Err() != nil {
+			return ap.Answer{}, approvalReadError(ctx.Err())
+		}
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return ap.Answer{}, approvalReadError(err)
+		}
 		var coded *ap.CodeError
-		if errors.As(err, &coded) && coded.Code == ap.CodeRecordCorrupt {
+		if errors.As(err, &coded) && (coded.Code == ap.CodeRecordCorrupt || coded.Code == ap.CodeLifecycleUnavailable) {
 			return ap.Answer{}, err
 		}
 		inputs.MintFailed = err != nil
@@ -517,4 +586,16 @@ func (m ApprovalV2Minter) Mint(ctx context.Context, plan ap.ApprovalPlanV1, deci
 		signatures[i] = result.Sig
 	}
 	return signatures, nil
+}
+
+func approvalProjectionChanged(row *sqlitestore.V2Row, view ap.Summary, due time.Time) bool {
+	status := string(view.ApprovalStatus)
+	if view.ExecutionStatus != ap.ExecutionNone && view.ExecutionStatus != ap.ExecutionNotApplicable {
+		status = string(view.ExecutionStatus)
+	}
+	sameDue := row.NextDueAt == nil && due.IsZero()
+	if row.NextDueAt != nil && !due.IsZero() {
+		sameDue = row.NextDueAt.Unix() == due.Unix()
+	}
+	return row.Class != view.Class || row.ViewStatus != status || !sameDue
 }
