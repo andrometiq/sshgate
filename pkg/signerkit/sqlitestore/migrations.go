@@ -181,6 +181,15 @@ CREATE TABLE IF NOT EXISTS totp_replay (
 		SQL:     approvalMigration7SQL,
 		Apply:   applyMigration7,
 	},
+	{Version: 8, Name: "legacy_expiry_outbox", SQL: `
+CREATE TABLE IF NOT EXISTS legacy_expiry_outbox (
+ event_key TEXT PRIMARY KEY,
+ request_id TEXT NOT NULL,
+ resolved_at INTEGER NOT NULL,
+ evidence BLOB NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_legacy_expiry_outbox_due ON legacy_expiry_outbox(resolved_at,request_id);
+`},
 }
 
 // applyMigration2 makes the one non-idempotent part of migration 2 safe to
