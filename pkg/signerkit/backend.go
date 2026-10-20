@@ -19,15 +19,9 @@ type ApprovalRequest struct {
 	Submitted time.Time
 }
 
-// GrantApprovalRequest is the unit of work submitted to a Backend's
-// RequestGrant: a request for the human to mint a STANDING GRANT. Unlike
-// an ApprovalRequest (which approves specific commands once), approving a
-// grant authorises the signer to auto-sign matching commands for the
-// whole Duration WITHOUT further taps — so the backend MUST render it
-// with a distinct, scary UX that makes that consequence unmistakable.
-//
-//   - Scope == "all"      → any command on Alias auto-signs.
-//   - Scope == "commands" → only the exact strings in Commands auto-sign.
+// GrantApprovalRequest requests a legacy v1 grant. Approval retains its scope
+// for listing and revocation, but never auto-signs a v1 request. The backend
+// must make that limitation clear on the grant card.
 //
 // Duration is the requested window; the signer caps it at 24h before
 // calling and records expiry = now + Duration on approval. RequestID

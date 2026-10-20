@@ -27,9 +27,9 @@ import (
 )
 
 // MaxGrantDuration is the hard ceiling on a standing grant's lifetime.
-// A request for a longer window is rejected at creation; the signer will
-// never auto-sign past a grant's expiry, and the gate still independently
-// caps every individual signature at sigwire.MaxSigValidity regardless.
+// A request for a longer window is rejected at creation. v1 grants never
+// authorize signing (OQ3); a v2 grant covers nothing past its expiry, and the
+// gate still independently caps every signature at sigwire.MaxSigValidity.
 const MaxGrantDuration = 24 * time.Hour
 
 // maxXferLabelLen caps the display label on a register_xfer_key request. It is
@@ -39,15 +39,8 @@ const MaxGrantDuration = 24 * time.Hour
 // — bannerLabel's control-char rejection. The CLI also caps friendlier-side.
 const maxXferLabelLen = 64
 
-// grant is a standing grant: in-memory signer state recorded after ONE
-// human approval that lets matching (alias, command) sign requests
-// auto-approve WITHOUT prompting during the window. It never appears on
-// the wire and the gate is unaware of it — auto-signed signatures are
-// byte-identical to human-approved ones. Grants are in-memory only, so a
-// signer restart drops every grant.
-//
-//   - scope == "all"      → any command on alias auto-signs.
-//   - scope == "commands" → only an EXACT string in commands auto-signs.
+// grant is a legacy v1 grant retained for listing and revocation. It never
+// authorises signing. Grants are in-memory only; a signer restart drops them.
 //
 // Fields are written once at creation (under grantsMu.Lock) and read-only
 // thereafter, so a snapshot copied out under RLock is safe to inspect
@@ -120,7 +113,7 @@ type Daemon struct {
 	// alias (one grant per alias — a new grant for an alias replaces the
 	// old). It is lazily initialised on first create so a Daemon built as
 	// a struct literal (cmd/main, tests) needs no extra wiring. All access
-	// goes through grantsMu: reads (matchGrant) take RLock, create/revoke
+	// goes through grantsMu: reads (list_grants) take RLock, create/revoke
 	// take Lock. The table is process-memory only — it is never persisted,
 	// so a signer restart drops every grant (the "stop the signer kills
 	// grants" property).
@@ -287,7 +280,8 @@ type signRequestCmd struct {
 // approved; Error is populated only on error.
 //
 // AuthMode (F4) reports HOW the request was authorised — "human" for a
-// real-time Telegram tap, "grant:<id>" for a standing-grant auto-sign,
+// real-time Telegram tap, "grant:<id>" for a v2 decision made under a
+// standing grant (v1 sign never uses a grant; OQ3),
 // empty for any non-approved outcome. It rides the gate-INVISIBLE
 // MCP↔signer socket RPC, NOT the signed payload: a grant signature is
 // byte-identical to a human one by design, so the gate neither sees nor
@@ -314,7 +308,7 @@ type signResponse struct {
 //
 //   - approved==false → "" (denied / timeout / error / a read — NOTHING was
 //     authorised, regardless of any approver name the backend carries).
-//   - "grant:<id>"    → returned verbatim (a standing-grant auto-sign).
+//   - "grant:<id>"    → returned verbatim (a v2 grant decision; never v1 sign).
 //   - any other non-empty value → "human" (a real-time tap; the approver name
 //     lives in approved_by, the HOW is just "human").
 //   - approved==true but empty approvedBy → "" (no authoriser recorded).
@@ -576,9 +570,8 @@ func (d *Daemon) HandleSignRequest(ctx context.Context, conn io.ReadWriter) erro
 		// sign a leg whose recipient came from the AGENT — exactly the hole this
 		// feature closes. Transfers MUST go through the dedicated "transfer" kind
 		// (handleTransfer), where the signer sources the pubkeys itself. This
-		// check is before matchGrant, so a standing grant can never reach it
-		// either. isAdminVerb already forces a human prompt for these, but that
-		// is not enough — we reject them outright on this path.
+		// check is before approval: a human prompt is not enough — we reject
+		// these verbs outright on this path.
 		if isTransferVerb(c.Cmd) {
 			return d.respondError(conn, req.RequestID, fmt.Sprintf(
 				"commands[%d] is a transfer verb; transfers must use the \"transfer\" request kind, not \"sign\"", i))
@@ -601,8 +594,7 @@ func (d *Daemon) HandleSignRequest(ctx context.Context, conn io.ReadWriter) erro
 	// Lone-admin-verb invariant: an SSHGATE_ admin verb (SSHGATE_UPDATE /
 	// SSHGATE_REVOKE) MUST be the ONLY command in a sign request. Reject a
 	// request that bundles an admin verb with any sibling command BEFORE any
-	// prompting or signing. Rationale: an admin verb correctly forces a human
-	// prompt (matchGrant carve-out), but the update approval banner renders only
+	// prompting or signing. The update approval banner renders only
 	// the update command — a crafted multi-command request could therefore hide
 	// sibling writes/reveals behind a clean "GATE UPDATE" banner and get them all
 	// signed under one tap (signAll signs every command). Enforcing "admin verb ⇒
@@ -617,15 +609,6 @@ func (d *Daemon) HandleSignRequest(ctx context.Context, conn io.ReadWriter) erro
 					"commands[%d] is an SSHGATE_ admin verb; an admin verb must be the sole command in a sign request", i))
 			}
 		}
-	}
-
-	// Standing-grant auto-approve: if EVERY command matches a live grant
-	// for its alias (and none requests reveal or network — both always prompt), skip
-	// the human prompt entirely and synthesise an approval. respond then
-	// signs a NORMAL per-command payload (byte-identical to a
-	// human-approved one), so the gate never learns a grant was involved.
-	if id, ok := d.matchGrant(req.Commands); ok {
-		return d.respond(conn, req, Result{Status: StatusApproved, ApprovedBy: "grant:" + id})
 	}
 
 	resultCh, prepared, err := d.legacyApprove(ctx, apReq, nil)
@@ -700,7 +683,7 @@ func (d *Daemon) respond(conn io.Writer, req signRequest, result Result) error {
 	// carries the denier's name on a DENY too), so the socket response and the
 	// audit row never disagree on how a write was authorised. It is empty for
 	// denied/timeout/error, "human" for a real-time tap, and "grant:<id>" for a
-	// standing-grant auto-sign.
+	// v2 grant decision (v1 sign never uses a grant; OQ3).
 	resp := signResponse{RequestID: req.RequestID, Status: result.Status.String(), AuthMode: authMode(result.Status == StatusApproved, result.ApprovedBy), ProtoVersion: sigwire.ProtoVersion}
 
 	if result.Status == StatusApproved {
@@ -992,8 +975,7 @@ func (d *Daemon) handleListGrants(ctx context.Context, conn io.ReadWriter, line 
 		if req.Alias != "" && alias != req.Alias {
 			continue
 		}
-		// Never report a dead/phantom-expired grant. Mirrors matchGrant's
-		// expiry guard: at-or-before now() is dead.
+		// Never report an expired grant: at-or-before now() is dead.
 		if !g.expiry.After(now) {
 			continue
 		}
@@ -1490,88 +1472,8 @@ func (d *Daemon) auditRegisterXferKey(req registerXferKeyRequest, status, approv
 	}
 }
 
-// matchGrant reports whether EVERY command in cmds is covered by a live
-// standing grant for its alias, returning the matched grant id for the
-// audit trail. It is the auto-approve gate: when ok is true the daemon
-// signs without prompting.
-//
-// Security-critical guards, in order:
-//
-//   - REVEAL ALWAYS PROMPTS. If ANY command is a SECRET-REVEAL, the whole
-//     request falls through to the human prompt — a grant NEVER
-//     auto-signs a reveal. This is checked first/outermost so no later
-//     logic can accidentally auto-approve a reveal.
-//   - NO PARTIAL AUTO-APPROVE. A single command that does not match a
-//     live grant fails the whole request (returns ok=false), so the
-//     human prompt covers the full set rather than a subset.
-//   - EXACT-STRING SCOPE. For scope=="commands", c.Cmd must equal a
-//     stored command string exactly — no prefix/substring/argument
-//     tolerance. scope=="all" matches any command on that alias.
-//   - EXPIRY. A grant whose expiry is at-or-before now() is dead and
-//     matches nothing (the signer never auto-signs past a grant window).
-//   - PER-ALIAS. Each command is checked against the grant for ITS OWN
-//     alias (c.Server), so a grant for alias X can never auto-sign a
-//     command aimed at alias Y.
-//
-// The returned id is the grant matched by the FIRST command. run /
-// run_batch always target a single alias, so all commands share one
-// grant and the first id is the right audit anchor; if a future
-// multi-alias request had every command covered by its own alias's
-// grant, recording the first is still an accurate "auto-approved under a
-// grant" marker.
-func (d *Daemon) matchGrant(cmds []signRequestCmd) (id string, ok bool) {
-	// Reveal, network and administrative verbs always force a human prompt.
-	// A grant must NEVER auto-sign an admin verb: the gate dispatches on the
-	// command prefix regardless of which signer path
-	// minted the signature, so this carve-out is the ONLY control that stops a
-	// scope=all grant from silently authorizing a gate replacement or teardown
-	// (see docs/proposed/sshgate-update-verb-2026-07.md Finding 1). Checked
-	// first/outermost, like the reveal guard, so no later grant logic can
-	// re-admit it; it fails safe (over-prompt, never under-prompt).
-	for _, c := range cmds {
-		if c.Reveal || c.Net || isAdminVerb(c.Cmd) {
-			return "", false
-		}
-	}
-	if len(cmds) == 0 {
-		return "", false
-	}
-
-	d.grantsMu.RLock()
-	defer d.grantsMu.RUnlock()
-	if d.grants == nil {
-		return "", false
-	}
-
-	now := d.now()
-	var firstID string
-	for i, c := range cmds {
-		g, exists := d.grants[c.Server]
-		if !exists {
-			return "", false
-		}
-		if !g.expiry.After(now) {
-			// Expired (or exactly at expiry): dead grant, prompt.
-			return "", false
-		}
-		if !grantCovers(g, c.Cmd) {
-			return "", false
-		}
-		if i == 0 {
-			firstID = g.id
-		}
-	}
-	return firstID, true
-}
-
-// isAdminVerb reports whether cmd is (or would dispatch to) an SSHGate
-// administrative gate verb — SSHGATE_REVOKE (gate teardown) or
-// SSHGATE_UPDATE (in-place gate-binary replacement). It matches the bare
-// "SSHGATE_" prefix: the gate keys its admin dispatch on this prefix
-// (main.go), no legitimate shell command begins with it, and a stray match
-// only forces a human prompt (fail-safe). It is the guard that keeps a
-// standing grant from ever auto-signing a gate-control verb; the human tap
-// (and, for updates, the scary approval banner) is then mandatory.
+// isAdminVerb identifies the gate admin prefix for the lone-admin rule and
+// network refusal. Unknown verbs fail closed under the same prefix.
 func isAdminVerb(cmd string) bool {
 	return strings.HasPrefix(cmd, "SSHGATE_")
 }
@@ -1579,32 +1481,10 @@ func isAdminVerb(cmd string) bool {
 // isTransferVerb reports whether cmd is a box→box transfer verb
 // (SSHGATE_XFER_SEND / SSHGATE_XFER_RECV, or any future SSHGATE_XFER_*). These
 // are rejected on the generic sign path (they must go through the dedicated
-// "transfer" kind) and are a strict subset of isAdminVerb (so matchGrant also
-// refuses to auto-sign them). It keys on the shared xferwire.VerbPrefix so the
-// signer and the gate can never disagree on what counts as a transfer verb.
+// "transfer" kind) and are a strict subset of isAdminVerb. The shared
+// xferwire.VerbPrefix keeps signer and gate classification consistent.
 func isTransferVerb(cmd string) bool {
 	return strings.HasPrefix(cmd, xferwire.VerbPrefix)
-}
-
-// grantCovers reports whether grant g authorises command cmd. scope=="all"
-// covers everything on the alias; scope=="commands" covers ONLY an exact
-// string match (no patterns, no argument tolerance).
-func grantCovers(g grant, cmd string) bool {
-	switch g.scope {
-	case "all":
-		return true
-	case "commands":
-		for _, allowed := range g.commands {
-			if allowed == cmd {
-				return true
-			}
-		}
-		return false
-	default:
-		// Unknown scope never auto-approves (defensive; create-time
-		// validation already rejects anything but all/commands).
-		return false
-	}
 }
 
 // signAll signs each command in cmds with d.Key and returns the wire-
@@ -1734,9 +1614,8 @@ func newNonce() (string, error) {
 }
 
 // newGrantID returns a short random grant identifier prefixed "g_". It
-// is used purely as an audit anchor (ApprovedBy = "grant:<id>") — it is
-// never security-bearing, so 96 bits of entropy is ample. Uses the same
-// randRead seam as newNonce so a broken RNG surfaces as an error.
+// identifies a legacy grant for listing and audit; it never authorises signing.
+// It uses the same randRead seam as newNonce so RNG errors surface.
 func newGrantID() (string, error) {
 	var buf [12]byte
 	if _, err := randRead(buf[:]); err != nil {

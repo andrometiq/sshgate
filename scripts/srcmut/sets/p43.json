@@ -19,25 +19,6 @@
     ]
   },
   {
-    "id": "P-S-GRANT-NET",
-    "name": "grant-net-guard",
-    "package": "./src/signer",
-    "file": "pkg/signerkit/daemon.go",
-    "old": "if c.Reveal || c.Net || isAdminVerb(c.Cmd) {",
-    "new": "if c.Reveal || isAdminVerb(c.Cmd) {",
-    "red": [
-      {
-        "test": "TestMatchGrantNeverAutoSignsNet",
-        "markers": [
-          "grant-autosigned-net"
-        ]
-      }
-    ],
-    "green": [
-      "TestGrant_RevealNeverAutoSigned"
-    ]
-  },
-  {
     "id": "P-S-REMOTE-SIGNATURE",
     "name": "remote-signature-inputs",
     "package": "./src/signer",

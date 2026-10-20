@@ -31,7 +31,8 @@ import (
 // AuthMode records HOW the request was authorised — and ONLY when it was.
 // Decoupled from approved_by so the log carries both WHO ("approved_by") and
 // HOW ("auth_mode"): "human" = a real-time human approval; "grant:<id>" = a
-// standing-grant auto-sign; empty for a denied/timeout/error/read where
+// v2 decision under a standing grant (v1 sign never uses a grant; OQ3); empty
+// for a denied/timeout/error/read where
 // nothing was authorised. It is set via the authMode helper — the SAME helper
 // the socket response uses, gated on the approval state — so the audit and the
 // wire never drift, and a DENY never reads as "human".
