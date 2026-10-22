@@ -14,6 +14,7 @@ import (
 	"github.com/karthikeyan5/sshgate/src/gate"
 	"github.com/karthikeyan5/sshgate/src/gate/confine"
 	"github.com/karthikeyan5/sshgate/src/gate/confine/jailmut"
+	"github.com/karthikeyan5/sshgate/src/sigwire"
 )
 
 // Test-only seams, the same class as executeCommand and gateDirFn: package
@@ -182,6 +183,12 @@ func readSpecBase(pin pinState, requires, grant bool) confine.Spec {
 	return spec
 }
 
+type readFlags struct {
+	netGrant, envelope, expectNet bool
+}
+
+var readAdmittedHook func(pinState)
+
 // execRead runs a command the classifier called a read, on the Tier-1 and
 // signed read paths alike. Signed writes and admin verbs never reach it.
 //
@@ -192,27 +199,41 @@ func readSpecBase(pin pinState, requires, grant bool) confine.Spec {
 // unpinned host, for a read that does not require confinement, falls back to
 // an unconfined run: classifier-only, or the shell-free client for a daemon
 // read. Nothing that may have reached the command is ever run again.
-func execRead(audit *gate.AuditLogger, cmd, approval string, reveal bool) int {
+func execRead(audit *gate.AuditLogger, cmd, approval string, reveal bool, flags readFlags) int {
+	flags.netGrant = flags.netGrant || forceNetGrant
+	if _, matched := lane2Parse(cmd); matched && (flags.netGrant || flags.expectNet) && !jailmut.On("P-G-NET-DAEMON-READ") {
+		logf("%s", sigwire.GateDenyNetDaemonRead)
+		auditReadDenied(audit, cmd, "net:daemon-read", exitNoPermVal, flags)
+		return exitNoPermVal
+	}
 	pin := jailPinFn()
+	if readAdmittedHook != nil {
+		readAdmittedHook(pin)
+	}
 	if pin.damaged != "" {
 		reason, line := pin.denial()
 		logf("read jail unavailable: %s", line)
-		auditReadDenied(audit, cmd, reason, exitNoPermVal)
+		auditReadDenied(audit, cmd, reason, exitNoPermVal, flags)
 		return exitNoPermVal
 	}
-	grant := forceNetGrant
-	requires := requiresConfinement(pin, grant)
+	if flags.expectNet && !(pin.valid && pin.pin.Net) && !jailmut.On("P-G-ENVELOPE-EXPECT-NET") {
+		logf("%s", sigwire.GateDenyNetNotPermitted)
+		auditReadDenied(audit, cmd, "net:not-permitted", exitNoPermVal, flags)
+		return exitNoPermVal
+	}
+	grant := flags.netGrant
+	requires := requiresConfinement(pin, grant || flags.envelope)
 	plan, matched, refusal := lane2Plan(cmd, pin)
 	defer plan.Close()
 	if !matched {
 		spec := readSpec(pin, requires, grant)
 		read := &gate.ReadAudit{Enforcement: "kernel", Profile: spec.Profile, Pinned: pin.valid, AcceptFS: spec.AcceptFS, RequiresConfinement: requires}
-		return routeRead(audit, cmd, approval, reveal, pin, requires, execPlan{confine: &spec, read: read},
-			execPlan{read: &gate.ReadAudit{Enforcement: "classifier", Net: true}})
+		return routeRead(audit, cmd, approval, reveal, pin, requires, execPlan{netGrant: flags.netGrant, envelope: flags.envelope, confine: &spec, read: read},
+			execPlan{netGrant: flags.netGrant, envelope: flags.envelope, read: &gate.ReadAudit{Enforcement: "classifier", Net: true}})
 	}
 	if refusal != "" {
 		logf("daemon read refused: %s; nothing ran", refusal)
-		auditReadDenied(audit, cmd, "lane2:admit:"+refusal, exitNoPermVal)
+		auditReadDenied(audit, cmd, "lane2:admit:"+refusal, exitNoPermVal, flags)
 		return exitNoPermVal
 	}
 	if lane2AfterAdmitHook != nil {
@@ -220,8 +241,8 @@ func execRead(audit *gate.AuditLogger, cmd, approval string, reveal bool) int {
 	}
 	spec := lane2Spec(pin, requires, &plan)
 	read := &gate.ReadAudit{Enforcement: "daemon-read", Profile: spec.Profile, Pinned: pin.valid, AcceptFS: spec.AcceptFS, RequiresConfinement: requires}
-	return routeRead(audit, cmd, approval, reveal, pin, requires, execPlan{confine: &spec, lane2: plan.argv, execPath: plan.binary.path, read: read},
-		execPlan{argv: plan.argv, execPath: plan.binary.path, read: &gate.ReadAudit{Enforcement: "daemon-read", Net: true}})
+	return routeRead(audit, cmd, approval, reveal, pin, requires, execPlan{netGrant: flags.netGrant, envelope: flags.envelope, confine: &spec, lane2: plan.argv, execPath: plan.binary.path, read: read},
+		execPlan{netGrant: flags.netGrant, envelope: flags.envelope, argv: plan.argv, execPath: plan.binary.path, read: &gate.ReadAudit{Enforcement: "daemon-read", Net: true}})
 }
 
 // lane2AfterAdmitHook runs, in tests only, between a daemon read's admission
@@ -233,21 +254,22 @@ var lane2AfterAdmitHook func(*lane2Execution)
 // read ran there, the session ended, it is denied, or it falls back once to
 // the unconfined fallback plan, which never reached the command before.
 func routeRead(audit *gate.AuditLogger, cmd, approval string, reveal bool, pin pinState, requires bool, jailed, fallback execPlan) int {
+	flags := readFlags{netGrant: jailed.netGrant, envelope: jailed.envelope}
 	rc, res, setupErr := execAndAudit(audit, cmd, "read", approval, reveal, jailed)
 	route := routeAttempt(pin.valid, requires, res, setupErr)
 	switch {
 	case route.kernel:
 		return rc
 	case route.cancelled:
-		auditReadDenied(audit, cmd, route.reason, exitCancelled, res.Transport)
+		auditReadDenied(audit, cmd, route.reason, exitCancelled, flags, res.Transport)
 		return exitCancelled
 	case !route.fallback:
 		logf("read jail unavailable: %s", route.line)
-		auditReadDenied(audit, cmd, route.reason, exitNoPermVal, res.Transport)
+		auditReadDenied(audit, cmd, route.reason, exitNoPermVal, flags, res.Transport)
 		return exitNoPermVal
 	}
 	if sessionContext != nil && sessionContext.Err() != nil {
-		auditReadDenied(audit, cmd, "cancelled", exitCancelled, res.Transport)
+		auditReadDenied(audit, cmd, "cancelled", exitCancelled, flags, res.Transport)
 		return exitCancelled
 	}
 	// The command never started, so running it once, unconfined, is its

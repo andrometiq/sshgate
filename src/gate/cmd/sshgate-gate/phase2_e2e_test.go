@@ -124,28 +124,23 @@ func legConfineRequiredAbsent(t *testing.T, abi string) {
 	p.Finish()
 }
 
-// legConfineRequiredLane2: on a host pinned net=allow a daemon read requires
-// confinement, so it is refused before the daemon binary runs.
-// legConfineRequiredLane2: a daemon read that must run confined (here through
-// a network grant) is denied on a host whose jail is Absent; only the unpinned,
-// not-required case falls back to the unjailed client.
+// legConfineRequiredLane2 requires confinement through the unsigned envelope.
 func legConfineRequiredLane2(t *testing.T) {
 	p := newProof(t, "G-CONFINE-REQUIRED-LANE2")
 	bin := buildLane2Fixtures(t)
 	dir := t.TempDir()
 	withGateDir(t, dir)
-	withNetGrant(t)
 	withReadSpec(t, "native", func(spec *confine.Spec) { spec.ForceABI = confine.ForceNoLandlock })
-	mode := lane2Mode(t, "report")
-	out, err := exec.Command(filepath.Join(bin, "systemctl"), "status", mode).Output()
-	p.Control("lane2", err == nil && lane2Reported(out, mode))
+	out, err := exec.Command(filepath.Join(bin, "docker"), "ps").Output()
+	var exit *exec.ExitError
+	p.Control("lane2", errors.As(err, &exit) && exit.ExitCode() == 2 && strings.Contains(string(out), "SG-FIXTURE no mode"))
 
-	code, out2, _ := runWith(t, "systemctl status "+mode)
-	ran := lane2Reported([]byte(out2), mode)
+	code, out2, _ := runWith(t, "SSHGATE_READ1 confined docker ps")
+	ran := strings.Contains(out2, "SG-FIXTURE no mode")
 	p.Effect("lane2-ran", ran)
 	recs := auditRecords(t, dir)
 	denied := code == exitNoPermVal && out2 == "" && len(recs) == 1 && recs[0]["deny_reason"] == "jail:absent:landlock:ENOSYS"
-	p.Jailed("lane2", denied || ran && code == exitOK)
+	p.Jailed("lane2", denied || ran && code == 2)
 	p.Observed("lane2", ran || out2 == "")
 	p.Finish()
 }
@@ -169,7 +164,11 @@ func legUnmetFuse(t *testing.T, abi, name, pin string, grant bool) {
 		plantPin(t, dir, pin, 0o644)
 	}
 	mark := fixture.mark(t)
-	code, out := runTestGate(t, testGateConfig{Dir: dir, ABI: abi, Grant: grant}, tools.bin, "cat fuse-ioctl "+fixture.point+"/f 0x40085301 42")
+	command := "cat fuse-ioctl " + fixture.point + "/f 0x40085301 42"
+	if name == "G-ENVELOPE-UNMET" {
+		command = "SSHGATE_READ1 confined " + command
+	}
+	code, out := runTestGate(t, testGateConfig{Dir: dir, ABI: abi, Grant: grant}, tools.bin, command)
 	records := fixture.seal(t, mark)
 	recs := auditRecords(t, dir)
 	landed := slices.Contains(records, "IOCTL 42")
@@ -181,7 +180,7 @@ func legUnmetFuse(t *testing.T, abi, name, pin string, grant bool) {
 	case landed:
 		p.Effect("fuse-ioctl", true)
 		valid = code == exitOK && strings.Contains(out, "ioctl=ok")
-		if pin == "" && !grant {
+		if pin == "" && !grant && name != "G-ENVELOPE-UNMET" {
 			unmet, _ := recs[0]["label_clause_unmet"].([]any)
 			valid = valid && slices.ContainsFunc(unmet, func(clause any) bool { return strings.HasPrefix(fmt.Sprint(clause), "fs-view:fuse") })
 		}

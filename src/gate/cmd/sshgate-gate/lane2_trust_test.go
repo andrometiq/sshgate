@@ -23,7 +23,9 @@ func TestLane2TrustDefaults(t *testing.T) {
 		t.Fatal(err)
 	}
 	seen := map[string]bool{}
-	isSeam := func(name string) bool { return expected[name] != "" || name == "lane2AfterAdmitHook" }
+	isSeam := func(name string) bool {
+		return expected[name] != "" || (name == "lane2AfterAdmitHook" || name == "readAdmittedHook" || name == "envelopeParsedHook")
+	}
 	compact := func(s string) string {
 		expression, err := parser.ParseExpr(s)
 		if err != nil {
@@ -57,7 +59,7 @@ func TestLane2TrustDefaults(t *testing.T) {
 						continue
 					}
 					seen[name.Name] = true
-					if name.Name == "lane2AfterAdmitHook" {
+					if name.Name == "lane2AfterAdmitHook" || name.Name == "readAdmittedHook" || name.Name == "envelopeParsedHook" {
 						if len(n.Values) != 0 {
 							bad = true
 						}
@@ -81,7 +83,7 @@ func TestLane2TrustDefaults(t *testing.T) {
 			return true
 		})
 	}
-	for name := range expected {
+	for _, name := range []string{"readAdmittedHook", "envelopeParsedHook", "lane2AfterAdmitHook", "lane2BinDirs", "lane2TrustedUIDs", "lane2SystemEndpoints"} {
 		if !seen[name] {
 			t.Errorf("missing declaration %s", name)
 		}
@@ -91,7 +93,7 @@ func TestLane2TrustDefaults(t *testing.T) {
 func lane2TrustTarget(node ast.Node) bool {
 	switch n := node.(type) {
 	case *ast.Ident:
-		return n.Name == "lane2TrustedUIDs" || n.Name == "lane2SystemEndpoints" || n.Name == "lane2BinDirs" || n.Name == "lane2AfterAdmitHook"
+		return n.Name == "lane2TrustedUIDs" || n.Name == "lane2SystemEndpoints" || n.Name == "lane2BinDirs" || n.Name == "lane2AfterAdmitHook" || n.Name == "readAdmittedHook" || n.Name == "envelopeParsedHook"
 	case *ast.IndexExpr:
 		return lane2TrustTarget(n.X)
 	case *ast.SliceExpr:
@@ -135,7 +137,7 @@ func TestLane2TrustGuardMutations(t *testing.T) {
 	for _, source := range []string{
 		`lane2TrustedUIDs = []uint32{1000}`, `lane2TrustedUIDs[0] = 1000`,
 		`lane2SystemEndpoints["docker"] = []string{"/tmp/socket"}`, `lane2BinDirs[0] = "/tmp"`,
-		`lane2AfterAdmitHook = f`, `lane2TrustedUIDs[0]++`, `lane2TrustedUIDs[0]--`,
+		`readAdmittedHook = f`, `envelopeParsedHook = f`, `x := &envelopeParsedHook`, `lane2AfterAdmitHook = f`, `lane2TrustedUIDs[0]++`, `lane2TrustedUIDs[0]--`,
 		`append(lane2TrustedUIDs, 1000)`, `copy(lane2TrustedUIDs, other)`, `clear(lane2SystemEndpoints)`,
 		`delete(lane2SystemEndpoints,"docker")`, `x := &lane2TrustedUIDs[0]`,
 		`for _, lane2TrustedUIDs[0] = range []uint32{1000} {}`, `for lane2TrustedUIDs[0] = range other {}`,

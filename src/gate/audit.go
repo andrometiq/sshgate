@@ -219,11 +219,14 @@ type AuditRecord struct {
 	// all+full. Reveal's accepted exposure is the agent + transcript + approval
 	// chat, not this on-disk record.
 	Revealed bool `json:"revealed,omitempty"`
+	Envelope bool `json:"envelope,omitempty"`
 	// ReadAudit is how an executed read was enforced. nil (no keys) on every
 	// other record.
 	*ReadAudit
 	// DenyReason says why the read jail refused a read: "pin:damaged",
 	// "lane2:admit:<check>" for daemon-read admission,
+	// "envelope:bad", "envelope:not-a-read", "envelope:signed",
+	// "net:not-a-read", "net:not-permitted", "net:daemon-read",
 	// "pin:legacy-floor", "confine:required", "jail:absent:<stage>[:<ERRNO>]",
 	// "jail:failed:<stage>[:<ERRNO>]" (with ":after-start" when the read may
 	// have started before the jail failed), or "cancelled" when the session ended

@@ -209,6 +209,10 @@ func run() int {
 		return exitSoftware
 	}
 
+	if strings.HasPrefix(raw, sigwire.EnvelopePrefix) {
+		return runEnvelope(audit, raw)
+	}
+
 	// Decide whether the inbound line is signed.
 	signed := sigwire.IsSigned(raw)
 
@@ -229,7 +233,7 @@ func run() int {
 		kind := classify.Classify(raw)
 		if kind == classify.KindRead {
 			// Tier-1 read-only: unsigned read, never revealed.
-			return execRead(audit, raw, "unsigned", false)
+			return execRead(audit, raw, "unsigned", false, readFlags{})
 		}
 		// KindWrite or KindUnknown (empty/whitespace already handled
 		// upstream — anything else unknown falls through as write).
@@ -320,7 +324,7 @@ func run() int {
 		if signed {
 			status = "signed"
 		}
-		return execRead(audit, innerCmd, status, reveal)
+		return execRead(audit, innerCmd, status, reveal, readFlags{})
 	case classify.KindWrite, classify.KindUnknown:
 		// Fail-safe: unknown is treated as write (classify.Classify
 		// already returns KindWrite for the truly-unknown cases; an
@@ -567,6 +571,7 @@ func execAndAudit(audit *gate.AuditLogger, cmd, classification, approval string,
 		Stdout:    res.Stdout,
 		Stderr:    res.Stderr,
 		ReadAudit: plan.read,
+		Envelope:  plan.envelope,
 	}
 	if res.Transport.CleanupError == "" {
 		res.Transport.CleanupError = res.CleanupError
@@ -586,17 +591,18 @@ func execAndAudit(audit *gate.AuditLogger, cmd, classification, approval string,
 // neither is a classifier-only run. execPath is a daemon read's admitted
 // client.
 type execPlan struct {
-	execPath string
-	argv     []string
-	lane2    []string
-	confine  *confine.Spec
-	read     *gate.ReadAudit
+	netGrant, envelope bool
+	execPath           string
+	argv               []string
+	lane2              []string
+	confine            *confine.Spec
+	read               *gate.ReadAudit
 }
 
 // auditReadDenied records a read the read jail refused, with its deny
 // reason. The deny line must already be written: this finishes delivery.
-func auditReadDenied(audit *gate.AuditLogger, cmd, reason string, exit int, outcome ...gate.TransportMetadata) {
-	auditNoExecReason(audit, cmd, "read", "denied", exit, reason, outcome...)
+func auditReadDenied(audit *gate.AuditLogger, cmd, reason string, exit int, flags readFlags, outcome ...gate.TransportMetadata) {
+	auditNoExecReason(audit, cmd, "read", "denied", exit, reason, flags, outcome...)
 }
 
 // auditNoExec records a Tier-6a line for a command that ran NO /bin/sh
@@ -604,12 +610,13 @@ func auditReadDenied(audit *gate.AuditLogger, cmd, reason string, exit int, outc
 // signed admin verb handled internally (approval="signed"). Meta is nil
 // because there is no output metadata. The write is fail-open.
 func auditNoExec(audit *gate.AuditLogger, cmd, classification, approval string, exit int, outcome ...gate.TransportMetadata) {
-	auditNoExecReason(audit, cmd, classification, approval, exit, "", outcome...)
+	auditNoExecReason(audit, cmd, classification, approval, exit, "", readFlags{}, outcome...)
 }
 
-func auditNoExecReason(audit *gate.AuditLogger, cmd, classification, approval string, exit int, denyReason string, outcome ...gate.TransportMetadata) {
+func auditNoExecReason(audit *gate.AuditLogger, cmd, classification, approval string, exit int, denyReason string, flags readFlags, outcome ...gate.TransportMetadata) {
 	record := gate.AuditRecord{
 		DenyReason: denyReason,
+		Envelope:   flags.envelope,
 		TS:         time.Now().UTC().Unix(),
 		// Redact a secret embedded in the command string even on the no-exec
 		// (denial / admin-verb) path — a denied command can still carry a

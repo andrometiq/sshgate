@@ -221,9 +221,10 @@ func TestPhase2Tables(t *testing.T) {
 				p := newProof(t, "U-ExecReadConfineRequired")
 				changed := false
 				for name, pin := range pins {
-					for _, grant := range []bool{false, true} {
-						requires := requiresConfinement(pin, grant)
-						if want := pin.valid && pin.pin.Net || grant; requires != want {
+					for _, flags := range []readFlags{{}, {netGrant: true}, {envelope: true}, {envelope: true, expectNet: true}} {
+						grant := flags.netGrant
+						requires := requiresConfinement(pin, grant || flags.envelope)
+						if want := pin.valid && pin.pin.Net || grant || flags.envelope; requires != want {
 							t.Fatalf("%s grant=%v: requires = %v", name, grant, requires)
 						}
 						for _, class := range []confine.FailureClass{confine.Absent, confine.Failed} {
@@ -240,8 +241,9 @@ func TestPhase2Tables(t *testing.T) {
 				p := newProof(t, "U-SpecStrictSources")
 				changed := false
 				for name, pin := range pins {
-					for _, grant := range []bool{false, true} {
-						requires := requiresConfinement(pin, grant)
+					for _, flags := range []readFlags{{}, {netGrant: true}, {envelope: true}, {envelope: true, expectNet: true}} {
+						grant := flags.netGrant
+						requires := requiresConfinement(pin, grant || flags.envelope)
 						got := readSpec(pin, requires, grant)
 						want := confine.Spec{Profile: confine.ProfileROv1, Strict: pin.valid || requires, Net: pin.pin.Net || grant}
 						if pin.valid {
@@ -545,7 +547,7 @@ func TestRunReadCancelledBeforeFallback(t *testing.T) {
 						}
 						sessionSink, sessionContext = nil, nil
 					}()
-					code = execRead(newAuditLogger(), "stat "+target+" ran", "unsigned", false)
+					code = execRead(newAuditLogger(), "stat "+target+" ran", "unsigned", false, readFlags{})
 				})
 			})
 			if code != exitCancelled || strings.Contains(stderr, "read jail unavailable") {

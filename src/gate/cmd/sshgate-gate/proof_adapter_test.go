@@ -99,11 +99,26 @@ func gateProofCases() []harness.Case {
 	add("C-L2-ABSTRACT", "Execution", "Execute", nil, []string{"jailed:abstract"}, nil, nil)
 	cases[len(cases)-1].ResidualABIs = harness.ResidualBelowABI("R-L2-ABSTRACT-BELOW-ABI6", hostABI, 6)
 	add("C-L2-UNIX-DGRAM", "Execution", "Execute", nil, []string{"jailed:dgram"}, nil, nil)
+	add = in("Phase4")
+	for _, name := range []string{"U-EnvelopeParse", "U-EnvelopeFlags", "U-EnvelopeExpectNet", "U-DaemonReadNetRefused"} {
+		add(name, "Unit", "", nil, []string{"control:decision"}, []string{"EFFECT:decision"}, nil)
+	}
+	add("G-ENVELOPE-GRAMMAR", "Effect", "Execute", []string{"SetupAbort"}, []string{"control:effect", "jailed:attempt", "observe:effect"}, []string{"EFFECT:agent-bytes"}, nil)
+	add("G-ENVELOPE-NO-NET-UNPINNED", "Effect", "Execute", []string{"SetupAbort"}, []string{"control:effect", "jailed:attempt", "observe:effect"}, []string{"EFFECT:connected"}, nil)
+	add("G-ENVELOPE-NO-NET-DENY", "Effect", "Execute", []string{"SetupAbort"}, []string{"control:effect", "jailed:attempt", "observe:effect"}, []string{"EFFECT:connected"}, nil)
+	add("G-ENVELOPE-PIN-SNAPSHOT", "Effect", "Execute", []string{"SetupAbort"}, []string{"control:effect", "jailed:attempt", "observe:effect"}, []string{"EFFECT:ran-without-network"}, nil)
+	add("G-NET-LANE2-AVAILABLE", "Effect", "Execute", []string{"SetupAbort"}, []string{"control:effect", "jailed:attempt", "observe:effect"}, []string{"EFFECT:lane2-ran"}, nil)
+	add("G-ENVELOPE-ABSENT", "Effect", "Execute", []string{"SetupAbort"}, []string{"control:effect", "jailed:attempt", "observe:effect"}, []string{"EFFECT:ran-unconfined"}, nil)
+	add("G-ENVELOPE-NET-ALLOW", "Execution", "Execute", nil, []string{"jailed:attempt", "observe:effect"}, nil, nil)
+	add("G-ENVELOPE-ABSENT-TWIN", "Execution", "Execute", nil, []string{"jailed:attempt", "observe:effect"}, nil, nil)
+	add("G-ENVELOPE-NEW-GATE", "Execution", "Execute", nil, []string{"jailed:attempt", "observe:effect"}, nil, nil)
+	add("G-ENVELOPE-OLD-GATE", "Execution", "Execute", nil, []string{"jailed:attempt", "observe:effect"}, nil, nil)
+	add("G-ENVELOPE-UNMET", "Effect", "Execute", []string{"SetupAbort"}, []string{"control:facility", "jailed:probe", "observe:effects"}, []string{"ABORT:selfcheck", "EFFECT:fuse-ioctl"}, []string{"fuse-unavailable"})
 	return cases
 }
 
 // gateHooks are the protections whose mutation may show an effect here.
-var gateHooks = []string{"P-G-CONFINE-REQUIRED", "P-G-STRICT", "P-G-NET-STRICT", "P-COVERS", "P-CLONE-MNT", "P-SC-NET", "P-G-SEAL", "P-G-SEAL-GUARD", "P-G-LABEL-SWITCH", "P-G-JAILVERB-NOEXEC", "P-G-SELFTEST-JAILED", "P-G-PIN-REHEARSAL", "P-L2-GRAMMAR", "P-L2-REDIRECT", "P-L2-ADMIT", "P-L2-INTERP", "P-L2-EXEC-NARROW", "P-L2-MEMFD", "P-L2-SOCK-PIN", "P-L2-NET-OFF", "P-L2-SPEC-NET", "P-L2-ENV", "P-L2-IDENTITY"}
+var gateHooks = []string{"P-G-ENVELOPE", "P-G-ENVELOPE-NO-NET", "P-G-ENVELOPE-EXPECT-NET", "P-G-NET-DAEMON-READ", "P-G-CONFINE-REQUIRED", "P-G-STRICT", "P-G-NET-STRICT", "P-COVERS", "P-CLONE-MNT", "P-SC-NET", "P-G-SEAL", "P-G-SEAL-GUARD", "P-G-LABEL-SWITCH", "P-G-JAILVERB-NOEXEC", "P-G-SELFTEST-JAILED", "P-G-PIN-REHEARSAL", "P-L2-GRAMMAR", "P-L2-REDIRECT", "P-L2-ADMIT", "P-L2-INTERP", "P-L2-EXEC-NARROW", "P-L2-MEMFD", "P-L2-SOCK-PIN", "P-L2-NET-OFF", "P-L2-SPEC-NET", "P-L2-ENV", "P-L2-IDENTITY"}
 
 // gateProof is the gate package's proof: one case, its obligations, and the
 // markers its legs observed. Finish prints the one PROOF-COMPLETE line.
