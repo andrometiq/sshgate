@@ -351,7 +351,11 @@ func TestFileStoreGrantPublicationIsAtomic(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { _, err := e.Vote(vote); done <- err }()
 	receiveNotify(t, entered)
-	waiting, _ := startWait(t, e, st.ID(1)) // The superseded record itself is not written.
+	initial, err := e.WaitMany(context.Background(), st.PrincipalA, []string{st.ID(1)}, ap.AwaitMaxWait)
+	if err != nil || initial.WaitElapsed || len(initial.Summaries) != 1 || initial.Summaries[0].RequestID != st.ID(1) || initial.Summaries[0].ApprovalStatus != ap.ApprovalApproved || initial.Summaries[0].Class != ap.ClassLive {
+		t.Fatal("decided grant waited for publication", initial, err)
+	}
+	waiting, _ := startWait(t, e, st.ID(2))
 	got, err := e.List(st.PrincipalA)
 	if err != nil || !reflect.DeepEqual(got, old) {
 		t.Fatal("uncommitted grant view", got, err)
@@ -394,8 +398,8 @@ func TestFileStoreGrantPublicationIsAtomic(t *testing.T) {
 	close(stop)
 	receiveNotify(t, readDone)
 	wake := receiveWait(t, waiting)
-	if wake.err != nil || wake.result.WaitElapsed || wake.result.Summaries[0].Class == ap.ClassLive {
-		t.Fatal("superseded grant wake", wake)
+	if wake.err != nil || wake.result.WaitElapsed || wake.result.Summaries[0].Class != ap.ClassLive {
+		t.Fatal("replacement grant wake", wake)
 	}
 	got, err = e.List(st.PrincipalA)
 	if err != nil {
@@ -406,7 +410,6 @@ func TestFileStoreGrantPublicationIsAtomic(t *testing.T) {
 			t.Fatal("committed grant membership", got)
 		}
 	}
-	waiting, _ = startWait(t, e, st.ID(2))
 	clock.Advance(2 * time.Hour)
 	// Wall time alone must not publish expiry.
 	sum, err := e.Get(st.PrincipalA, st.ID(2))
@@ -416,8 +419,8 @@ func TestFileStoreGrantPublicationIsAtomic(t *testing.T) {
 	if err := e.Reconcile(); err != nil {
 		t.Fatal(err)
 	}
-	wake = receiveWait(t, waiting)
-	if wake.err != nil || wake.result.WaitElapsed || wake.result.Summaries[0].Class == ap.ClassLive {
-		t.Fatal("latched expiry not published", wake)
+	expired, err := e.WaitMany(context.Background(), st.PrincipalA, []string{st.ID(2)}, ap.AwaitMaxWait)
+	if err != nil || expired.WaitElapsed || expired.Summaries[0].Class == ap.ClassLive {
+		t.Fatal("latched expiry not published", expired, err)
 	}
 }

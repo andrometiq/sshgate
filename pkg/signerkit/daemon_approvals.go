@@ -359,8 +359,9 @@ func transferDigestsLocked(registry *XferRegistry, transfer ap.Transfer) (ap.Xfe
 	return ap.XferDigests{Source: source.EntryDigest, Destination: destination.EntryDigest}, nil
 }
 
-// ApprovalFreezer binds authenticated ownership and configured validity. Route
-// snapshots remain requester-supplied; transfer keys come only from the signer.
+// ApprovalFreezer binds authenticated ownership and caps requested validity at
+// the configured limit. Route snapshots remain requester-supplied; transfer
+// keys come only from the signer.
 func (s *Service) ApprovalFreezer(validity time.Duration) lifecycle.Freezer {
 	return approvalFreezer{s.daemon.XferRegistry, validity}
 }
@@ -377,7 +378,11 @@ func (f approvalFreezer) Freeze(ctx context.Context, draft ap.ApprovalDraft, pri
 	if err := draft.Validate(); err != nil {
 		return ap.ApprovalPlanV1{}, err
 	}
-	inputs := ap.FreezeInputs{RequesterPrincipal: principal, RequesterSub: sub, Now: now, Validity: f.validity}
+	validity := f.validity
+	if seconds := draft.RequestedValiditySeconds; seconds != nil {
+		validity = min(validity, time.Duration(*seconds)*time.Second)
+	}
+	inputs := ap.FreezeInputs{RequesterPrincipal: principal, RequesterSub: sub, Now: now, Validity: validity}
 	if draft.Transfer != nil {
 		transfer, err := f.freezeTransfer(*draft.Transfer)
 		if err != nil {

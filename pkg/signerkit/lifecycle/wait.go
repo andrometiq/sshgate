@@ -15,7 +15,8 @@ type WaitResult struct {
 }
 
 // WaitMany waits for a confirmed change to any requested record. A zero budget
-// reads immediately. Missing and foreign IDs both answer not_found.
+// reads immediately. An already decided record returns immediately at any budget.
+// Missing and foreign IDs both answer not_found.
 func (e *Engine) WaitMany(ctx context.Context, principal string, requestIDs []string, wait time.Duration) (WaitResult, error) {
 	e.published.mu.Lock()
 	defer e.published.mu.Unlock()
@@ -41,14 +42,21 @@ func (e *Engine) WaitMany(ctx context.Context, principal string, requestIDs []st
 	if err != nil {
 		return WaitResult{}, err
 	}
-	if wait == 0 {
+	decided := false
+	for _, record := range records {
+		if record.record.Header.Decision != nil {
+			decided = true
+			break
+		}
+	}
+	if decided || wait == 0 {
 		e.published.mu.Unlock()
 		summaries, err := e.publishedViews(records)
 		e.published.mu.Lock()
 		if stopped := e.published.availabilityLocked(); stopped != nil {
 			return WaitResult{}, stopped
 		}
-		return WaitResult{Summaries: summaries, WaitElapsed: true}, err
+		return WaitResult{Summaries: summaries, WaitElapsed: !decided}, err
 	}
 	e.waitJoined.Add(1)
 	defer e.waitJoined.Done()
