@@ -142,7 +142,7 @@ func TestJailVerbOneJSONLine(t *testing.T) {
 			got := decodeVerbLine(t, out)
 			want := jailVerbReport{V: 1, Profile: confine.ProfileROv1, Enforcement: s.enforcement, Pinned: s.pinned, Net: s.net,
 				LandlockABI: s.abi, Label: s.label, Reason: s.reason, Unmet: append([]string{}, s.unmet...),
-				AcceptFS: append([]string{}, s.acceptFS...), CorePattern: readCorePattern()}
+				AcceptFS: append([]string{}, s.acceptFS...), CorePattern: readCorePattern(), NetGrants: true}
 			if !reflect.DeepEqual(got, want) {
 				t.Fatalf("verb\n got %+v\nwant %+v", got, want)
 			}

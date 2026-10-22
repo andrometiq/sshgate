@@ -261,7 +261,7 @@ func TestGateBinaryJailVerb(t *testing.T) {
 
 	code, out, stderr := runGate("SSHGATE_JAIL")
 	report := decodeVerbLine(t, out)
-	if code != exitOK || report.Enforcement != "kernel" || report.Pinned || report.Net || report.Label != confine.LabelPinToClaim {
+	if code != exitOK || report.Enforcement != "kernel" || report.Pinned || report.Net || !report.NetGrants || report.Label != confine.LabelPinToClaim {
 		t.Fatalf("verb: exit %d, report %+v, stderr %q", code, report, stderr)
 	}
 	if strings.Contains(stderr, preloadError) || stderr != "" {

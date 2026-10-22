@@ -18,8 +18,8 @@ import (
 const jailProbeCommand = ":"
 
 // netGrantsSupported reports whether this gate accepts signed per-read
-// network grants (P4.2 turns it on).
-const netGrantsSupported = false
+// network grants.
+const netGrantsSupported = true
 
 // maxCorePattern caps the core_pattern the verb reports.
 const maxCorePattern = 128

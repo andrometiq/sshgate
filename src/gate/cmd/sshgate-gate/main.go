@@ -12,8 +12,9 @@
 //	     SSHGATE_UPDATE, prints SSHGATE_UPDATED)
 //	1  — generic runtime failure or non-zero from /bin/sh -c on the
 //	     non-pass-through paths
-//	65 — EX_DATAERR: bad signature, bad envelope format, expired sig,
-//	     validity window too long; also a SSHGATE_UPDATE refusal (malformed
+//	65 — EX_DATAERR: bad signature, bad signed-envelope format, expired sig,
+//	     not yet valid, validity window too long, or a signed network grant
+//	     this build cannot honour; also a SSHGATE_UPDATE refusal (malformed
 //	     hash, empty/oversized/undersized stdin, hash mismatch, or a
 //	     non-ELF/wrong-arch binary — nothing is written)
 //	70 — EX_SOFTWARE: pubkey file unreadable, corrupt, or has insecure
@@ -24,7 +25,10 @@
 //	     unavailable" on stderr: the jail pin is damaged (or a jail-floor
 //	     from an earlier release is left with no jail pin), the read must run
 //	     confined and cannot, the jail failed to set up (or failed after the
-//	     read may have started), or the host has no usable jail and is pinned
+//	     read may have started), or the host has no usable jail and is pinned;
+//	     also a bad read envelope, a signed envelope, a non-read in an
+//	     envelope or network grant, a network request on a daemon-read verb,
+//	     or an envelope net flag on a host not pinned net=allow
 //	143 — a signed admin verb, a read whose jail never started, or
 //	     SSHGATE_JAIL, cancelled before it ran
 //
