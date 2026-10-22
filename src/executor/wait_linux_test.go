@@ -25,9 +25,13 @@ type waiterStore struct {
 	listErr      error
 	beforeCommit func(ap.R2) error
 	beforeList   func()
+	beforeLoad   func(string)
 }
 
 func (m *waiterStore) Load(id string) (ap.R2, error) {
+	if m.beforeLoad != nil {
+		m.beforeLoad(id)
+	}
 	m.loads++
 	j, ok := m.jobs[id]
 	if !ok {
@@ -55,6 +59,8 @@ func (m *waiterStore) Commit(j ap.R2) error {
 	m.commits++
 	return nil
 }
+
+func (m *waiterStore) Remove(id string) error { delete(m.jobs, id); return nil }
 
 type waitSignerFake struct {
 	submitSignerFake

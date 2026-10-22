@@ -32,6 +32,9 @@ func (s *Service) StartCommandJobs(signer CommandSigner, ssh jobplan.PhasedRunne
 	if signer == nil || ssh == nil || s.stopping || s.commandSigner != nil || len(s.submissions) != 0 {
 		return errors.New("executor: cannot start command workers")
 	}
+	if err := s.retainLocked(0); err != nil {
+		return err
+	}
 	files, err := s.store.List()
 	if err != nil {
 		return err
@@ -48,6 +51,8 @@ func (s *Service) StartCommandJobs(signer CommandSigner, ssh jobplan.PhasedRunne
 		jobs = append(jobs, job)
 	}
 	s.commandSigner, s.commandSSH = signer, ssh
+	s.actorGroup.Add(1)
+	go s.retentionLoop()
 	for _, job := range jobs {
 		s.projectJobLocked(job)
 	}
@@ -78,18 +83,19 @@ type commandActor struct {
 	lastSigned int
 	journalErr error
 	reconcile  bool
+	job        *ap.R2
 }
 
 // Caller holds mu. Actor lifetime is separate from the coalesced nudge flag.
 func (s *Service) startCommandActorLocked(id string, flag chan struct{}) {
-	if s.commandSigner == nil || s.actors[id] {
+	if s.commandSigner == nil || s.actors[id] != nil {
 		return
 	}
-	s.actors[id] = true
+	actor := &commandActor{service: s, id: id}
+	s.actors[id] = actor
 	s.actorGroup.Add(1)
 	go func() {
 		defer s.actorGroup.Done()
-		actor := commandActor{service: s, id: id}
 		defer func() {
 			if actor.runner != nil {
 				actor.runner.Close()
@@ -104,6 +110,10 @@ func (s *Service) startCommandActorLocked(id string, flag chan struct{}) {
 			case <-flag:
 			}
 			for {
+				select {
+				case <-flag:
+				default:
+				}
 				progress, done, err := actor.next()
 				if err != nil {
 					if s.effects.Err() == nil {
@@ -124,8 +134,8 @@ func (s *Service) startCommandActorLocked(id string, flag chan struct{}) {
 					backoff = 250 * time.Millisecond
 					continue
 				}
-				// Nudges never bypass a transient-answer backoff.
-				if !commandBackoff(s.effects, backoff) {
+				// A signer change can shorten an otherwise idle retry.
+				if !commandWake(s.effects, flag, backoff) {
 					return
 				}
 				backoff = min(2*time.Second, backoff*2)
@@ -141,7 +151,18 @@ func (a *commandActor) next() (bool, bool, error) {
 		s.mu.Unlock()
 		return false, true, nil
 	}
-	job, err := s.store.Load(a.id)
+	var err error
+	if a.job == nil {
+		var loaded ap.R2
+		loaded, err = s.store.Load(a.id)
+		if err == nil {
+			a.job = &loaded
+		}
+	}
+	var job ap.R2
+	if a.job != nil {
+		job = *a.job
+	}
 	a.memory.Delivered = s.deliveries[a.id]
 	s.mu.Unlock()
 	if err != nil {
@@ -368,7 +389,8 @@ func (a *commandActor) BeforeStep(ordinal int) error {
 }
 func (a *commandActor) AfterStep(ordinal int, result ap.StepResult) error {
 	err := a.commit(ap.RecordResult{Ordinal: ordinal, Result: result})
-	if errors.Is(err, securestate.ErrTooLarge) {
+	var code *ap.CodeError
+	if errors.Is(err, securestate.ErrTooLarge) || errors.As(err, &code) && code.Code == ap.CodeRequestTooLarge {
 		result.Stdout, result.Stderr = nil, nil
 		result.BodiesUnstorable = true
 		err = a.commit(ap.RecordResult{Ordinal: ordinal, Result: result})
@@ -438,6 +460,9 @@ func (s *Service) delivered(ids []string) {
 	}
 	for _, id := range ids {
 		job, err := s.store.Load(id)
+		if errors.Is(err, securestate.ErrNotFound) {
+			continue
+		}
 		if err != nil {
 			s.reportFatal(err)
 			continue
@@ -451,16 +476,6 @@ func (s *Service) delivered(ids []string) {
 }
 
 // Timers schedule effects; they never judge an authority window.
-func commandBackoff(ctx context.Context, delay time.Duration) bool {
-	timer := time.NewTimer(delay)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return false
-	case <-timer.C:
-		return true
-	}
-}
 func commandCallContext(ctx context.Context) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(ctx, SubmitNotificationTimeout)
 }
@@ -474,5 +489,18 @@ func (a *commandActor) publishNotification(status ap.NotificationStatus) {
 	defer s.mu.Unlock()
 	if attempt := s.submissions[a.id]; attempt != nil && !s.stopping {
 		attempt.observe(status)
+	}
+}
+
+func commandWake(ctx context.Context, flag <-chan struct{}, delay time.Duration) bool {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-flag:
+		return true
+	case <-timer.C:
+		return true
 	}
 }

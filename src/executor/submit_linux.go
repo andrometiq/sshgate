@@ -23,6 +23,7 @@ type Store interface {
 	Load(string) (ap.R2, error)
 	List() ([]JobFile, error)
 	Commit(ap.R2) error
+	Remove(string) error
 }
 
 type Config struct {
@@ -39,8 +40,10 @@ type Service struct {
 	mu                sync.Mutex
 	commandSigner     CommandSigner
 	commandSSH        jobplan.PhasedRunner
-	actors            map[string]bool
+	actors            map[string]*commandActor
 	deliveries        map[string]bool
+	retentionDue      map[string]time.Time
+	submitReaders     map[string]int
 	actorGroup        sync.WaitGroup
 	signer            SubmitSigner
 	submissions       map[string]*submitAttempt
@@ -61,6 +64,8 @@ type Service struct {
 	clock             elapsed.Clock
 	stagedGatePath    string
 	epoch             string
+	jobFileLimit      int
+	budgetLimit       int64
 	reservationLimit  int64 // Test seam; production uses R2Max.
 }
 
@@ -78,11 +83,11 @@ func NewService(config Config) (*Service, error) {
 	waitSigner, _ := config.Signer.(WaitSigner)
 	effects, cancelEffects := context.WithCancel(context.Background())
 	return &Service{
-		actors: make(map[string]bool), deliveries: make(map[string]bool), store: config.Store, servers: config.Servers, clock: config.Clock,
+		actors: make(map[string]*commandActor), deliveries: make(map[string]bool), retentionDue: make(map[string]time.Time), submitReaders: make(map[string]int), store: config.Store, servers: config.Servers, clock: config.Clock,
 		signer: config.Signer, waitSigner: waitSigner, submissions: make(map[string]*submitAttempt), fatal: make(chan error, 1),
 		effects: effects, cancelEffects: cancelEffects, submitTimeout: SubmitNotificationTimeout,
 		waiterDone: make(chan struct{}), waiterWake: make(chan struct{}, 1), jobNudges: make(map[string]chan struct{}), waitJobs: make(map[string]bool),
-		stagedGatePath: config.StagedGatePath, epoch: hex.EncodeToString(epoch[:]), reservationLimit: ap.R2Max,
+		stagedGatePath: config.StagedGatePath, epoch: hex.EncodeToString(epoch[:]), reservationLimit: ap.R2Max, jobFileLimit: ap.ExecutorJobFiles, budgetLimit: ap.ExecutorBudget,
 	}, nil
 }
 
@@ -178,11 +183,16 @@ func (s *Service) submit(request executorwire.SubmitRequest, admitted func(strin
 func refusal(code string) error { return &executorwire.WireError{Code: code, Message: code} }
 
 func (s *Service) admit(reservation int64) error {
+	if s.commandSigner != nil {
+		if err := s.retainLocked(reservation); err != nil {
+			return err
+		}
+	}
 	files, err := s.store.List()
 	if err != nil {
 		return err
 	}
-	if len(files) >= ap.ExecutorJobFiles {
+	if len(files) >= s.jobFileLimit {
 		return refusal("executor_full")
 	}
 	var used int64
@@ -206,12 +216,12 @@ func (s *Service) admit(reservation int64) error {
 				}
 			}
 		}
-		if charge < 0 || charge > ap.ExecutorBudget-used {
+		if charge < 0 || charge > s.budgetLimit-used {
 			return refusal("executor_full")
 		}
 		used += charge
 	}
-	if live >= ap.ExecutorLiveJobs || reservation > ap.ExecutorBudget-used {
+	if live >= ap.ExecutorLiveJobs || reservation > s.budgetLimit-used {
 		return refusal("executor_full")
 	}
 	return nil

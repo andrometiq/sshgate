@@ -87,7 +87,6 @@ func StepOutcome(kind StepKind, earlierExecuted bool, phased PhasedResult) Outco
 	stderr := string(phased.Stderr)
 	if (kind == UnsignedRead || kind == SignedWrite || kind == SignedReveal) && exit == 77 && strings.Contains(stderr, "gate: read jail unavailable") {
 		outcome.VerdictClass = "read_jail_unavailable"
-
 		switch {
 		case strings.Contains(stderr, "the jail failed after the read may have started"):
 			outcome.Annotation = ReadJailAfterStart

@@ -36,6 +36,9 @@ func (s *Service) nudgeLocked(id string) {
 }
 
 func (s *Service) jobCommittedLocked(job ap.R2) {
+	if actor := s.actors[job.RequestID]; actor != nil {
+		actor.job = &job
+	}
 	s.projectJobLocked(job)
 	select {
 	case s.waiterWake <- struct{}{}:
@@ -57,6 +60,7 @@ func (s *Service) startWaiter() {
 // report outstanding still need nudges, but no longer need approval watches.
 func (s *Service) projectJobLocked(job ap.R2) {
 	id := job.RequestID
+	s.projectRetentionLocked(job)
 	delete(s.waitJobs, id)
 	if !commandExecutable(job) {
 		delete(s.jobNudges, id)

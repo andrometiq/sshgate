@@ -625,7 +625,7 @@ func TestCommandJobAlreadyMarkedNeverStarts(t *testing.T) {
 }
 
 func TestCommandJobStaticClockReads(t *testing.T) {
-	elapsedtest.AssertNoDirectTimeReads(t, []string{"execute_linux.go"}, "execute_linux.go:commandBackoff", "execute_linux.go:commandCallContext")
+	elapsedtest.AssertNoDirectTimeReads(t, []string{"execute_linux.go", "notify_linux.go", "retention_linux.go"}, "execute_linux.go:commandWake", "execute_linux.go:commandCallContext", "notify_linux.go:Service.SubmitAndNotify", "notify_linux.go:Service.submitNotification", "notify_linux.go:Service.observeNotification", "retention_linux.go:Service.retentionLoop")
 }
 
 func TestCommandJobFractionalDecisionWindow(t *testing.T) {

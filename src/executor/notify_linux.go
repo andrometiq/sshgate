@@ -36,7 +36,20 @@ func (s *Service) SubmitAndNotify(ctx context.Context, request executorwire.Subm
 	var bound context.Context
 	var cancel context.CancelFunc
 	ownsAttempt := false
+	var pinned string
+	defer func() {
+		if pinned != "" {
+			s.mu.Lock()
+			s.submitReaders[pinned]--
+			if s.submitReaders[pinned] == 0 {
+				delete(s.submitReaders, pinned)
+			}
+			s.mu.Unlock()
+		}
+	}()
 	job, err := s.submit(request, func(id string) {
+		pinned = id
+		s.submitReaders[id]++
 		bound, cancel = context.WithTimeout(s.effects, s.submitTimeout)
 		if s.signer == nil && s.commandSigner == nil {
 			return
