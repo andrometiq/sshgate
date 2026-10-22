@@ -10,11 +10,13 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/karthikeyan5/sshgate/internal/elapsed/elapsedtest"
 	"github.com/karthikeyan5/sshgate/pkg/signerkit/assist"
 	"github.com/karthikeyan5/sshgate/pkg/signerkit/sqlitestore"
 	ap "github.com/karthikeyan5/sshgate/src/approvalplan"
@@ -504,10 +506,17 @@ func TestApprovalV2AssistSQLiteLockPastDeadline(t *testing.T) {
 	}
 }
 
+func approvalShutdownFixture(t *testing.T) (*ApprovalV2Engine, *sqlitestore.DB, *elapsedtest.Fake) {
+	t.Helper()
+	// Cancellation can discard the last SQL connection and erase a :memory:
+	// database. Use the server's file-backed store across this shutdown cut.
+	return approvalEngineFixture(t, true)
+}
+
 // Test-only HTTP glue exercises the shutdown boundary without adding v2 routes
 // ahead of commit 6. Both handlers have entered before Shutdown stops intake.
 func TestApprovalV2SubmitAfterHTTPShutdownCut(t *testing.T) {
-	e, db, clock := approvalEngineFixture(t, false)
+	e, db, clock := approvalShutdownFixture(t)
 	approvalWorkerSink(e)
 	var calls atomic.Int32
 	configureHostedAssist(t, e, hostedAssessorFunc(func(_ context.Context, in assist.Input) (ap.AssistResult, error) {
@@ -1014,5 +1023,78 @@ func TestApprovalV2AssistBusyRetriesStopAtDeadline(t *testing.T) {
 	time.Sleep(300 * time.Millisecond)
 	if st.attempts.Load() != attempts || calls.Load() != 1 || readApproval(t, db, 1).Record.Header.Assist != nil {
 		t.Fatalf("retry did not stop without Close: attempts=%d then=%d calls=%d", attempts, st.attempts.Load(), calls.Load())
+	}
+}
+
+// Hold startup's first transaction until Close cancels it, then let database/sql
+// perform its context-driven rollback before startup resumes.
+type shutdownTransactionStore struct {
+	ApprovalV2Store
+	once    sync.Once
+	entered chan struct{}
+}
+
+func (s *shutdownTransactionStore) BeginV2(ctx context.Context) (*sql.Tx, error) {
+	tx, err := s.ApprovalV2Store.BeginV2(ctx)
+	if err != nil {
+		return nil, err
+	}
+	s.once.Do(func() {
+		close(s.entered)
+		<-ctx.Done()
+		for {
+			var value int
+			if errors.Is(tx.QueryRowContext(context.Background(), "SELECT 1").Scan(&value), sql.ErrTxDone) {
+				break
+			}
+			runtime.Gosched()
+		}
+	})
+	return tx, nil
+}
+
+func TestApprovalV2SubmitAfterCanceledStartupTransaction(t *testing.T) {
+	e, db, clock := approvalShutdownFixture(t)
+	submitApproval(t, e, 1)
+	before := append([]byte(nil), readApproval(t, db, 1).RecordJSON...)
+	var calls atomic.Int32
+	configureHostedAssist(t, e, hostedAssessorFunc(func(_ context.Context, in assist.Input) (ap.AssistResult, error) {
+		calls.Add(1)
+		return hostedAssistResult(in), nil
+	}))
+	st := &shutdownTransactionStore{ApprovalV2Store: db, entered: make(chan struct{})}
+	e.config.Store = st
+	server := NewServer("secret", db, log.New(io.Discard, "", 0))
+	defer server.Close()
+	if err := server.StartOrdinaryWorkers(e); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-st.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("startup transaction not entered")
+	}
+	server.Close()
+	if got := readApproval(t, db, 1).RecordJSON; !bytes.Equal(got, before) {
+		t.Fatal("shutdown changed the committed record")
+	}
+	summary, err := e.Submit(context.Background(), "client", "", approvalDraft(2))
+	if err != nil || summary.ApprovalStatus != ap.ApprovalPending {
+		t.Fatalf("post-cut Submit: %+v, %v", summary, err)
+	}
+	row := readApproval(t, db, 2).Record
+	if row.Header.Assist != nil || row.Header.Decision != nil || calls.Load() != 0 {
+		t.Fatal("post-cut Submit dispatched assist or committed an assist slot or decision")
+	}
+	clock.Advance(6 * time.Second)
+	next, err := NewApprovalV2Engine(e.config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := next.reconcileStartup(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if slot := readApproval(t, db, 2).Record.Header.Assist; slot == nil || slot.Reason != assist.ReasonDeadline || calls.Load() != 0 {
+		t.Fatalf("restart slot: %+v, provider calls: %d", slot, calls.Load())
 	}
 }
