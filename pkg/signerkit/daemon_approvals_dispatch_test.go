@@ -558,7 +558,7 @@ func TestApprovalDispatchForeignAndMissingAreIdentical(t *testing.T) {
 	}
 }
 
-func TestApprovalDispatchWaitWakesOnReport(t *testing.T) {
+func TestApprovalDispatchWaitReturnsDecisionAndReport(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		h := newApprovalDispatchHarness(t, true)
 		synctest.Wait()
@@ -572,8 +572,15 @@ func TestApprovalDispatchWaitWakesOnReport(t *testing.T) {
 		synctest.Wait()
 		select {
 		case err := <-done:
-			t.Fatalf("Wait returned before a change: %v", err)
+			if err != nil {
+				t.Fatal(err)
+			}
 		default:
+			t.Fatal("Wait blocked on an already decided record")
+		}
+		decision := approvalResponse(t, aw.KindWait, conn.Bytes(), "")
+		if len(decision.Summaries) != 1 || decision.Summaries[0].ApprovalStatus != ap.ApprovalApproved {
+			t.Fatal("Wait did not return the committed decision")
 		}
 		report := h.requests()[5]
 		reported := &approvalDispatchConn{Reader: bytes.NewReader(approvalRequestFrame(t, report))}
@@ -581,15 +588,9 @@ func TestApprovalDispatchWaitWakesOnReport(t *testing.T) {
 			t.Fatal(err)
 		}
 		approvalResponse(t, aw.KindReport, reported.Bytes(), "")
-		// The report must wake Wait now, not the 55-second timeout.
-		synctest.Wait()
-		select {
-		case err := <-done:
-			if err != nil {
-				t.Fatal(err)
-			}
-		default:
-			t.Fatal("Wait did not wake on the report")
+		conn = &approvalDispatchConn{Reader: bytes.NewReader(approvalRequestFrame(t, request))}
+		if err := h.service.HandleSignRequestWithPeer(context.Background(), conn, &PeerCredentials{UID: h.uid}); err != nil {
+			t.Fatal(err)
 		}
 		response := approvalResponse(t, aw.KindWait, conn.Bytes(), "")
 		current := &approvalDispatchConn{Reader: bytes.NewReader(approvalRequestFrame(t, h.requests()[1]))}

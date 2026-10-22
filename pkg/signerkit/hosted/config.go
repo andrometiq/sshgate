@@ -1,6 +1,7 @@
 package hosted
 
 import (
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"log"
@@ -8,6 +9,9 @@ import (
 
 	"github.com/karthikeyan5/sshgate/pkg/signerkit"
 	"github.com/karthikeyan5/sshgate/pkg/signerkit/store"
+	"github.com/karthikeyan5/sshgate/src/approvalplan"
+	"github.com/karthikeyan5/sshgate/src/approvalreview"
+	redactrules "github.com/karthikeyan5/sshgate/src/redact/rules"
 )
 
 // Construction sentinels for New. They are NEW to package hosted and distinct
@@ -29,7 +33,7 @@ var (
 	ErrNoMachineClientID = errors.New("hosted: New: MachineClientID is required")
 	// ErrInvalidRequiredApprovals prevents an implicit or impossible quorum
 	// policy from reaching production request intake.
-	ErrInvalidRequiredApprovals = errors.New("hosted: New: RequiredApprovals must be greater than zero")
+	ErrInvalidRequiredApprovals = fmt.Errorf("hosted: New: RequiredApprovals must be between 1 and %d", approvalplan.MaxRequiredApprovals)
 )
 
 // Config composes a complete hosted server in one call. It is the integrator /
@@ -58,7 +62,8 @@ type Config struct {
 	MachineClientID string
 
 	// RequiredApprovals is the immutable quorum threshold copied onto every
-	// request at intake. It must be positive; changing the deploy flag affects
+	// request at intake. The maximum is approvalplan.MaxRequiredApprovals;
+	// human-plane composition also requires a positive value. Changing the deploy flag affects
 	// new requests only because pending rows retain their stored N.
 	RequiredApprovals int
 
@@ -105,6 +110,9 @@ func New(cfg Config) (*Server, error) {
 	}
 	if cfg.APIKey == "" {
 		return nil, ErrNoAPIKey
+	}
+	if cfg.RequiredApprovals > approvalplan.MaxRequiredApprovals {
+		return nil, ErrInvalidRequiredApprovals
 	}
 	if cfg.Auth.RPID != "" {
 		if cfg.MachineClientID == "" {
@@ -156,4 +164,15 @@ func New(cfg Config) (*Server, error) {
 	}
 
 	return s, nil
+}
+
+// BuildApprovalSnapshot redacts a request with the full ruleset and a fresh,
+// ephemeral salt. Only the returned snapshot is suitable for persistence.
+func BuildApprovalSnapshot(plan approvalplan.ApprovalPlanV1) (approvalreview.ReviewSnapshot, error) {
+	var salt [32]byte
+	defer clear(salt[:])
+	if _, err := rand.Read(salt[:]); err != nil {
+		return approvalreview.ReviewSnapshot{}, fmt.Errorf("hosted: generate review salt: %w", err)
+	}
+	return approvalreview.BuildSnapshot(plan, &salt, redactrules.Combined())
 }

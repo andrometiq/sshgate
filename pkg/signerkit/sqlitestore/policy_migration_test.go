@@ -165,7 +165,7 @@ func TestMigrationLedgerRejectsNameAndFutureVersionDrift(t *testing.T) {
 		mutate string
 	}{
 		{name: "name", mutate: `UPDATE schema_migrations SET name='substituted' WHERE version=6`},
-		{name: "future", mutate: `INSERT INTO schema_migrations(version,name,applied_at) VALUES(8,'future',1)`},
+		{name: "future", mutate: `INSERT INTO schema_migrations(version,name,applied_at) VALUES(9,'future',1)`},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "drift.db")

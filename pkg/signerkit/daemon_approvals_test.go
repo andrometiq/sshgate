@@ -501,3 +501,40 @@ func TestApprovalRuntimeLegacyDeliverySurvivesRepeatedRecovery(t *testing.T) {
 		t.Fatal(result)
 	}
 }
+
+func TestApprovalFreezerRequestedValiditySubmit(t *testing.T) {
+	for _, tc := range []struct {
+		name             string
+		requested        int
+		configured, want time.Duration
+	}{
+		{"shorter", 300, 24 * time.Hour, 300 * time.Second},
+		{"omitted", 0, 24 * time.Hour, 24 * time.Hour},
+		{"above_config", 86400, time.Hour, time.Hour},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			service := &Service{daemon: &Daemon{}}
+			store := &lifecycle.MemStore{}
+			engine, err := lifecycle.New(lifecycle.Config{Store: store, Clock: elapsedtest.NewFake(st.T0), Freezer: service.ApprovalFreezer(tc.configured), SnapshotBuilder: runtimeSnapshot{}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { engine.Close() })
+			draft := st.JobDraft(st.ID(1), ap.CoordinatorInProcessSync, st.T0, st.Write("true", 60))
+			if tc.requested != 0 {
+				draft.RequestedValiditySeconds = &tc.requested
+			}
+			if _, err := engine.Submit(context.Background(), st.PrincipalA, draft); err != nil {
+				t.Fatal(err)
+			}
+			record, err := store.Load(ap.RecordKey(st.PrincipalA, draft.RequestID))
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := st.T0.Add(tc.want)
+			if !record.Header.RequestExpiresAt.Equal(want) || !record.Payload.Plan.RequestExpiresAt.Equal(want) {
+				t.Fatalf("frozen expiry: header=%v plan=%v want=%v", record.Header.RequestExpiresAt, record.Payload.Plan.RequestExpiresAt, want)
+			}
+		})
+	}
+}

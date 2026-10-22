@@ -174,7 +174,8 @@ func TestCloseWaitersAndClaim(t *testing.T) {
 	e, _, _, _ := engineFixture(t)
 	sum := submitJob(t, e, 1)
 	approve(t, e, 1)
-	waiting, cancel := startWait(t, e, st.ID(1))
+	submitJob(t, e, 2)
+	waiting, cancel := startWait(t, e, st.ID(2))
 	defer cancel()
 	claimDone := make(chan error, 1)
 	go func() {
