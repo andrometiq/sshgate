@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/karthikeyan5/sshgate/internal/faultpoint"
 	"github.com/karthikeyan5/sshgate/internal/securestate"
 	ap "github.com/karthikeyan5/sshgate/src/approvalplan"
 	"golang.org/x/sys/unix"
@@ -41,6 +42,9 @@ type FileStore struct {
 	afterStoreUpdate  func() error
 }
 
+// ErrStoreFatal marks ownership acquisition failures; later reload failures are recoverable.
+var ErrStoreFatal = errors.New("approval store ownership acquisition failed")
+
 var _ Store = (*FileStore)(nil)
 
 // OpenFileStore acquires ownership and loads the journal. A load failure returns
@@ -57,7 +61,12 @@ func OpenFileStore(path string, uid uint32) (*FileStore, error) {
 // AcquireFileStore creates the final directory component if absent and acquires
 // its ownership flock without loading records. Its parent must already exist.
 // Call Reopen before use; until then all Store operations are storage_uncertain.
-func AcquireFileStore(path string, uid uint32) (*FileStore, error) {
+func AcquireFileStore(path string, uid uint32) (store *FileStore, err error) {
+	defer func() {
+		if err != nil {
+			err = errors.Join(ErrStoreFatal, err)
+		}
+	}()
 	path = filepath.Clean(path)
 	parent, err := unix.Open(filepath.Dir(path), unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
 	if err != nil {
@@ -79,8 +88,23 @@ func AcquireFileStore(path string, uid uint32) (*FileStore, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := unix.Flock(fd, unix.LOCK_EX|unix.LOCK_NB); err != nil {
-		unix.Close(fd)
+	defer func() {
+		if store == nil {
+			unix.Close(fd)
+		}
+	}()
+	var stat unix.Stat_t
+	if err := unix.Fstat(fd, &stat); err != nil {
+		return nil, err
+	}
+	if stat.Uid != uid || stat.Mode&07777 != 0700 {
+		return nil, fmt.Errorf("%w: approval store directory must have mode 0700 and uid %d", securestate.ErrUnsafe, uid)
+	}
+	err = faultpoint.Error("filestore.flock", unix.EBADF)
+	if err == nil {
+		err = unix.Flock(fd, unix.LOCK_EX|unix.LOCK_NB)
+	}
+	if err != nil {
 		if errors.Is(err, unix.EWOULDBLOCK) {
 			return nil, fmt.Errorf("approval store %s is held by another signer process: %w", path, err)
 		}
@@ -242,12 +266,16 @@ func (s *FileStore) poison() {
 }
 
 func (s *FileStore) update(fn func(*securestate.Transaction) error) error {
+	faultpoint.Exit("filestore.before-update")
 	var err error
 	if s.beforeStoreUpdate != nil {
 		err = s.beforeStoreUpdate()
 	}
 	if err == nil {
 		err = s.disk.Update(fn)
+		if err == nil {
+			faultpoint.Exit("filestore.after-update")
+		}
 		if err == nil && s.afterStoreUpdate != nil {
 			if fault := s.afterStoreUpdate(); fault != nil {
 				err = errors.Join(securestate.ErrCommitUncertain, fault)
