@@ -84,15 +84,37 @@ var lane2Refused = []string{
 	"systemctl list-units --type=service,socket", "systemctl list-units --type=bogus",
 	"systemctl list-units --state=a,b", "systemctl list-units --state=Failed", "systemctl show -p A,,B",
 	"systemctl show -p A-B", "docker ps --filter name=a=b,c",
-	"systemctl status " + strings.Repeat("u", lane2MaxValue+1), "systemctl status a=b", "systemctl status a,b",
-	"systemctl status a+b", "docker logs --since " + strings.Repeat("1", lane2MaxValue+1) + " web",
+	"systemctl status " + strings.Repeat("u", 129), "systemctl status a=b", "systemctl status a,b",
+	"systemctl status a+b", "docker logs --since " + strings.Repeat("1", 129) + " web",
+}
+
+// Independent counts from the specified grammar, including required flags.
+var lane2ExpectedCounts = []struct {
+	line             string
+	minimum, maximum int
+}{
+	{"systemctl status", 0, 16},
+	{"systemctl is-active", 0, 16},
+	{"systemctl is-failed", 0, 16},
+	{"systemctl list-units", 0, 16},
+	{"systemctl list-unit-files", 0, 16},
+	{"systemctl show", 0, 16},
+	{"systemctl cat", 1, 16},
+	{"systemctl get-default", 0, 0},
+	{"docker ps", 0, 0},
+	{"docker inspect", 1, 16},
+	{"docker logs", 1, 1},
+	{"docker images", 0, 1},
+	{"docker version", 0, 0},
+	{"docker stats --no-stream", 0, 16},
+	{"docker top", 1, 1},
 }
 
 // lane2RedirectSpellings are every spelling of every refused flag, with a
 // value inline, as the next token, and attached to a short flag.
 func lane2RedirectSpellings() []string {
 	var spellings []string
-	for _, flag := range lane2RedirectFlags {
+	for _, flag := range []string{"--user", "--host", "--machine", "--root", "--image", "--global", "--context", "-c", "-H", "-M"} {
 		spellings = append(spellings, flag, flag+"=x")
 		if !strings.HasPrefix(flag, "--") {
 			spellings = append(spellings, flag+"x")
@@ -125,17 +147,30 @@ func testLane2Grammar(t *testing.T) {
 			t.Errorf("lane2Parse(%q) admitted a line outside the grammar", line)
 		}
 	}
-	for client, grammar := range lane2Grammar {
-		for verb := range grammar.verbs {
-			for _, spelling := range append(lane2RedirectSpellings(), "-H x", "--host x", "--user x", "-c x") {
-				line := client + " " + verb + " " + spelling + " web"
+	admitted := false
+	for _, row := range lane2ExpectedCounts {
+		base := row.line + strings.Repeat(" u", row.minimum)
+		for _, spelling := range lane2RedirectSpellings() {
+			for _, suffix := range []string{"", " x"} {
+				line := base + " " + spelling + suffix
 				if _, ok := lane2Parse(line); ok {
 					t.Errorf("lane2Parse(%q) admitted a redirect flag", line)
 				}
 			}
 		}
+		for _, spelling := range []string{"--x", "--x=v", "--x v"} {
+			_, ok := lane2Parse(base + " " + spelling)
+			admitted = admitted || ok
+		}
+		for _, count := range []int{0, 1, row.maximum, row.maximum + 1, 16, 17} {
+			line := row.line + strings.Repeat(" u", count)
+			_, ok := lane2Parse(line)
+			want := count >= row.minimum && count <= row.maximum
+			if ok != want {
+				t.Errorf("lane2Parse(%q): accepted = %v, want %v", line, ok, want)
+			}
+		}
 	}
-	admitted := false
 	for _, line := range lane2Unlisted {
 		_, ok := lane2Parse(line)
 		admitted = admitted || ok
@@ -154,17 +189,8 @@ func testLane2RedirectList(t *testing.T) {
 		missed = missed || !lane2Redirect(spelling)
 	}
 	clean := true
-	for _, grammar := range lane2Grammar {
-		for _, verb := range grammar.verbs {
-			for _, flag := range verb.flags {
-				for _, spelling := range append([]string{flag.long, flag.long + "=v"}, flag.aliases...) {
-					clean = clean && !lane2Redirect(spelling)
-				}
-			}
-		}
-		for _, dropped := range grammar.dropped {
-			clean = clean && !lane2Redirect(dropped)
-		}
+	for _, flag := range strings.Fields("--full -l --all -a --no-legend --plain --quiet -q --lines -n --type -t --state --property -p --value --no-pager --no-ask-password --system --no-trunc --latest --size -s --last --filter -f --format --timestamps --details --tail --since --until --digests --no-stream") {
+		clean = clean && !lane2Redirect(flag) && !lane2Redirect(flag+"=v")
 	}
 	clean = clean && !lane2Redirect("--hostname") && !lane2Redirect("--users")
 	p.Effect("decision", missed)
@@ -186,13 +212,13 @@ func TestPhase3Tables(t *testing.T) {
 	}
 }
 
-// lane2LongLine pads prefix with positionals of at most lane2MaxValue bytes
+// lane2LongLine pads prefix with positionals of at most 128 bytes
 // to exactly size bytes.
-func lane2LongLine(t *testing.T, prefix string, size int) string {
+func lane2LongLine(t testing.TB, prefix string, size int) string {
 	t.Helper()
 	line := prefix
 	for len(line) < size {
-		n := min(size-len(line)-1, lane2MaxValue)
+		n := min(size-len(line)-1, 128)
 		if n < 1 {
 			t.Fatalf("SETUP: cannot pad %q to %d bytes", prefix, size)
 		}
@@ -201,13 +227,16 @@ func lane2LongLine(t *testing.T, prefix string, size int) string {
 	return line
 }
 
-func TestLane2LengthBounds(t *testing.T) {
-	plain := lane2LongLine(t, "systemctl status --quiet", lane2MaxLine)
-	expanding := lane2LongLine(t, "systemctl status -q -l -a -n 1", lane2MaxLine)
+func lane2LengthCases(t testing.TB) []struct {
+	name, line string
+	want       bool
+} {
+	plain := lane2LongLine(t, "systemctl status --quiet", 1024)
+	expanding := lane2LongLine(t, "systemctl status -q -l -a -n 1", 1024)
 	short := "systemctl status -q"
-	canonical1024 := lane2LongLine(t, short, lane2MaxLine-len("--quiet")+len("-q"))
-	canonical1025 := lane2LongLine(t, short, lane2MaxLine+1-len("--quiet")+len("-q"))
-	for _, tc := range []struct {
+	canonical1024 := lane2LongLine(t, short, 1024-len("--quiet")+len("-q"))
+	canonical1025 := lane2LongLine(t, short, 1024+1-len("--quiet")+len("-q"))
+	return []struct {
 		name, line string
 		want       bool
 	}{
@@ -217,8 +246,15 @@ func TestLane2LengthBounds(t *testing.T) {
 		{"canonical line of exactly 1024 bytes", canonical1024, true},
 		{"canonical line of 1025 bytes", canonical1025, false},
 		{"33 tokens", "systemctl status" + strings.Repeat(" u", 31), false},
-		{"128-byte value", "docker logs --since " + strings.Repeat("1", lane2MaxValue) + " web", true},
-	} {
+		{"128-byte flag value", "docker logs --since " + strings.Repeat("1", 128) + " web", true},
+		{"129-byte flag value", "docker logs --since " + strings.Repeat("1", 129) + " web", false},
+		{"128-byte positional", "systemctl status " + strings.Repeat("u", 128), true},
+		{"129-byte positional", "systemctl status " + strings.Repeat("u", 129), false},
+	}
+}
+
+func TestLane2LengthBounds(t *testing.T) {
+	for _, tc := range lane2LengthCases(t) {
 		call, ok := lane2Parse(tc.line)
 		if ok != tc.want {
 			t.Errorf("%s: lane2Parse ok = %v, want %v", tc.name, ok, tc.want)
@@ -233,6 +269,78 @@ func TestLane2LengthBounds(t *testing.T) {
 // parses back to the same call and renders the same argv; and every rendered
 // token is a grammar token, never a refused flag.
 func FuzzLane2Parse(f *testing.F) {
+	// All accepted and refused inputs from TestLane2Argv.
+	for _, line := range []string{
+		"systemctl status sshd",
+		"systemctl status\t nginx.service  --no-pager",
+		"systemctl status -l -n 50 getty@tty1.service",
+		"systemctl list-units --type=service -a",
+		"systemctl show -p ActiveState sshd",
+		"systemctl is-active -q sshd",
+		"systemctl get-default",
+		"docker ps -a",
+		"docker ps --filter status=running --format json",
+		"docker logs --tail 100 --since 1h web",
+		"docker stats --no-stream",
+		"docker inspect --format=json web",
+		"docker top web",
+		"docker version",
+		"systemctl status sshd; id",
+		"systemctl status sshd | head",
+		"systemctl status sshd && id",
+		"systemctl status sshd &",
+		"systemctl status sshd > /tmp/x",
+		"systemctl status < /etc/passwd",
+		"systemctl status `id`",
+		"systemctl status $(id)",
+		"systemctl status ${HOME}",
+		"systemctl status $HOME",
+		"systemctl status 'sshd'",
+		`systemctl status "sshd"`,
+		`systemctl status ss\hd`,
+		"systemctl status ssh*",
+		"systemctl status ssh?",
+		"systemctl status [s]shd",
+		"systemctl status ~/x",
+		"systemctl status sshd #c",
+		"systemctl status {a,b}",
+		"systemctl status sshd\nid",
+		"systemctl status (sshd)",
+		"DOCKER_HOST=tcp://evil:2375 docker ps",
+		"systemctl restart sshd",
+		"systemctl edit sshd",
+		"systemctl is-enabled sshd",
+		"systemctl --no-pager",
+		"systemctl",
+		"journalctl -u sshd",
+		"/usr/bin/systemctl status sshd",
+		"docker run alpine",
+		"docker exec web id",
+		"docker info",
+		"docker logs -f web",
+		"docker stats",
+		"docker ps -aq",
+		"docker top web aux",
+		"systemctl status -n",
+		"systemctl status -n --all",
+		"systemctl status --full=yes",
+		"systemctl list-units --type=service,socket",
+		"systemctl status --root=/x sshd",
+		"systemctl status --user",
+		"systemctl -H root@evil status sshd",
+		"systemctl status -H root@evil sshd",
+		"systemctl status --host=evil sshd",
+		"systemctl status --host evil",
+		"systemctl status -M box sshd",
+		"systemctl status --machine=box",
+		"docker ps -H tcp://evil:2375",
+		"docker ps --host=tcp://evil:2375",
+		"docker ps --context evil",
+		"docker ps -c evil",
+		"docker -H tcp://evil:2375 ps",
+	} {
+		f.Add(line)
+	}
 	for line := range lane2Golden {
 		f.Add(line)
 	}
@@ -247,7 +355,10 @@ func FuzzLane2Parse(f *testing.F) {
 	f.Add("systemctl status" + strings.Repeat(" u", 30))
 	f.Add("systemctl status" + strings.Repeat(" u", 31))
 	f.Add("docker logs --since -10m web")
-	f.Add("systemctl status -q -l -a -n 1 " + strings.Repeat("u", lane2MaxValue))
+	f.Add("systemctl status -q -l -a -n 1 " + strings.Repeat("u", 128))
+	for _, tc := range lane2LengthCases(f) {
+		f.Add(tc.line)
+	}
 	f.Fuzz(func(t *testing.T, line string) {
 		call, ok := lane2Parse(line)
 		if !ok {
