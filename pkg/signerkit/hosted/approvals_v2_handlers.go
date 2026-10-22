@@ -25,10 +25,15 @@ func (s *Server) AttachApprovals(engine *ApprovalV2Engine) error {
 	if s.approvalsMachine != nil {
 		return errors.New("hosted: approvals already attached")
 	}
+	limiter := &machineRateLimiter{}
 	s.approvalsMachine = s.withAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		kind, id := approvalRoute(r)
 		if kind == "" {
 			writeApprovalResponse(w, aw.KindGet, aw.ErrorResponse(ap.CodeNotFound, ""))
+			return
+		}
+		if !limiter.allow(600) {
+			writeApprovalResponse(w, kind, aw.ErrorResponse(ap.CodeBusy, ""))
 			return
 		}
 		response, err := s.dispatchApprovalHTTP(r, engine, kind, id)

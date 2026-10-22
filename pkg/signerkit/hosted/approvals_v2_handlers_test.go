@@ -187,6 +187,36 @@ func TestApprovalHTTPClaimAndReport(t *testing.T) {
 	}
 }
 
+func TestApprovalHTTPLimiter(t *testing.T) {
+	s, _, db := approvalHTTPFixture(t)
+	// Neither v1 bucket consumes the approvals budget.
+	for i := 0; i < 120; i++ {
+		s.machineSubmitLimit.allow(120)
+	}
+	for i := 0; i < 600; i++ {
+		s.machinePollLimit.allow(600)
+	}
+	for i := 0; i < 600; i++ {
+		approvalHTTPError(t, approvalHTTPRequest(s, "GET", aw.HostedRoot+"/"+statetest.ID(1), nil), ap.CodeNotFound)
+	}
+	body := approvalHTTPBody(t, aw.HostedSubmitBody{ApprovalProto: 1, Draft: approvalDraft(1)})
+	w := approvalHTTPRequest(s, "POST", aw.HostedRoot, body)
+	approvalHTTPError(t, w, ap.CodeBusy)
+	if w.Header().Get("Retry-After") != "1" {
+		t.Fatal("retry header")
+	}
+	if _, err := db.ReadV2(context.Background(), approvalKey(1)); err == nil {
+		t.Fatal("limited submit stored")
+	}
+	golden, err := os.ReadFile("../../../src/approvalwire/testdata/hosted/response-busy.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(bytes.TrimSpace(golden), w.Body.Bytes()) {
+		t.Fatal("busy golden mismatch")
+	}
+}
+
 func TestApprovalHTTPValidation(t *testing.T) {
 	s, _, db := approvalHTTPFixture(t)
 	body := approvalHTTPBody(t, aw.HostedSubmitBody{ApprovalProto: 1, Draft: approvalDraft(1)})
