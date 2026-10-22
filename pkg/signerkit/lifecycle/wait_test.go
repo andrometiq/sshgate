@@ -5,6 +5,7 @@ import (
 	"errors"
 	"reflect"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	ap "github.com/karthikeyan5/sshgate/src/approvalplan"
@@ -169,24 +170,64 @@ func TestWaitManyCancellationAndBounds(t *testing.T) {
 
 func TestWaitManyBroadcastAndRemoval(t *testing.T) {
 	e, clock, _, _ := engineFixture(t)
-	submitJob(t, e, 1)
-	cancelAdmissionRecord(t, e, 1)
-	clock.Advance(25 * time.Hour)
+	summary := submitJob(t, e, 1)
 	first, _ := startWait(t, e, st.ID(1))
 	second, _ := startWait(t, e, st.ID(1))
-	if answer, err := e.Delete(st.PrincipalA, st.ID(1), true); err != nil || !answer.Removed {
-		t.Fatal(answer, err)
+	if _, err := e.AdminCancel(summary.RecordHandle, ap.AdminCancel{PlanHash: summary.PlanHash, Admin: st.Admin}); err != nil {
+		t.Fatal(err)
 	}
 	for _, done := range []<-chan waitAnswer{first, second} {
 		got := receiveWait(t, done)
-		var code *ap.CodeError
-		if !errors.As(got.err, &code) || code.Code != ap.CodeNotFound || len(got.result.Summaries) != 0 {
-			t.Fatalf("removed record: %+v", got)
+		if got.err != nil || got.result.WaitElapsed || len(got.result.Summaries) != 1 || got.result.Summaries[0].ApprovalStatus != ap.ApprovalCanceled {
+			t.Fatalf("broadcast: %+v", got)
 		}
 	}
+	command(t, e, 1, ap.AssistDone{Unavailable: "test unavailable"})
+	flushRecord(t, e, 1)
+	clock.Advance(25 * time.Hour)
+	if answer, err := e.Delete(st.PrincipalA, st.ID(1), true); err != nil || !answer.Removed {
+		t.Fatal(answer, err)
+	}
+	_, err := e.WaitMany(context.Background(), st.PrincipalA, []string{st.ID(1)}, ap.AwaitMaxWait)
+	checkCode(t, err, ap.CodeNotFound)
 	e.published.mu.Lock()
 	defer e.published.mu.Unlock()
 	if len(e.published.waiters) != 0 {
 		t.Fatal("broadcast leaked registrations")
+	}
+}
+
+func TestWaitManyDecisionBeforeWait(t *testing.T) {
+	for _, status := range []ap.ApprovalStatus{ap.ApprovalApproved, ap.ApprovalCanceled, ap.ApprovalExpired} {
+		for _, budget := range []time.Duration{0, ap.AwaitMaxWait} {
+			t.Run(string(status)+"/"+budget.String(), func(t *testing.T) {
+				synctest.Test(t, func(t *testing.T) {
+					e, clock, store, _ := engineFixture(t)
+					submitJob(t, e, 1)
+					submitJob(t, e, 2)
+					switch status {
+					case ap.ApprovalApproved:
+						approve(t, e, 1)
+					case ap.ApprovalCanceled:
+						cancelAdmissionRecord(t, e, 1)
+					case ap.ApprovalExpired:
+						clock.Advance(2 * time.Hour)
+						command(t, e, 1, ap.Tick{})
+					}
+					before := store.commits
+					started := time.Now()
+					result, err := e.WaitMany(context.Background(), st.PrincipalA, []string{st.ID(2), st.ID(1)}, budget)
+					if err != nil || result.WaitElapsed || time.Since(started) != 0 || len(result.Summaries) != 2 {
+						t.Fatalf("decided wait: %+v %v elapsed=%v", result, err, time.Since(started))
+					}
+					if result.Summaries[0].ApprovalStatus != ap.ApprovalPending || result.Summaries[1].ApprovalStatus != status {
+						t.Fatalf("summaries: %+v", result.Summaries)
+					}
+					if store.commits != before || len(e.published.waiters) != 0 {
+						t.Fatal("wait wrote or registered")
+					}
+				})
+			})
+		}
 	}
 }
