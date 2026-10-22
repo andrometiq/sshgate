@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/karthikeyan5/sshgate/pkg/signerkit"
+	redactrules "github.com/karthikeyan5/sshgate/src/redact/rules"
 	"github.com/karthikeyan5/sshgate/src/signer/backend"
 )
 
@@ -817,6 +818,7 @@ func TestTelegram_ExplainerHappyPath(t *testing.T) {
 	store := &backend.MemChatStore{}
 	_ = store.Save(allowedChatID)
 	tb := newTestBackend(t, fake, store, 5*time.Second)
+	tb.RedactRules = redactrules.Combined()
 	tb.Explainer = &stubExplainer{
 		lines: []string{
 			"restart the nginx web server",
@@ -870,6 +872,7 @@ func TestTelegram_ExplainerEmptyEntryRendersFallbackText(t *testing.T) {
 	store := &backend.MemChatStore{}
 	_ = store.Save(allowedChatID)
 	tb := newTestBackend(t, fake, store, 5*time.Second)
+	tb.RedactRules = redactrules.Combined()
 	tb.Explainer = &stubExplainer{
 		lines: []string{"first explained", ""}, // second is empty
 	}
@@ -907,6 +910,7 @@ func TestTelegram_ExplainerErrorFallsBackToFooter(t *testing.T) {
 	store := &backend.MemChatStore{}
 	_ = store.Save(allowedChatID)
 	tb := newTestBackend(t, fake, store, 5*time.Second)
+	tb.RedactRules = redactrules.Combined()
 	tb.Explainer = &stubExplainer{err: errors.New("upstream-down")}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -942,6 +946,7 @@ func TestTelegram_ExplainerTimeoutFallsBackToFooter(t *testing.T) {
 	store := &backend.MemChatStore{}
 	_ = store.Save(allowedChatID)
 	tb := newTestBackend(t, fake, store, 5*time.Second)
+	tb.RedactRules = redactrules.Combined()
 	tb.Explainer = &stubExplainer{delay: 500 * time.Millisecond}
 	tb.ExplainerTimeout = 50 * time.Millisecond
 

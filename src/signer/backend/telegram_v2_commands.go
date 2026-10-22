@@ -11,7 +11,7 @@ import (
 
 const approvalUpdateLimit = 100
 
-// No lifecycle commands are registered yet. /start retains its legacy handler.
+// No lifecycle commands are registered in production yet. /start retains its legacy handler.
 func (t *TelegramBackend) handleApprovalCommand(m *tgbotapi.Message, forwarded bool) {
 	reason := "unknown_command"
 	switch {
@@ -23,6 +23,11 @@ func (t *TelegramBackend) handleApprovalCommand(m *tgbotapi.Message, forwarded b
 		reason = "forwarded"
 	case t.commandDrain:
 		reason = "redelivered"
+	default:
+		if handler := t.approvalCommands[m.Command()]; handler != nil {
+			handler(m)
+			return
+		}
 	}
 	transition := "command_refused{" + reason + "}"
 	if t.CommandAudit != nil {

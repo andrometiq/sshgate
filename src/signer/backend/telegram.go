@@ -18,6 +18,8 @@ import (
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
 	"github.com/karthikeyan5/sshgate/pkg/signerkit"
+	"github.com/karthikeyan5/sshgate/pkg/signerkit/assist"
+	ap "github.com/karthikeyan5/sshgate/src/approvalplan"
 	"github.com/karthikeyan5/sshgate/src/redact"
 	"github.com/karthikeyan5/sshgate/src/sigwire"
 )
@@ -41,7 +43,8 @@ import (
 //     {approve, deny, timeout, ctx-cancel} wins.
 type TelegramBackend struct {
 	approvalCallbacks *telegramApprovalCallbacks
-	commandDrain      bool // owned by the poller
+	commandDrain      bool                               // owned by the poller
+	approvalCommands  map[string]func(*tgbotapi.Message) // configured before polling
 	// CommandAudit is wired to the local AuditLog before Run.
 	CommandAudit interface {
 		Write(signerkit.AuditEvent) error
@@ -1109,6 +1112,7 @@ func outcomeMark(s signerkit.ResultStatus) string {
 
 // runExplainer is a thin wrapper around t.Explainer.Explain that:
 //   - returns (nil, nil) if no explainer is configured
+//   - skips the provider if its command copy cannot be safely redacted
 //   - enforces ExplainerTimeout (default 5s)
 //   - never panics — any panic in the Explainer is caught and logged so
 //     a misbehaving model client cannot kill the request goroutine
@@ -1138,11 +1142,16 @@ func (t *TelegramBackend) runExplainer(ctx context.Context, cmds []signerkit.Com
 	ectx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	flat := make([]string, len(cmds))
-	for i, c := range cmds {
-		flat[i] = c.Cmd
+	// This synthesized plan is advisory input only, never an authorization.
+	plan := ap.ApprovalPlanV1{Kind: ap.KindCommandJob, RationaleOrigin: ap.OriginSynthesizedLegacyV1, Rationale: ap.LegacyRationaleText, CommandJob: &ap.CommandJob{}}
+	for _, c := range cmds {
+		plan.CommandJob.Steps = append(plan.CommandJob.Steps, ap.Step{ExactCommand: c.Cmd})
 	}
-	return t.Explainer.Explain(ectx, flat)
+	input, err := assist.RedactForProvider(plan, t.RedactSalt, t.RedactRules)
+	if err != nil {
+		return nil, err
+	}
+	return t.Explainer.Explain(ectx, input.Commands)
 }
 
 // sanitiseExplainerErr renders a short, credential-free reason string

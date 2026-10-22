@@ -55,6 +55,11 @@ func TestApprovalCommandGate(t *testing.T) {
 			f := newCallbackFixture(t)
 			a := &commandAudit{}
 			f.backend.CommandAudit = a
+			if tt.reason != "unknown_command" {
+				f.backend.approvalCommands = map[string]func(*tgbotapi.Message){"cancel": func(*tgbotapi.Message) {
+					t.Fatal("refused command reached its handler")
+				}}
+			}
 			u := commandUpdate(100, "/cancel secret-argument")
 			tt.change(f.backend, u.Message)
 			before := time.Now()
@@ -201,6 +206,9 @@ func TestApprovalCommandForwardOrigin(t *testing.T) {
 				f := newCallbackFixture(t)
 				a := &commandAudit{}
 				f.backend.CommandAudit = a
+				f.backend.approvalCommands = map[string]func(*tgbotapi.Message){"pending": func(*tgbotapi.Message) {
+					t.Fatal("forwarded command reached its handler")
+				}}
 				ctx, cancel := context.WithCancel(context.Background())
 				defer cancel()
 				f.backend.runDone = make(chan struct{})
@@ -218,6 +226,58 @@ func TestApprovalCommandForwardOrigin(t *testing.T) {
 				f.backend.pollLoop(ctx)
 				if len(a.events) != 1 || a.events[0].Status != "approval-command_refused{forwarded}" {
 					t.Fatalf("events: %+v", a.events)
+				}
+			})
+		})
+	}
+}
+
+func TestApprovalRegisteredCommandTimestampSkew(t *testing.T) {
+	for _, skew := range []time.Duration{10 * time.Minute, -10 * time.Minute} {
+		t.Run(skew.String(), func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				f := newCallbackFixture(t)
+				a := &commandAudit{}
+				f.backend.CommandAudit = a
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				var executed []int
+				f.backend.approvalCommands = map[string]func(*tgbotapi.Message){"test": func(m *tgbotapi.Message) {
+					executed = append(executed, m.MessageID)
+					if m.MessageID == 2 {
+						cancel()
+						synctest.Wait()
+					}
+				}}
+				f.backend.runDone = make(chan struct{})
+				defer close(f.backend.runDone)
+				// Telegram's clock disagrees with the signer's startup clock.
+				// A correction cannot change which side of the update cut a command occupies.
+				telegramNow := time.Now().Add(-skew)
+				batch := 0
+				f.api.hook = func(r *http.Request, _ int) (string, error) {
+					if !strings.HasSuffix(r.URL.Path, "getUpdates") {
+						t.Fatal("unexpected API call")
+					}
+					batch++
+					if batch > 2 {
+						t.Fatal("post-drain command did not execute")
+					}
+					u := commandUpdate(batch, "/test")
+					u.Message.MessageID = batch
+					u.Message.Date = int(telegramNow.Add(time.Duration(batch-1) * time.Second).Unix())
+					body, err := json.Marshal(struct {
+						OK     bool              `json:"ok"`
+						Result []tgbotapi.Update `json:"result"`
+					}{true, []tgbotapi.Update{u}})
+					return string(body), err
+				}
+				f.backend.pollLoop(ctx)
+				if len(executed) != 1 || executed[0] != 2 {
+					t.Fatalf("executed commands: %v; want only post-drain command 2", executed)
+				}
+				if len(a.events) != 1 || a.events[0].Status != "approval-command_refused{redelivered}" {
+					t.Fatalf("audit events: %+v", a.events)
 				}
 			})
 		})
