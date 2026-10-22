@@ -951,23 +951,22 @@ func TestApprovalV2AssistRestartBeforeDeadline(t *testing.T) {
 	if redispatches.Load() != 0 || calls.Load() != 1 || readApproval(t, reopened, 1).Record.Header.Assist != nil {
 		t.Fatal("restart dispatched provider or filled assist before deadline")
 	}
-	clock.Advance(5 * time.Second)
-	bound := time.Now().Add(time.Second)
+	deadline := readApproval(t, reopened, 1).Record.Header.AssistDeadline
+	clock.Advance(deadline.Add(time.Second).Sub(clock.Wall()))
+	// The worker uses a real ticker; scheduler delay must not move the fake clock.
+	bound := time.Now().Add(10 * time.Second)
 	for readApproval(t, reopened, 1).Record.Header.Assist == nil {
 		if time.Now().After(bound) {
-			t.Fatal("Clock missed assist_deadline + 1 second")
+			t.Fatal("worker did not reconcile the advanced clock")
 		}
 		time.Sleep(time.Millisecond)
-	}
-	if time.Now().After(bound) {
-		t.Fatal("Clock missed assist_deadline + 1 second")
 	}
 	view, err := next.Get(context.Background(), approvalKey(1))
 	if err != nil || view.AssistRevision != 1 {
 		t.Fatalf("restart view=%+v error=%v", view, err)
 	}
 	slot := readApproval(t, reopened, 1).Record.Header.Assist
-	if slot.State != ap.AssistUnavailable || slot.Reason != assist.ReasonDeadline || calls.Load() != 1 || redispatches.Load() != 0 {
+	if slot.State != ap.AssistUnavailable || slot.Reason != assist.ReasonDeadline || !slot.GeneratedAt.Equal(deadline) || !clock.Wall().Equal(deadline.Add(time.Second)) || calls.Load() != 1 || redispatches.Load() != 0 {
 		t.Fatalf("slot=%+v provider calls=%d", slot, calls.Load())
 	}
 }
@@ -990,11 +989,12 @@ func TestApprovalV2AssistBusyRetriesStopAtDeadline(t *testing.T) {
 	}
 	// Establish an active retry loop before crossing the deadline.
 	awaitApprovalState(t, func() bool { return st.attempts.Load() >= 2 })
-	clock.Advance(6 * time.Second)
+	deadline := readApproval(t, db, 1).Record.Header.AssistDeadline
+	clock.Advance(deadline.Add(time.Second).Sub(clock.Wall()))
 	// Admission is the public proof that the completion callback exited. No Close
 	// or cancellation occurs until cleanup, and BEGIN remains busy throughout.
 	completed := make(chan struct{})
-	bound := time.Now().Add(time.Second)
+	bound := time.Now().Add(10 * time.Second)
 	for {
 		result := e.config.AssistPool.TrySubmit(context.Background(), nil, assist.Input{}, clock.Wall().Add(time.Second), func(assist.Snapshot) { close(completed) })
 		if result == assist.Accepted {
