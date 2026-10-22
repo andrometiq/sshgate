@@ -444,3 +444,68 @@ func TestUIListsV2NeutralizesAuditMetadata(t *testing.T) {
 		t.Fatalf("audit metadata not neutralized: %s", out["v2_entries"])
 	}
 }
+
+func TestUIListsV2PaginationInsertBetweenPagesAndFullFinalPage(t *testing.T) {
+	e, db, clock := approvalEngineFixture(t, false)
+	s, _, _, _ := voteChallengeFixture(t, false)
+	s.Human.Store = db
+	ctx := context.Background()
+	// Leave gaps on both sides of the cursor, all at the same timestamp.
+	for id := 2; id <= 198; id += 2 {
+		submitApproval(t, e, id)
+	}
+	first, cursor := pendingPage(t, s, "")
+	if len(first) != 50 || cursor == "" {
+		t.Fatalf("first page: %d %q", len(first), cursor)
+	}
+	// A second principal keeps the fixture within the per-principal live cap.
+	if _, err := e.Submit(ctx, "another", "", approvalDraft(1)); err != nil {
+		t.Fatal(err)
+	}
+	submitApproval(t, e, 101) // After the cursor: included in the next page.
+	second, next := pendingPage(t, s, cursor)
+	if len(second) != 50 || next != "" {
+		t.Fatalf("exactly full final page: %d %q", len(second), next)
+	}
+	var want []string
+	for id := 2; id <= 198; id += 2 {
+		want = append(want, readApproval(t, db, id).RecordHandle)
+		if id == 100 {
+			want = append(want, readApproval(t, db, 101).RecordHandle)
+		}
+	}
+	var got []string
+	for _, row := range append(first, second...) {
+		var handle string
+		if err := json.Unmarshal(row["record_handle"], &handle); err != nil {
+			t.Fatal(err)
+		}
+		got = append(got, handle)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("continuation changed order or lost/repeated rows: got %v want %v", got, want)
+	}
+	fresh, _ := pendingPage(t, s, "")
+	var firstHandle string
+	json.Unmarshal(fresh[0]["record_handle"], &firstHandle)
+	inserted, err := db.ReadV2(ctx, sqlitestore.V2Key{ClientID: "another", RequestID: approvalKey(1).RequestID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstHandle != inserted.RecordHandle {
+		t.Fatal("refresh missed insert before cursor")
+	}
+	// A later timestamp sorts after the equal-timestamp group even with a smaller ID.
+	clock.Advance(time.Second)
+	if _, err := e.Submit(ctx, "other", "", approvalDraftAt(1, clock.Wall())); err != nil {
+		t.Fatal(err)
+	}
+	second, next = pendingPage(t, s, cursor)
+	if len(second) != 50 || next == "" {
+		t.Fatalf("new tail continuation: %d %q", len(second), next)
+	}
+	tail, end := pendingPage(t, s, next)
+	if len(tail) != 1 || end != "" {
+		t.Fatalf("inserted tail page: %d %q", len(tail), end)
+	}
+}

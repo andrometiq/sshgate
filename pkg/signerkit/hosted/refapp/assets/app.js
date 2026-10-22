@@ -188,3 +188,47 @@ async function logout() {
   await apiPost('/auth/logout', {});
   location.href = 'login.html';
 }
+
+// Review strings are already neutralized by approvalreview; preserve its display bytes.
+function renderV2Review(row) {
+  const block = el('section', {class: 'card'});
+  block.appendChild(el('p', {text: 'Plan SHA-256: ' + (row.plan_hash || '—')}));
+  block.appendChild(el('p', {text: 'Expires: ' + fmtTime(row.request_expires_at)}));
+  if (row.pruned) {
+    block.appendChild(el('p', {text: row.details || 'details pruned'}));
+    block.appendChild(el('p', {text: row.rationale_redacted || ''}));
+    return block;
+  }
+  const view = row.review;
+  if (!view) return block;
+  for (const line of view.headlines || []) block.appendChild(el('p', {text: line}));
+  for (const line of [view.sync_notice, view.reason_label, view.reason, view.summary]) {
+    if (line) block.appendChild(el('p', {text: line}));
+  }
+  for (const item of view.items || []) {
+    const command = el('section', {class: 'cmd'});
+    command.appendChild(el('div', {text: item.heading || ''}));
+    command.appendChild(el('div', {class: 'label', text: item.text_label || ''}));
+    command.appendChild(el('div', {class: 'text', text: item.text || ''}));
+    if (item.ref) command.appendChild(el('div', {text: item.ref}));
+    if (item.sha256) command.appendChild(el('div', {class: 'sha', text: 'SHA-256: ' + item.sha256}));
+    for (const note of item.notes || []) command.appendChild(el('div', {text: note}));
+    block.appendChild(command);
+  }
+  const assist = view.assist || {};
+  block.appendChild(el('h2', {text: 'AI advisory'}));
+  for (const line of [assist.state, assist.alignment, assist.summary, assist.reason]) {
+    if (line) block.appendChild(el('p', {text: line}));
+  }
+  for (const concern of assist.concerns || []) block.appendChild(el('p', {text: 'Concern: ' + concern}));
+  for (const effect of assist.effects || []) block.appendChild(el('p', {text: 'Effect: ' + effect}));
+  return block;
+}
+
+function renderV2Votes(votes, required) {
+  const block = el('div');
+  votes = votes || [];
+  if (required != null) block.appendChild(el('p', {text: 'Required approvals: ' + required}));
+  for (const vote of votes) block.appendChild(el('p', {text: vote.operator + ' — ' + vote.decision}));
+  return block;
+}
