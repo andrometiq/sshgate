@@ -648,3 +648,10 @@ Rule:
 - A committed `/renotify` gives gen+1, so a new derived handle.
 - The frozen R1 encoding and Apply stay unchanged. The "first CardStart uses the derived handle" rule is enforced in the lifecycle and pinned by tests, not by a core guard.
 Authorized edits for the A8 lane: the new function plus its test in `src/approvalplan/ids.go` (no other approvalplan change), `pkg/signerkit/lifecycle/notify.go` and its tests, and the one-line replacement note in `src/approvalreview/telegram.go`.
+
+### Rulings 2026-10-22 — gap sweep of the remaining lanes (orchestrator)
+A read-only sweep listed 43 underdetermined rules across the remaining lanes. The 28 orchestrator
+rulings, the new lanes A1a-auth and B1f, the C2a–C2d split and the DAG amendments are in
+[wave3-gap-rulings.md](wave3-gap-rulings.md). They passed three independent verification rounds;
+the fourth revision's last five fixes were applied without a further round. Its owner questions
+are open until answered; a lane blocked by one does not start.
