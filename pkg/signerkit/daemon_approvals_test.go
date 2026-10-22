@@ -339,8 +339,10 @@ func (*heldApprovalNotifier) SendCard(context.Context, lifecycle.Notification) (
 func (*heldApprovalNotifier) EditCard(context.Context, int64, lifecycle.Notification) (lifecycle.EditOutcome, error) {
 	return lifecycle.EditFailed, nil
 }
-func (*heldApprovalNotifier) EditStatus(context.Context, int64, string) error { return nil }
-func (*heldApprovalNotifier) MarkIncomplete(context.Context, int64) error     { return nil }
+func (*heldApprovalNotifier) EditStatus(context.Context, int64, lifecycle.StatusDisplay) error {
+	return nil
+}
+func (*heldApprovalNotifier) MarkIncomplete(context.Context, int64) error { return nil }
 
 func TestServiceCloseJoinsApprovalSendWithoutPolicyJournal(t *testing.T) {
 	defer goleak.VerifyNone(t)

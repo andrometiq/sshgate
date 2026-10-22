@@ -109,12 +109,16 @@ func (a *notifyActor) commit(ctx context.Context, cmd ap.Command) (ap.R1, ap.Ans
 
 func notification(rec ap.R1) Notification {
 	n := Notification{Snapshot: rec.Payload.ReviewSnapshot, Assist: rec.Payload.AssistResult, AssistState: ap.AssistPreparing}
+	gen := rec.Header.RenotifyGen
 	if rec.Header.Assist != nil {
 		n.AssistState, n.Revision = rec.Header.Assist.State, 1
 	}
 	if bursts := rec.Payload.Bursts; len(bursts) != 0 {
 		n.PartMessageIDs = bursts[len(bursts)-1].PartMsgIDs
+		gen = bursts[len(bursts)-1].Gen
 	}
+	n.Handle = ap.CardHandleFor(ap.RecordKey(rec.Header.Principal, rec.Header.RequestID), gen)
+	n.PartsHandle = n.Handle
 	return n
 }
 
@@ -127,7 +131,7 @@ func (a *notifyActor) run(ctx context.Context) error {
 		}
 	}()
 	for {
-		_, step, err := a.read(ctx)
+		rec, step, err := a.read(ctx)
 		if err != nil {
 			return err
 		}
@@ -195,7 +199,11 @@ func (a *notifyActor) run(ctx context.Context) error {
 			if err := a.engine.checkAvailable(); err != nil {
 				return err
 			}
-			_ = a.engine.config.Notifier.EditStatus(ctx, step.MsgID, step.State)
+			display := StatusDisplay{State: step.State}
+			if step.State == string(ap.ExecutionNotExecutable) {
+				display.Reason = rec.Header.Mint.Reason
+			}
+			_ = a.engine.config.Notifier.EditStatus(ctx, step.MsgID, display)
 			if _, _, err := a.commit(ctx, ap.StatusEdited{State: step.State}); err != nil {
 				return err
 			}
@@ -216,19 +224,57 @@ func (a *notifyActor) run(ctx context.Context) error {
 func newEditRetryTimer(delay time.Duration) *time.Timer { return time.NewTimer(delay) }
 
 func (a *notifyActor) startCard(ctx context.Context, edit bool) (ap.R1, Notification, bool, error) {
-	handle, err := ap.NewCardHandle(rand.Reader)
-	if err != nil {
-		return ap.R1{}, Notification{}, false, err
-	}
 	challenge, err := ap.NewChallenge(rand.Reader)
 	if err != nil {
 		return ap.R1{}, Notification{}, false, err
+	}
+	e := a.engine
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if err := e.availabilityLocked(); err != nil {
+		return ap.R1{}, Notification{}, false, err
+	}
+	if err := ctx.Err(); err != nil {
+		return ap.R1{}, Notification{}, false, err
+	}
+	before, err := e.load(a.key)
+	if err != nil {
+		return ap.R1{}, Notification{}, false, err
+	}
+	if before == nil {
+		if _, exists := e.projections.records[a.key]; exists {
+			return ap.R1{}, Notification{}, false, keyError()
+		}
+		return ap.R1{}, Notification{}, false, nil
+	}
+	handle := ""
+	if !edit && before.Payload != nil {
+		derived := ap.CardHandleFor(a.key, before.Header.RenotifyGen)
+		used := false
+		for _, entry := range before.Payload.CardEntries {
+			if entry.Handle == derived {
+				used = true
+				break
+			}
+		}
+		if !used {
+			handle = derived
+		}
+	}
+	if handle == "" {
+		handle, err = ap.NewCardHandle(rand.Reader)
+		if err != nil {
+			return ap.R1{}, Notification{}, false, err
+		}
 	}
 	var cmd ap.Command = ap.CardStart{Handle: handle, ChalHash: ap.ChallengeHash(challenge)}
 	if edit {
 		cmd = ap.EditStart{Handle: handle, ChalHash: ap.ChallengeHash(challenge)}
 	}
-	rec, answer, err := a.commit(ctx, cmd)
+	rec, answer, err := e.commitLocked(a.key, before, cmd, e.now(), ap.Inputs{})
+	if err == nil {
+		err = answerError(answer)
+	}
 	if err != nil || answer.Reason != "" {
 		return rec, Notification{}, false, err
 	}

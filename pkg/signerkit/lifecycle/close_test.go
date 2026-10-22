@@ -434,7 +434,9 @@ type closeStatusNotifier struct {
 	status func() error
 }
 
-func (n *closeStatusNotifier) EditStatus(context.Context, int64, string) error { return n.status() }
+func (n *closeStatusNotifier) EditStatus(context.Context, int64, StatusDisplay) error {
+	return n.status()
+}
 
 func TestStopLatchBeforeIO(t *testing.T) {
 	for _, effect := range []string{"notifier", "audit"} {
