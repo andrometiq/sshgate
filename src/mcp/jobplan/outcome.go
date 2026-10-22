@@ -40,6 +40,22 @@ type Outcome struct {
 	Retryable    bool
 }
 
+const (
+	ReadJailAfterStart = "gate reported read jail unavailable after the read may have started; its result is not trusted (counted as executed)"
+	ReadJailRefused    = "gate refused the read: read jail unavailable"
+	ReadJailSigned     = "gate reported read jail unavailable (unverified on a signed route; counted as executed)"
+)
+
+// ReadJailRemediation recognizes only the runner's durable annotations.
+func ReadJailRemediation(annotation string) (string, bool) {
+	switch annotation {
+	case ReadJailAfterStart, ReadJailRefused, ReadJailSigned:
+		return "Ask a human to run `~/.sshgate-gate/gate doctor` on the host; do not auto-retry.", true
+	default:
+		return "", false
+	}
+}
+
 // StepOutcome never uses stderr as evidence that a signed step did not run.
 // EarlierExecuted limits signature retry advice to the first executed step.
 func StepOutcome(kind StepKind, earlierExecuted bool, phased PhasedResult) Outcome {
@@ -71,16 +87,17 @@ func StepOutcome(kind StepKind, earlierExecuted bool, phased PhasedResult) Outco
 	stderr := string(phased.Stderr)
 	if (kind == UnsignedRead || kind == SignedWrite || kind == SignedReveal) && exit == 77 && strings.Contains(stderr, "gate: read jail unavailable") {
 		outcome.VerdictClass = "read_jail_unavailable"
-		outcome.Message = "Ask a human to run `~/.sshgate-gate/gate doctor` on the host; do not auto-retry."
+
 		switch {
 		case strings.Contains(stderr, "the jail failed after the read may have started"):
-			outcome.Annotation = "gate reported read jail unavailable after the read may have started; its result is not trusted (counted as executed)"
+			outcome.Annotation = ReadJailAfterStart
 		case kind == UnsignedRead:
 			outcome.Status = approvalplan.StepFailedNotStarted
-			outcome.Annotation = "gate refused the read: read jail unavailable"
+			outcome.Annotation = ReadJailRefused
 		default:
-			outcome.Annotation = "gate reported read jail unavailable (unverified on a signed route; counted as executed)"
+			outcome.Annotation = ReadJailSigned
 		}
+		outcome.Message, _ = ReadJailRemediation(outcome.Annotation)
 		return outcome
 	}
 	switch kind {

@@ -14,6 +14,7 @@ import (
 	"github.com/karthikeyan5/sshgate/internal/securestate"
 	ap "github.com/karthikeyan5/sshgate/src/approvalplan"
 	"github.com/karthikeyan5/sshgate/src/executorwire"
+	"github.com/karthikeyan5/sshgate/src/mcp/jobplan"
 	"github.com/karthikeyan5/sshgate/src/mcp/registry"
 )
 
@@ -36,6 +37,11 @@ type Config struct {
 // this same critical section so released reservations cannot race admission.
 type Service struct {
 	mu                sync.Mutex
+	commandSigner     CommandSigner
+	commandSSH        jobplan.PhasedRunner
+	actors            map[string]bool
+	deliveries        map[string]bool
+	actorGroup        sync.WaitGroup
 	signer            SubmitSigner
 	submissions       map[string]*submitAttempt
 	fatal             chan error
@@ -72,7 +78,7 @@ func NewService(config Config) (*Service, error) {
 	waitSigner, _ := config.Signer.(WaitSigner)
 	effects, cancelEffects := context.WithCancel(context.Background())
 	return &Service{
-		store: config.Store, servers: config.Servers, clock: config.Clock,
+		actors: make(map[string]bool), deliveries: make(map[string]bool), store: config.Store, servers: config.Servers, clock: config.Clock,
 		signer: config.Signer, waitSigner: waitSigner, submissions: make(map[string]*submitAttempt), fatal: make(chan error, 1),
 		effects: effects, cancelEffects: cancelEffects, submitTimeout: SubmitNotificationTimeout,
 		waiterDone: make(chan struct{}), waiterWake: make(chan struct{}, 1), jobNudges: make(map[string]chan struct{}), waitJobs: make(map[string]bool),
@@ -84,6 +90,12 @@ func NewService(config Config) (*Service, error) {
 // Commit errors, particularly ErrCommitUncertain, remain errors for the owner
 // to handle; they must never be turned into an ordinary retryable refusal.
 func (s *Service) Submit(request executorwire.SubmitRequest) (executorwire.Job, error) {
+	return s.submit(request, nil)
+}
+
+// admitted runs under mu after a confirmed commit (or an idempotent lookup),
+// before any worker can observe this admission.
+func (s *Service) submit(request executorwire.SubmitRequest, admitted func(string)) (executorwire.Job, error) {
 	if _, err := executorwire.MarshalRequest(request); err != nil {
 		return executorwire.Job{}, err
 	}
@@ -97,6 +109,9 @@ func (s *Service) Submit(request executorwire.SubmitRequest) (executorwire.Job, 
 	if err == nil {
 		if job.InputHash != request.InputHash {
 			return executorwire.Job{}, refusal("conflict")
+		}
+		if admitted != nil {
+			admitted(job.RequestID)
 		}
 		return executorwire.FromSummary(ap.JobView(job, s.epoch)), nil
 	}
@@ -152,6 +167,9 @@ func (s *Service) Submit(request executorwire.SubmitRequest) (executorwire.Job, 
 	}
 	if err := s.store.Commit(job); err != nil {
 		return executorwire.Job{}, err
+	}
+	if admitted != nil {
+		admitted(job.RequestID)
 	}
 	s.jobCommittedLocked(job)
 	return executorwire.FromSummary(ap.JobView(job, s.epoch)), nil

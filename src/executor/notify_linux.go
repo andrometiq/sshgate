@@ -32,48 +32,62 @@ type submitAttempt struct {
 // Notification evidence belongs to this attempt: an older acknowledgement
 // cannot supply a notification status when every fresh Get fails.
 func (s *Service) SubmitAndNotify(ctx context.Context, request executorwire.SubmitRequest) (executorwire.Response, error) {
-	job, err := s.Submit(request)
+	var attempt *submitAttempt
+	var bound context.Context
+	var cancel context.CancelFunc
+	ownsAttempt := false
+	job, err := s.submit(request, func(id string) {
+		bound, cancel = context.WithTimeout(s.effects, s.submitTimeout)
+		if s.signer == nil && s.commandSigner == nil {
+			return
+		}
+		attempt = s.submissions[id]
+		if attempt == nil && !s.stopping {
+			attempt = &submitAttempt{done: make(chan struct{})}
+			s.submissions[id] = attempt
+			ownsAttempt = true
+			go func() {
+				defer cancel()
+				s.submitNotification(bound, id, attempt)
+				s.mu.Lock()
+				if attempt.err != nil {
+					s.reportFatal(attempt.err)
+				}
+				attempt.bounded = errors.Is(bound.Err(), context.DeadlineExceeded)
+				delete(s.submissions, id)
+				close(attempt.done)
+				s.mu.Unlock()
+			}()
+		}
+	})
 	if err != nil {
 		return executorwire.Response{}, err
 	}
-	bound, cancel := context.WithTimeout(s.effects, s.submitTimeout)
-	ownsAttempt := false
-	defer func() {
-		if !ownsAttempt {
-			cancel()
-		}
-	}()
+	if !ownsAttempt {
+		defer cancel()
+	}
 	response := executorwire.Response{ProtoVersion: executorwire.Proto, Kind: executorwire.KindSubmit, OK: true, Job: &job}
-	if s.signer == nil {
-		return response, nil
-	}
-	s.mu.Lock()
-	attempt := s.submissions[job.RequestID]
-	if attempt == nil && !s.stopping {
-		attempt = &submitAttempt{done: make(chan struct{})}
-		s.submissions[job.RequestID] = attempt
-		// The actor's deadline belongs to the service, not the caller's connection.
-		ownsAttempt = true
-		go func() {
-			defer cancel()
-			s.submitNotification(bound, job.RequestID, attempt)
-			s.mu.Lock()
-			if attempt.err != nil {
-				s.reportFatal(attempt.err)
-			}
-			attempt.bounded = errors.Is(bound.Err(), context.DeadlineExceeded)
-			delete(s.submissions, job.RequestID)
-			close(attempt.done)
-			s.mu.Unlock()
-		}()
-	}
-	s.mu.Unlock()
 	if attempt != nil {
-		select {
-		case <-attempt.done:
-		case <-bound.Done():
-		case <-ctx.Done():
+		ticker := time.NewTicker(500 * time.Millisecond)
+	wait:
+		for {
+			select {
+			case <-attempt.done:
+				break wait
+			case <-bound.Done():
+				break wait
+			case <-ctx.Done():
+				break wait
+			case <-ticker.C:
+				s.mu.Lock()
+				notified := notificationComplete(attempt.notification)
+				s.mu.Unlock()
+				if notified {
+					break wait
+				}
+			}
 		}
+		ticker.Stop()
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -112,9 +126,21 @@ func (s *Service) Close() {
 	for _, attempt := range attempts {
 		<-attempt.done
 	}
+	s.actorGroup.Wait()
 }
 
 func (s *Service) submitNotification(ctx context.Context, id string, attempt *submitAttempt) {
+	s.mu.Lock()
+	job, loadErr := s.store.Load(id)
+	commands := s.commandSigner != nil && loadErr == nil && commandExecutable(job)
+	s.mu.Unlock()
+	if commands {
+		s.observeNotification(ctx, id, attempt)
+		return
+	}
+	if s.signer == nil {
+		return
+	}
 	reconcile := false
 	backoff := 250 * time.Millisecond
 	for ctx.Err() == nil {
@@ -176,7 +202,7 @@ func (s *Service) submitNotification(ctx context.Context, id string, attempt *su
 			}
 			job = current
 			if err == nil && answer.Code == "" {
-				attempt.notification = summary.NotificationStatus
+				attempt.observe(summary.NotificationStatus)
 				if job.SignerAck == "" {
 					action.Kind = ap.JobActSubmit
 				}
@@ -243,4 +269,55 @@ func (s *Service) commitSubmission(job ap.R2, command ap.JobCommand) (ap.R2, err
 		s.jobCommittedLocked(next)
 	}
 	return next, nil
+}
+
+// The command actor alone owns signer transitions once execution is enabled.
+func (s *Service) observeNotification(ctx context.Context, id string, attempt *submitAttempt) {
+	for ctx.Err() == nil {
+		s.mu.Lock()
+		status := attempt.notification
+		s.mu.Unlock()
+		if status != "" && status != ap.NotificationNotStarted && status != ap.NotificationSending {
+			return
+		}
+		summary, err := s.commandSigner.Get(ctx, id)
+		s.mu.Lock()
+		if s.stopping || ctx.Err() != nil {
+			s.mu.Unlock()
+			return
+		}
+		if err == nil && summary.RequestID == id && summary.NotificationStatus.Valid() {
+			attempt.observe(summary.NotificationStatus)
+		}
+		job, loadErr := s.store.Load(id)
+		if loadErr != nil {
+			attempt.err = loadErr
+			s.mu.Unlock()
+			return
+		}
+		done := ap.JobView(job, s.epoch).State == ap.JobFinal && job.SignerAck == "" || attempt.notification != "" && attempt.notification != ap.NotificationNotStarted && attempt.notification != ap.NotificationSending
+		s.mu.Unlock()
+		if done {
+			return
+		}
+		timer := time.NewTimer(500 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+	}
+}
+
+func notificationComplete(status ap.NotificationStatus) bool {
+	return status != "" && status != ap.NotificationNotStarted && status != ap.NotificationSending
+}
+
+// E63 ends at the first complete observation. An older in-flight response
+// cannot erase that evidence after another call has observed completion.
+func (a *submitAttempt) observe(status ap.NotificationStatus) {
+	if !notificationComplete(a.notification) {
+		a.notification = status
+	}
 }

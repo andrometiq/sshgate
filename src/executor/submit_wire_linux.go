@@ -79,5 +79,14 @@ func (s *Service) ServeConn(ctx context.Context, conn net.Conn) error {
 		return err
 	}
 	_, err = io.Copy(conn, bytes.NewReader(body))
+	if err == nil && response.Kind == executorwire.KindAwait {
+		var ids []string
+		for _, item := range response.Items {
+			if item.Job != nil && len(item.Job.Results) != 0 {
+				ids = append(ids, item.RequestID)
+			}
+		}
+		s.delivered(ids)
+	}
 	return err
 }

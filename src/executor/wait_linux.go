@@ -28,6 +28,7 @@ func (s *Service) nudgeLocked(id string) {
 		flag = make(chan struct{}, 1)
 		s.jobNudges[id] = flag
 	}
+	s.startCommandActorLocked(id, flag)
 	select {
 	case flag <- struct{}{}:
 	default:
@@ -57,7 +58,7 @@ func (s *Service) startWaiter() {
 func (s *Service) projectJobLocked(job ap.R2) {
 	id := job.RequestID
 	delete(s.waitJobs, id)
-	if job.Draft.CommandJob == nil {
+	if !commandExecutable(job) {
 		delete(s.jobNudges, id)
 		return
 	}
