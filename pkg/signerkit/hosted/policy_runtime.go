@@ -207,15 +207,13 @@ func (server *Server) MarkPolicyUnready() {
 	server.policyMu.Unlock()
 }
 
-// Close makes policy unavailable, cancels, and joins both owned workers. It
-// intentionally performs no row-lease clear.
+// Close makes policy unavailable and joins ordinary and policy work.
+// It intentionally performs no row-lease clear.
 func (server *Server) Close() error {
 	server.MarkPolicyUnready()
+	server.closeOrdinaryWorkers()
 	server.policyMu.Lock()
-	if server.policyClosed {
-		server.policyMu.Unlock()
-		return nil
-	}
+	// Every caller joins; policyClosed prevents any later worker admission.
 	server.policyClosed = true
 	cancel := server.policyCancel
 	server.policyMu.Unlock()

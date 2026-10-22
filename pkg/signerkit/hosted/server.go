@@ -17,8 +17,8 @@ import (
 // Server is the hosted signer-server HTTP handler. It owns the route
 // table, the bearer-token auth check, and the shared dependencies
 // (logger, API key, store handle). A single Server instance serves an
-// arbitrary number of concurrent requests; all fields are read-only
-// after construction.
+// arbitrary number of concurrent requests; configuration is read-only after
+// startup, and worker ownership is synchronized.
 //
 // Server itself implements http.Handler so callers can drop it into
 // http.Server or httptest. cmd/signer-server wires the production
@@ -90,6 +90,13 @@ type Server struct {
 	machineAttached    bool
 	machineSubmitLimit *machineRateLimiter
 	machinePollLimit   *machineRateLimiter
+
+	ordinaryMu     sync.Mutex
+	ordinaryEngine *ApprovalV2Engine
+	ordinaryCancel context.CancelFunc
+	ordinaryJoined chan struct{}
+	ordinaryClosed bool
+	ordinaryClose  sync.Once
 
 	policyMu         sync.Mutex
 	policy           *PolicyAPIConfig
