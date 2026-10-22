@@ -11,9 +11,19 @@ published; entries are ordered newest-first by version.
 ## [Unreleased]
 
 Phase 2 of the kernel read jail (work item #22): P2.1 and P2.2, released
-together, and Phase 3 (the `systemctl`/`docker` read verbs).
+together, Phase 3 (the `systemctl`/`docker` read verbs), and the Phase-4 gate
+support for signed network grants and the unsigned read envelope (P4.2).
 
 ### Added
+
+- **Gate support for per-read signed network grants.** A verified `Net=true`
+  read runs in a strict jail with network; an unavailable jail or an unmet
+  clause refuses it with exit 77. `SSHGATE_JAIL` reports `net_grants=true`.
+  Signer and MCP support remain separate Phase-4 steps.
+- **`SSHGATE_READ1 confined[,net] <cmd>`**, an unsigned read envelope that
+  requires a strict jailed run on either signer tier. It never grants network:
+  `net` requires a valid `net=allow` pin at admission, or exit 77. Executed-read
+  and denial audits carry `envelope` and `net_grant` to distinguish the sources.
 
 - **`gate doctor --pin --net=allow|deny [--accept-fs=network[,autofs]]`** pins
   a host after a rehearsal: doctor builds test fixtures (a file, a named pipe,
@@ -32,6 +42,15 @@ together, and Phase 3 (the `systemctl`/`docker` read verbs).
   one, `kernel-jailed, network open — not read-only` with `net=allow`, and so on.
 
 ### Security
+
+- **Network grants cover reads only.** A grant on an admin verb, write or
+  unknown command is denied before dispatch (exit 77,
+  `gate: network grant covers reads only`). Signed inner read envelopes are
+  denied with `gate: the read envelope is unsigned-only`. A daemon-read verb
+  refuses either a signed grant or an envelope `net` flag (exit 77,
+  `gate: network is not available for daemon-read verbs`), whatever the pin or
+  jail availability. An envelope with `confined` alone still permits a daemon
+  read in its jail without network.
 
 - **The `systemctl`/`docker` read verbs are admitted before they run.** A typed
   grammar decides which lines are these verbs, and the gate runs its own
@@ -55,10 +74,10 @@ together, and Phase 3 (the `systemctl`/`docker` read verbs).
 - **Network is off by default for unsigned reads.** On a host where the
   kernel jail runs, an unsigned read can no longer open a TCP or UDP socket,
   not even to localhost. Turn it back on per host by pinning the host
-  `net=allow` (`gate doctor --pin --net=allow`); a per-read signed network grant
-  is planned. A jailed network tool that fails for this reason gets one note on
-  stderr. Hosts without a usable jail run reads classifier-only, as before, and
-  keep network.
+  `net=allow` (`gate doctor --pin --net=allow`); the gate also accepts a
+  per-read signed network grant. A jailed network tool that fails for this reason
+  gets one note on stderr. Hosts without a usable jail run reads classifier-only,
+  as before, and keep network.
 - **Every read attempts the jail; there is no separate probe.** A setup
   failure caused by the host lacking the jail (user namespaces off, Ubuntu's
   AppArmor userns restriction, an LSM-refused mount, a missing kernel feature)

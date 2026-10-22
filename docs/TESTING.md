@@ -113,8 +113,7 @@ single-call indirections:
 
 - `gateDirFn` / `homeDirFn` — `src/gate/cmd/sshgate-gate/main.go` (`var gateDirFn`, `var homeDirFn`)
 - `executeCommand` (`main.go`) and the read router's seams in
-  `src/gate/cmd/sshgate-gate/readjail.go`: `forceNetGrant` (stands in for a signed network grant
-  until the signed wire carries one), `readSpecHook` (forces a Landlock ABI or a setup failure),
+  `src/gate/cmd/sshgate-gate/readjail.go`: `readSpecHook` (forces a Landlock ABI or a setup failure),
   `hostFactsFn`, `pinUIDFn`, `jailPinFn`, `sealFn` (the seal of a jailed read) and
   `resetVerbEnv` (the `SSHGATE_JAIL` environment reset); the in-process test binary
   records the last two instead of sealing itself or clearing its environment. The
@@ -124,7 +123,11 @@ single-call indirections:
   `rehearsalObserveHook`. Doctor's are `fixturesFn` (the fixtures and the rehearsal behind the
   `rehearser` interface), `mountOfFn` and `describeMountsFn`. The gate legs that need the gate in its own process
   set the same seams through the test binary's `SSHGATE_TEST_GATE` mode (`jail_testmain_test.go`);
-  the gate itself never reads them from the environment.
+  the gate itself never reads them from the environment. `testGateConfig.HostFPs` supplies
+  host fingerprints through `hostKeyFPsFn` for real signed grants; `Absent` forces Landlock
+  unavailable (and takes precedence over `ABI`). The old `forceNetGrant` seam is gone. `envelopeParsedHook` runs
+  between parsing and admission; `readAdmittedHook` runs after the one pin snapshot, so tests
+  can change the pin on either side of admission and check the network decision.
 - The daemon-read seams in `src/gate/cmd/sshgate-gate/lane2.go` and `lane2admit.go`:
   `lane2BinDirs` (where the client is looked up), `lane2TrustedUIDs` (the owners admission
   trusts, `{0}` in production) and `lane2SystemEndpoints` (the default daemon sockets).
@@ -134,6 +137,10 @@ single-call indirections:
   admission and the jail. These are trust decisions, so `TestLane2TrustDefaults` checks their
   initialisers in the source and fails on any assignment, in-place change or address-taking of
   them outside `_test.go` files.
+  Subprocess tests pass `testGateConfig.Lane2` (binary directory, trusted owners and daemon
+  sockets) from the test-only `__jailtest_lane2fixtures` sentinel. `Lane2IsolationDir`
+  excludes host clients in the negative control; the fixture's `ps-connect` mode sends a
+  nonce to the parent-owned listener to prove the client reached the fake daemon.
 - `dialWithCtx` — `src/mcp/sign/client.go` (`var dialWithCtx`)
 - `randRead` — `src/signer/daemon.go` (`var randRead`)
 - `dialAgentSock`, `parsePrivateKey` — `src/mcp/tools/add_server.go` (package vars)
@@ -670,6 +677,16 @@ classifier-only reads on a host with Ubuntu's AppArmor userns restriction
 in this target, which needs a working jail; `make test` runs them, and CI requires them to pass
 on `ubuntu-latest`. It
 then checks the combined log against the case manifest (see 12.4).
+
+Phase-4 decision legs run under `TestPhase4Tables/{native,abi1}` and effect legs under
+`TestJailMatrixPhase4/{native,abi1}`. Their manifest is `proof_cases_phase4_test.go` and
+protections are in `phase4_registry_test.go`, both in `src/gate/confine`. The renamed
+`G-NET-NO-FALLBACK` and `G-NET-UNMET` legs remain under `TestJailMatrixPhase2/{native,abi1}`;
+they now use real signed grants. `TestGateBinaryNetGrant` uses the production gate and
+host-key loader: unjailed controls can change a file and connect to loopback; jailed grant
+and envelope reads cannot change the file, and only the grant connects on an unpinned host.
+The runner requires PASS lines for both Phase-4 roots and this binary test. Root and FUSE
+legs remain owed at the Phase-4 phase-end; the non-root results do not complete that gate.
 
 Some fast checks need no jail at all:
 

@@ -466,17 +466,18 @@ admission window is done).
   self-tests.
 - *Depends:* P4.1.
 
-**P4.2 — Gate: signed network and the envelope.** Status: open.
+**P4.2 — Gate: signed network and the envelope.**
+Status: done (root and FUSE legs owed at the Phase 4 phase-end).
 
 - *Deliverables:*
   - The admission window moved to P4.0 (done there).
   - The gate's signed path calls `gate.Verify` and honours `Verified.Net`; the P4.0
     `VerifySigned` wrapper keeps refusing `Net` for every other caller.
   - A network grant on an admin verb, a write or an unknown command is denied 77
-    (`gate: network grant covers reads only`), checked immediately after `VerifySigned`
+    (`gate: network grant covers reads only`), checked immediately after `gate.Verify`
     succeeds and before the `SSHGATE_REVOKE` / `SSHGATE_UPDATE` / `SSHGATE_XFER_*` dispatch;
     the inner-envelope check (a signed inner command starting with `SSHGATE_READ`, denied 77)
-    sits at the same point.
+    sits at the same point (`gate: the read envelope is unsigned-only`).
   - Daemon-read verbs accept `confined` only. A signed `Net=true` grant or an envelope `net`
     flag on a daemon-read verb is refused 77 with the fixed line
     `gate: network is not available for daemon-read verbs`, whatever the pin and whether or not
@@ -489,7 +490,7 @@ admission window is done).
     never reaches the classifier as a whole line. Grammar, byte-exact:
     `SSHGATE_READ1 SP flags SP cmd`, where `SP` is exactly one 0x20;
     `flags = flag *("," flag)`; `flag = "confined" / "net"`; `cmd` is the remaining bytes
-    verbatim, at least one printable byte. Refused 77 (`gate: bad envelope`): any other version
+    verbatim, not empty or whitespace-only. Refused 77 (`gate: bad envelope`): any other version
     digit, a missing field, a tab, CR, LF or NUL in the flags field, an empty, unknown or
     duplicate flag, a missing `confined`, or an empty or whitespace-only `cmd`. The `net` flag
     is refused 77 (`gate: network not permitted on this host`) unless the pin is valid with

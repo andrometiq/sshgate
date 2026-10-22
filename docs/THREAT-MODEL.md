@@ -285,13 +285,19 @@ jailed read, and doctor says so.
 
 ### What a jailed read can still do
 
-- **Use the network, where the host allows it.** Network for unsigned reads is
-  off by default: a jailed read cannot open a TCP or UDP socket unless the host
-  is pinned `net=allow` (a per-read signed network grant is planned). On such a
-  host a read can send data
-  out, or talk to a local TCP service (a database, an admin HTTP endpoint) and
-  make that service change state. A classifier-only read on a host without the
-  jail keeps network: nothing removes it there.
+- **Use the network, where the pin or a signed grant allows it.** A jailed read
+  cannot open a TCP or UDP socket unless the host is pinned `net=allow` or the
+  read carries a verified signed network grant. A grant forces a strict jailed
+  run: an unavailable jail or an unmet clause refuses the read, never falls back.
+  The unsigned `SSHGATE_READ1 confined[,net] <cmd>` envelope also requires a
+  strict jailed run, but never grants network. Its `net` flag requires a valid
+  `net=allow` pin at admission, or exit 77; admission and execution use the same
+  pin snapshot. Daemon reads refuse both a signed network grant and an envelope
+  `net` flag with exit 77 (`gate: network is not available for daemon-read verbs`),
+  regardless of the pin or jail availability. An ordinary read with network can
+  send data out, or talk to a local TCP service (a database, an admin HTTP endpoint)
+  and make that service change state. A classifier-only read on a host without
+  the jail keeps network: nothing removes it there.
 - **Read anything the SSH user can read.** That includes the host's `/tmp` and
   `/var/tmp`, which stay visible **read-only** (they are not emptied), other
   users' world-readable files, and process command lines. Redaction is the only
