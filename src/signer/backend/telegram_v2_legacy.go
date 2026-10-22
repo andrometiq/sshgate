@@ -26,6 +26,8 @@ type TelegramLegacyNotifier struct {
 	destination lifecycle.LegacyDestination
 	mu          sync.Mutex
 	entries     map[string]*legacyDeliveryEntry
+	bindings    map[string]legacyCallbackBinding
+	retired     []string
 }
 
 type legacyDeliveryEntry struct {
@@ -87,9 +89,34 @@ func (n *TelegramLegacyNotifier) Prepared(instance string) (*lifecycle.PreparedL
 	return lifecycle.NewPreparedLegacyApproval(entry.artifact.Data())
 }
 
-// Release forgets transport material, never the lifecycle's decision or tombstone.
+// Release drops rendered material, retaining only bounded callback bindings.
 func (n *TelegramLegacyNotifier) Release(instance string) {
 	n.mu.Lock()
+	if entry := n.entries[instance]; entry != nil && entry.messageID > 0 {
+		data := entry.artifact.Data()
+		if n.bindings == nil {
+			n.bindings = make(map[string]legacyCallbackBinding)
+		}
+		if _, exists := n.bindings[data.Context.Handle]; !exists {
+			n.retired = append(n.retired, data.Context.Handle)
+		}
+		n.bindings[data.Context.Handle] = legacyCallbackBinding{chat: data.Context.Destination.ChatID, message: entry.messageID}
+		if callbacks := n.backend.approvalCallbacks; callbacks != nil {
+			retained := n.retired[:0]
+			for _, handle := range n.retired {
+				if callbacks.runtime.Legacy().HasHandle(handle) {
+					retained = append(retained, handle)
+				} else {
+					delete(n.bindings, handle)
+				}
+			}
+			n.retired = retained
+		}
+		if len(n.retired) > 256 {
+			delete(n.bindings, n.retired[0])
+			n.retired = n.retired[1:]
+		}
+	}
 	delete(n.entries, instance)
 	n.mu.Unlock()
 }

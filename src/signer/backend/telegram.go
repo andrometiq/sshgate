@@ -40,6 +40,8 @@ import (
 //   - Each pending request is resolved exactly once — the first of
 //     {approve, deny, timeout, ctx-cancel} wins.
 type TelegramBackend struct {
+	approvalCallbacks *telegramApprovalCallbacks
+
 	// Static config — set at construction, never mutated.
 	allowedUserID int64
 	chatStore     ChatStore
@@ -436,6 +438,7 @@ func (t *TelegramBackend) Run(ctx context.Context) error {
 	go func() {
 		defer close(t.runDone)
 		t.pollLoop(ctx)
+		t.CloseApprovalCallbacks()
 		stopWorkers()
 		workers.Wait()
 		t.runMu.Lock()
@@ -593,6 +596,10 @@ func (t *TelegramBackend) handleCallback(cb *tgbotapi.CallbackQuery) {
 			fromID = cb.From.ID
 		}
 		t.logger.Printf("callback from unauthorized user_id=%d ignored", fromID)
+		return
+	}
+	if strings.HasPrefix(cb.Data, "v:") {
+		t.handleApprovalCallback(cb)
 		return
 	}
 	if strings.HasPrefix(cb.Data, "p:") {

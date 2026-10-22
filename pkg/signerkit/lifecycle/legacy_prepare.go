@@ -193,6 +193,8 @@ func (e *LegacyService) DeliverLegacy(reservation *LegacyReservation, artifact *
 		return errors.New("backend: legacy card delivery failed")
 	}
 	r.live = true
+	close(r.ready)
+	r.ready = nil
 	e.mu.Unlock()
 	return nil
 }

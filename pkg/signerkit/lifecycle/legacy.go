@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/subtle"
 	"errors"
+	"log/slog"
 	"strconv"
 	"sync"
 	"time"
@@ -37,6 +38,7 @@ type LegacyRequest struct {
 	cancel                context.CancelFunc
 	deadline              time.Duration
 	done                  chan struct{}
+	ready                 chan struct{}
 	result                LegacyResult
 	noise                 int
 }
@@ -46,6 +48,7 @@ type legacyOwner struct {
 	requestID string
 }
 type legacyTombstone struct {
+	destination   LegacyDestination
 	owner         legacyOwner
 	challengeHash string
 	result        LegacyResult
@@ -147,7 +150,7 @@ func (e *LegacyService) reserveLegacyLocked(ctx context.Context, uid uint32, req
 	}
 	now := e.now()
 	requestCtx, cancel := context.WithCancel(ctx)
-	r := &LegacyRequest{owner: owner, handle: handle, challengeHash: ap.ChallengeHash(challenge), ctx: requestCtx, cancel: cancel, deadline: now.Elapsed + sigwire.ApprovalWindow, done: make(chan struct{})}
+	r := &LegacyRequest{owner: owner, handle: handle, challengeHash: ap.ChallengeHash(challenge), ctx: requestCtx, cancel: cancel, deadline: now.Elapsed + sigwire.ApprovalWindow, done: make(chan struct{}), ready: make(chan struct{})}
 	e.requests[handle], e.owners[owner] = r, r
 	e.joined.Add(1)
 	go func() {
@@ -183,10 +186,31 @@ func (e *LegacyService) resolveLegacyLocked(r *LegacyRequest, result LegacyResul
 		return
 	}
 	r.result = result
+	if r.ready != nil {
+		close(r.ready)
+		r.ready = nil
+	}
+	if r.live && r.artifact != nil && e.config.LegacyNotifier != nil {
+		artifact := &PreparedLegacyApproval{data: r.artifact.Data()}
+		status := result.Status
+		if status == "timeout" {
+			status = "expired"
+		}
+		e.joined.Add(1)
+		go func() {
+			defer e.joined.Done()
+			if err := e.config.LegacyNotifier.EditStatus(e.ctx, artifact, status); err != nil {
+				slog.Warn("lifecycle: legacy status edit failed")
+			}
+		}()
+	}
 	r.cancel()
 	delete(e.requests, r.handle)
 	delete(e.owners, r.owner)
 	e.tombstones[r.handle] = &legacyTombstone{owner: r.owner, challengeHash: r.challengeHash, result: result, noise: r.noise}
+	if r.artifact != nil {
+		e.tombstones[r.handle].destination = r.artifact.data.Context.Destination
+	}
 	e.order = append(e.order, r.handle)
 	if len(e.order) > 256 {
 		delete(e.tombstones, e.order[0])
@@ -288,4 +312,40 @@ func (e *LegacyService) legacyVoteLocked(vote ap.CastVote, now ap.Now) (LegacyTa
 		metadata.Principal = "local-uid:" + strconv.FormatUint(uint64(owner.uid), 10)
 	}
 	return result, metadata
+}
+
+// CallbackReadiness describes a transient delivery barrier, never permission to vote.
+// Re-query after Changed, and refuse if Closed fires before voting.
+type CallbackReadiness struct {
+	MessageID   int64
+	Decision    string
+	Pending     bool
+	Changed     <-chan struct{}
+	Closed      <-chan struct{}
+	Destination LegacyDestination
+}
+
+// CallbackElapsed reads the persistent owner's monotonic clock across v2 recovery.
+func (e *LegacyService) CallbackElapsed() time.Duration { return e.config.Clock.Elapsed() }
+
+// CallbackReadiness observes only a matching challenge on a delivering request.
+func (e *LegacyService) CallbackReadiness(handle, challenge string) (CallbackReadiness, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.closed {
+		return CallbackReadiness{}, unavailable()
+	}
+	e.expireLegacyLocked(e.now())
+	state := CallbackReadiness{Closed: e.ctx.Done()}
+	r := e.requests[handle]
+	if r != nil && r.artifact != nil {
+		state.Destination = r.artifact.data.Context.Destination
+	} else if tomb := e.tombstones[handle]; tomb != nil {
+		state.Destination = tomb.destination
+	}
+	if r != nil && r.delivering && !r.live && r.artifact != nil &&
+		subtle.ConstantTimeCompare([]byte(ap.ChallengeHash(challenge)), []byte(r.challengeHash)) == 1 {
+		state.Pending, state.Changed = true, r.ready
+	}
+	return state, nil
 }
