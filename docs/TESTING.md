@@ -48,7 +48,7 @@ All the make targets that run tests or checks:
 | `make test-jail` | the read jail's acceptance matrix, non-root lane (§12) | Linux with unprivileged user namespaces that can mount, Landlock, FUSE | any change to the jail or the gate's read path |
 | `make test-jail-root` | the same matrix as root | root on a **disposable** machine | same |
 | `make test-jail-mutate MUTATE=<IDs>` | the mutation proof: removes protections and checks a named test catches each (§12) | as `test-jail` (root lane: run it as root) | when you add or touch a jail protection |
-| `make test-fidelity-smoke` | compares jailed and unjailed output of `ps`, `top`, `pgrep`, `ss` | as `test-jail`, plus the `sqlite3` and `git` CLIs (a missing tool fails as `SETUP:`) | jail changes |
+| `make test-fidelity-smoke` | compares jailed and unjailed output of `ps`, `top`, `pgrep`, `ss` | as `test-jail`, plus a reachable Docker daemon and the `sqlite3` and `git` CLIs (a missing tool fails as `SETUP:`) | jail changes |
 | `make selftest-testjail`, `make selftest-jailmut` | self-tests of the jail test runner and the mutation harness | — | when you change the jail test tooling |
 
 The standing gates are also listed in `docs/E2E-TEST-STRATEGY.md`. The rule of
@@ -622,7 +622,8 @@ them.
   namespaces that can mount (on Ubuntu 24.04 that means
   `kernel.apparmor_restrict_unprivileged_userns=0` or an AppArmor profile for the
   test binaries), Landlock, seccomp, `/dev/fuse` and `fusermount3`, at least two
-  CPUs, both `dash` and `bash`, and a C compiler (`cc`): the daemon-read legs build
+  CPUs, a live system bus at `/run/dbus/system_bus_socket`, both `dash` and
+  `bash`, and a C compiler (`cc`): the daemon-read legs build
   their test clients from `src/gate/cmd/sshgate-gate/testdata/lane2client`. The
   `docker` client at `/usr/bin/docker` (no daemon needed) for
   `TestLane2DockerHostContact`, which checks it dials exactly the admitted socket. The

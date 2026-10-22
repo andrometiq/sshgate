@@ -75,8 +75,8 @@ func legLane2Unadmitted(t *testing.T, abi, name, flag, effect string) {
 	passed := lane2Reported([]byte(out), mode, flag)
 	p.Effect(effect, passed)
 	recs := auditRecords(t, gateDir)
-	daemonRead := len(recs) == 1 && recs[0]["enforcement"] == "daemon-read"
-	jailed := len(recs) == 1 && recs[0]["enforcement"] == "kernel" && recs[0]["profile"] == "ro-v1"
+	daemonRead := lane2RanJailed(t, gateDir)
+	jailed := len(recs) == 1 && recs[0]["enforcement"] == "kernel" && recs[0]["profile"] == "ro-v1" && recs[0]["net"] == false
 	p.Jailed("lane2", passed && code == exitOK && daemonRead || !passed && jailed)
 	p.Observed("output", passed || !strings.Contains(out, mode))
 	p.Finish()
@@ -113,7 +113,7 @@ func legLane2Admit(t *testing.T, abi, name string) {
 	p.Effect(effect, ran)
 	records := auditRecords(t, gateDir)
 	denied := len(records) == 1 && records[0]["deny_reason"] == "lane2:admit:"+reason
-	executed := len(records) == 1 && records[0]["enforcement"] == "daemon-read"
+	executed := lane2RanJailed(t, gateDir)
 	p.Jailed("lane2", ran && code == 0 && executed || !ran && code == exitNoPermVal && denied && strings.Contains(stderr, "nothing ran"))
 	p.Observed("output", ran || out == "")
 	p.Finish()
@@ -178,7 +178,7 @@ func legLane2AdmitEndpoint(t *testing.T, abi string) {
 	p.Effect("endpoint-accepted", accepted)
 	records := auditRecords(t, gateDir)
 	denied := len(records) == 1 && records[0]["deny_reason"] == "lane2:admit:endpoint"
-	executed := len(records) == 1 && records[0]["enforcement"] == "daemon-read"
+	executed := lane2RanJailed(t, gateDir)
 	p.Jailed("lane2", accepted && code == 0 && executed && strings.Contains(out, "HOST-CONNECTED "+nonce) ||
 		!accepted && code == exitNoPermVal && denied && out == "" && strings.Contains(stderr, "nothing ran"))
 	p.Observed("listener", healthy)
@@ -219,7 +219,7 @@ func legLane2InterpUntrusted(t *testing.T, abi string) {
 	p.Effect("interp-ran", ran)
 	records := auditRecords(t, gateDir)
 	single := len(records) == 1
-	p.Jailed("lane2", ran && code == 0 && single && records[0]["enforcement"] == "daemon-read" && records[0]["deny_reason"] == nil ||
+	p.Jailed("lane2", ran && code == 0 && lane2RanJailed(t, gateDir) && records[0]["deny_reason"] == nil ||
 		!ran && code == exitNoPermVal && single && records[0]["deny_reason"] == "lane2:admit:interp" && out == "" && strings.Contains(stderr, "nothing ran"))
 	p.Observed("output", ran || out == "")
 	p.Finish()
