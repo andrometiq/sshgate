@@ -54,6 +54,11 @@ func approvalEngineFixture(t *testing.T, file bool) (*ApprovalV2Engine, *sqlites
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { db.Close() })
+	for _, id := range []string{"operator", "client", "other", "another", "first", "third"} {
+		if err := db.CreateUser(context.Background(), &store.User{ID: id, Username: id, Role: "operator", CreatedAt: statetest.T0}); err != nil {
+			t.Fatal(err)
+		}
+	}
 	clock := elapsedtest.NewFake(statetest.T0)
 	e, err := NewApprovalV2Engine(ApprovalV2Config{Store: db, Clock: clock, Freezer: &approvalTestFreezer{}, SnapshotBuilder: approvalTestSnapshot{}})
 	if err != nil {

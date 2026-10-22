@@ -12,19 +12,21 @@ import (
 
 	"github.com/karthikeyan5/sshgate/pkg/signerkit"
 	"github.com/karthikeyan5/sshgate/pkg/signerkit/store"
+	ap "github.com/karthikeyan5/sshgate/src/approvalplan"
+	aw "github.com/karthikeyan5/sshgate/src/approvalwire"
 )
 
 // Server is the hosted signer-server HTTP handler. It owns the route
 // table, the bearer-token auth check, and the shared dependencies
 // (logger, API key, store handle). A single Server instance serves an
-// arbitrary number of concurrent requests; all fields are read-only
-// after construction.
+// arbitrary number of concurrent requests; configuration is read-only after
+// startup, and worker ownership is synchronized.
 //
 // Server itself implements http.Handler so callers can drop it into
 // http.Server or httptest. cmd/signer-server wires the production
 // server; handlers_test.go wires an httptest.Server in-process.
 type Server struct {
-	// APIKey is the single bearer token that gates /v1/* routes. The current
+	// APIKey is the single bearer token for v1 and v2 machine routes. The current
 	// release uses one shared key file (managed by ops). Per-client machine keys
 	// are future work; WebAuthn/TOTP protect the separate human surface today.
 	APIKey string
@@ -75,13 +77,14 @@ type Server struct {
 
 	// Human is the optional human-plane API (Phase E): the /auth/* and
 	// /ui/* routes, gated by a server-side session (NOT the bearer key).
-	// When nil the server exposes only the machine plane (/v1/*,
-	// /healthz) — the v2.0 behaviour. Mount it via AttachHuman before the
+	// When nil the server exposes only machine routes and /healthz.
+	// Mount it via AttachHuman before the
 	// server starts serving. The two planes share this mux but never share
 	// credentials: see human_handlers.go's plane-separation contract.
 	Human *HumanAPI
 
-	mux *http.ServeMux
+	mux              *http.ServeMux
+	approvalsMachine http.Handler
 
 	// machineAttached guards AttachMachine against a double-attach — the
 	// machine plane's counterpart to the s.Human != nil guard in
@@ -90,6 +93,13 @@ type Server struct {
 	machineAttached    bool
 	machineSubmitLimit *machineRateLimiter
 	machinePollLimit   *machineRateLimiter
+
+	ordinaryMu     sync.Mutex
+	ordinaryEngine *ApprovalV2Engine
+	ordinaryCancel context.CancelFunc
+	ordinaryJoined chan struct{}
+	ordinaryClosed bool
+	ordinaryClose  sync.Once
 
 	policyMu         sync.Mutex
 	policy           *PolicyAPIConfig
@@ -252,6 +262,16 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.logRequest(w, r, s.policyMachine.ServeHTTP)
 		return
 	}
+	if isApprovalV2Path(r.URL.Path, r.URL.EscapedPath()) {
+		if s.approvalsMachine != nil {
+			s.logRequest(w, r, s.approvalsMachine.ServeHTTP)
+		} else {
+			s.logRequest(w, r, s.withAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				writeApprovalResponse(w, aw.KindGet, aw.ErrorResponse(ap.CodeNotFound, ""))
+			})).ServeHTTP)
+		}
+		return
+	}
 	if s.policyHuman != nil && isPolicyHumanPath(r.URL.Path, r.URL.EscapedPath()) {
 		s.logRequest(w, r, s.policyHuman.ServeHTTP)
 		return
@@ -275,10 +295,20 @@ func (s *Server) dirtyPolicyPlane(request *http.Request) string {
 	}
 }
 
+func isApprovalV2Path(decodedPath, escapedPath string) bool {
+	for _, target := range []string{decodedPath, escapedPath, path.Clean(decodedPath), path.Clean(escapedPath)} {
+		target = strings.TrimLeft(target, "/")
+		if target == "v2" || strings.HasPrefix(target, "v2/") {
+			return true
+		}
+	}
+	return false
+}
+
 func isPolicyV2Path(path, escapedPath string) bool {
 	for _, target := range []string{path, escapedPath} {
 		target = strings.TrimLeft(target, "/")
-		if target == "v2" || strings.HasPrefix(target, "v2/") {
+		if target == "v2/policy" || strings.HasPrefix(target, "v2/policy/") {
 			return true
 		}
 	}

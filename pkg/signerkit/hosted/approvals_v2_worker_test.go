@@ -735,6 +735,9 @@ func TestApprovalV2RetentionSustainedLoad(t *testing.T) {
 			t.Error(err)
 		}
 	})
+	if err := db.CreateUser(context.Background(), &store.User{ID: "operator", Username: "operator", Role: "operator", CreatedAt: statetest.T0}); err != nil && !errors.Is(err, store.ErrDuplicate) {
+		t.Fatal(err)
+	}
 	clock := elapsedtest.NewFake(statetest.T0)
 	e, err := NewApprovalV2Engine(ApprovalV2Config{
 		Store: db, Clock: clock, Freezer: &approvalTestFreezer{}, SnapshotBuilder: approvalLoadSnapshot{},

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/karthikeyan5/sshgate/pkg/signerkit"
+	"github.com/karthikeyan5/sshgate/pkg/signerkit/assist"
 	"github.com/karthikeyan5/sshgate/pkg/signerkit/store"
 	"github.com/karthikeyan5/sshgate/src/approvalplan"
 	"github.com/karthikeyan5/sshgate/src/approvalreview"
@@ -175,4 +176,16 @@ func BuildApprovalSnapshot(plan approvalplan.ApprovalPlanV1) (approvalreview.Rev
 		return approvalreview.ReviewSnapshot{}, fmt.Errorf("hosted: generate review salt: %w", err)
 	}
 	return approvalreview.BuildSnapshot(plan, &salt, redactrules.Combined())
+}
+
+// The provider receives its own redacted copy, never the stored display snapshot.
+type hostedAssistInputBuilder struct{}
+
+func (hostedAssistInputBuilder) BuildAssistInput(plan approvalplan.ApprovalPlanV1) (assist.Input, error) {
+	var salt [32]byte
+	defer clear(salt[:])
+	if _, err := rand.Read(salt[:]); err != nil {
+		return assist.Input{}, err
+	}
+	return assist.RedactForProvider(plan, salt, redactrules.Combined())
 }
