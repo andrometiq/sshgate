@@ -8,17 +8,21 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/karthikeyan5/sshgate/pkg/signerkit"
+	"github.com/karthikeyan5/sshgate/pkg/signerkit/sqlitestore"
 	"github.com/karthikeyan5/sshgate/pkg/signerkit/store"
 	ap "github.com/karthikeyan5/sshgate/src/approvalplan"
+	"github.com/karthikeyan5/sshgate/src/approvalreview"
 )
 
 type voteSessionStore struct {
@@ -251,5 +255,257 @@ func TestVoteChallengeConcurrentNonces(t *testing.T) {
 	}
 	if len(seen) != 32 {
 		t.Fatal("missing challenge")
+	}
+}
+
+type uiV2DetailResponse struct {
+	RecordHandle  string               `json:"record_handle"`
+	SubPrincipal  string               `json:"sub_principal"`
+	Review        *approvalreview.View `json:"review"`
+	VoteChallenge voteChallenge        `json:"vote_challenge"`
+	Reason        string               `json:"rationale_redacted"`
+	Pruned        bool                 `json:"pruned"`
+	Details       string               `json:"details"`
+}
+
+// ServeHTTP with recorders keeps the route tests independent of socket access.
+func TestUIV2DetailByHandle(t *testing.T) {
+	e, db, clock := approvalEngineFixture(t, false)
+	s, ctx, _, _ := voteChallengeFixture(t, false)
+	s.Human.Store = db
+	session := voteSession{ID: "secret-session-id", ExpiresAt: clock.Wall().Add(time.Hour)}
+	s.Human.Auth.store.(*voteSessionStore).session.ExpiresAt = session.ExpiresAt
+	ctx = context.WithValue(ctx, voteSessionContextKey{}, session)
+	draft := approvalDraft(610)
+	draft.Rationale = "Check ✓ result"
+	for _, sub := range []string{"local-uid:1001", "local-uid:1002"} {
+		if _, err := e.Submit(ctx, "client", sub, draft); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, sub := range []string{"local-uid:1001", "local-uid:1002"} {
+		key := sqlitestore.V2Key{ClientID: "client", SubPrincipal: sub, RequestID: draft.RequestID}
+		before, err := db.ReadV2(ctx, key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		get := func() uiV2DetailResponse {
+			req := httptest.NewRequest("GET", "/ui/v2/request/"+before.RecordHandle, nil)
+			req.AddCookie(&http.Cookie{Name: SessionCookieName, Value: "secret-session-id"})
+			res := httptest.NewRecorder()
+			s.ServeHTTP(res, req)
+			if res.Code != 200 {
+				t.Fatalf("detail: %d %s", res.Code, res.Body)
+			}
+			var out uiV2DetailResponse
+			if err := json.Unmarshal(res.Body.Bytes(), &out); err != nil {
+				t.Fatal(err)
+			}
+			if out.RecordHandle != before.RecordHandle || out.SubPrincipal != sub || out.Review == nil || out.Review.PlanHash != before.Record.Header.PlanHash {
+				t.Fatalf("wrong view: %+v", out)
+			}
+			if out.Reason != out.Review.Reason || strings.Contains(out.Reason, "✓") {
+				t.Fatal("reason differs from shared renderer", out.Reason, out.Review.Reason)
+			}
+			if strings.Contains(res.Body.String(), "secret-session-id") || strings.Contains(res.Body.String(), "claim_token_hash") {
+				t.Fatal("private state exposed")
+			}
+			return out
+		}
+		out := get()
+		binding := ap.ChallengeBinding{Plane: ap.PlaneV2, RecordKey: ap.HostedRecordKey("client", sub, draft.RequestID), PlanHash: before.Record.Header.PlanHash, Operator: "operator", AllowedActions: []string{ap.ActionDeny}}
+		if reason := s.Human.verifyVoteChallenge(ctx, binding, out.VoteChallenge.Challenge, clock.Wall()); reason != "" {
+			t.Fatal(reason)
+		}
+		if !reflect.DeepEqual(out.VoteChallenge.AllowedActions, []string{ap.ActionDeny}) {
+			t.Fatal("preparing permits approval")
+		}
+		other := binding
+		other.RecordKey = ap.HostedRecordKey("client", "other", draft.RequestID)
+		if s.Human.verifyVoteChallenge(ctx, other, out.VoteChallenge.Challenge, clock.Wall()) != "stale_challenge" {
+			t.Fatal("challenge crossed records")
+		}
+		clock.Advance(10 * time.Second)
+		// An overdue assist remains preparing until the worker commits Clock.
+		again := get()
+		if again.VoteChallenge.AssistRevision != 0 || !reflect.DeepEqual(again.VoteChallenge.AllowedActions, []string{ap.ActionDeny}) {
+			t.Fatal("GET advanced assist")
+		}
+		after, err := db.ReadV2(ctx, key)
+		if err != nil || !bytes.Equal(before.RecordJSON, after.RecordJSON) {
+			t.Fatal("GET wrote state", err)
+		}
+		if _, _, err := e.mutate(ctx, key, ap.Tick{}, ap.Inputs{}); err != nil {
+			t.Fatal(err)
+		}
+		terminal := get()
+		row, err := db.ReadV2(ctx, key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		binding.AssistRevision, binding.AssistDigest = 1, row.Record.Header.Assist.Digest
+		binding.AllowedActions = []string{ap.ActionApprove, ap.ActionDeny}
+		if terminal.VoteChallenge.AssistRevision != 1 || !reflect.DeepEqual(terminal.VoteChallenge.AllowedActions, binding.AllowedActions) {
+			t.Fatal("terminal assist did not enable approval")
+		}
+		if reason := s.Human.verifyVoteChallenge(ctx, binding, terminal.VoteChallenge.Challenge, clock.Wall()); reason != "" {
+			t.Fatal(reason)
+		}
+		if s.Human.verifyVoteChallenge(ctx, binding, out.VoteChallenge.Challenge, clock.Wall()) != "stale_challenge" {
+			t.Fatal("old revision still valid")
+		}
+
+	}
+	for _, path := range []string{"/ui/request/" + draft.RequestID, "/ui/v2/request/" + draft.RequestID} {
+		req := httptest.NewRequest("GET", path, nil)
+		req.AddCookie(&http.Cookie{Name: SessionCookieName, Value: "secret-session-id"})
+		res := httptest.NewRecorder()
+		s.ServeHTTP(res, req)
+		if res.Code != 404 {
+			t.Fatalf("ID route: %d %s", res.Code, res.Body)
+		}
+	}
+}
+
+type uiHandleErrorStore struct {
+	store.Store
+	err error
+}
+
+func (s uiHandleErrorStore) ByHandleV2(context.Context, string) (*sqlitestore.V2Row, error) {
+	return nil, s.err
+}
+
+func TestUIV2HandleGuards(t *testing.T) {
+	s, _, _, _ := voteChallengeFixture(t, false)
+	for _, tc := range []struct {
+		err     error
+		status  int
+		message string
+	}{
+		{store.ErrNotFound, 404, "unknown handle"},
+		{sqlitestore.ErrV2AmbiguousHandle, 409, "ambiguous handle"},
+		{errors.New("private database error"), 500, "get request"},
+	} {
+		s.Human.Store = uiHandleErrorStore{err: tc.err}
+		for _, route := range []struct{ method, suffix string }{{"GET", ""}, {"POST", "/approve"}, {"POST", "/deny"}} {
+			req := httptest.NewRequest(route.method, "https://localhost/ui/v2/request/handle"+route.suffix, nil)
+			req.Header.Set("Origin", "https://localhost")
+			req.Header.Set("Content-Type", "application/json")
+			req.AddCookie(&http.Cookie{Name: SessionCookieName, Value: "secret-session-id"})
+			res := httptest.NewRecorder()
+			s.ServeHTTP(res, req)
+			if res.Code != tc.status || !strings.Contains(res.Body.String(), tc.message) {
+				t.Fatalf("%s: %d %s", route.suffix, res.Code, res.Body)
+			}
+			req.Header.Del("Cookie")
+			res = httptest.NewRecorder()
+			s.ServeHTTP(res, req)
+			if res.Code != 401 {
+				t.Fatal("route bypassed session", res.Code)
+			}
+		}
+	}
+}
+
+type uiHandleRowStore struct {
+	store.Store
+	row *sqlitestore.V2Row
+}
+
+func (s uiHandleRowStore) ByHandleV2(context.Context, string) (*sqlitestore.V2Row, error) {
+	return s.row, nil
+}
+
+func TestUIV2DetailFailureAndTerminalViews(t *testing.T) {
+	e, db, _ := approvalEngineFixture(t, false)
+	submitApproval(t, e, 611)
+	row := readApproval(t, db, 611)
+	s, _, _, _ := voteChallengeFixture(t, false)
+	get := func(method, suffix string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, "https://localhost/ui/v2/request/"+row.RecordHandle+suffix, nil)
+		req.Header.Set("Origin", "https://localhost")
+		req.Header.Set("Content-Type", "application/json")
+		req.AddCookie(&http.Cookie{Name: SessionCookieName, Value: "secret-session-id"})
+		res := httptest.NewRecorder()
+		s.ServeHTTP(res, req)
+		return res
+	}
+	s.Human.Store = &voteSessionStore{}
+	if res := get("GET", ""); res.Code != 503 {
+		t.Fatal("missing backend", res.Code)
+	}
+	s.Human.Store = uiHandleRowStore{row: row}
+	for _, suffix := range []string{"/approve", "/deny"} {
+		if res := get("POST", suffix); res.Code != 503 {
+			t.Fatal("vote must fail closed until transaction is attached", res.Code)
+		}
+		req := httptest.NewRequest("POST", "https://localhost/ui/v2/request/"+row.RecordHandle+suffix, nil)
+		req.Header.Set("Origin", "https://untrusted.invalid")
+		req.Header.Set("Content-Type", "application/json")
+		req.AddCookie(&http.Cookie{Name: SessionCookieName, Value: "secret-session-id"})
+		res := httptest.NewRecorder()
+		s.ServeHTTP(res, req)
+		if res.Code != 403 {
+			t.Fatal("cross-origin vote accepted", res.Code)
+		}
+	}
+	raw := row.Record.Payload.ReviewSnapshot
+	row.Record.Payload.ReviewSnapshot = []byte(`{}`)
+	if res := get("GET", ""); res.Code != 500 {
+		t.Fatal("bad snapshot", res.Code)
+	}
+	row.Record.Payload.ReviewSnapshot = raw
+	row.Record.Header.Assist = &ap.AssistSlot{State: ap.AssistReady, Digest: "digest"}
+	if res := get("GET", ""); res.Code != 500 {
+		t.Fatal("missing ready result", res.Code)
+	}
+	row.Record.Header.Assist = nil
+	key := s.Human.voteMACKey
+	s.Human.voteMACKey = nil
+	if res := get("GET", ""); res.Code != 500 {
+		t.Fatal("missing challenge key", res.Code)
+	}
+	s.Human.voteMACKey = key
+	row.Record.Header.Assist = &ap.AssistSlot{State: ap.AssistUnavailable, Reason: "deadline", Digest: "digest"}
+	row.Record.Header.Shed = true
+	row.Record.Header.Decision = &ap.Decision{Status: ap.ApprovalDenied}
+	row.Record.Payload = nil
+	res := get("GET", "")
+	if res.Code != 200 {
+		t.Fatalf("shed detail: %d %s", res.Code, res.Body)
+	}
+	var out uiV2DetailResponse
+	if err := json.Unmarshal(res.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if !out.Pruned || out.Details != "details pruned" || out.Review != nil || len(out.VoteChallenge.AllowedActions) != 0 {
+		t.Fatalf("shed view: %+v", out)
+	}
+}
+
+func TestUIV2DetailUnderWriterLock(t *testing.T) {
+	e, db, _ := approvalEngineFixture(t, true)
+	submitApproval(t, e, 612)
+	row := readApproval(t, db, 612)
+	s, _, _, _ := voteChallengeFixture(t, false)
+	s.Human.Store = db
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	tx, err := db.BeginV2(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	req := httptest.NewRequest("GET", "/ui/v2/request/"+row.RecordHandle, nil).WithContext(ctx)
+	req.AddCookie(&http.Cookie{Name: SessionCookieName, Value: "secret-session-id"})
+	res := httptest.NewRecorder()
+	s.ServeHTTP(res, req)
+	if res.Code != 200 {
+		t.Fatalf("WAL read under writer lock: %d %s", res.Code, res.Body)
+	}
+	var out uiV2DetailResponse
+	if err := json.Unmarshal(res.Body.Bytes(), &out); err != nil || out.VoteChallenge.Challenge == "" {
+		t.Fatalf("challenge missing: %v %s", err, res.Body)
 	}
 }

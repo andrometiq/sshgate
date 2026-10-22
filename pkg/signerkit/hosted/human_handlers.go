@@ -15,7 +15,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/karthikeyan5/sshgate/pkg/signerkit/sqlitestore"
 	"github.com/karthikeyan5/sshgate/pkg/signerkit/store"
+	ap "github.com/karthikeyan5/sshgate/src/approvalplan"
+	"github.com/karthikeyan5/sshgate/src/approvalreview"
 )
 
 // human_handlers.go is Phase E: the HUMAN-PLANE HTTP surface — the
@@ -207,6 +210,9 @@ func (h *HumanAPI) registerHumanRoutes(mux *http.ServeMux) {
 	mux.Handle("POST /auth/logout", h.withSessionMutation(h.handleLogout))
 
 	// --- ui: all session-gated ---
+	mux.Handle("GET /ui/v2/request/{handle}", h.withSession(h.handleUIV2Request))
+	mux.Handle("POST /ui/v2/request/{handle}/approve", h.withSessionMutation(h.handleUIV2Vote))
+	mux.Handle("POST /ui/v2/request/{handle}/deny", h.withSessionMutation(h.handleUIV2Vote))
 	mux.Handle("GET /ui/pending", h.withSession(h.handleUIPending))
 	mux.Handle("GET /ui/request/{id}", h.withSession(h.handleUIRequest))
 	mux.Handle("POST /ui/request/{id}/approve", h.withSessionMutation(h.handleUIApprove))
@@ -714,6 +720,111 @@ func (h *HumanAPI) handleUIRequest(w http.ResponseWriter, r *http.Request, userI
 		}
 	}
 	writeJSON(w, http.StatusOK, sum)
+}
+
+// resolveUIV2 uses the operator-wide handle index, never a requester ID.
+func (h *HumanAPI) resolveUIV2(w http.ResponseWriter, r *http.Request) *sqlitestore.V2Row {
+	reader, ok := h.Store.(interface {
+		ByHandleV2(context.Context, string) (*sqlitestore.V2Row, error)
+	})
+	if !ok {
+		writeJSONError(w, http.StatusServiceUnavailable, "approvals unavailable")
+		return nil
+	}
+	row, err := reader.ByHandleV2(r.Context(), r.PathValue("handle"))
+	if err != nil {
+		switch {
+		case errors.Is(err, store.ErrNotFound):
+			writeJSONError(w, http.StatusNotFound, "unknown handle")
+		case errors.Is(err, sqlitestore.ErrV2AmbiguousHandle):
+			writeJSONError(w, http.StatusConflict, "ambiguous handle")
+		default:
+			writeJSONError(w, http.StatusInternalServerError, "get request")
+		}
+		return nil
+	}
+	return row
+}
+
+// The vote transaction and its ordered checks are attached in the next phase.
+func (h *HumanAPI) handleUIV2Vote(w http.ResponseWriter, r *http.Request, _ string) {
+	if h.resolveUIV2(w, r) != nil {
+		writeJSONError(w, http.StatusServiceUnavailable, "voting unavailable")
+	}
+}
+
+type uiV2Request struct {
+	RecordHandle      string               `json:"record_handle"`
+	SubPrincipal      string               `json:"sub_principal"`
+	RequestID         string               `json:"request_id"`
+	PlanHash          string               `json:"plan_hash"`
+	ApprovalStatus    ap.ApprovalStatus    `json:"approval_status"`
+	RequestExpiresAt  time.Time            `json:"request_expires_at"`
+	RequiredApprovals int                  `json:"required_approvals"`
+	Reason            string               `json:"rationale_redacted"`
+	Votes             []ap.Vote            `json:"votes"`
+	Pruned            bool                 `json:"pruned"`
+	Details           string               `json:"details,omitempty"`
+	Review            *approvalreview.View `json:"review,omitempty"`
+	VoteChallenge     voteChallenge        `json:"vote_challenge"`
+}
+
+func (h *HumanAPI) handleUIV2Request(w http.ResponseWriter, r *http.Request, userID string) {
+	row := h.resolveUIV2(w, r)
+	if row == nil {
+		return
+	}
+	rec := row.Record
+	header := rec.Header
+	binding := ap.ChallengeBinding{
+		Plane: ap.PlaneV2, RecordKey: ap.HostedRecordKey(row.Key.ClientID, row.Key.SubPrincipal, row.Key.RequestID),
+		PlanHash: header.PlanHash, Operator: userID, AllowedActions: []string{ap.ActionDeny},
+	}
+	assist := approvalreview.Assist{State: ap.AssistPreparing}
+	if header.Assist != nil {
+		binding.AssistRevision, binding.AssistDigest = 1, header.Assist.Digest
+		binding.AllowedActions = []string{ap.ActionApprove, ap.ActionDeny}
+		assist.State, assist.Reason = header.Assist.State, header.Assist.Reason
+		if rec.Payload != nil {
+			assist.Result = rec.Payload.AssistResult
+		}
+	}
+	out := uiV2Request{
+		RecordHandle: row.RecordHandle, SubPrincipal: approvalreview.NeutralizeText(header.SubPrincipal),
+		RequestID: header.RequestID, PlanHash: header.PlanHash, ApprovalStatus: ap.ApprovalPending,
+		RequestExpiresAt: header.RequestExpiresAt, RequiredApprovals: header.RequiredApprovals,
+		Reason: header.RationaleRedacted, Pruned: header.Shed,
+	}
+	if header.Decision != nil {
+		out.ApprovalStatus = header.Decision.Status
+		binding.AllowedActions = []string{}
+	}
+	for _, vote := range header.Votes {
+		vote.Operator = approvalreview.NeutralizeText(vote.Operator)
+		out.Votes = append(out.Votes, vote)
+	}
+	if header.Shed {
+		out.Details = "details pruned"
+	} else {
+		snapshot, err := approvalreview.DecodeSnapshot(rec.Payload.ReviewSnapshot)
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "get review")
+			return
+		}
+		view, err := approvalreview.BuildView(snapshot, assist)
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "get review")
+			return
+		}
+		out.Review = &view
+	}
+	challenge, err := h.issueVoteChallenge(r.Context(), binding, header.RequestExpiresAt)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "issue challenge")
+		return
+	}
+	out.VoteChallenge = challenge
+	writeJSON(w, http.StatusOK, out)
 }
 
 // voteRequest is the body of approve/deny. step_up carries an optional
