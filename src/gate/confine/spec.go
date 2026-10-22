@@ -16,25 +16,6 @@ import (
 	"github.com/karthikeyan5/sshgate/src/gate/confine/jailmut"
 )
 
-// Rung is the interim probe result: full confinement or classifier-only.
-type Rung int
-
-const (
-	Rung3Unconfined Rung = iota // no kernel wall (labelled UNCONFINED)
-	Rung1Full                   // user/mount/IPC namespaces, host PID, ro /, Landlock, seccomp
-)
-
-func (r Rung) String() string {
-	switch r {
-	case Rung1Full:
-		return "full"
-	case Rung3Unconfined:
-		return "unconfined"
-	default:
-		return "invalid"
-	}
-}
-
 // Sentinel argv markers for the gate's internal re-exec. The gate's main
 // dispatches these BEFORE any SSH_ORIGINAL_COMMAND handling; they only ever add
 // restrictions, and the forced command passes no argv, so the agent can never
@@ -56,7 +37,7 @@ type NSIDs struct{ User, Mnt, Pid, IPC uint64 }
 const ProfileROv1 = "ro-v1"
 
 // Spec is the fully-resolved confinement policy for ONE command. Built by the
-// gate from Detect (production) or by a test directly. It is the
+// gate's read router (readSpec) or by a test directly. It is the
 // ONLY thing that selects behaviour — there is no env var or argv an agent can
 // set to change it: the worker reads the Spec from the sentinel argv the parent
 // gate wrote, a path the agent never reaches (the forced command passes no argv;
@@ -72,7 +53,53 @@ type Spec struct {
 	ForceABI int
 	// InjectFailAt forces a setup error in tests.
 	InjectFailAt string
+	// Lane2 makes this a daemon-read run: the worker execs Lane2.Binary with
+	// the argv from fd 3 and Lane2Env, instead of /bin/sh -c.
+	Lane2 *Lane2 `json:",omitempty"`
 }
+
+// Lane2 is a daemon read's admitted client: the identities the gate checked and
+// the references it holds. The files are passed to the jail as fds 5 and up,
+// in field order (binary, interpreter, sockets); Command numbers them.
+type Lane2 struct {
+	Client   string // "systemctl" or "docker": the base name argv[0] must carry
+	Binary   string // resolved absolute path the gate admitted, the exec path
+	BinaryID FileID
+	BinaryFD int
+	Interp   string // resolved PT_INTERP; "" for a static binary
+	InterpID FileID
+	InterpFD int
+	Sockets  []Endpoint // the 1..2 admitted daemon endpoints that are present
+
+	BinaryFile, InterpFile *os.File `json:"-"` // the gate's held references
+}
+
+// FileID is an inode identity.
+type FileID struct{ Dev, Ino uint64 }
+
+// Endpoint is an admitted daemon socket.
+type Endpoint struct {
+	Path string // absolute, at most 107 bytes
+	ID   FileID
+	FD   int
+	File *os.File `json:"-"` // the gate's held O_PATH reference
+}
+
+// files lists the held references in their fd order.
+func (l *Lane2) files() []*os.File {
+	files := []*os.File{l.BinaryFile}
+	if l.Interp != "" {
+		files = append(files, l.InterpFile)
+	}
+	for _, socket := range l.Sockets {
+		files = append(files, socket.File)
+	}
+	return files
+}
+
+// firstHeldFD is the child fd number of the first held reference, after the
+// command (3) and status (4) pipes.
+const firstHeldFD = 5
 
 const ForceNoLandlock = -1
 
@@ -84,27 +111,16 @@ const maxStatusBytes = 1 << 20
 // Leave room for the shim's bounded cleanup diagnostic after I/X.
 const maxInfoBytes = maxStatusBytes - 4096
 
-// Report is the host-probe result for `gate doctor` and the audit line.
-type Report struct {
-	Rung                Rung
-	LandlockABI         int
-	Userns              bool
-	Seccomp             bool
-	LSMs                []string
-	AppArmorUsernsClamp bool
-	// ProbeErr is set when a probe failed for a reason OTHER than definitive
-	// feature absence (e.g. a transient resource error). A non-nil ProbeErr
-	// means the caller must DENY, never silently downgrade to a weaker rung.
-	ProbeErr error
-	Notes    []string
-}
-
 // SetupError means NOTHING was executed: the worker aborted before execve
 // (or died before reporting). Stage names the setup step; Errno is the raw
 // errno the worker reported, 0 when unknown.
 type SetupError struct {
 	Stage string
 	Errno syscall.Errno
+	// SawInfo is set by Status when the report began with an I line: the
+	// worker claimed to pass setup, so the command may have started. It is
+	// parent-side only, never on the wire.
+	SawInfo bool
 }
 
 func (e *SetupError) Error() string {
@@ -183,6 +199,23 @@ func (j *Jailed) startStatusReader() {
 	}()
 }
 
+// Start starts the jail. A failure is the "clone" stage, and nothing ran. Its
+// errno is composite: whatever Cmd.Start returns, from the clone itself, the
+// parent's uid/gid map writes, or the child's steps up to the execve of
+// /proc/self/exe. A context already done is returned as is: that is a
+// cancellation, not a jail failure.
+func (j *Jailed) Start() error {
+	err := j.Cmd.Start()
+	if err == nil {
+		return nil
+	}
+	j.Abort()
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	return &SetupError{Stage: "clone", Errno: errnoOf(err)}
+}
+
 // Abort releases every pipe end when Cmd.Start fails.
 func (j *Jailed) Abort() {
 	for _, f := range j.childEnds {
@@ -203,6 +236,15 @@ func (j *Jailed) Abort() {
 // Status validates the worker's I/X report after Cmd.Wait and descendant cleanup. Facts are published
 // only on success; the shim appends worker status and an optional cleanup diagnostic.
 func (j *Jailed) Status() (Facts, error) {
+	facts, err := j.status()
+	var setup *SetupError
+	if report := j.statusReport.data; errors.As(err, &setup) && len(report) > 0 && report[0] == 'I' {
+		setup.SawInfo = true
+	}
+	return facts, err
+}
+
+func (j *Jailed) status() (Facts, error) {
 	defer func() {
 		if j.statusR != nil {
 			_ = j.statusR.Close()
@@ -285,7 +327,7 @@ func (j *Jailed) Status() (Facts, error) {
 			return failure("report")
 		}
 	}
-	if facts.Profile != j.spec.Profile || facts.Net != j.spec.Net || facts.Lane2 || facts.ABI < 1 || j.spec.ForceABI > 0 && facts.ABI > j.spec.ForceABI || j.strict && len(facts.Unmet) > 0 {
+	if facts.Profile != j.spec.Profile || facts.Net != j.spec.Net || facts.Lane2 != (j.spec.Lane2 != nil) || facts.ABI < 1 || j.spec.ForceABI > 0 && facts.ABI > j.spec.ForceABI || j.strict && len(facts.Unmet) > 0 {
 		return failure("report")
 	}
 	tail, worker, cleanup, recordErr := splitStatusRecords(tail)
@@ -346,6 +388,14 @@ func statusFromReport(buf []byte) error {
 	}
 }
 
+func errnoOf(err error) syscall.Errno {
+	var e syscall.Errno
+	if errors.As(err, &e) {
+		return e
+	}
+	return 0
+}
+
 // Wire tokens for the fd-4 status pipe.
 const (
 	statusReachedExec = "X" // written immediately before execve
@@ -372,12 +422,9 @@ func parseFailReport(s string) (stage string, errno syscall.Errno) {
 }
 
 // Command returns a Jailed whose Cmd runs `sh -c cmd` INSIDE the jail the Spec
-// describes. It is implemented per platform; on non-linux it returns an error.
-// It is never called for Rung3Unconfined (the gate passes a nil *Spec instead).
+// describes, or, for a daemon read (Spec.Lane2), the admitted client with the
+// argv EncodeArgv produced cmd from. It is implemented per platform; on non-linux it returns an error.
+// It is never called for a classifier-only read (the gate passes a nil *Spec).
 func (s Spec) Command(ctx context.Context, cmd string) (*Jailed, error) {
 	return s.command(ctx, cmd)
 }
-
-// Detect probes the host and returns the Report (Rung + real ABI). Pure
-// read-only probing; it never mutates the host.
-func Detect() Report { return detect() }

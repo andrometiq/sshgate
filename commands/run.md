@@ -111,13 +111,21 @@ them out instead of treating them as a generic command failure:
   read because it could not confirm or set up the host's kernel read jail.
   The command did not run. stderr contains `gate: read jail unavailable`
   and the result's `denial.verdict_class` is `read_jail_unavailable`.
-  This happens when the operator pinned a `jail-floor` and the host no
-  longer supports the jail, when the `jail-floor` file is damaged, when
-  the host probe fails for an unexplained reason, or when jail setup
-  fails. Do NOT retry and do NOT tell the user to add a signer: reads
+  This happens when the host's jail pin is damaged (or a 0.1.x
+  `jail-floor` is left with no pin), when jail setup fails, or when the
+  host has no usable jail and is pinned or the read must run confined.
+  Do NOT retry and do NOT tell the user to add a signer: reads
   are refused the same way until the host is fixed. Ask a human to
   run `~/.sshgate-gate/gate doctor` on the host (from their own shell);
-  it reports the jail level and why reads are refused.
+  it reports the jail state and the pin, and why reads are refused.
+- **77 on a read — daemon read refused.** stderr contains
+  `gate: daemon read refused: <check>; nothing ran`. A `systemctl`/`docker`
+  read verb was refused before it ran because the host's client, its loader,
+  a library search path or the daemon socket failed the gate's ownership
+  checks (`<check>` says which: `binary`, `binary-elf`, `search-tag`,
+  `interp` or `endpoint`). Do NOT retry; tell the user, so a human can fix
+  the host (for example start the daemon, or fix the ownership of the file
+  named).
 - **77 on a write — gate denied the write.** No signer pubkey is
   configured on the remote (read-only / Tier 1), or the write arrived
   without a signature. Check `/sshgate:status`: a `read_only` server or a

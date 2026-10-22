@@ -48,7 +48,7 @@ func (s Spec) validate(worker bool) error {
 	if s.InjectFailAt != "" {
 		stage, errno := s.inject()
 		switch stage {
-		case "spec", "cmdread", "nsverify", "mounts", "private", "setattr", "devnodes", "covers", "scratch", "fds", "cwd", "nnp", "caps", "rlimits", "landlock", "seccomp", "tsync", "session", "selfcheck", "exec":
+		case "spec", "cmdread", "lane2argv", "lane2id", "nsverify", "mounts", "private", "setattr", "devnodes", "covers", "scratch", "fds", "cwd", "nnp", "caps", "rlimits", "landlock", "seccomp", "tsync", "session", "selfcheck", "exec":
 		default:
 			return unix.EINVAL
 		}
@@ -59,7 +59,40 @@ func (s Spec) validate(worker bool) error {
 	if worker && (s.ParentNS.User == 0 || s.ParentNS.Mnt == 0 || s.ParentNS.Pid == 0 || s.ParentNS.IPC == 0) {
 		return unix.EINVAL
 	}
+	if s.Lane2 != nil && (s.Cwd != "/" || s.Net && !jailmut.On("P-L2-SPEC-NET") || !s.Lane2.valid()) {
+		return unix.EINVAL
+	}
 	return nil
+}
+
+// valid checks a daemon read's identities and that its held references are
+// numbered from firstHeldFD in field order, one per object that exists.
+func (l *Lane2) valid() bool {
+	isPath := func(path string, limit int) bool {
+		return filepath.IsAbs(path) && filepath.Clean(path) == path && !strings.ContainsRune(path, 0) && len(path) <= limit
+	}
+	if l.Client != "systemctl" && l.Client != "docker" || !isPath(l.Binary, 4096) || l.BinaryID.Ino == 0 || l.BinaryFD != firstHeldFD {
+		return false
+	}
+	next := firstHeldFD + 1
+	if l.Interp != "" {
+		if !isPath(l.Interp, 4096) || l.InterpID.Ino == 0 || l.InterpFD != next {
+			return false
+		}
+		next++
+	} else if l.InterpID != (FileID{}) || l.InterpFD != 0 {
+		return false
+	}
+	if len(l.Sockets) == 0 || len(l.Sockets) > 2 {
+		return false
+	}
+	for _, socket := range l.Sockets {
+		if !isPath(socket.Path, 107) || socket.ID.Ino == 0 || socket.FD != next {
+			return false
+		}
+		next++
+	}
+	return true
 }
 
 func (s Spec) inject() (string, syscall.Errno) {

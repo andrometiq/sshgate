@@ -25,9 +25,9 @@ moved out of `classifier.go` into `src/classify/rules_text.go`,
   Landlock. There, a read cannot write files or file metadata on the host,
   connect to a local daemon over a Unix socket, or signal or trace other
   processes. So a classifier miss of the kind surveyed here no longer turns
-  into a write on such a host: the command runs, but inside the jail. Reads
-  in the jail keep network access, and a few `systemctl`/`docker` read
-  commands run outside it from a fixed list. `gate doctor` on the host says
+  into a write on such a host: the command runs, but inside the jail. Whether
+  jailed reads get network is a per-host setting, and a few `systemctl`/`docker` read
+  commands from a fixed list reach their daemon from a narrower form of the jail. `gate doctor` on the host says
   whether the jail applies; see
   [install-step-by-step.md](install-step-by-step.md#5-check-the-servers-read-jail).
 - **The security boundary for writes is unchanged:** an Ed25519 signature
@@ -38,8 +38,8 @@ moved out of `classifier.go` into `src/classify/rules_text.go`,
 
 - **On hosts without the jail, the classifier is still the only wall** for
   unsigned commands. Any command it wrongly calls a read runs with the SSH
-  user's full rights. Operators can pin `jail-floor` so such hosts refuse
-  reads instead (see the install guide).
+  user's full rights. Operators can pin the host (the `jail` file) so it
+  refuses reads instead (see the install guide).
 - **The classifier parses shell text, and parsers have gaps.** Two classes
   stay open by the nature of the approach: GNU long-option abbreviations of
   options the rules do not list, and environment-variable prefixes the

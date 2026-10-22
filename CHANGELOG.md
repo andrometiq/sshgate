@@ -8,6 +8,107 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 Dates are intentionally omitted where a release has not yet been tagged and
 published; entries are ordered newest-first by version.
 
+## [Unreleased]
+
+Phase 2 of the kernel read jail (work item #22): P2.1 and P2.2, released
+together, and Phase 3 (the `systemctl`/`docker` read verbs).
+
+### Added
+
+- **`gate doctor --pin --net=allow|deny [--accept-fs=network[,autofs]]`** pins
+  a host after a rehearsal: doctor builds test fixtures (a file, a named pipe,
+  Unix and TCP listeners, a running process, a `/tmp` file), runs a fixed probe
+  menu inside the exact read jail the pin would give, checks every effect from
+  outside, and writes the `jail` pin (0600, atomically) only if every check
+  passed; otherwise it exits 77 and writes nothing. A matching pin is left
+  unchanged. `--pin` also repairs a damaged pin or a leftover `jail-floor`.
+- **`SSHGATE_JAIL`**, an unsigned, unaudited verb that read-only hosts answer
+  too: one jail attempt of `:` and one JSON line saying how reads are enforced,
+  whether the host is pinned, whether reads have network, the Landlock ABI, the
+  read label and any denial reason. No byte the agent sends runs.
+- **The read label.** Doctor and the verb report what a read here is:
+  `classifier-only (jail available; pin to claim)` on an unpinned host with the
+  jail, `kernel-jailed (read-only label not enabled in this build)` on a pinned
+  one, `kernel-jailed, network open — not read-only` with `net=allow`, and so on.
+
+### Security
+
+- **The `systemctl`/`docker` read verbs are admitted before they run.** A typed
+  grammar decides which lines are these verbs, and the gate runs its own
+  canonical command: long flag spellings, a fixed binary path, and a prefix that
+  fixes the daemon (`--no-pager --no-ask-password` for `systemctl`,
+  `--host=unix://<socket>` for `docker`, the pin's `docker_socket` when set). The
+  client binary, its ELF interpreter, its library search paths and the daemon
+  socket must be owned by root (a pinned `docker_socket`: by the gate's user)
+  and replaceable by no other user. An untrusted client, interpreter or search
+  path, or a missing or mis-owned daemon socket, refuses the read with exit 77
+  (`gate: daemon read refused: <check>; nothing ran`); before, the read ran, or
+  ran and failed to connect. The verbs run from `/` with `TMPDIR=/dev/shm`.
+- **The gate seals itself while a jailed read runs.** It becomes
+  non-dumpable right after the read's jail starts, so another process of the
+  same user outside the jail can no longer read its environment or redaction
+  key, or inject bytes into the client's output, through `/proc`. A gate binary
+  its owner cannot read refuses every jailed read; doctor says so.
+
+### Changed
+
+- **Network is off by default for unsigned reads.** On a host where the
+  kernel jail runs, an unsigned read can no longer open a TCP or UDP socket,
+  not even to localhost. Turn it back on per host by pinning the host
+  `net=allow` (`gate doctor --pin --net=allow`); a per-read signed network grant
+  is planned. A jailed network tool that fails for this reason gets one note on
+  stderr. Hosts without a usable jail run reads classifier-only, as before, and
+  keep network.
+- **Every read attempts the jail; there is no separate probe.** A setup
+  failure caused by the host lacking the jail (user namespaces off, Ubuntu's
+  AppArmor userns restriction, an LSM-refused mount, a missing kernel feature)
+  is *Absent*: an unpinned host runs the read classifier-only. Any other
+  failure is *Failed* and refuses the read (exit 77), as does any failure on a
+  pinned host. A command the jail may have started is never run again.
+- **The `jail` pin replaces `jail-floor`.** A `jail` file in the gate
+  directory (`profile=ro-v1`, `net=allow|deny`, optional `accept_fs=`), written
+  by `gate doctor --pin`, pins the host: reads never run outside the jail, runs are strict (a mount the jail
+  cannot hide refuses the read), and the pin sets network. A damaged pin
+  refuses every read. **Upgrading:** a leftover `jail-floor` with no `jail` pin
+  refuses every read until the host is re-pinned or the file is removed.
+- **The `systemctl`/`docker` read verbs now run in the read jail,** in a
+  narrower form: Unix stream sockets to their pinned daemon only (from Landlock
+  ABI 9), `EXECUTE` only on the client and its interpreter, no `memfd`, and
+  never network, whatever the pin. A host pinned `net=allow` runs them jailed
+  without network instead of refusing them. Like any read, one on a pinned host
+  whose jail is Absent or has an unmet clause, or on any host whose jail is
+  Failed, is now denied (exit 77) where before it ran outside the jail; only an
+  unpinned host without the jail runs them unjailed. A daemon restart that
+  recreates its socket between admission and the jail fails that one read
+  (exit 77, `jail:failed:lane2id:…`).
+- **Fewer lines count as `systemctl`/`docker` read verbs.** A line outside the
+  new grammar is no longer one of these verbs and runs as an ordinary read
+  instead (jailed, it cannot reach the daemon; on an unpinned host without the
+  jail, classifier-only as before):
+  - `docker info`, which runs the CLI's plugins;
+  - `systemctl is-enabled`, which runs a helper program for a SysV-only service.
+    In the jail plain `systemctl is-enabled <unit>` fails (`Failed to connect to
+    bus`); `systemctl --root=/ is-enabled <unit>` or
+    `SYSTEMD_OFFLINE=1 systemctl is-enabled <unit>` gives the same answer as an
+    unjailed run. The gate does not rewrite the command;
+  - `--format` other than `json` or `table`; `docker top` with more than one
+    argument; `systemctl` `--type`, `--state`, `--lines` or `--property` on a
+    verb that does not use them, and list values such as `--type=service,socket`
+    or `--state=a,b`.
+- **On Ubuntu with the AppArmor userns restriction** each read makes one jail
+  attempt, which logs one AppArmor `userns_create` denial. Install an AppArmor
+  profile for the gate, accept classifier-only reads, or pin the host to refuse
+  them.
+- **Audit.** Executed reads record `enforcement`, `profile`, `pinned`,
+  `landlock_abi`, `net`, `accept_fs`, `requires_confinement`, `cwd_reset`,
+  `jail_absent` and `label_clause_unmet`; jail denials record `deny_reason`.
+  The `rung` field is gone.
+- **`gate doctor`** is rewritten: it reports the read label, the host's jail
+  features with the errnos of its attempts, every mount and whether the jail
+  shows it, the rehearsal, the pin and advice. A host whose gate directory the
+  jail cannot show (FUSE, ZFS, `overlay`, a block device behind LVM, LUKS, md,
+  a loop device or device-mapper) cannot be pinned in this build.
+
 ## [0.1.5]
 
 The kernel read jail (phase 1 of work item #22), plus public-release polish:

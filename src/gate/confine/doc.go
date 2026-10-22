@@ -1,7 +1,8 @@
 // Package confine builds SSHGate's ro-v1 kernel jail. Every confined command
 // requires fresh user, mount and IPC namespaces with the host PID namespace, read-only mounts, Landlock,
-// no_new_privs, capability reduction and seccomp. Detect currently selects
-// either the full jail or classifier-only execution; a failed setup never retries.
+// no_new_privs, capability reduction and seccomp. The gate attempts
+// the jail for every read; a setup failure is Absent or Failed
+// (ClassifySetupFailure), and nothing that reached the command is retried.
 //
 // The mount view preserves host /proc and read-only /tmp and /var/tmp. Only
 // private /dev/shm and /dev/null are writable. Unsafe filesystems are covered. Metadata syscalls and generic fileattr setters are denied even
@@ -15,7 +16,8 @@
 //
 // The parent re-execs /proc/self/exe as __jail with namespace clone flags. Its
 // subreaper shim starts __jailexec, which verifies namespaces, builds the mount view,
-// applies restrictions on a locked OS thread and execs /bin/sh. The command and
+// applies restrictions on a locked OS thread and execs /bin/sh, or, for a daemon
+// read (Spec.Lane2), the admitted client after re-checking its identity. The command and
 // setup report use private pipes on fd 3 and fd 4; no command travels on argv.
 // A verified fresh session isolates own-group signals and retunes. Before ABI 6,
 // seccomp permits kill only for pid zero or signal zero and denies directed

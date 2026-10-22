@@ -98,8 +98,8 @@ the registered servers.
 
 1. **Classify** the command as read or write (see *Read/write classification*).
 2. If **read**, run it without asking anyone: inside the kernel read jail on a
-   host that supports it (see *Read confinement*), otherwise unconfined as
-   before, and stream the output back through the inline secret redactor (see
+   host that supports it (see *Read confinement*), otherwise classifier-only
+   unless the host is pinned, and stream the output back through the inline secret redactor (see
    below).
 3. If **write**, require a valid signature: the command must arrive wrapped in an
    `SSHGATE_SIG` envelope that verifies against the signing public key deployed
@@ -114,8 +114,9 @@ with shell access (or an approved signed write) can change:
 - `gate.pub` — the signing public key, the gate's trust anchor. On a read-only
   host it is absent, so writes can never be authorized there regardless of
   what the client sends.
-- `jail-floor` (optional) — makes the gate refuse reads rather than run them
-  unconfined when the read jail is unavailable.
+- `jail` (optional) — the jail pin: reads never run outside the jail, and it
+  says whether reads get network. A damaged pin denies reads, and so does a
+  leftover `jail-floor` from 0.1.x when there is no `jail` pin.
 - `audit-level` and `audit-path` (optional) — how much the gate's audit log
   records and where it is written (default: all commands with output metadata,
   in `audit.log` in the gate directory).
@@ -214,23 +215,32 @@ command. Inside the jail the command has:
 The jail checks the state it built before the command starts and refuses the
 read if any check fails. A jailed read cannot change host files or file
 metadata, reach local daemons over Unix sockets, or signal, trace or re-tune
-other processes. **It keeps TCP/UDP network access**, including to localhost;
-making network a per-host and per-read permission is the next build step
-([BUILD-PLAN.md](BUILD-PLAN.md) work item 1).
+other processes. Whether it can open TCP/UDP sockets is a per-host setting
+(see [THREAT-MODEL.md](THREAT-MODEL.md)).
 
-On a host without the jail, reads run unconfined as they did before the jail,
-and the audit log labels them `unconfined`. The operator can run
-`~/.sshgate-gate/gate doctor` on the host to see which case applies, and
-`gate doctor --pin` to write `jail-floor`; with that pin the gate refuses
-(exit 77, `read jail unavailable`) any read it cannot jail. A probe that fails for
-an unexplained reason, or a jail that fails to build for a read, also refuses
-that read; the gate never falls back to running it unconfined.
+Every read attempts the jail; there is no separate probe. A setup failure that
+comes from the host lacking the jail (user namespaces off, an AppArmor or LSM
+refusal, a missing kernel feature) is *Absent*; anything else is *Failed*. On an
+unpinned host an Absent jail runs the read classifier-only, and the audit log
+says `enforcement: classifier`. A Failed jail, or any failure on a host pinned
+with the `jail` file, refuses the read (exit 77, `read jail unavailable`); the
+gate never re-runs a command the jail may have started. The operator runs
+`~/.sshgate-gate/gate doctor` on the host to see which case applies.
 
-Three things deliberately stay outside the jail: a fixed allowlist of
-`systemctl` and `docker` read verbs that need a daemon socket (run shell-free,
-from a fixed path, with allowlisted flags and a closed environment); signed
-writes; and the admin verbs (`SSHGATE_REVOKE`, `SSHGATE_UPDATE`,
-`SSHGATE_XFER_*`). A jail problem never blocks a signed write or an admin verb.
+A fixed allowlist of `systemctl` and `docker` read verbs that need a daemon
+socket runs in a narrower form of the jail: Unix stream sockets (from Landlock
+ABI 9 only to its pinned daemon; below ABI 9 to any socket the SSH user may
+reach, and below ABI 6 abstract sockets too), `EXECUTE` only on the admitted
+client and its interpreter, no `memfd`, never network. It runs shell-free, from
+a fixed path, as a canonical command built from a typed flag grammar, with a
+closed environment, after admission checks the client, its loader and the
+daemon socket (THREAT-MODEL.md has the rules and residuals). Where an ordinary
+read would run classifier-only (an unpinned host whose jail is Absent, the read
+not required to run confined), a daemon read runs unjailed instead, with
+network, keeping the grammar, admission and closed environment. Otherwise two
+things deliberately stay outside the jail: signed writes; and the admin verbs
+(`SSHGATE_REVOKE`, `SSHGATE_UPDATE`, `SSHGATE_XFER_*`). A jail problem never
+blocks a signed write or an admin verb.
 
 For a jailed read the gate returns the command's real exit code or signal when
 the worker's status is known, also when the read was cancelled or the client went
@@ -360,7 +370,7 @@ the full reasoning, see [approval-architecture.md](approval-architecture.md).
   obscure tool flags or shell-parsing mismatches remain a residual risk on the
   read path. On a host with the read jail the damage is bounded by the jail; on
   a host without it, only default-deny and the regression corpus stand in the way.
-- Reads keep network access, inside the jail too: a read can send data out or ask
-  a local TCP service to change state. Reads can also see anything the SSH user
+- Where a read has network (a host without the jail, or one that allows it), it
+  can send data out or ask a local TCP service to change state. Reads can also see anything the SSH user
   can read. See [THREAT-MODEL.md](THREAT-MODEL.md) for the jail's full residual
   list.

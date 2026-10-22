@@ -5,6 +5,7 @@ package harness
 import (
 	"fmt"
 	"reflect"
+	"slices"
 	"strings"
 )
 
@@ -29,11 +30,12 @@ type Leg struct {
 	Name                 string
 	Package              string
 	Names                map[string]string
-	Root                 bool
+	Root, NonRoot        bool
 	CIOnly               bool
 	Markers              []string
 	ABIMarkers           map[string][]string
 	Omissions, Residuals []string
+	ResidualABIs         map[string]string // as Case.ResidualABIs
 }
 
 func (l Leg) ExpectedMarkers(abi string) []string {
@@ -88,7 +90,7 @@ func Validate(registry []Protection) error {
 			sets[s.Name()] = s
 			names := map[string]bool{}
 			for _, leg := range s.Legs {
-				if leg.Name == "" || leg.Package == "" || names[leg.Name] {
+				if leg.Name == "" || leg.Package == "" || names[leg.Name] || leg.Root && leg.NonRoot {
 					return fmt.Errorf("%s: invalid leg %q", s.Name(), leg.Name)
 				}
 				names[leg.Name] = true
@@ -103,6 +105,9 @@ func Validate(registry []Protection) error {
 					}
 					if strings.HasPrefix(leg.Name, "L-") && !strings.HasSuffix(prefix, "/"+abi) {
 						return fmt.Errorf("%s: %s full name does not identify its ABI", leg.Name, abi)
+					}
+					if code := leg.ResidualABIs[abi]; code != "" && !slices.Contains(DocumentedResiduals, code) {
+						return fmt.Errorf("%s: undocumented residual %s", leg.Name, code)
 					}
 					markers := map[string]bool{}
 					for _, marker := range leg.ExpectedMarkers(abi) {
@@ -142,6 +147,8 @@ func Select(s MutationSet, root, ci bool) (legs []Leg, omitted []string) {
 		reason := ""
 		if leg.Root && !root {
 			reason = "root"
+		} else if leg.NonRoot && root {
+			reason = "non-root"
 		} else if leg.CIOnly && !ci {
 			reason = "ci-only"
 		}

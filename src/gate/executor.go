@@ -49,12 +49,20 @@ type ExecOpts struct {
 	CaptureLimit int
 	// Confine, when non-nil, runs the command inside the kernel jail the Spec
 	// describes (the ro-v1 profile) instead of a plain
-	// /bin/sh -c. A nil Confine is byte-for-byte today's path (rung 3 / unset):
-	// the gate passes nil on an unconfined host so this field is purely additive.
+	// /bin/sh -c. A nil Confine is the plain path of signed writes and
+	// classifier-only reads.
 	// The jail only ADDS restrictions; stdout/stderr/stdin/redaction wiring below
 	// is identical either way.
 	Confine *confine.Spec
+	// Seal, when set on a confined run, is called right after the jailed
+	// child starts and before it receives its command (the gate passes
+	// confine.SealProcess). A Seal error kills the child before the command
+	// runs: SetupError stage "seal". A confined run in a process that is no
+	// longer dumpable is refused before it starts: stage "sealed".
+	Seal func() error
 	// ClientSink is shared with the entrypoint for diagnostics after execution.
+	// An unconfined run writes through it when it is set; signed writes and
+	// daemon reads leave it nil.
 	ClientSink *ClientSink
 }
 
@@ -239,25 +247,32 @@ func ExecWithRedaction(ctx context.Context, cmd string, opts ExecOpts) (res Exec
 		c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	}
 
-	return runRedacted(ctx, c, jailed, "/bin/sh", opts)
+	what := "/bin/sh"
+	if opts.Confine != nil && opts.Confine.Lane2 != nil {
+		what = opts.Confine.Lane2.Binary
+	}
+	return runRedacted(ctx, c, jailed, what, opts)
 }
 
 // ExecArgvWithRedaction runs argv directly — no shell, no jail — with exactly
 // env as the child's environment, through the same stdout/stderr redaction,
 // counting, /dev/null stdin and process-group plumbing as ExecWithRedaction.
-// It is the shell-free exec for the gate's Lane-2 daemon-read allowlist: argv[0]
-// must be an absolute path (never a $PATH lookup), and a nil env yields an EMPTY
-// environment, never the gate's inherited one. opts.Confine must be nil — this
+// It is the shell-free exec for a Lane-2 daemon read's unjailed fallback: argv[0]
+// and execPath must be absolute paths (never a $PATH lookup). execPath selects
+// the file while argv[0] preserves the admitted client name. A nil env yields an EMPTY
+// environment, never the gate's inherited one, and the child's cwd is /. opts.Confine must be nil — this
 // door is unjailed by design. Return values follow ExecWithRedaction.
-func ExecArgvWithRedaction(ctx context.Context, argv, env []string, opts ExecOpts) (ExecResult, error) {
-	if len(argv) == 0 || !filepath.IsAbs(argv[0]) {
-		return ExecResult{ExitCode: -1}, errors.New("exec: argv[0] must be an absolute path")
+func ExecArgvWithRedaction(ctx context.Context, execPath string, argv, env []string, opts ExecOpts) (ExecResult, error) {
+	if len(argv) == 0 || !filepath.IsAbs(argv[0]) || !filepath.IsAbs(execPath) {
+		return ExecResult{ExitCode: -1}, errors.New("exec: exec path and argv[0] must be absolute paths")
 	}
 	if opts.Confine != nil {
 		return ExecResult{ExitCode: -1}, errors.New("exec: argv exec is never confined")
 	}
-	c := exec.CommandContext(ctx, argv[0], argv[1:]...)
+	c := exec.CommandContext(ctx, execPath, argv[1:]...)
+	c.Args = append([]string(nil), argv...)
 	c.Env = append([]string{}, env...) // non-nil: os/exec inherits the gate's env only for a nil Env
+	c.Dir = "/"
 	c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	return runRedacted(ctx, c, nil, argv[0], opts)
 }
@@ -277,8 +292,15 @@ func runRedacted(ctx context.Context, c *exec.Cmd, jailed *confine.Jailed, what 
 	// stream (see ExecResult). One per stream, never shared. CaptureLimit
 	// (>0 only for the audit all+full path) makes them also tee a capped
 	// copy of the forwarded bytes.
-	outCount := &countingWriter{dst: os.Stdout, captureLimit: opts.CaptureLimit}
-	errCount := &countingWriter{dst: os.Stderr, captureLimit: opts.CaptureLimit}
+	// A caller that already holds the client sink (a read falling back to
+	// classifier-only after a jail attempt) writes through it: the sink made
+	// the client fds non-blocking, so a direct write could fail with EAGAIN.
+	stdout, stderr := io.Writer(os.Stdout), io.Writer(os.Stderr)
+	if opts.ClientSink != nil {
+		stdout, stderr = opts.ClientSink.Stdout(), opts.ClientSink.Stderr()
+	}
+	outCount := &countingWriter{dst: stdout, captureLimit: opts.CaptureLimit}
+	errCount := &countingWriter{dst: stderr, captureLimit: opts.CaptureLimit}
 
 	// Stdout / Stderr: when a ruleset is configured (and not a reveal),
 	// wrap each stream's counting writer in a redact.Writer. Stderr is

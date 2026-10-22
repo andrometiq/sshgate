@@ -39,7 +39,8 @@ release status and trust boundary match your needs.
   key configured" — reads execute, writes exit 77 with:
   `gate: no signing key configured (read-only install — re-run /sshgate:setup to add a signer)`.
 - **Trust model:** the agent can read whatever the SSH user can read
-  (files, logs, process lists), and reads keep network access. Writes are
+  (files, logs, process lists); whether reads get network depends on the
+  host (see [step 5](#5-check-the-servers-read-jail)). Writes are
   denied by the gate itself, with no approval channel at all. On a server
   that supports it (see [step 5](#5-check-the-servers-read-jail)), the gate
   also runs reads inside a kernel jail, so a command the classifier
@@ -105,7 +106,7 @@ release status and trust boundary match your needs.
   the only side that must be Linux.
 
 **For the kernel read jail, each server additionally needs** (optional —
-without them reads still work, unconfined):
+without them reads still work, classifier-only):
 
 - **Landlock** enabled in the running kernel (Linux 5.13 or newer, with
   `landlock` in the active security-module list).
@@ -275,64 +276,95 @@ emulate) — see #17 in [ROADMAP.md](ROADMAP.md).
 
 ### 5. Check the server's read jail
 
-The gate decides per server whether it can run reads inside the kernel
-read jail (profile `ro-v1`). Inside the jail a read sees the host's files
-read-only; its only writable space is a private 64 MiB scratch area at
-`/dev/shm` (and `/dev/null`). It cannot write files or file metadata on
-the host, connect to a local daemon over a Unix socket, or signal or
-trace other processes. It **does** keep TCP/UDP network access, including
-to services on localhost. A short, fixed list of `systemctl` and `docker`
-read commands runs outside the jail because they need those daemons'
-sockets. Signed writes never run in the jail.
+The gate decides per read whether it can run it inside the kernel read jail
+(profile `ro-v1`): every read attempts the jail. Inside the jail a read sees
+the host's files read-only; its only writable space is a private 64 MiB
+scratch area at `/dev/shm` (and `/dev/null`). It cannot write files or file
+metadata on the host, connect to a local daemon over a Unix socket, or signal
+or trace other processes. A short, fixed list of `systemctl` and `docker`
+read commands reaches those daemons' sockets from a narrower form of the jail,
+without network (only from Landlock ABI 9 is that jail held to the daemon's own
+socket); on an unpinned host without a usable jail they run unjailed, like
+other reads there. Signed writes never run in the jail.
 
-There are only two levels: `full` (jailed) and `unconfined` (classifier
-only, as before the jail existed). To see which applies, log in to the
-server **with your own admin access** (not SSHGate's key, which only runs
-the gate) as the same user you registered, and run:
+**Network.** Unsigned reads in the jail have **no network** by default: they
+cannot open TCP or UDP sockets, not even to services on localhost. A host
+pinned `net=allow` (below) gives them network; a per-read signed network
+grant is planned. When a network tool such as `curl` fails for this reason,
+the gate prints one note on stderr saying so. A host without the jail runs
+reads classifier-only, and those keep network.
+
+To see what applies, log in to the server **with your own admin access**
+(not SSHGate's key, which only runs the gate) as the same user you
+registered, and run:
 
 ```bash
 ~/.sshgate-gate/gate doctor
 ```
 
-The `reads:` line is the verdict:
+It changes nothing. It prints the verdict for an unsigned read on its `reads:`
+line and the read label on its `label:` line, then rehearses the jail: it runs
+a fixed probe menu inside the jail against test files, sockets and a process
+it creates in the gate directory, `/tmp` and `/dev/shm`, checks from outside
+that nothing changed, and removes them. The `rehearsal:` line says whether
+that passed. The `reads:` line is one of:
 
-- `jailed:full` — reads run in the jail.
-- `unconfined` — this host lacks Landlock or usable user namespaces, so
-  reads run unconfined. The `userns`, `landlock_abi`,
-  `apparmor_userns_clamp` and `notes` lines say which part is missing.
-- `denied: <reason>` — the gate is refusing reads (see below).
+- `kernel-jailed, no network` or `kernel-jailed, network open` — reads run in
+  the jail.
+- `classifier-only (no usable jail)` — this host lacks the jail (user
+  namespaces off, the AppArmor restriction, no Landlock), so reads run
+  guarded by the classifier only. The `attempt:` line names the failing step.
+- `denied (<reason>)` — the gate is refusing reads (see below).
 
-`--json` prints the same report as JSON.
+`--json` prints the full report as JSON: the same fields the `SSHGATE_JAIL`
+verb returns, the host's jail features, every mount and whether the jail shows
+it, the rehearsal's rows, the pin, and advice.
 
 On Ubuntu 23.10 and newer, `apparmor_userns_clamp: yes` means the default
-AppArmor restriction blocks the namespaces the jail needs. SSHGate does not
-ship an AppArmor profile for the gate yet. Turning the restriction off
+AppArmor restriction blocks the namespaces the jail needs, so reads run
+classifier-only, and each read logs one AppArmor `userns_create` denial in
+the kernel audit log. SSHGate does not ship an AppArmor profile for the gate
+yet. Turning the restriction off
 (`sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0`, plus a
-file in `/etc/sysctl.d/` to keep it after a reboot) lets the gate
-build the jail, but it also allows unprivileged user namespaces for every
-user on that host, so weigh that before you do it.
+file in `/etc/sysctl.d/` to keep it after a reboot) lets the gate build the
+jail, but it also allows unprivileged user namespaces for every user on that
+host, so weigh that before you do it.
 
-**Optional: pin the jail floor.** Without a pin, a host that loses the
-jail (a kernel or sysctl change) quietly goes back to unconfined reads. To
-make the gate refuse reads instead, run this once on a host that reports
-`jailed:full`:
+**Optional: pin the host.** Without a pin, a host that loses the jail (a
+kernel or sysctl change) goes back to classifier-only reads. A pin makes the
+gate refuse reads instead (exit 77, `gate: read jail unavailable`; the agent
+is told to ask you to run `gate doctor`), and sets the host's network for
+reads. Pin with doctor, as the same user:
 
 ```bash
-~/.sshgate-gate/gate doctor --pin
+~/.sshgate-gate/gate doctor --pin --net=deny
 ```
 
-It writes `full` to `~/.sshgate-gate/jail-floor`. From then on, if the jail
-is unavailable, the gate refuses reads with exit 77 and the message
-`gate: read jail unavailable` (the fixed `systemctl`/`docker` list, which
-never uses the jail, still runs), and the agent is told to ask you to run
-`gate doctor`. A damaged floor file (unreadable, group- or world-writable,
-or holding anything other than `full` or `unconfined`) also makes the gate
-refuse reads. `--pin` never lowers an existing floor; to remove the pin,
-delete the file by hand.
+Doctor rehearses the jail the pin would give and writes the pin only if the
+rehearsal passed; otherwise it exits 77 and writes nothing. Running it again
+leaves the pin unchanged. `--net=allow` gives jailed reads network; on such a
+host the fixed `systemctl`/`docker` list is refused, because it cannot run in
+the jail. `--accept-fs=network` (or `network,autofs`) makes the jail show those
+mounts instead of hiding them.
 
-Even without a pin, the gate never falls back to an unconfined read on a
-host that supports the jail: if the jail check fails for an unexplained
-reason, or the jail cannot be set up for a read, that read is refused with
+The host can be pinned only if the jail shows the gate directory. If the gate
+directory is on a network file system, add `--accept-fs=network`. If it is on
+FUSE, ZFS, `overlay`, or a block device behind LVM, LUKS, md, a loop device or
+device-mapper, this build cannot pin the host: doctor says so, and reads there
+stay classifier-only.
+
+The pin is the file `~/.sshgate-gate/jail`, mode 0600. It must stay a regular
+file (not a symlink) with one link, at most 4 KiB, owned by the gate's user and
+not group- or world-writable; anything else makes it *damaged*, and a damaged
+pin refuses every read. `gate doctor --pin` repairs a damaged pin. To remove
+the pin, delete the file.
+
+**Upgrading from 0.1.x.** The older `jail-floor` file is no longer read as a
+floor. If it is present and there is no `jail` pin, the gate refuses every
+read until you pin the host with `gate doctor --pin` or delete `jail-floor`.
+
+Even without a pin, the gate never re-runs a read the jail may have started:
+a jail that fails to set up for an unexplained reason refuses the read with
 exit 77.
 
 ---
@@ -684,12 +716,15 @@ clears it; if that fails, find the holder with
 `sudo fuser /run/sshgatesigner/sock`.
 
 **A read fails with exit 77 and `gate: read jail unavailable`.**
-The gate on that server refused to run the read because it could not
-confirm or set up the kernel read jail. Nothing ran. Run
-`~/.sshgate-gate/gate doctor` on the server (Tier 1 step 5) and read its
-`reads:` and `notes:` lines. The usual cause is a pinned `jail-floor` on a
-host that lost Landlock or user namespaces; fix the host, or delete the
-`jail-floor` file to accept unconfined reads there.
+The gate on that server refused to run the read: its jail pin is damaged,
+a 0.1.x `jail-floor` is left with no `jail` pin, or the kernel read jail
+could not be set up (on a pinned host, or for a read that must run
+confined). Nothing ran, unless the line says the read may have started
+(the jail failed after reporting itself ready). Run `~/.sshgate-gate/gate doctor` on the server
+(Tier 1 step 5) and read its `pin:`, `attempt:`, `reads:` and `note:`
+lines. Fix the host or the pin, or delete the pin (or the leftover
+`jail-floor`) to make the host unpinned: reads then run in the jail where it
+works and classifier-only where it does not.
 
 **`go build` fails with "cannot find module".**
 You're not in the SSHGate repo root. `cd` to the directory containing

@@ -48,7 +48,7 @@ All the make targets that run tests or checks:
 | `make test-jail` | the read jail's acceptance matrix, non-root lane (§12) | Linux with unprivileged user namespaces that can mount, Landlock, FUSE | any change to the jail or the gate's read path |
 | `make test-jail-root` | the same matrix as root | root on a **disposable** machine | same |
 | `make test-jail-mutate MUTATE=<IDs>` | the mutation proof: removes protections and checks a named test catches each (§12) | as `test-jail` (root lane: run it as root) | when you add or touch a jail protection |
-| `make test-fidelity-smoke` | compares jailed and unjailed output of `ps`, `top`, `pgrep`, `ss` | as `test-jail` | jail changes |
+| `make test-fidelity-smoke` | compares jailed and unjailed output of `ps`, `top`, `pgrep`, `ss` | as `test-jail`, plus the `sqlite3` and `git` CLIs (a missing tool fails as `SETUP:`) | jail changes |
 | `make selftest-testjail`, `make selftest-jailmut` | self-tests of the jail test runner and the mutation harness | — | when you change the jail test tooling |
 
 The standing gates are also listed in `docs/E2E-TEST-STRATEGY.md`. The rule of
@@ -112,6 +112,28 @@ original → assign → restore via `defer`/`t.Cleanup`). Used for narrow,
 single-call indirections:
 
 - `gateDirFn` / `homeDirFn` — `src/gate/cmd/sshgate-gate/main.go` (`var gateDirFn`, `var homeDirFn`)
+- `executeCommand` (`main.go`) and the read router's seams in
+  `src/gate/cmd/sshgate-gate/readjail.go`: `forceNetGrant` (stands in for a signed network grant
+  until the signed wire carries one), `readSpecHook` (forces a Landlock ABI or a setup failure),
+  `hostFactsFn`, `pinUIDFn`, `jailPinFn`, `sealFn` (the seal of a jailed read) and
+  `resetVerbEnv` (the `SSHGATE_JAIL` environment reset); the in-process test binary
+  records the last two instead of sealing itself or clearing its environment. The
+  rehearsal's seams are `selftestBinaryFn` (tests point it at a non-race build of the
+  gate made with `jailmut.BuildFlags()`, so the mutation hooks stay live and no
+  race-built binary runs under the jail's seccomp filter), `rehearsalSpecHook` and
+  `rehearsalObserveHook`. Doctor's are `fixturesFn` (the fixtures and the rehearsal behind the
+  `rehearser` interface), `mountOfFn` and `describeMountsFn`. The gate legs that need the gate in its own process
+  set the same seams through the test binary's `SSHGATE_TEST_GATE` mode (`jail_testmain_test.go`);
+  the gate itself never reads them from the environment.
+- The daemon-read seams in `src/gate/cmd/sshgate-gate/lane2.go` and `lane2admit.go`:
+  `lane2BinDirs` (where the client is looked up), `lane2TrustedUIDs` (the owners admission
+  trusts, `{0}` in production) and `lane2SystemEndpoints` (the default daemon sockets).
+  `withLane2Seams` sets all three for a test (the test's binary directory, root plus the test
+  user, and test-owned listening sockets) and restores them. `lane2AfterAdmitHook` (in
+  `readjail.go`, nil in production) lets an identity leg replace an admitted object between
+  admission and the jail. These are trust decisions, so `TestLane2TrustDefaults` checks their
+  initialisers in the source and fails on any assignment, in-place change or address-taking of
+  them outside `_test.go` files.
 - `dialWithCtx` — `src/mcp/sign/client.go` (`var dialWithCtx`)
 - `randRead` — `src/signer/daemon.go` (`var randRead`)
 - `dialAgentSock`, `parsePrivateKey` — `src/mcp/tools/add_server.go` (package vars)
@@ -135,7 +157,7 @@ multi-step remote conversation in memory rather than against a real sshd.
 These are **package-var** seams, not env vars, and that is deliberate. The
 clearest case: `gateDirFn` resolves where the gate reads `gate.pub` (the
 signature-verification trust anchor), and also its other static operator files
-(`jail-floor`, `audit-level`, `audit-path`). If that location were `$ENV`-overridable,
+(the `jail` pin, `audit-level`, `audit-path`). If that location were `$ENV`-overridable,
 an attacker who controlled the environment could point the gate at a `gate.pub`
 they own and **forge signatures** — every "signed" admin command would verify.
 So the seam exists *only* so in-package tests can point resolution at a
@@ -231,7 +253,8 @@ Constants in `main.go` (sysexits-style); each asserted by a named case in
 | 1 | `exitGeneric` | generic runtime failure / empty inner command | `TestRunSignedWritePassthrough` (empty inner) |
 | 65 | `exitDataErr` (EX_DATAERR) | bad signature, bad envelope, expired sig, validity window too long | `TestRunVerifiedPaths` (bad signature / tampered cmd / expired) |
 | 70 | `exitSoftware` (EX_SOFTWARE) | `gate.pub` unreadable / corrupt / insecure mode | `TestRunPubkeyFailures` (corrupt / insecure-mode) |
-| 77 | `exitNoPermVal` (EX_NOPERM) | write command without a verified `SSHGATE_SIG` prefix; also a read refused because the read jail cannot be trusted or set up (stderr says `read jail unavailable`) | `TestRunWriteDenial` (unsigned write); `TestRunReadOnlyMode` (write in read-only); `TestRunReadFailsClosed` (probe error, damaged or higher floor); `TestRunReadJailSetupFailureDenies` (jail setup failure; needs a jail-capable host, run by `make test-jail`) |
+| 77 | `exitNoPermVal` (EX_NOPERM) | write command without a verified `SSHGATE_SIG` prefix; also a read the read jail refuses (stderr says `read jail unavailable`): a damaged pin or a 0.1.x `jail-floor` with no pin, a Failed jail, an Absent jail on a pinned host, or a read that must run confined | `TestRunWriteDenial` (unsigned write); `TestRunReadOnlyMode` (write in read-only); `TestRunReadDeniedDamagedPin`, `TestRunReadLegacyFloorDenies`, `TestRunReadFailedSetupDenies`, `TestRunReadAbsentPinnedDenies`; `TestRunReadJailSetupFailureDenies` (live jail, run by `make test-jail`) |
+| 143 | `exitCancelled` | a signed admin verb, or a read whose jail never started, cancelled before it ran (read deny_reason `cancelled`) | `TestRunReadCancelledBeforeFallback` |
 | 0–255 | passthrough | child's own exit code passed straight through | `TestRunSignedWritePassthrough` (child exits 42 → 42) |
 | 128+signum | passthrough | child killed by signal → `128+signal` | `TestRunSignedWritePassthrough` (SIGTERM → 143) |
 
@@ -266,8 +289,12 @@ Without a jail spec, `executor.go` runs `exec.CommandContext(ctx, "/bin/sh",
 "-c", cmd)` — a real shell. With a jail spec (a read on a jail-capable host), the
 gate re-executes itself to build the jail, and the jailed worker then runs
 `/bin/sh` (`src/gate/confine/doc.go`); those paths are tested in §12, not here.
-The fixed `systemctl`/`docker` read verbs run shell-free through
-`ExecArgvWithRedaction`. `executor_test.go` genuinely shells out and depends on
+The fixed `systemctl`/`docker` read verbs run shell-free: in their own jail
+(the worker execs the admitted client with the argv from fd 3), or, as the
+unconfined fallback, through `ExecArgvWithRedaction`. Their jail legs use the C
+client `src/gate/cmd/sshgate-gate/testdata/lane2client`, never the race-built
+test binary, whose modes (`sg-<mode>.<nonce>`) report argv and env, run a
+plugin, a memfd copy or the loader, and connect to sockets the leg lists. `executor_test.go` genuinely shells out and depends on
 coreutils being present: `TestExec` runs `echo hello` and asserts stdout
 `"hello\n"`; a large-output case runs `yes x | head -c 65536`; a timeout case
 runs `sleep 10`. This is the one place the unit suite assumes a POSIX `/bin/sh`
@@ -595,8 +622,11 @@ them.
   namespaces that can mount (on Ubuntu 24.04 that means
   `kernel.apparmor_restrict_unprivileged_userns=0` or an AppArmor profile for the
   test binaries), Landlock, seccomp, `/dev/fuse` and `fusermount3`, at least two
-  CPUs, and both `dash` and `bash`. The CI workflow `.github/workflows/jail.yml`
-  shows a complete runner setup.
+  CPUs, both `dash` and `bash`, and a C compiler (`cc`): the daemon-read legs build
+  their test clients from `src/gate/cmd/sshgate-gate/testdata/lane2client`. The
+  `docker` client at `/usr/bin/docker` (no daemon needed) for
+  `TestLane2DockerHostContact`, which checks it dials exactly the admitted socket. The
+  CI workflow `.github/workflows/jail.yml` shows a complete runner setup.
 - **Root lane (`make test-jail-root`):** everything above, run as root, plus
   systemd, `systemd-mount`, loop devices, `losetup`, `mkfs.ext4`, `binfmt_misc`,
   `useradd` and `userdel`, and host `CAP_SYS_NICE`. **Use a disposable VM or
@@ -626,7 +656,18 @@ make test-jail-mutate                  # every mutation set (slow)
 real-effect tests in `src/gate` (`TestExecWithRedactionConfine*`), and the gate
 binary's read-path tests in `src/gate/cmd/sshgate-gate` (for example
 `TestGateBinaryJailedRead`, which drives a forced-command read through the real
-gate binary and also checks that jailed reads keep TCP/UDP network access). It
+gate binary and checks that an unpinned jailed read gets no INET socket), the
+read router's decision tables (`TestPhase2Tables`) and its gate legs
+(`TestJailMatrixPhase2`, `TestGateBinaryNetworkPin`), the in-process read's
+recorded seal (`TestInProcessReadLeavesDumpable`), the `SSHGATE_JAIL` verb through
+the real binary (`TestGateBinaryJailVerb`), and the real binary's `gate doctor`
+rehearsal and `--pin` on the host (`TestDoctorRehearsalRealHost`), and the jailed
+daemon-read rows that need a working jail (`TestLane2HeldFDsClosedJailed`,
+`TestLane2DockerHostContact`). The two tests that prove
+classifier-only reads on a host with Ubuntu's AppArmor userns restriction
+(`TestRunReadClampHostRunsClassifierOnly`, `TestGateBinaryClampHostClassifierOnly`) are not
+in this target, which needs a working jail; `make test` runs them, and CI requires them to pass
+on `ubuntu-latest`. It
 then checks the combined log against the case manifest (see 12.4).
 
 Some fast checks need no jail at all:
@@ -669,7 +710,8 @@ and `TestDistGateHasNoMutationBuild` checks the committed one.
 ### 12.4 Lanes, CI mode and the phase-end gate
 
 - **Local runs omit what they cannot show.** Root-only legs are declared
-  omissions in the non-root lane, and some controls (among them the socket-family
+  omissions in the non-root lane, and non-root-only legs (`G-GATE-SEAL`: a capless
+  root process cannot reach even an unsealed root gate) in the root lane. Some controls (among them the socket-family
   sweeps, the module-autoload control, the crash legs and some cover fixtures)
   run only with `SSHGATE_JAIL_CI=1`. In a mutation run, a set with no remaining red
   leg prints `NOT-RUN`; a step's commit names those sets, and they must be red in
@@ -678,7 +720,12 @@ and `TestDistGateHasNoMutationBuild` checks the committed one.
   control, the jailed attempt, the outside observation) and prints exactly one
   `PROOF-COMPLETE` line when it finishes. `PROOF-OMITTED` needs a declared reason
   (CI accepts only lane reasons) and `PROOF-RESIDUAL` must name an accepted
-  residual. `make test-jail` and `make test-jail-root` check their logs against
+  residual from `harness.DocumentedResiduals` (each tied to THREAT-MODEL). A
+  case's `ResidualABIs` fixes, on the host that judges it, which lanes report a
+  residual instead of completing: for example the daemon-read socket pin is a
+  residual in the ABI-1 lane and natively below Landlock ABI 9. A residual in any
+  other lane, a completion in a residual lane, or a residual where a mutation
+  was expected to show its effect fails the run. `make test-jail` and `make test-jail-root` check their logs against
   the case manifest, so free-text omissions give no coverage.
 - **Phase-end gate.** On a disposable runner, run both lanes in CI mode and keep
   their evidence:

@@ -36,6 +36,22 @@ func TestManifestStrict(t *testing.T) {
 	if _, err := CheckManifest(strings.NewReader("PROOF-OMITTED L-PROOF native root-only\n"), []Case{c}, false, true); err != nil {
 		t.Fatal(err)
 	}
+	nonRoot := testCase()
+	nonRoot.NonRoot = true
+	omitted := "PROOF-OMITTED L-PROOF native nonroot-only\n"
+	if _, err := CheckManifest(strings.NewReader(omitted), []Case{nonRoot}, true, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := CheckManifest(strings.NewReader(omitted), []Case{nonRoot}, false, true); err == nil {
+		t.Fatal("accepted a non-root-only omission in the non-root lane")
+	}
+	if _, err := CheckManifest(strings.NewReader(omitted), []Case{testCase()}, true, true); err == nil {
+		t.Fatal("accepted a non-root-only omission for a case that does not declare it")
+	}
+	c.NonRoot = true
+	if ValidateCases([]Case{c}) == nil {
+		t.Fatal("accepted a case that is both root-only and non-root-only")
+	}
 }
 func TestCaseUnionOmissionsNeverComplete(t *testing.T) {
 	c := testCase()

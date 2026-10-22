@@ -18,6 +18,20 @@ type Outcome struct {
 	Red           bool
 }
 
+// ProofOutcome is the outcome a judged proof contributes to its lane's report:
+// a completion is red when the leg expected markers in that ABI; a per-lane
+// residual is green, so the union compares it with the expected markers like
+// any other outcome. An omission or a legacy residual contributes none.
+func ProofOutcome(set MutationSet, leg Leg, abi string, proof ProofRecord) (Outcome, bool) {
+	switch {
+	case proof.Outcome == "COMPLETE":
+		return Outcome{Set: set.Name(), ABI: abi, Leg: leg.Name, Red: len(leg.ExpectedMarkers(abi)) > 0}, true
+	case proof.Outcome == "RESIDUAL" && len(leg.Residuals) == 0:
+		return Outcome{Set: set.Name(), ABI: abi, Leg: leg.Name}, true
+	}
+	return Outcome{}, false
+}
+
 // CheckUnion is the phase-end gate over the two CI-mode lane reports.
 func CheckUnion(registry []Protection, reports []Report) error {
 	lanes := map[bool]bool{}
@@ -38,7 +52,7 @@ func CheckUnion(registry []Protection, reports []Report) error {
 				for _, leg := range set.Legs {
 					covered := false
 					for _, report := range reports {
-						eligible := !leg.Root || report.Root
+						eligible := (!leg.Root || report.Root) && (!leg.NonRoot || !report.Root)
 						matched := false
 						for _, outcome := range report.Outcomes {
 							if outcome.Set == set.Name() && outcome.ABI == abi && outcome.Leg == leg.Name {
@@ -50,6 +64,8 @@ func CheckUnion(registry []Protection, reports []Report) error {
 								hasRed = hasRed || outcome.Red
 							}
 						}
+						// Only a legacy Residual-kind leg is covered by its declaration;
+						// a per-lane residual is an outcome, compared above.
 						for _, proof := range report.Proofs {
 							if proof.Leg == leg.Name && proof.ABI == abi && proof.Outcome == "RESIDUAL" && slices.Contains(leg.Residuals, proof.Code) {
 								matched = true

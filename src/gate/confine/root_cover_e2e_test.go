@@ -75,19 +75,46 @@ func legAutofs(t *testing.T, spec Spec) {
 	if len(kinds) != 1 || kinds[0] != "autofs" {
 		t.Fatalf("SETUP: trigger not initially dormant: %v", kinds)
 	}
-	result := runJailed(t, p, spec, RunPlan{Mode: Execute, Ops: []ProofOp{{Name: "directory", Command: "ls -A " + coverQuote(point), Validate: func(stdout, stderr string, exit int) error {
+	// The child first looks without triggering (stat, its mountinfo), then lists.
+	var statDev, mountinfo, listing string
+	var listingExit int
+	result := runJailed(t, p, spec, RunPlan{Mode: Execute, Ops: []ProofOp{
+		{Name: "identity", Command: "stat -c %d " + coverQuote(point), Validate: func(stdout, stderr string, exit int) error {
+			if exit != 0 || stderr != "" {
+				return fmt.Errorf("child stat: exit=%d stderr=%q", exit, stderr)
+			}
+			statDev = stdout
+			return nil
+		}},
+		{Name: "mounts", Command: "cat /proc/self/mountinfo", Validate: func(stdout, stderr string, exit int) error {
+			if exit != 0 || stderr != "" {
+				return fmt.Errorf("child mountinfo: exit=%d stderr=%q", exit, stderr)
+			}
+			mountinfo = stdout
+			return nil
+		}},
 		// The trigger is judged after completion; here only the report's shape.
-		return autofsListingError(point, OpOutcome{Stdout: stdout, Stderr: stderr, Exit: exit}, true)
-	}}}})
+		{Name: "directory", Command: "ls -A " + coverQuote(point) + " 2>&1", Validate: func(stdout, stderr string, exit int) error {
+			if stderr != "" || exit != 0 && exit != 2 {
+				return fmt.Errorf("listing: exit=%d stderr=%q", exit, stderr)
+			}
+			listing, listingExit = stdout, exit
+			return nil
+		}},
+	}})
 	p.Jailed("probe", result)
 	coverRan(t, result.jailResult)
 	kinds = autofsKinds(t, point)
-	triggered := len(kinds) != 1 || kinds[0] != "autofs"
-	mutationEffect(t, "L-AUTOFS", "triggered", triggered)
-	p.Observed("mounts", Observation{Conclusive: true, Sealed: true, Valid: len(kinds) > 0, Detail: "mountinfo after synchronous listing"})
-	if err := autofsListingError(point, OpOutcome{Stdout: result.stdout, Stderr: result.stderr, Exit: result.exit}, triggered); err != nil {
+	isMounted := len(kinds) != 1 || kinds[0] != "autofs"
+	isUncovered, err := autofsChildView(point, statDev, mountinfo)
+	mutationSetup(t, err)
+	effect, err := autofsListing(point, listing, listingExit, isMounted, isUncovered, autofsEffect() == "uncovered-refused")
+	if err != nil {
 		unexpected(t, "%v", err)
 	}
+	// An effect this kernel cannot show is an undeclared marker: SETUP.
+	mutationEffect(t, "L-AUTOFS", effect, effect != "")
+	p.Observed("mounts", Observation{Conclusive: true, Sealed: true, Valid: len(kinds) > 0, Detail: "host and child mountinfo after synchronous listing"})
 	output, err = exec.Command("ls", "-A", point).CombinedOutput()
 	if err != nil {
 		t.Fatalf("SETUP: automount control: %v: %s", err, output)

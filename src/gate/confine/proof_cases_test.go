@@ -9,7 +9,7 @@ import (
 	"testing"
 )
 
-var legCases = append(append(append(proofCases(), proofCasesM1()...), proofCasesM2()...), proofCasesM3()...)
+var legCases = append(append(append(append(append(proofCases(), proofCasesM1()...), proofCasesM2()...), proofCasesM3()...), proofCasesPhase2()...), proofCasesPhase3()...)
 
 func proofCases() []harness.Case {
 	var cases []harness.Case
@@ -56,7 +56,7 @@ func proofCases() []harness.Case {
 		markers                []string
 	}{
 		{"L-COVER-LOOP", "canary", "directory", []string{"EFFECT:visible", "EFFECT:nonempty"}},
-		{"L-AUTOFS", "trigger", "mounts", []string{"EFFECT:triggered"}},
+		{"L-AUTOFS", "trigger", "mounts", []string{"EFFECT:" + autofsEffect()}},
 		{"L-BINFMT-FIXED-CHAR", "interpreter", "read", nil},
 		{"L-TRACEFS", "drain", "marker", []string{"EFFECT:trace-consumed"}},
 	} {
@@ -146,7 +146,11 @@ func TestProofCaseMarkerCoverage(t *testing.T) {
 	report := harness.Report{Root: true, CI: true}
 	for _, c := range legCases {
 		for _, abi := range c.ABIs {
-			report.Proofs = append(report.Proofs, harness.ProofRecord{Outcome: "COMPLETE", Leg: c.Name, ABI: abi})
+			proof := harness.ProofRecord{Outcome: "COMPLETE", Leg: c.Name, ABI: abi}
+			if code := c.ResidualABIs[abi]; code != "" {
+				proof = harness.ProofRecord{Outcome: "RESIDUAL", Leg: c.Name, ABI: abi, Code: code}
+			}
+			report.Proofs = append(report.Proofs, proof)
 		}
 	}
 	if err := harness.CheckCaseUnion(legCases, completeRegistry(), []harness.Report{report}); err != nil {

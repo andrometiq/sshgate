@@ -42,6 +42,9 @@ const (
 type filterParams struct {
 	allowInet bool
 	abi       int
+	// lane2 is a daemon read: Unix stream sockets are allowed (its daemon) and
+	// memfd is denied (no anonymous executable past narrow EXECUTE).
+	lane2 bool
 }
 
 // retErrno builds a SECCOMP_RET_ERRNO action carrying errno in the low 16 bits.
@@ -170,7 +173,14 @@ func buildFilter(p filterParams) []unix.SockFilter {
 			action = "allow"
 		}
 		actions[i] = action
-		if action == "allow" {
+	}
+	// After the per-row mutation loop: the table rows stay allow, so this never
+	// makes a P-SC-MEMFD_* hook live.
+	for i, row := range syscallTable {
+		if p.lane2 && (row.name == "MEMFD_CREATE" || row.name == "MEMFD_SECRET") && !jailmut.On("P-L2-MEMFD") {
+			actions[i] = "deny"
+		}
+		if actions[i] == "allow" {
 			allowed = append(allowed, row.nr)
 		}
 	}

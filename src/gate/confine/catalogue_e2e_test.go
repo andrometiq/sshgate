@@ -403,7 +403,7 @@ func catalogueSysctl(t *testing.T, spec Spec, system bool) {
 	p.Control("effect", ControlResult{Valid: true, Detail: "unjailed sysctl changed namespace-local domainname; restored before attempt"})
 	result := catalogueRun(t, p, spec, command, "", control, false)
 	p.Jailed("command", result)
-	if result.exit == 0 {
+	if result.exit == 0 && !isSysctlIgnoredRefusal(result.stderr) {
 		unexpected(t, "catalogue sysctl write accepted: %+v", result)
 	}
 	after, err := os.ReadFile("/proc/sys/kernel/domainname")

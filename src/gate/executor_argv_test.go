@@ -25,7 +25,7 @@ func TestExecArgvWithRedaction(t *testing.T) {
 		var res gate.ExecResult
 		out := captureStdout(t, func() {
 			var err error
-			res, err = gate.ExecArgvWithRedaction(ctx, []string{"/bin/echo", "a;b", "$HOME", "`id`", "$(id)", "*"}, nil, gate.ExecOpts{})
+			res, err = gate.ExecArgvWithRedaction(ctx, "/bin/echo", []string{"/bin/echo", "a;b", "$HOME", "`id`", "$(id)", "*"}, nil, gate.ExecOpts{})
 			if err != nil {
 				t.Errorf("err = %v", err)
 			}
@@ -38,10 +38,22 @@ func TestExecArgvWithRedaction(t *testing.T) {
 		}
 	})
 
+	t.Run("the child's cwd is /", func(t *testing.T) {
+		t.Chdir(t.TempDir())
+		out := captureStdout(t, func() {
+			if _, err := gate.ExecArgvWithRedaction(ctx, "/bin/pwd", []string{"/bin/pwd", "-P"}, nil, gate.ExecOpts{}); err != nil {
+				t.Errorf("err = %v", err)
+			}
+		})
+		if out != "/\n" {
+			t.Errorf("child cwd = %q, want /", out)
+		}
+	})
+
 	t.Run("env is exactly the passed env, never inherited", func(t *testing.T) {
 		t.Setenv("DOCKER_HOST", "tcp://attacker.invalid:2375")
 		out := captureStdout(t, func() {
-			if _, err := gate.ExecArgvWithRedaction(ctx, []string{"/usr/bin/env"}, []string{"LANG=C"}, gate.ExecOpts{}); err != nil {
+			if _, err := gate.ExecArgvWithRedaction(ctx, "/usr/bin/env", []string{"/usr/bin/env"}, []string{"LANG=C"}, gate.ExecOpts{}); err != nil {
 				t.Errorf("err = %v", err)
 			}
 		})
@@ -49,7 +61,7 @@ func TestExecArgvWithRedaction(t *testing.T) {
 			t.Errorf("child env = %q, want exactly LANG=C", out)
 		}
 		out = captureStdout(t, func() {
-			if _, err := gate.ExecArgvWithRedaction(ctx, []string{"/usr/bin/env"}, nil, gate.ExecOpts{}); err != nil {
+			if _, err := gate.ExecArgvWithRedaction(ctx, "/usr/bin/env", []string{"/usr/bin/env"}, nil, gate.ExecOpts{}); err != nil {
 				t.Errorf("err = %v", err)
 			}
 		})
@@ -68,7 +80,7 @@ func TestExecArgvWithRedaction(t *testing.T) {
 		t.Cleanup(func() { os.Stdin = orig; _ = r.Close() })
 		go func() { _, _ = w.WriteString("MARKER_STDIN_REACHED\n"); _ = w.Close() }()
 		out := captureStdout(t, func() {
-			if _, err := gate.ExecArgvWithRedaction(ctx, []string{"/bin/cat"}, nil, gate.ExecOpts{}); err != nil {
+			if _, err := gate.ExecArgvWithRedaction(ctx, "/bin/cat", []string{"/bin/cat"}, nil, gate.ExecOpts{}); err != nil {
 				t.Errorf("err = %v", err)
 			}
 		})
@@ -79,7 +91,7 @@ func TestExecArgvWithRedaction(t *testing.T) {
 
 	t.Run("output is redacted", func(t *testing.T) {
 		out := captureStdout(t, func() {
-			if _, err := gate.ExecArgvWithRedaction(ctx, []string{"/bin/echo", "AKIA1234567890ABCDEF"}, nil, gate.ExecOpts{Rules: redactrules.Combined()}); err != nil {
+			if _, err := gate.ExecArgvWithRedaction(ctx, "/bin/echo", []string{"/bin/echo", "AKIA1234567890ABCDEF"}, nil, gate.ExecOpts{Rules: redactrules.Combined()}); err != nil {
 				t.Errorf("err = %v", err)
 			}
 		})
@@ -89,7 +101,7 @@ func TestExecArgvWithRedaction(t *testing.T) {
 	})
 
 	t.Run("exit code passes through", func(t *testing.T) {
-		res, err := gate.ExecArgvWithRedaction(ctx, []string{"/bin/false"}, nil, gate.ExecOpts{})
+		res, err := gate.ExecArgvWithRedaction(ctx, "/bin/false", []string{"/bin/false"}, nil, gate.ExecOpts{})
 		if err != nil || res.ExitCode != 1 {
 			t.Errorf("res = %+v, err = %v; want exit 1", res, err)
 		}
@@ -97,14 +109,16 @@ func TestExecArgvWithRedaction(t *testing.T) {
 
 	t.Run("refusals", func(t *testing.T) {
 		for name, tc := range map[string]struct {
-			argv []string
-			opts gate.ExecOpts
+			execPath string
+			argv     []string
+			opts     gate.ExecOpts
 		}{
-			"empty argv":        {nil, gate.ExecOpts{}},
-			"relative argv[0]":  {[]string{"echo", "x"}, gate.ExecOpts{}},
-			"confine requested": {[]string{"/bin/echo", "x"}, gate.ExecOpts{Confine: &confine.Spec{Profile: confine.ProfileROv1}}},
+			"empty argv":         {"/bin/echo", nil, gate.ExecOpts{}},
+			"relative argv[0]":   {"/bin/echo", []string{"echo", "x"}, gate.ExecOpts{}},
+			"relative exec path": {"echo", []string{"/bin/echo", "x"}, gate.ExecOpts{}},
+			"confine requested":  {"/bin/echo", []string{"/bin/echo", "x"}, gate.ExecOpts{Confine: &confine.Spec{Profile: confine.ProfileROv1}}},
 		} {
-			res, err := gate.ExecArgvWithRedaction(ctx, tc.argv, nil, tc.opts)
+			res, err := gate.ExecArgvWithRedaction(ctx, tc.execPath, tc.argv, nil, tc.opts)
 			if err == nil || res.ExitCode != -1 {
 				t.Errorf("%s: res = %+v, err = %v; want refusal with exit -1", name, res, err)
 			}

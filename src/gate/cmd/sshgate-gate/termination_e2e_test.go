@@ -196,7 +196,7 @@ func terminationAwaitSignalHandler(t *testing.T, command *exec.Cmd) {
 }
 
 func TestTerminationBinaryConfined(t *testing.T) {
-	liveRung(t)
+	requireJail(t)
 	dir := t.TempDir()
 	binary := filepath.Join(dir, "gate")
 	build := exec.Command("go", "build", "-o", binary, ".")
@@ -297,7 +297,7 @@ func TestTerminationDefaultSIGPIPE(t *testing.T) {
 		t.Run(strconv.FormatBool(confined), func(t *testing.T) {
 			plan := execPlan{}
 			if confined {
-				liveRung(t)
+				requireJail(t)
 				plan.confine = &confine.Spec{Profile: confine.ProfileROv1}
 			}
 			var rc int
@@ -317,7 +317,6 @@ func TestTerminationErrorHelper(t *testing.T) {
 	}
 	dir := os.Getenv("SSHGATE_TERMINATION_TEST_DIR")
 	withGateDir(t, dir)
-	detectFn = func() confine.Report { return confine.Report{Rung: confine.Rung1Full} }
 	executeCommand = func(context.Context, string, gate.ExecOpts) (gate.ExecResult, error) {
 		result := gate.ExecResult{ExitCode: 23, Transport: gate.TransportMetadata{CleanupError: "fixture cleanup failure", SourceTruncated: "live-writer-after-cleanup-failure", SourceBytesRead: 42, WorkerStatus: confine.WorkerStatus{Unavailable: "fixture worker unavailable"}}}
 		if mode == "setup" {

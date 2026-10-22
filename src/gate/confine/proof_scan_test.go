@@ -22,6 +22,7 @@ var proofScanExceptions = map[string]string{
 
 var proofLaunchExceptions = map[string]string{
 	"proof_execution_test.go:runJailed":                     "the sole jailed execution primitive",
+	"lane2_endpoint_test.go:lane2SpecRefused":               "builds and aborts a daemon-read jail command, never starting it, to read the Spec check",
 	"cover_fixture_e2e_test.go:coverNamespace":              "unjailed namespace fixture and child-test proof transport",
 	"cover_fixture_e2e_test.go:startCoverFuse":              "unjailed FUSE daemon observer startup",
 	"cover_fixture_e2e_test.go:fuseFixture.Stop":            "FUSE observer shutdown and verdict join",
@@ -33,6 +34,10 @@ var proofLaunchExceptions = map[string]string{
 	"proof_m2_hostpid_observer_test.go:m2Recipient.Stop":    "unjailed signal-recipient observer teardown",
 	"proof_m2_hostpid_observer_test.go:m2ProcessOwner.Stop": "unjailed victim process teardown",
 	"proof_m2_user_observer_test.go:userRetuneVictim.Stop":  "unjailed USER retune victim teardown",
+	"xfer_e2e_test.go:e2eGateSSH.Run":                       "transfer e2e fake SSH transport, reached only by name through t.Run",
+	"fuse_fixture_e2e_test.go:gateFuse.stop":                "gate FUSE observer shutdown and verdict join",
+	"phase22_e2e_test.go:startSealGate":                     "subprocess gate startup and cleanup reap",
+	"phase22_e2e_test.go:sealGate.finish":                   "subprocess gate FIFO feed and exit join",
 }
 
 type proofFunction struct {
@@ -208,7 +213,7 @@ func TestLegsUseProofAPI(t *testing.T) {
 		}
 	}
 	// A declaration removed from its body cannot escape the scan simply by deleting newProof.
-	for _, name := range []string{"TestJailMatrixPhase1", "TestPhase1Tables", "TestJailMatrixCovers", "legCoverWalkDenied", "legSelfcheckDeniedSafe"} {
+	for _, name := range []string{"TestJailMatrixPhase1", "TestPhase1Tables", "TestJailMatrixCovers", "legCoverWalkDenied", "legSelfcheckDeniedSafe", "TestJailMatrixPhase2", "TestPhase2Tables", "TestJailMatrixPhase3", "TestPhase3Tables"} {
 		roots[name] = true
 	}
 	for _, violation := range proofLaunchViolations(fs, functions, roots, proofLaunchExceptions) {

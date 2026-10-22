@@ -15,3 +15,9 @@ func On(id string) bool {
 	}
 	return false
 }
+
+// BuildFlags are the go build flags that compile another binary with the same
+// mutation hooks on: the selftest binary a test builds for the rehearsal.
+func BuildFlags() []string {
+	return []string{"-tags=jail_mutation", "-ldflags=-X github.com/karthikeyan5/sshgate/src/gate/confine/jailmut.IDs=" + IDs}
+}

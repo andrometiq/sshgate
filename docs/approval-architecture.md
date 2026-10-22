@@ -14,8 +14,8 @@ The read/write classifier decides whether a command is sent for signing; it is
 not the security boundary. If it misclassifies a write as a read, that command
 runs unsigned. On a host with the kernel read jail it then runs inside the jail,
 where it cannot change host files, reach local daemons over Unix sockets or touch
-other processes, though it can still use the network; on a host without the jail
-it runs unconfined. The full residual-risk treatment is in
+other processes, and uses the network only where the host allows it; on a host
+without the jail it runs classifier-only, unless the host is pinned. The full residual-risk treatment is in
 [THREAT-MODEL.md](THREAT-MODEL.md).
 
 ## Tier 1 — read-only

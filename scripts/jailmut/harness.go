@@ -204,8 +204,8 @@ func runSet(set harness.MutationSet, report *harness.Report, output io.Writer) e
 				return fmt.Errorf("%s %s %s: %w", set.Name(), abi, leg.Name, err)
 			}
 			report.Proofs = append(report.Proofs, proof)
-			if proof.Outcome == "COMPLETE" {
-				report.Outcomes = append(report.Outcomes, harness.Outcome{Set: set.Name(), ABI: abi, Leg: leg.Name, Red: len(leg.ExpectedMarkers(abi)) > 0})
+			if outcome, ok := harness.ProofOutcome(set, leg, abi, proof); ok {
+				report.Outcomes = append(report.Outcomes, outcome)
 			}
 		}
 		if hasRed {

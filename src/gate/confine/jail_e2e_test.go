@@ -51,9 +51,7 @@ func (c jailCfg) spec(t *testing.T) Spec {
 }
 
 func TestJailMatrix(t *testing.T) {
-	rep := Detect()
-	t.Logf("host: rung=%s landlock_abi=%d userns=%v seccomp=%v probeErr=%v",
-		rep.Rung, rep.LandlockABI, rep.Userns, rep.Seccomp, rep.ProbeErr)
+	t.Logf("host: %+v", ReadHostFacts())
 
 	probe := buildProbe(t) // built ONCE; every leg reuses the same binary
 
@@ -213,7 +211,7 @@ func legBypassCorpus(t *testing.T, spec Spec) {
 
 // bypassCorpus is the BYPASS-CATALOGUE.md Wave-4 regression corpus as test data:
 // every classifier read/write-misjudgement, each rewritten so its sink lands on a
-// seeded file or marker under $HOME (where the jail is read-only on every rung).
+// seeded file or marker under $HOME (where the jail is read-only).
 // Network-side and host/kernel-state entries carry a skip reason instead.
 func bypassCorpus() []bypassRow {
 	return []bypassRow{
@@ -399,7 +397,7 @@ func pathExists(path string) bool {
 }
 
 func legFileWrite(t *testing.T, spec Spec) {
-	target := seedTarget(t) // under $HOME: read-only inside the jail on every rung
+	target := seedTarget(t) // under $HOME: read-only inside the jail
 	marker := filepath.Join(filepath.Dir(target), "marker")
 	before := hashFile(t, target)
 	// One command that both appends to the seeded target AND drops a marker; the
@@ -608,7 +606,7 @@ func legXattr(t *testing.T, spec Spec, probe string) {
 }
 
 func legAFUnix(t *testing.T, spec Spec, probe string) {
-	// A real listener under $HOME (visible on every rung — /tmp is overmounted on
+	// A real listener under $HOME (visible in the jail — /tmp is overmounted on
 	// the jail), with an unjailed control
 	// dial proving the socket actually accepts connections.
 	home := homeDir(t)
@@ -760,10 +758,10 @@ func legIPC(t *testing.T, spec Spec, probe string) {
 	r := runJailedRan(t, spec, probe+" shm-rmid "+strconv.Itoa(id))
 
 	if !shmExists(id) {
-		unexpected(t, "rung 1: host shm segment %d was deleted from inside the jail; CLONE_NEWIPC should isolate it", id)
+		unexpected(t, "host shm segment %d was deleted from inside the jail; CLONE_NEWIPC should isolate it", id)
 	}
 	if r.exit == 0 {
-		unexpected(t, "rung 1: jailed shm-rmid exited 0; the host id should be invalid in the new IPC namespace")
+		unexpected(t, "jailed shm-rmid exited 0; the host id should be invalid in the new IPC namespace")
 	}
 }
 
@@ -896,21 +894,21 @@ func legFill(t *testing.T, spec Spec) {
 			}
 		}
 		if fillExit == "" || fillExit == "0" {
-			unexpected(t, "rung 1: tmpfs fill exit=%q; expected non-zero (ENOSPC at the tmpfs bound); stdout=%q", fillExit, r.stdout)
+			unexpected(t, "tmpfs fill exit=%q; expected non-zero (ENOSPC at the tmpfs bound); stdout=%q", fillExit, r.stdout)
 		}
 		n, err := strconv.ParseInt(size, 10, 64)
 		if err != nil {
-			unexpected(t, "rung 1: fill size %q not a number (stdout=%q stderr=%q): %v", size, r.stdout, r.stderr, err)
+			unexpected(t, "fill size %q not a number (stdout=%q stderr=%q): %v", size, r.stdout, r.stderr, err)
 			t.FailNow()
 		}
 		if n <= 0 || n > tmpfsSizeBytes {
-			unexpected(t, "rung 1: tmpfs fill reached %d bytes; want 0 < n <= %d", n, tmpfsSizeBytes)
+			unexpected(t, "tmpfs fill reached %d bytes; want 0 < n <= %d", n, tmpfsSizeBytes)
 		}
 		return
 	}
 }
 
-// legProcfsReadOnly proves the rung-1 jail mounts its /proc read-only. The kernel
+// legProcfsReadOnly proves the jail mounts its /proc read-only. The kernel
 // control files (/proc/sys, /proc/sysrq-trigger, /proc/irq, ...) check only DAC
 // on write, so a root SSH user on a host without Landlock would pass that check;
 // the read-only mount is what stops it. The suite runs unprivileged, so the
@@ -959,7 +957,7 @@ func legProcfsReadOnly(t *testing.T, spec Spec) {
 	}
 }
 
-// legReaper proves the rung-1 pid-1 reaper returns as soon as the WORKER exits
+// legReaper proves the jail's pid-1 reaper returns as soon as the WORKER exits
 // and does not block on a backgrounded child (the spec's named proof point
 // "backgrounded cmd & does not hang"). A hang would be caught by the timeout
 // (exit != 0) and by the elapsed-time bound.
@@ -1315,8 +1313,8 @@ func exitCodeOf(err error) int {
 // signature of a syscall the seccomp filter refused with KILL.
 func isSeccompKill(exit int) bool { return exit == 128+int(unix.SIGSYS) }
 
-// seedTarget creates a temp file under $HOME (read-only in the jail on every
-// rung — it is not /tmp, /var/tmp, /dev/shm or the scratch dir) and returns its
+// seedTarget creates a temp file under $HOME (read-only in the jail — it is
+// not /tmp, /var/tmp, /dev/shm or the scratch dir) and returns its
 // path, cleaned up after the test.
 func seedTarget(t *testing.T) string {
 	t.Helper()

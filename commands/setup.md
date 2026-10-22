@@ -355,9 +355,9 @@ Print verbatim:
 > each read inside a kernel jail that cannot write to the host. To see
 > whether a server gets it, log in with your own admin access as the
 > registered user and run `~/.sshgate-gate/gate doctor` (the `reads:` line
-> says `jailed:full` or `unconfined`). Optionally run
-> `~/.sshgate-gate/gate doctor --pin` there to make the gate refuse reads
-> rather than run them unconfined if the jail ever becomes unavailable.
+> says `kernel-jailed, …`, `classifier-only …` or `denied (…)`). A pin on the
+> host sets whether jailed reads get network and makes the gate refuse reads
+> rather than run them outside the jail.
 > Details: docs/install-step-by-step.md, "Check the server's read jail".
 >
 > Re-run /sshgate:setup any time to add a Telegram signer.

@@ -66,3 +66,16 @@ jobs:
 
       - name: go test (race)
         run: make test
+
+      - name: Unsigned reads on a stock Ubuntu clamp host run classifier-only
+        run: |
+          # ubuntu-latest keeps Ubuntu's AppArmor userns restriction on, so the
+          # jail's clone is refused there. These tests must PASS, never skip.
+          set -o pipefail
+          test "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns)" = 1
+          SSHGATE_REQUIRE_CLAMP_TEST=1 go test -race -count=1 -v \
+            -run '^(TestRunReadClampHostRunsClassifierOnly|TestGateBinaryClampHostClassifierOnly)$' \
+            ./src/gate/cmd/sshgate-gate/ | tee clamp.log
+          grep -q -- '^--- PASS: TestRunReadClampHostRunsClassifierOnly' clamp.log
+          grep -q -- '^--- PASS: TestGateBinaryClampHostClassifierOnly' clamp.log
+          if grep -q -- '--- SKIP' clamp.log; then exit 1; fi

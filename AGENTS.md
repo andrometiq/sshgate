@@ -97,14 +97,20 @@ have them check the host's `/var/log/auth.log` and that the key line was pasted 
   signature, usually clock skew or a stale approval: retry once.
 - **Read jail.** On hosts with unprivileged user namespaces and Landlock, reads run in a
   kernel jail: they cannot change host files, reach Unix-socket daemons (a few fixed
-  `systemctl`/`docker` read verbs run outside the jail) or touch other processes. They see
+  `systemctl`/`docker` read verbs reach their own daemon, in a narrower jail without
+  network; only from Landlock ABI 9 can the kernel hold them to that one socket) or touch other processes. They see
   the host's `/tmp` and `/var/tmp` read-only; their only writable space is a private
   `/dev/shm` (`TMPDIR` points there), so a tool that insists on writing to `/tmp` fails.
-  The network, including localhost TCP services, is still open to reads. Other hosts run
-  reads unconfined, classifier-only, unless the operator pinned a jail floor. A read denied
-  with 77 and `read jail unavailable` means the host's jail could not be confirmed or set
-  up (or is required by that pin and missing), so nothing ran: don't retry; a human runs
-  `~/.sshgate-gate/gate doctor` on the host. Details: `docs/THREAT-MODEL.md`.
+  Whether jailed reads have network (even localhost TCP) is set per host by the operator's
+  pin; when a network tool fails for lack of it, the gate prints a note saying so. `systemctl is-enabled`
+  is not one of them: spell it `systemctl --root=/ is-enabled <unit>` (or with
+  `SYSTEMD_OFFLINE=1`), which works in the jail. A 77 with `daemon read refused` means the
+  host's client or daemon socket failed the gate's ownership checks: don't retry. Hosts without the
+  jail run reads classifier-only, with network, unless the operator pinned the host. A read denied with 77 and `read jail unavailable` means the pin is
+  damaged, or the host's jail could not be set up (or is missing on a pinned host, or for
+  a read that must run confined), so nothing ran: don't retry; a human runs
+  `~/.sshgate-gate/gate doctor` on the host, and pins it with `gate doctor --pin --net=deny`
+  (or `--net=allow`). Details: `docs/THREAT-MODEL.md`.
 - `transfer` failing with `src/dest server not registered for transfer`: that endpoint has no
   transfer key on the signer. The user runs `sshgate xfer-register <alias>`, then you retry.
 

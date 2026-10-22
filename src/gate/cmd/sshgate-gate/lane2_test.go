@@ -5,13 +5,16 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 
+	"github.com/karthikeyan5/sshgate/src/gate/confine"
 	"github.com/karthikeyan5/sshgate/src/redact"
 )
 
@@ -20,9 +23,9 @@ import (
 // was exec'd (path, argv, env, stdin) instead of running tests.
 func withLane2Bins(t *testing.T) string {
 	t.Helper()
-	self, err := os.Executable()
+	self, err := lane2Self()
 	if err != nil {
-		t.Fatalf("os.Executable: %v", err)
+		t.Fatalf("SETUP: lane2 client copy: %v", err)
 	}
 	dir := t.TempDir()
 	for _, name := range []string{"systemctl", "docker"} {
@@ -30,34 +33,126 @@ func withLane2Bins(t *testing.T) string {
 			t.Fatalf("symlink %s: %v", name, err)
 		}
 	}
-	prev, prevRules := lane2BinDirs, redactRules
-	lane2BinDirs = []string{dir}
+	withLane2Seams(t, dir)
+	prevRules := redactRules
 	// The child's report carries random temp paths the production redactor
 	// would scrub as high-entropy; compare it raw.
 	redactRules = []redact.Rule{}
-	t.Cleanup(func() { lane2BinDirs, redactRules = prev, prevRules })
+	t.Cleanup(func() { redactRules = prevRules })
 	return dir
+}
+
+var lane2SelfOnce struct {
+	sync.Once
+	path string
+	err  error
+}
+
+// lane2Self is this test binary copied, once per process, into a 0755
+// directory of its own under TestMain's TMPDIR (removed at exit): go test
+// built the original under the caller's umask, and its directory is not ours
+// to chmod.
+func lane2Self() (string, error) {
+	lane2SelfOnce.Do(func() {
+		self, err := os.Executable()
+		if err != nil {
+			lane2SelfOnce.err = err
+			return
+		}
+		dir, err := os.MkdirTemp("", "lane2-self-")
+		if err != nil {
+			lane2SelfOnce.err = err
+			return
+		}
+		lane2SelfOnce.path, lane2SelfOnce.err = copyExecutable(self, dir)
+	})
+	return lane2SelfOnce.path, lane2SelfOnce.err
+}
+
+// copyExecutable copies src to dir/gate.test and sets the copy 0755 and dir
+// 0755; it changes nothing else.
+func copyExecutable(src, dir string) (string, error) {
+	if err := os.Chmod(dir, 0o755); err != nil {
+		return "", err
+	}
+	in, err := os.Open(src)
+	if err != nil {
+		return "", err
+	}
+	defer in.Close()
+	path := filepath.Join(dir, "gate.test")
+	out, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o700)
+	if err != nil {
+		return "", err
+	}
+	_, err = io.Copy(out, in)
+	if err = errors.Join(err, out.Close()); err != nil {
+		return "", err
+	}
+	return path, os.Chmod(path, 0o755)
+}
+
+// TestCopyExecutableLeavesSource: the copy is 0755 in its 0755 directory, and
+// the source and a shared sticky parent keep their complete modes.
+func TestCopyExecutableLeavesSource(t *testing.T) {
+	shared := filepath.Join(t.TempDir(), "shared")
+	if err := os.Mkdir(shared, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(shared, 0o777|os.ModeSticky); err != nil {
+		t.Fatal(err)
+	}
+	src := filepath.Join(shared, "gate.test")
+	if err := os.WriteFile(src, []byte("binary"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(src, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	dst := filepath.Join(t.TempDir(), "copy")
+	if err := os.Mkdir(dst, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dst, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	path, err := copyExecutable(src, dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []struct {
+		path string
+		mode os.FileMode
+	}{{shared, os.ModeDir | os.ModeSticky | 0o777}, {src, 0o777}, {dst, os.ModeDir | 0o755}, {path, 0o755}} {
+		if info, err := os.Stat(want.path); err != nil || info.Mode() != want.mode {
+			t.Errorf("%s: mode %v (%v), want %v", want.path, info.Mode(), err, want.mode)
+		}
+	}
+	if data, err := os.ReadFile(path); err != nil || string(data) != "binary" {
+		t.Errorf("copy %q, %v", data, err)
+	}
 }
 
 func TestLane2Argv(t *testing.T) {
 	bin := withLane2Bins(t)
 	sc, dk := filepath.Join(bin, "systemctl"), filepath.Join(bin, "docker")
+	host := "--host=unix://" + lane2SystemEndpoints.docker
 
 	match := map[string][]string{
-		"systemctl status sshd":                           {sc, "--no-pager", "status", "sshd"},
-		"systemctl status\t nginx.service  --no-pager":    {sc, "--no-pager", "status", "nginx.service", "--no-pager"},
-		"systemctl status -l -n 50 getty@tty1.service":    {sc, "--no-pager", "status", "-l", "-n", "50", "getty@tty1.service"},
-		"systemctl list-units --type=service,socket -a":   {sc, "--no-pager", "list-units", "--type=service,socket", "-a"},
-		"systemctl show -p ActiveState sshd":              {sc, "--no-pager", "show", "-p", "ActiveState", "sshd"},
-		"systemctl is-active -q sshd":                     {sc, "--no-pager", "is-active", "-q", "sshd"},
-		"systemctl get-default":                           {sc, "--no-pager", "get-default"},
-		"docker ps -a":                                    {dk, "ps", "-a"},
-		"docker ps --filter status=running --format json": {dk, "ps", "--filter", "status=running", "--format", "json"},
-		"docker logs --tail 100 --since 1h web":           {dk, "logs", "--tail", "100", "--since", "1h", "web"},
-		"docker stats --no-stream":                        {dk, "stats", "--no-stream"},
-		"docker inspect --format=json web":                {dk, "inspect", "--format=json", "web"},
-		"docker top web":                                  {dk, "top", "web"},
-		"docker version":                                  {dk, "version"},
+		"systemctl status sshd":                           {sc, "--no-pager", "--no-ask-password", "status", "sshd"},
+		"systemctl status\t nginx.service  --no-pager":    {sc, "--no-pager", "--no-ask-password", "status", "nginx.service"},
+		"systemctl status -l -n 50 getty@tty1.service":    {sc, "--no-pager", "--no-ask-password", "status", "--full", "--lines=50", "getty@tty1.service"},
+		"systemctl list-units --type=service -a":          {sc, "--no-pager", "--no-ask-password", "list-units", "--all", "--type=service"},
+		"systemctl show -p ActiveState sshd":              {sc, "--no-pager", "--no-ask-password", "show", "--property=ActiveState", "sshd"},
+		"systemctl is-active -q sshd":                     {sc, "--no-pager", "--no-ask-password", "is-active", "--quiet", "sshd"},
+		"systemctl get-default":                           {sc, "--no-pager", "--no-ask-password", "get-default"},
+		"docker ps -a":                                    {dk, host, "ps", "--all"},
+		"docker ps --filter status=running --format json": {dk, host, "ps", "--filter=status=running", "--format={{json .}}"},
+		"docker logs --tail 100 --since 1h web":           {dk, host, "logs", "--tail=100", "--since=1h", "web"},
+		"docker stats --no-stream":                        {dk, host, "stats", "--no-stream"},
+		"docker inspect --format=json web":                {dk, host, "inspect", "--format={{json .}}", "web"},
+		"docker top web":                                  {dk, host, "top", "web"},
+		"docker version":                                  {dk, host, "version"},
 	}
 	for cmd, want := range match {
 		got, ok := lane2Argv(cmd)
@@ -90,23 +185,27 @@ func TestLane2Argv(t *testing.T) {
 		"systemctl status sshd\nid":             "newline",
 		"systemctl status (sshd)":               "subshell",
 		"DOCKER_HOST=tcp://evil:2375 docker ps": "env assignment prefix",
-		// Not on the allowlist.
-		"systemctl restart sshd":          "write verb",
-		"systemctl edit sshd":             "edit verb",
-		"systemctl --no-pager":            "no verb",
-		"systemctl":                       "bare binary",
-		"journalctl -u sshd":              "other binary",
-		"/usr/bin/systemctl status sshd":  "absolute argv0",
-		"docker run alpine":               "docker write verb",
-		"docker exec web id":              "docker exec",
-		"docker logs -f web":              "follow flag",
-		"docker stats":                    "stats without --no-stream",
-		"docker ps -aq":                   "bundled short flags",
-		"systemctl status -n":             "value flag without value",
-		"systemctl status -n --all":       "value flag followed by a flag",
-		"systemctl status --full=yes":     "inline value on a boolean flag",
-		"systemctl status --root=/x sshd": "offline-root flag",
-		"systemctl status --user":         "unlisted flag",
+		// Not in the grammar.
+		"systemctl restart sshd":                     "write verb",
+		"systemctl edit sshd":                        "edit verb",
+		"systemctl is-enabled sshd":                  "is-enabled is an ordinary read",
+		"systemctl --no-pager":                       "no verb",
+		"systemctl":                                  "bare binary",
+		"journalctl -u sshd":                         "other binary",
+		"/usr/bin/systemctl status sshd":             "absolute argv0",
+		"docker run alpine":                          "docker write verb",
+		"docker exec web id":                         "docker exec",
+		"docker info":                                "docker info runs plugins",
+		"docker logs -f web":                         "follow flag",
+		"docker stats":                               "stats without --no-stream",
+		"docker ps -aq":                              "bundled short flags",
+		"docker top web aux":                         "top takes one container",
+		"systemctl status -n":                        "value flag without value",
+		"systemctl status -n --all":                  "value flag followed by a flag",
+		"systemctl status --full=yes":                "inline value on a boolean flag",
+		"systemctl list-units --type=service,socket": "list value",
+		"systemctl status --root=/x sshd":            "offline-root flag",
+		"systemctl status --user":                    "user manager",
 		// Daemon-redirecting flags, in every spelling.
 		"systemctl -H root@evil status sshd": "-H before verb",
 		"systemctl status -H root@evil sshd": "-H",
@@ -131,15 +230,15 @@ func TestLane2Argv(t *testing.T) {
 // path no one can create, so no config.json (context switch, CLI hooks) and no
 // user cli-plugins/ dir can ever be read by a Lane-2 docker read.
 func TestLane2DockerConfigCannotExist(t *testing.T) {
-	if !slices.Contains(lane2Env, "DOCKER_CONFIG="+lane2NoDockerConfig) {
-		t.Fatalf("lane2Env = %q does not pin DOCKER_CONFIG", lane2Env)
+	if !slices.Contains(confine.Lane2Env(), "DOCKER_CONFIG="+confine.Lane2NoDockerConfig) {
+		t.Fatalf("Lane2Env = %q does not pin DOCKER_CONFIG", confine.Lane2Env())
 	}
-	if _, err := os.Stat(lane2NoDockerConfig); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("stat %s: %v, want not-exist", lane2NoDockerConfig, err)
+	if _, err := os.Stat(confine.Lane2NoDockerConfig); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stat %s: %v, want not-exist", confine.Lane2NoDockerConfig, err)
 	}
-	if err := os.Mkdir(lane2NoDockerConfig, 0o700); err == nil {
-		_ = os.Remove(lane2NoDockerConfig)
-		t.Fatalf("created %s; the pinned docker config dir must be uncreatable", lane2NoDockerConfig)
+	if err := os.Mkdir(confine.Lane2NoDockerConfig, 0o700); err == nil {
+		_ = os.Remove(confine.Lane2NoDockerConfig)
+		t.Fatalf("created %s; the pinned docker config dir must be uncreatable", confine.Lane2NoDockerConfig)
 	}
 }
 
@@ -156,10 +255,12 @@ func TestLane2BinaryAbsentFallsThrough(t *testing.T) {
 }
 
 // TestRunLane2ExecShellFreeClosedEnv drives run() end to end: an exact Lane-2
-// read execs the fixed binary directly (no /bin/sh), with the closed four-var
-// environment — a planted DOCKER_HOST/DOCKER_TLS_VERIFY and every other
-// inherited variable are absent — and /dev/null stdin, and is audited as lane2.
+// read execs the fixed binary directly (no /bin/sh) with the canonical argv,
+// the closed environment (a planted DOCKER_HOST/DOCKER_TLS_VERIFY and every
+// other inherited variable are absent), cwd / and /dev/null stdin, and is
+// audited as lane2.
 func TestRunLane2ExecShellFreeClosedEnv(t *testing.T) {
+	withAbsentJail(t)
 	bin := withLane2Bins(t)
 	for _, kv := range [][2]string{
 		{"DOCKER_HOST", "tcp://attacker.invalid:2375"},
@@ -171,16 +272,21 @@ func TestRunLane2ExecShellFreeClosedEnv(t *testing.T) {
 	} {
 		t.Setenv(kv[0], kv[1])
 	}
-	self, _ := os.Executable()
-	self, _ = filepath.EvalSymlinks(self)
+	self, err := lane2Self()
+	if err == nil {
+		self, err = filepath.EvalSymlinks(self)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	for _, tc := range []struct {
 		cmd      string
 		approval string
 		wantArgs []string
 	}{
-		{"docker ps -a", "unsigned", []string{filepath.Join(bin, "docker"), "ps", "-a"}},
-		{"systemctl status sshd", "unsigned", []string{filepath.Join(bin, "systemctl"), "--no-pager", "status", "sshd"}},
+		{"docker ps -a", "unsigned", []string{filepath.Join(bin, "docker"), "--host=unix://" + lane2SystemEndpoints.docker, "ps", "--all"}},
+		{"systemctl status sshd", "unsigned", []string{filepath.Join(bin, "systemctl"), "--no-pager", "--no-ask-password", "status", "sshd"}},
 	} {
 		t.Run(tc.cmd, func(t *testing.T) {
 			dir := t.TempDir() // no gate.pub: Tier-1 unsigned read
@@ -199,11 +305,14 @@ func TestRunLane2ExecShellFreeClosedEnv(t *testing.T) {
 			if !reflect.DeepEqual(rep.Args, tc.wantArgs) {
 				t.Errorf("argv = %q, want %q (exact, shell-free)", rep.Args, tc.wantArgs)
 			}
-			if !reflect.DeepEqual(rep.Env, lane2Env) {
-				t.Errorf("child env = %q, want exactly %q", rep.Env, lane2Env)
+			if !reflect.DeepEqual(rep.Env, confine.Lane2Env()) {
+				t.Errorf("child env = %q, want exactly %q", rep.Env, confine.Lane2Env())
+			}
+			if rep.Cwd != "/" {
+				t.Errorf("child cwd = %q, want /", rep.Cwd)
 			}
 			for _, kv := range rep.Env {
-				if strings.HasPrefix(kv, "DOCKER_") && kv != "DOCKER_CONFIG="+lane2NoDockerConfig {
+				if strings.HasPrefix(kv, "DOCKER_") && kv != "DOCKER_CONFIG="+confine.Lane2NoDockerConfig {
 					t.Errorf("planted %s reached the Lane-2 child", kv)
 				}
 			}
@@ -211,9 +320,9 @@ func TestRunLane2ExecShellFreeClosedEnv(t *testing.T) {
 				t.Errorf("Lane-2 child stdin is not /dev/null")
 			}
 			recs := auditRecords(t, dir)
-			if len(recs) != 1 || recs[0]["rung"] != "lane2" || recs[0]["classification"] != "read" ||
-				recs[0]["approval_status"] != tc.approval {
-				t.Errorf("audit = %v, want one read/%s record with rung lane2", recs, tc.approval)
+			if len(recs) != 1 || recs[0]["enforcement"] != "daemon-read" || recs[0]["classification"] != "read" ||
+				recs[0]["approval_status"] != tc.approval || recs[0]["pinned"] != false || recs[0]["net"] != true {
+				t.Errorf("audit = %v, want one read/%s daemon-read record", recs, tc.approval)
 			}
 		})
 	}
@@ -221,6 +330,7 @@ func TestRunLane2ExecShellFreeClosedEnv(t *testing.T) {
 
 // TestRunLane2SignedRead: Lane 2 is also consulted on the signed read path.
 func TestRunLane2SignedRead(t *testing.T) {
+	withAbsentJail(t)
 	bin := withLane2Bins(t)
 	dir := t.TempDir()
 	pub, priv := genKey(t)
@@ -235,12 +345,12 @@ func TestRunLane2SignedRead(t *testing.T) {
 	if err := json.Unmarshal([]byte(out), &rep); err != nil {
 		t.Fatalf("child report %q: %v", out, err)
 	}
-	if want := []string{filepath.Join(bin, "docker"), "ps"}; !reflect.DeepEqual(rep.Args, want) {
+	if want := []string{filepath.Join(bin, "docker"), "--host=unix://" + lane2SystemEndpoints.docker, "ps"}; !reflect.DeepEqual(rep.Args, want) {
 		t.Errorf("argv = %q, want %q", rep.Args, want)
 	}
 	recs := auditRecords(t, dir)
-	if len(recs) != 1 || recs[0]["rung"] != "lane2" || recs[0]["approval_status"] != "signed" {
-		t.Errorf("audit = %v, want one signed record with rung lane2", recs)
+	if len(recs) != 1 || recs[0]["enforcement"] != "daemon-read" || recs[0]["approval_status"] != "signed" {
+		t.Errorf("audit = %v, want one signed daemon-read record", recs)
 	}
 }
 
@@ -248,6 +358,7 @@ func TestRunLane2SignedRead(t *testing.T) {
 // inspect, systemctl show and cat) can print secrets, so its output must pass
 // the gate's production redactor exactly like a jailed read's.
 func TestRunLane2OutputRedacted(t *testing.T) {
+	withAbsentJail(t)
 	withLane2Bins(t)
 	redactRules = nil // the production ruleset; withLane2Bins restores the seam
 	dir := t.TempDir()
@@ -261,7 +372,24 @@ func TestRunLane2OutputRedacted(t *testing.T) {
 		t.Errorf("Lane-2 stdout = %q; want the planted secret replaced by a redaction marker", out)
 	}
 	recs := auditRecords(t, dir)
-	if len(recs) != 1 || recs[0]["rung"] != "lane2" {
-		t.Errorf("audit = %v, want one lane2 record", recs)
+	if len(recs) != 1 || recs[0]["enforcement"] != "daemon-read" {
+		t.Errorf("audit = %v, want one daemon-read record", recs)
 	}
+}
+
+// withAbsentJail forces the read jail Absent (no Landlock), so a daemon read on
+// an unpinned host takes its unjailed fallback: the race-built test binary
+// used as the client never runs under the jail's filter.
+func withAbsentJail(t *testing.T) {
+	t.Helper()
+	previous := readSpecHook
+	readSpecHook = func(spec *confine.Spec) { spec.ForceABI = confine.ForceNoLandlock }
+	t.Cleanup(func() { readSpecHook = previous })
+}
+
+// lane2Argv keeps the canonical argv assertions focused while exercising admission.
+func lane2Argv(cmd string) ([]string, bool) {
+	plan, matched, refusal := lane2Plan(cmd, pinState{})
+	defer plan.Close()
+	return plan.argv, matched && refusal == ""
 }

@@ -106,10 +106,16 @@ func Judge(stream io.Reader, stderr string, status int, legs []Leg, abi string) 
 		if proof.Leg != leg.Name || proof.ABI != abi {
 			return fmt.Errorf("infrastructure: mismatched proof %s", name)
 		}
+		if leg.ResidualABIs[abi] != "" && proof.Outcome == "COMPLETE" {
+			return fmt.Errorf("infrastructure: %s completed in a lane that reports %s", name, leg.ResidualABIs[abi])
+		}
 		if proof.Outcome != "COMPLETE" {
-			c := Case{Name: leg.Name, ABIs: []string{abi}, Root: leg.Root, CIOnly: leg.CIOnly, Omissions: leg.Omissions, Residuals: leg.Residuals}
+			c := Case{Name: leg.Name, ABIs: []string{abi}, Root: leg.Root, NonRoot: leg.NonRoot, CIOnly: leg.CIOnly, Omissions: leg.Omissions, Residuals: leg.Residuals, ResidualABIs: leg.ResidualABIs}
 			if err := CheckProof(c, proof, os.Geteuid() == 0, os.Getenv("SSHGATE_JAIL_CI") == "1"); err != nil {
 				return fmt.Errorf("infrastructure: %w", err)
+			}
+			if proof.Outcome == "RESIDUAL" && len(leg.Residuals) == 0 && len(leg.ExpectedMarkers(abi)) > 0 {
+				return fmt.Errorf("mutation not detected: %s reported residual %s where %q were expected", name, proof.Code, leg.ExpectedMarkers(abi))
 			}
 			continue
 		}

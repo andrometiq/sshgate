@@ -54,7 +54,8 @@ foundation (Tier-3), whose remaining release gates are tracked in [ROADMAP.md](R
 The gate runs reads inside a kernel jail with one enforced profile, `ro-v1`. On a host that meets
 the profile's floor (unprivileged user, mount and IPC namespaces, `mount_setattr`, Landlock ABI 1
 or newer, seccomp, and a `/dev/shm` directory), every command the classifier calls a read runs in
-the jail, except the fixed `systemctl`/`docker` read verbs, which still run outside it. Other
+the jail, including the fixed `systemctl`/`docker` read verbs, which run with their own narrower
+rules and label. Other
 hosts run reads classifier-only, as before. What Phase 1 built:
 
 - **Namespaces.** The command runs in new user, mount and IPC namespaces. It stays in the host
@@ -85,8 +86,8 @@ hosts run reads classifier-only, as before. What Phase 1 built:
   publishes the command's wait status. The gate can therefore tell a read that never started
   from one that ran, and never re-runs a read that reached `X`. Descendant cleanup and output
   delivery are best effort and bounded after cancellation.
-- **Network.** Reads keep TCP/UDP network access, as before the jail. Network becomes a
-  permission in Phase 2 (P2.1) and Phase 4.
+- **Network.** Phase 1 left reads their TCP/UDP network access. P2.1 makes network a host
+  permission (the `jail` pin); Phase 4 adds per-read signed grants.
 - **Unchanged.** Signed writes and the admin verbs (`SSHGATE_REVOKE`, `SSHGATE_UPDATE`,
   `SSHGATE_XFER_*`) run exactly as before the jail; a jail problem never blocks them.
 - **Test system.** Every Phase-1 protection has a registry ID, a hook that exists only in
@@ -97,11 +98,8 @@ What Phase 1 does not do yet, and where it is done:
 
 | Gap | Step |
 |---|---|
-| Whether a read is jailed is still decided by the interim capability probe and the older `jail-floor` pin | P2.1 |
-| Runs are non-strict: a mount the jail cannot cover stays visible instead of refusing the read, and the gap is not in the audit record | P2.1 |
-| Reads have network access | P2.1, P4.2–P4.4 |
-| The fixed `systemctl`/`docker` read verbs run outside the jail | P3.2 |
-| No `SSHGATE_JAIL` capability verb; the MCP shows only the signer tier | P2.2, P5.1 |
+| Network is a host setting only; there is no per-read signed network grant | P4.2–P4.4 |
+| The MCP shows only the signer tier, not the host's `SSHGATE_JAIL` capability | P5.1 |
 | No host is labelled kernel read-only; the label is compiled off | P7.1 |
 | The MCP instructions and user docs do not yet explain network permissions, pins and labels | P5.2 |
 | A read the jail refuses inside `run_batch` returns exit 77 and stderr but no structured `denial` object (`run` has one) | P5.1 |
@@ -134,7 +132,9 @@ denied by default, granted per command by a signed request or per host by the op
   (see P4.1). Such a read is never run outside the jail, whatever the failure class.
 - **Daemon-read verbs.** The fixed allowlist of `systemctl` and `docker` read verbs that need a
   local daemon socket (`lane2` in the code). They carry their own label:
-  `daemon read, limited verbs: <binary> (not kernel read-only)`.
+  `daemon read, limited verbs: <binary> (not kernel read-only)`. From P3.2 they run inside
+  `ro-v1` with Unix stream sockets to their pinned daemon, `EXECUTE` only on the client and its
+  interpreter, no `memfd`, and never network.
 - **Protection IDs.** Each protection has an ID (`P-…`) in the registry
   (`src/gate/confine/protections_test.go`) and a hook (`jailmut.On("P-…")`) compiled only into
   mutation builds.
@@ -201,7 +201,7 @@ details.
 **Per-step acceptance (every P-step):** `make vet`, `make test`, `make test-jail`,
 `make test-jail-root`, `make test-fidelity-smoke`, and
 `make test-jail-mutate MUTATE=<IDs this step added or touched>`. A set reported `NOT-RUN` in a
-per-step run (its red legs are root-only or CI-only) is named in the commit message and must be
+per-step run (its red legs are root-only, non-root-only or CI-only) is named in the commit message and must be
 red in the phase-end run.
 
 **Phase-end acceptance (end of each phase):** the full mutation union above, the independent
@@ -227,7 +227,7 @@ the environment; the signed wire stays v1 with only additive fields an older gat
 ### Phase 2: gate wiring
 
 **P2.1 — The `jail` pin, setup-failure classification, and network from the pin.**
-Status: open.
+Status: done.
 
 - *Goal:* replace the interim probe and the `jail-floor` pin with "the attempt is the probe";
   make network a host permission for unsigned reads.
@@ -235,12 +235,16 @@ Status: open.
   - The `jail` pin parser: at most 4 KiB, `key=value` lines, `#` comments; `lstat` (no symlink),
     regular file, owned by the gate's uid, not group- or world-writable; an unknown or
     duplicate key, a missing required key or a bad value makes it damaged. A damaged pin denies
-    reads (77) and never affects signed writes or admin verbs. A leftover `jail-floor` file is
-    ignored, with one note from doctor.
+    reads (77) and never affects signed writes or admin verbs. A leftover `jail-floor` file
+    (any content) with no `jail` pin also denies reads (77, `pin:legacy-floor`): its operator
+    asked never to run reads outside the jail. Re-pinning or removing it clears the deny; under
+    a valid `jail` pin it is ignored, with one note from doctor.
   - `confine.ReadHostFacts` and `confine.ClassifySetupFailure(stage, errno, facts)`: `clone`
-    `EPERM`/`EINVAL` (or `ENOSPC` with `user.max_user_namespaces == 0`), mount-stage
-    `EPERM`/`EACCES`, `setattr` `ENOSYS`, missing `/dev/shm`, Landlock `ENOSYS`/`EOPNOTSUPP` and
-    seccomp unavailability are Absent. Cover failures, `nsverify`, `selfcheck`, `report`,
+    `EPERM`/`EINVAL` (or `ENOSPC` with `user.max_user_namespaces == 0`, or `EACCES` with
+    Ubuntu's AppArmor userns restriction on, `kernel.apparmor_restrict_unprivileged_userns=1`,
+    which is how stock Ubuntu 24.04 refuses the jail's clone), mount-stage `EPERM`/`EACCES`,
+    `setattr` `ENOSYS`, missing `/dev/shm`, Landlock `ENOSYS`/`EOPNOTSUPP` and seccomp
+    unavailability are Absent. Cover failures, `nsverify`, `selfcheck`, `report`,
     `exec`, `spec` and `cwd` failures, and any other errno are Failed.
   - `execRead` attempts the jail and applies the outcome table above. The requires-confinement
     flag is computed once and passed to both the plain and the daemon-read branch; in this step
@@ -250,8 +254,10 @@ Status: open.
     `net=allow`.** When a jailed read without network fails and its command is a network tool
     (`curl`, `wget`, `dig`, `ssh`, `git`, …), the gate prints one hint line on stderr.
   - Audit fields on executed reads: `enforcement`, `profile`, `pinned`, `landlock_abi`, `net`,
-    `accept_fs`, `requires_confinement`, `cwd_reset`, and `label_clause_unmet` (unpinned runs
-    without required confinement only); denials record `deny_reason` (for example
+    `accept_fs`, `requires_confinement`, `cwd_reset`, `label_clause_unmet` (the `fs-view:`
+    clauses a kernel run left unmet; unpinned runs without required confinement only), and
+    `jail_absent` (`<stage>[:<ERRNO>]` of the Absent jail a classifier-only run fell back
+    from); denials record `deny_reason` (for example
     `jail:absent:setattr:ENOSYS`, `pin:damaged`, `confine:required`). The `rung` field goes.
   - Delete `rung.go`, `jail-floor`, `Detect` and its helpers, and the interim mapping; every
     deleted test is replaced by a test of the new code.
@@ -263,10 +269,12 @@ Status: open.
   `SSHGATE_REVOKE` and a valid signed `SSHGATE_UPDATE` still run; INET legs show no socket
   under `net=deny` and a connection under `net=allow`.
 - *Depends:* Phase 1.
+- *Release:* P2.1 and P2.2 ship in one release, with no tag between them: P2.1 retires
+  `jail-floor` and the old `gate doctor --pin`, and operators can pin again only from P2.2.
 - *Release note:* any release containing P2.1 states that unsigned reads lost network and how
   to restore it (P5.2 wording).
 
-**P2.2 — `SSHGATE_JAIL`, `gate doctor`, and the label function.** Status: open.
+**P2.2 — `SSHGATE_JAIL`, `gate doctor`, and the label function.** Status: done.
 
 - *Goal:* let operators and the MCP see host capability, and pin a host after a full rehearsal.
 - *Deliverables:*
@@ -288,8 +296,11 @@ Status: open.
     While the switch is off, `doctor --pin` still writes the pin and reports
     `kernel-jailed (read-only label not enabled in this build)`.
   - The exit-code header comment in the gate's `main.go`.
-- *Acceptance:* `P-G-SELFTEST-JAILED`, `P-G-JAILVERB-NOEXEC` and `P-G-LABEL-SWITCH` registered and
-  mutation-proof; the gate half of `U-LabelContract` asserts every label string at both switch
+- *Acceptance:* `P-G-SELFTEST-JAILED`, `P-G-JAILVERB-NOEXEC`, `P-G-LABEL-SWITCH`,
+  `P-G-PIN-REHEARSAL` (a pin is written only after a passed rehearsal), `P-G-SEAL` (the gate is
+  non-dumpable while a jailed read runs; red in the non-root lane, since a capless root process
+  cannot reach even an unsealed root gate) and `P-G-SEAL-GUARD` (a non-dumpable process starts no
+  jail; red in the root lane, where its clone would succeed) registered and mutation-proof; the gate half of `U-LabelContract` asserts every label string at both switch
   values, that nothing emits `read-only (kernel)` while the switch is off, and that any non-empty
   `unmet` never yields it; `gate doctor --json` reports
   `classifier-only (jail available; pin to claim)` before `--pin`;
@@ -298,7 +309,7 @@ Status: open.
 
 ### Phase 3: daemon-read verbs inside the jail
 
-**P3.0 — Characterise the daemon-read verbs.** Status: open.
+**P3.0 — Characterise the daemon-read verbs.** Status: done.
 
 - *Goal:* evidence for the grammar and fidelity expectations before the verbs move.
 - *Deliverables:* throwaway probes, kept out of the repository, on a development host and the
@@ -310,37 +321,75 @@ Status: open.
 - *Acceptance:* findings recorded in the P3.1 commit message. A retained verb whose output
   changes is dropped or declared `L2-NOEXEC`. A `memfd_create`/`memfd_secret` deny for these
   verbs is adopted only if no retained verb calls them.
+- *Findings:* every retained verb gives identical output with `EXECUTE` limited to the client
+  and its interpreter, and none of the retained verbs (`docker` `version`, `ps`, `inspect`,
+  `logs`, `images`, `stats --no-stream`, `top`; `systemctl` `status`, `is-active`,
+  `is-failed`, `list-units`, `list-unit-files`, `show`, `cat`, `get-default`) executes another
+  program after start, for native units and for an enabled SysV-only service; `docker info`
+  executes its CLI plugins and is dropped; `systemctl is-enabled` executes
+  `systemd-sysv-install` for a SysV-only service and is dropped (it takes the ordinary read
+  path); no retained verb calls `memfd_create` or `memfd_secret`, so the deny is adopted;
+  `memfd` execution and the interpreter used as a loader both get past narrow `EXECUTE`;
+  Ubuntu's and Debian's `systemctl` carry an absolute, root-owned `RUNPATH`; the interpreter
+  path is a symlink (on Debian 12 through a symlinked directory too). Recorded in the P3.1
+  commit message.
 - *Depends:* Phase 2.
 
-**P3.1 — Grammar, canonical argv, identity checks and endpoint pinning.** Status: open.
+**P3.1 — Grammar, canonical argv, identity checks and endpoint pinning.** Status: done.
 
-- *Deliverables:* a typed grammar per verb (typed flags and positional counts, values at most 128
-  bytes, never starting with `-`, each flag at most once) producing a canonical argv;
+- *Deliverables:* a typed grammar per verb (typed flags and positional counts, values at most
+  128 bytes, never starting with `-`, each flag at most once) producing a canonical argv;
   `FuzzLane2Parse` (the parse is idempotent on its own output and accepts only grammar tokens);
-  `docker info` removed; binary and interpreter (`PT_INTERP`) identity checks, path-component
-  checks and a refusal of `DT_RPATH`/`DT_RUNPATH`, all as hygiene (the gate trusts the installed
-  client's dependency closure and does not certify it); endpoint pinning: `docker` gets
+  `docker info` and `systemctl is-enabled` removed; `argv[0]` is the fixed-directory name and
+  the resolved path is executed; the client admitted only if it, every directory above it, its
+  interpreter (`PT_INTERP`, every symlink resolved and the resolved inode pinned) and each
+  `DT_RPATH`/`DT_RUNPATH` directory are owned by root and replaceable by no other user; a
+  search-path entry that is empty, relative or carries `$ORIGIN` or another dynamic string
+  token, a `DT_AUDIT`/`DT_DEPAUDIT` tag, or a `DT_NEEDED`/`DT_FILTER`/`DT_AUXILIARY` string with a
+  `/` or a dynamic string token is refused; a socket endpoint's own mode bits are not checked
+  (they grant `connect`), its owner and every directory above it are; ELF tags are read from
+  the program headers; all of this is hygiene (the gate trusts the installed client's
+  dependency closure and does not certify it); endpoint pinning: `docker` gets
   `--host=unix://<socket>` (`/run/docker.sock` owned by root, or the pin's `docker_socket` owned
-  by the gate's uid); `systemctl` gets `--no-pager --no-ask-password` and the system bus (plus
-  `/run/systemd/private` for a root SSH user), each a root-owned socket; `--user`, `--host`,
-  `--machine`, `--root`, `--image`, `--global`, `--context` and `-c` are never accepted. The
-  verbs still run unjailed in this step.
-- *Acceptance:* `P-L2-INTERP` and `P-L2-ADMIT` registered and mutation-proof with
-  `U-Lane2ELFSearchTags` and the three `G-L2-ADMIT` fixtures; the fuzz target runs in
-  `make test`.
+  by the gate's uid; a resolved name that docker's `--host` parsing would rewrite, such as one
+  ending in white space, is refused, so the client dials the admitted socket); `systemctl` gets `--no-pager --no-ask-password` and the system bus (plus
+  `/run/systemd/private` for a root SSH user), each a root-owned socket, and an absent one must
+  lie under a directory only root can write; `--user`, `--host`, `--machine`, `--root`,
+  `--image`, `--global`, `--context` and `-c` are never accepted; a failed check refuses the
+  read 77 (`lane2:admit:<check>`); the verbs run from `/` and still run unjailed in this step.
+- *Acceptance:* `P-L2-GRAMMAR`, `P-L2-REDIRECT`, `P-L2-ADMIT` and `P-L2-INTERP` registered and
+  mutation-proof with `U-Lane2Grammar`, `G-L2-GRAMMAR` and `G-L2-REDIRECT`;
+  `U-Lane2ELFSearchTags`, the three `G-L2-ADMIT` fixtures (`-WRITABLE-DIR`, `-RUNPATH-ORIGIN`,
+  `-RUNPATH-UNTRUSTED`) and the root-lane `G-L2-ADMIT-ENDPOINT`; `U-Lane2Interp` and
+  `G-L2-INTERP-UNTRUSTED`; the fuzz target runs in `make test`.
 - *Depends:* P3.0.
 
-**P3.2 — Daemon-read verbs run inside `ro-v1`.** Status: open.
+**P3.2 — Daemon-read verbs run inside `ro-v1`.** Status: done.
 
-- *Deliverables:* `Spec.Lane2` with the canonical argv on fd 3; a closed environment
-  (`PATH=/usr/bin:/bin LANG=C SYSTEMD_COLORS=0 TERM=dumb TMPDIR=/dev/shm` plus the pinned empty
-  docker config); Unix-socket access only to the pinned sockets (Landlock `RESOLVE_UNIX` from
-  ABI 9); `EXECUTE` granted only on the checked binary and its interpreter; network off; the
-  exact daemon-read label in every pin state; the `memfd` deny if P3.0 adopted it, with its own
-  leg; fidelity rows for `systemctl status <unit>` and `docker ps`.
-- *Acceptance:* `P-L2-EXEC-NARROW` (`G-LANE2-PLUGIN-NOEXEC`) registered and mutation-proof;
-  loader, re-exec and `memfd` characterisation legs record their outcomes;
-  `make test-fidelity-smoke` includes the daemon-read rows.
+- *Deliverables:* `Spec.Lane2` (the admitted client's and interpreter's resolved paths and
+  inodes, and the pinned sockets with their inodes) with the canonical argv on fd 3; a closed
+  environment (`PATH=/usr/bin:/bin LANG=C SYSTEMD_COLORS=0 TERM=dumb TMPDIR=/dev/shm` plus the
+  pinned empty docker config); `AF_UNIX` stream sockets allowed only in a daemon-read run, with
+  Landlock `RESOLVE_UNIX` granted only on the pinned sockets from ABI 9; `EXECUTE` granted only on
+  the two inodes the worker re-checked; a failure adding a daemon-read rule is Failed, never
+  Absent; `memfd_create` and `memfd_secret` denied; network always off, whatever the pin (P4.2
+  refuses explicit network requests); the router attempts the jail for a daemon read like any
+  read and falls back to the unjailed exec only where a plain read falls back to
+  classifier-only; the exact daemon-read label in every pin state; fidelity rows for
+  `systemctl status <unit>` and `docker ps`; the mutation harness accepts named, documented
+  residuals on any case kind, from one list.
+- *Acceptance:* the residual list and per-host residual cases land first, with their own
+  harness tests; `P-L2-EXEC-NARROW` (`G-LANE2-PLUGIN-NOEXEC`), `P-L2-MEMFD`
+  (`G-L2-MEMFD-NOEXEC`), `P-L2-SOCK-SCOPE`, `P-L2-SOCK-PIN` (red at native ABI ≥ 9),
+  `P-L2-NET-OFF` with `P-L2-SPEC-NET`, `P-L2-ENV`, and `P-L2-IDENTITY` (replacement of the
+  client, its interpreter or a pinned socket between admission and the jail is refused)
+  registered and mutation-proof; a pinned socket replaced after the jail opened it stays
+  ungranted at ABI ≥ 9; `G-CONFINE-REQUIRED-LANE2` rewritten for the jailed route; the loader
+  (`C-L2-LOADER`, recorded open and accepted), re-exec and `memfd_secret` characterisation legs
+  record their outcomes; `make test-fidelity-smoke` includes the daemon-read rows; the suite and
+  mutation runs pass on Debian 12 (Landlock ABI 2) and Ubuntu 24.04 (ABI 4) as recorded runs;
+  the phase-end union passes twice, on the CI runner and on an ABI ≥ 9 VM, each judged on its
+  own host.
 - *Depends:* P3.1.
 
 ### Phase 4: the per-read network permission
@@ -650,7 +699,7 @@ admission window is done).
   (`ps aux`, `top -bn1`, `ss`, `ip`, `df`, `journalctl`, `/tmp` reads, git in `/tmp`, `sqlite3`,
   `getent`, `id`, `who`, the daemon-read verbs), at native ABI and ABI 1, non-root and root.
 - *Acceptance:* every difference matches a declared category; Go CLIs (`docker`, `kubectl`)
-  are characterised below Landlock ABI 6.
+  are characterised below Landlock ABI 6, and the daemon-read verbs at ABI 5 and ABI 6.
 - *Depends:* P6.0.
 
 **P6.2 — VM matrix and CI lanes.** Status: open.
@@ -664,7 +713,10 @@ admission window is done).
   configuration and lane before the run. The jail CI workflow gains a root job, a mutation job
   (path-filtered on the jail and gate packages) and a fidelity job, all in CI mode.
 - *Acceptance:* a recorded distro/configuration/lane → label table. No distro is documented as
-  read-only before this step is done.
+  read-only before this step is done. The matrix includes an ABI-5 kernel (6.10/6.11), an ABI-6
+  kernel (6.12–6.14) and an ABI ≥ 9 kernel; Debian 12 runs the daemon-read rows with `docker.io`
+  installed; RHEL 9 and Amazon Linux 2023 record their `systemctl` `RUNPATH` and interpreter
+  shapes against the admission rule.
 - *Depends:* P6.1.
 
 ### Phase 7: turn the label on

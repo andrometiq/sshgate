@@ -114,8 +114,14 @@ func runJailed(t *testing.T, p *executorProof, spec confine.Spec, plan executorR
 		if jailmut.On("P-NSVERIFY") {
 			stage = "private"
 		}
+		// private EPERM may mean a host without the jail, so the worker
+		// stays quiet about it; nsverify always explains itself.
+		wantStderr := "gate-jail: setup failed at nsverify: operation not permitted\n"
+		if stage == "private" {
+			wantStderr = ""
+		}
 		var setup *confine.SetupError
-		if !errors.As(err, &setup) || setup.Stage != stage || setup.Errno != syscall.EPERM || result.ExitCode != -1 || result.Stdout != "" || result.Stderr != "gate-jail: setup failed at "+stage+": operation not permitted\n" {
+		if !errors.As(err, &setup) || setup.Stage != stage || setup.Errno != syscall.EPERM || result.ExitCode != -1 || result.Stdout != "" || result.Stderr != wantStderr {
 			t.Fatalf("SETUP: expected %s EPERM without execution: %+v %v", stage, result, err)
 		}
 		if stage == "private" {
