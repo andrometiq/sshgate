@@ -4,24 +4,27 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	ap "github.com/karthikeyan5/sshgate/src/approvalplan"
 	st "github.com/karthikeyan5/sshgate/src/approvalplan/statetest"
+	ar "github.com/karthikeyan5/sshgate/src/approvalreview"
 	"go.uber.org/goleak"
 )
 
 type testNotifier struct {
-	mu         sync.Mutex
-	burstMu    sync.Mutex
-	parts      func(Notification) ([]int64, error)
-	card       func(Notification) (int64, error)
-	edit       func(Notification) (EditOutcome, error)
-	status     func(string)
-	incomplete func(int64)
-	bursts     int
+	mu            sync.Mutex
+	burstMu       sync.Mutex
+	parts         func(Notification) ([]int64, error)
+	card          func(Notification) (int64, error)
+	edit          func(Notification) (EditOutcome, error)
+	status        func(string)
+	statusDisplay func(StatusDisplay)
+	incomplete    func(int64)
+	bursts        int
 }
 
 func (n *testNotifier) Burst(_ context.Context, fn func(BurstSession) error) error {
@@ -33,12 +36,18 @@ func (n *testNotifier) Burst(_ context.Context, fn func(BurstSession) error) err
 	return fn(n)
 }
 func (n *testNotifier) SendParts(_ context.Context, v Notification) ([]int64, error) {
+	if _, err := ar.PackParts(ar.View{RequestID: st.ID(1)}, v.Handle); err != nil {
+		return nil, err
+	}
 	if n.parts != nil {
 		return n.parts(v)
 	}
 	return []int64{1, 2}, nil
 }
 func (n *testNotifier) SendCard(_ context.Context, v Notification) (int64, error) {
+	if _, err := ar.DecisionCard(ar.View{RequestID: st.ID(1)}, v.Handle, len(v.PartMessageIDs)); err != nil {
+		return 0, err
+	}
 	if n.card != nil {
 		return n.card(v)
 	}
@@ -50,9 +59,12 @@ func (n *testNotifier) EditCard(_ context.Context, _ int64, v Notification) (Edi
 	}
 	return EditConfirmed, nil
 }
-func (n *testNotifier) EditStatus(_ context.Context, _ int64, state string) error {
+func (n *testNotifier) EditStatus(_ context.Context, _ int64, display StatusDisplay) error {
+	if n.statusDisplay != nil {
+		n.statusDisplay(display)
+	}
 	if n.status != nil {
-		n.status(state)
+		n.status(display.State)
 	}
 	return errors.New("best effort")
 }
@@ -97,8 +109,12 @@ func TestNotifierBurstCommitAndLatestAssist(t *testing.T) {
 	key := ap.RecordKey(st.PrincipalA, st.ID(1))
 	partsEntered, release := make(chan struct{}), make(chan struct{})
 	cards := make(chan Notification, 1)
+	partsHandle := ap.CardHandleFor(key, 0)
 	n := &testNotifier{
 		parts: func(v Notification) ([]int64, error) {
+			if v.Handle != partsHandle {
+				t.Errorf("parts handle = %q, want %q", v.Handle, partsHandle)
+			}
 			rec, _ := store.Load(key)
 			if len(rec.Payload.Bursts) != 1 || rec.Payload.Bursts[0].Outcome != "" {
 				t.Error("parts preceded write-ahead commit")
@@ -108,6 +124,9 @@ func TestNotifierBurstCommitAndLatestAssist(t *testing.T) {
 			return []int64{10, 11}, nil
 		},
 		card: func(v Notification) (int64, error) {
+			if v.Handle != partsHandle {
+				t.Errorf("assist completion changed card handle: got %q, want %q", v.Handle, partsHandle)
+			}
 			rec, _ := store.Load(key)
 			if rec.Payload.Bursts[0].Outcome != ap.OutcomeSent || len(rec.Payload.CardEntries) != 1 {
 				t.Error("card preceded commits")
@@ -144,11 +163,12 @@ func TestNotifierBurstCommitAndLatestAssist(t *testing.T) {
 func TestNotifierEditRetryAndReplacement(t *testing.T) {
 	defer goleak.VerifyNone(t)
 	e, _, store, _ := engineFixture(t)
+	original := ap.CardHandleFor(ap.RecordKey(st.PrincipalA, st.ID(1)), 0)
 	submitJob(t, e, 1)
 	command(t, e, 1, ap.BurstStart{})
 	command(t, e, 1, ap.BurstDone{PartMsgIDs: []int64{1}})
-	command(t, e, 1, ap.CardStart{Handle: "abcdefghijkl", ChalHash: ap.ChallengeHash("0123456789abcdef")})
-	command(t, e, 1, ap.CardDone{Handle: "abcdefghijkl", MsgID: 3})
+	command(t, e, 1, ap.CardStart{Handle: original, ChalHash: ap.ChallengeHash("0123456789abcdef")})
+	command(t, e, 1, ap.CardDone{Handle: original, MsgID: 3})
 	command(t, e, 1, ap.AssistDone{Unavailable: "test"})
 	edits := make(chan Notification, 3)
 	cards := make(chan Notification, 1)
@@ -175,8 +195,15 @@ func TestNotifierEditRetryAndReplacement(t *testing.T) {
 		waitNotifyRecord(t, store, func(r ap.R1) bool {
 			return len(r.Payload.CardEntries) == 3 && r.Payload.CardEntries[2].Outcome == ap.OutcomeSent
 		})
-		if replacement.Handle == first.Handle || replacement.Challenge == first.Challenge {
+		if replacement.Handle == original || first.Handle == original || replacement.Handle == first.Handle || replacement.Challenge == first.Challenge {
 			t.Fatal("replacement reused challenge")
+		}
+		if first.PartsHandle != original || replacement.PartsHandle != original {
+			t.Fatal("edit or replacement lost the review parts handle")
+		}
+		answer, err := e.Vote(ap.CastVote{Operator: st.Operator, Decision: ap.VoteApprove, Authn: "telegram", Card: &ap.CardTap{Handle: original, Challenge: "0123456789abcdef", MsgID: 3}})
+		if err != nil || answer.Reason != "retired" {
+			t.Fatalf("original card tap: %+v %v", answer, err)
 		}
 	})
 	rec, _ := store.Load(ap.RecordKey(st.PrincipalA, st.ID(1)))
@@ -341,5 +368,195 @@ func TestNotifierRecoverySupersedesEditWithoutResendingParts(t *testing.T) {
 	rec := waitNotifyRecord(t, store, func(r ap.R1) bool { return len(r.Payload.CardEntries) == 3 && r.Payload.CardEntries[2].Confirmed })
 	if !rec.Payload.CardEntries[1].Retired {
 		t.Fatal("old edit remained valid")
+	}
+}
+
+func TestNotifierDerivedHandleRecoveryAndRenotify(t *testing.T) {
+	for _, cut := range []string{"burst_done", "renotify_before_card", "uncertain_burst"} {
+		t.Run(cut, func(t *testing.T) {
+			e, _, store, _ := engineFixture(t)
+			submitJob(t, e, 1)
+			command(t, e, 1, ap.AssistDone{Unavailable: "test"})
+			command(t, e, 1, ap.BurstStart{})
+			if cut != "uncertain_burst" {
+				command(t, e, 1, ap.BurstDone{PartMsgIDs: []int64{10}})
+			}
+			if cut == "renotify_before_card" {
+				command(t, e, 1, ap.Renotify{})
+			}
+			recovered, err := New(e.config)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cards := make(chan Notification, 1)
+			parts := make(chan Notification, 1)
+			n := &testNotifier{parts: func(v Notification) ([]int64, error) { parts <- v; return []int64{11}, nil }, card: func(v Notification) (int64, error) { cards <- v; return 12, nil }}
+			runNotifier(t, recovered, n)
+			if recovered.epoch == e.epoch {
+				t.Fatal("restart reused epoch")
+			}
+			if cut == "uncertain_burst" {
+				select {
+				case <-parts:
+					t.Fatal("uncertain burst resent")
+				case <-cards:
+					t.Fatal("uncertain burst got card")
+				case <-time.After(50 * time.Millisecond):
+				}
+				return
+			}
+			card := receiveNotify(t, cards)
+			gen := 0
+			if cut == "renotify_before_card" {
+				gen = 1
+				part := receiveNotify(t, parts)
+				if part.Handle != card.Handle {
+					t.Fatal("parts/card differ")
+				}
+				oldHandle := ap.CardHandleFor(ap.RecordKey(st.PrincipalA, st.ID(1)), 0)
+				answer, err := recovered.Vote(ap.CastVote{Operator: st.Operator, Decision: ap.VoteApprove, Authn: "telegram", Card: &ap.CardTap{Handle: oldHandle, Challenge: "0123456789abcdef", MsgID: 12}})
+				if err == nil && !answer.Noise {
+					t.Fatalf("pre-renotify handle was accepted: %+v", answer)
+				}
+			} else {
+				select {
+				case <-parts:
+					t.Fatal("recovery resent parts")
+				default:
+				}
+			}
+			want := ap.CardHandleFor(ap.RecordKey(st.PrincipalA, st.ID(1)), gen)
+			if card.Handle != want || card.PartsHandle != want || !ap.ValidChallenge(card.Challenge) {
+				t.Fatalf("card %+v, want %s", card, want)
+			}
+			waitNotifyRecord(t, store, func(r ap.R1) bool {
+				return len(r.Payload.CardEntries) > 0 && r.Payload.CardEntries[0].Outcome == ap.OutcomeSent
+			})
+		})
+	}
+}
+
+func TestNotifierDerivedHandleRendererAndVote(t *testing.T) {
+	e, _, store, _ := engineFixture(t)
+	key := ap.RecordKey(st.PrincipalA, st.ID(1))
+	cards := make(chan Notification, 2)
+	n := &testNotifier{
+		parts: func(n Notification) ([]int64, error) {
+			view := ar.View{RequestID: st.ID(1), Reason: strings.Repeat("x", 100), Items: []ar.Item{{TextLabel: "Command", Text: strings.Repeat("x", 6000)}}}
+			parts, err := ar.PackParts(view, n.Handle)
+			if err != nil {
+				return nil, err
+			}
+			if len(parts) < 2 {
+				t.Error("fixture not multipart")
+			}
+			ids := make([]int64, len(parts))
+			for i, part := range parts {
+				if !strings.Contains(part, "Card: "+n.Handle) {
+					t.Error("missing handle")
+				}
+				ids[i] = int64(i + 1)
+			}
+			return ids, nil
+		}, card: func(n Notification) (int64, error) {
+			text, err := ar.DecisionCard(ar.View{RequestID: st.ID(1)}, n.Handle, len(n.PartMessageIDs))
+			if !strings.Contains(text, "Card: "+n.Handle) {
+				t.Error("card handle missing")
+			}
+			cards <- n
+			return 100, err
+		},
+	}
+	submitJob(t, e, 1)
+	command(t, e, 1, ap.AssistDone{Unavailable: "test"})
+	runNotifier(t, e, n)
+	first := receiveNotify(t, cards)
+	waitNotifyRecord(t, store, func(r ap.R1) bool {
+		return len(r.Payload.CardEntries) > 0 && r.Payload.CardEntries[0].Outcome == ap.OutcomeSent
+	})
+	if first.Handle != ap.CardHandleFor(key, 0) {
+		t.Fatal("first handle not derived")
+	}
+	command(t, e, 1, ap.Renotify{})
+	second := receiveNotify(t, cards)
+	waitNotifyRecord(t, store, func(r ap.R1) bool {
+		return len(r.Payload.CardEntries) == 2 && r.Payload.CardEntries[1].Outcome == ap.OutcomeSent
+	})
+	if second.Handle != ap.CardHandleFor(key, 1) || second.Handle == first.Handle || second.Challenge == first.Challenge {
+		t.Fatal("renotify reused handle/challenge")
+	}
+	rec := command(t, e, 1, ap.CastVote{Operator: st.Operator, Decision: ap.VoteDeny, Authn: "telegram", Flags: ap.LocalVoteFlags, Card: &ap.CardTap{Handle: first.Handle, Challenge: first.Challenge, MsgID: 100}})
+	if len(rec.Header.Votes) > 0 || rec.Header.Decision != nil {
+		t.Fatal("retired handle voted")
+	}
+	callback := "v:a:" + second.Handle + ":" + second.Challenge
+	fields := strings.Split(callback, ":")
+	answer, err := e.Vote(ap.CastVote{Operator: st.Operator, Decision: ap.VoteApprove, Authn: "telegram", Card: &ap.CardTap{Handle: fields[2], Challenge: fields[3], MsgID: 100}})
+	if err != nil || answer.Code != "" {
+		t.Fatalf("tap: %+v %v", answer, err)
+	}
+	rec, err = store.Load(key)
+	if err != nil || rec.Header.Decision == nil || rec.Header.Decision.Status != ap.ApprovalApproved {
+		t.Fatalf("tap did not approve: %+v %v", rec.Header.Decision, err)
+	}
+}
+
+func TestNotifierRecoveredFirstCardFreshChallenge(t *testing.T) {
+	e, _, _, _ := engineFixture(t)
+	submitJob(t, e, 1)
+	command(t, e, 1, ap.BurstStart{})
+	cut := command(t, e, 1, ap.BurstDone{PartMsgIDs: []int64{1, 2}})
+	key := ap.RecordKey(st.PrincipalA, st.ID(1))
+	var cards []Notification
+	for range 2 {
+		store := &MemStore{}
+		if err := store.Commit(key, cut); err != nil {
+			t.Fatal(err)
+		}
+		config := e.config
+		config.Store = store
+		recovered, err := New(config)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Run("restart", func(t *testing.T) {
+			sent := make(chan Notification, 1)
+			n := &testNotifier{parts: func(Notification) ([]int64, error) { t.Error("resent committed parts"); return nil, nil }, card: func(n Notification) (int64, error) { sent <- n; return 3, nil }}
+			runNotifier(t, recovered, n)
+			cards = append(cards, receiveNotify(t, sent))
+			waitNotifyRecord(t, store, func(r ap.R1) bool {
+				return len(r.Payload.CardEntries) == 1 && r.Payload.CardEntries[0].Outcome == ap.OutcomeSent
+			})
+		})
+	}
+	if cards[0].Handle != ap.CardHandleFor(key, 0) || cards[1].Handle != cards[0].Handle || cards[1].Challenge == cards[0].Challenge {
+		t.Fatal("recovery did not preserve handle and mint a fresh challenge")
+	}
+}
+
+func TestNotifierNotExecutableReason(t *testing.T) {
+	for _, reason := range []string{ap.MintReasonGrantNotLive, ap.MintReasonStaleTransferKey, ap.MintReasonReservedVerb, ap.MintReasonClockSkew, ap.MintReasonSigningFailed} {
+		t.Run(reason, func(t *testing.T) {
+			e, _, store, _ := engineFixture(t)
+			submitJob(t, e, 1)
+			rec := approve(t, e, 1)
+			rec.Header.Mint = &ap.MintSlot{State: ap.MintError, Reason: reason}
+			if err := store.Commit(ap.RecordKey(st.PrincipalA, st.ID(1)), rec); err != nil {
+				t.Fatal(err)
+			}
+			recovered, err := New(e.config)
+			if err != nil {
+				t.Fatal(err)
+			}
+			displays := make(chan StatusDisplay, 2)
+			runNotifier(t, recovered, &testNotifier{statusDisplay: func(display StatusDisplay) { displays <- display }})
+			if got := receiveNotify(t, displays); got != (StatusDisplay{State: "not_executable", Reason: reason}) {
+				t.Fatalf("status display: %+v", got)
+			}
+			after := waitNotifyRecord(t, store, func(r ap.R1) bool { return len(r.Payload.StatusEdits) == 1 })
+			if after.Payload.StatusEdits[0].State != "not_executable" {
+				t.Fatal("reason changed the durable status-edit key")
+			}
+		})
 	}
 }

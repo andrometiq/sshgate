@@ -6,6 +6,11 @@
 // pkg/signerkit, which also holds the other implementations (StubBackend,
 // MockBackend, HostedServerBackend) and the request/result types.
 //
+// Legacy callback decisions replay buffered taps under the same lock used by
+// live taps. Acknowledgements and outcome edits are best effort: four workers
+// drain a 64-entry queue; saturation drops notifications with a cumulative count
+// in the log, without delaying polling or decisions. Stale buttons remain inert.
+//
 // TelegramBackend MUST be safe for concurrent calls — the daemon serves
 // multiple sign requests in parallel and a backend that serialises
 // internally is acceptable, but one that races on shared state is not.
