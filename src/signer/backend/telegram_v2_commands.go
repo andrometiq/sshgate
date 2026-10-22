@@ -2,6 +2,7 @@ package backend
 
 import (
 	"encoding/json"
+	"fmt"
 	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
@@ -10,6 +11,37 @@ import (
 )
 
 const approvalUpdateLimit = 100
+const commandRefusalInterval = time.Minute
+
+type commandRefusalState struct {
+	strangerDeadline      time.Duration
+	wrongUser, notPrivate uint64
+	replyAfter            time.Duration
+	replyLimited          bool
+}
+
+// The poller flushes on its next iteration after the interval, including idle polls.
+// Counts contain no message text, user identifiers or chat identifiers.
+func (t *TelegramBackend) flushCommandRefusals() {
+	if t.approvalCallbacks == nil {
+		return
+	}
+	s := &t.commandRefusals
+	if s.wrongUser+s.notPrivate == 0 || t.approvalCallbacks.runtime.Legacy().CallbackElapsed() < s.strangerDeadline {
+		return
+	}
+	transition := fmt.Sprintf("command_refused{count=%d,wrong_user=%d,not_private=%d}", s.wrongUser+s.notPrivate, s.wrongUser, s.notPrivate)
+	err := t.writeCommandRefusal(transition, false)
+	t.logger.Printf("%s audit_failed=%t", transition, err != nil)
+	s.wrongUser, s.notPrivate = 0, 0
+}
+
+func (t *TelegramBackend) writeCommandRefusal(transition string, replay bool) error {
+	if t.CommandAudit != nil {
+		return t.CommandAudit.Write(signerkit.AuditEvent{TS: time.Now(), Status: "approval-" + transition, Approval: &ap.AuditMetadata{Transition: transition, Replay: replay}})
+	}
+	return nil
+}
 
 // No lifecycle commands are registered in production yet. /start retains its legacy handler.
 func (t *TelegramBackend) handleApprovalCommand(m *tgbotapi.Message, forwarded bool) {
@@ -29,11 +61,27 @@ func (t *TelegramBackend) handleApprovalCommand(m *tgbotapi.Message, forwarded b
 			return
 		}
 	}
-	transition := "command_refused{" + reason + "}"
-	if t.CommandAudit != nil {
-		if err := t.CommandAudit.Write(signerkit.AuditEvent{TS: time.Now(), Status: "approval-" + transition, Approval: &ap.AuditMetadata{Transition: transition, Replay: true}}); err != nil {
-			t.logger.Print("telegram command refusal audit failed")
+	now := t.approvalCallbacks.runtime.Legacy().CallbackElapsed()
+	t.flushCommandRefusals()
+	s := &t.commandRefusals
+	if reason == "wrong_user" || reason == "not_private" {
+		if s.wrongUser+s.notPrivate == 0 {
+			s.strangerDeadline = now + commandRefusalInterval
 		}
+		if reason == "wrong_user" {
+			s.wrongUser++
+		} else {
+			s.notPrivate++
+		}
+		return
+	}
+	// One refusal per minute bounds both audit work and shared notification capacity.
+	if s.replyLimited && now < s.replyAfter {
+		return
+	}
+	s.replyLimited, s.replyAfter = true, now+commandRefusalInterval
+	if err := t.writeCommandRefusal("command_refused{"+reason+"}", reason == "redelivered"); err != nil {
+		t.logger.Print("telegram command refusal audit failed")
 	}
 	chat, err := t.approvalChat()
 	if err != nil {

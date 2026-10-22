@@ -43,6 +43,7 @@ import (
 //     {approve, deny, timeout, ctx-cancel} wins.
 type TelegramBackend struct {
 	approvalCallbacks *telegramApprovalCallbacks
+	commandRefusals   commandRefusalState                // owned by the poller
 	commandDrain      bool                               // owned by the poller
 	approvalCommands  map[string]func(*tgbotapi.Message) // configured before polling
 	// CommandAudit is wired to the local AuditLog before Run.
@@ -486,6 +487,7 @@ func (t *TelegramBackend) pollLoop(ctx context.Context) {
 		default:
 		}
 
+		t.flushCommandRefusals()
 		updates, err := t.fetchUpdates(offset)
 		if err != nil {
 			// Distinguish ctx-cancel from a real upstream error.

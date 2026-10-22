@@ -1,9 +1,11 @@
 package backend
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -64,12 +66,18 @@ func TestApprovalCommandGate(t *testing.T) {
 			tt.change(f.backend, u.Message)
 			before := time.Now()
 			f.backend.dispatch(u)
+			if tt.reason == "wrong_user" || tt.reason == "not_private" {
+				if len(a.events) != 0 || len(f.backend.notifications) != 0 || len(f.api.snapshot()) != 0 {
+					t.Fatal("unauthenticated refusal produced output")
+				}
+				return
+			}
 			if len(a.events) != 1 {
 				t.Fatalf("audit events: %v", a.events)
 			}
 			e := a.events[0]
 			transition := "command_refused{" + tt.reason + "}"
-			if e.Status != "approval-"+transition || e.Approval == nil || e.Approval.Transition != transition || !e.Approval.Replay || e.TS.Before(before) || e.TS.After(time.Now()) {
+			if e.Status != "approval-"+transition || e.Approval == nil || e.Approval.Transition != transition || e.Approval.Replay != (tt.reason == "redelivered") || e.TS.Before(before) || e.TS.After(time.Now()) {
 				t.Fatalf("event: %+v", e)
 			}
 			encoded, _ := json.Marshal(e)
@@ -184,17 +192,8 @@ func TestApprovalCommandStartupDrain(t *testing.T) {
 		if answered != 1 {
 			t.Fatalf("drained callback answered %d times", answered)
 		}
-		if len(a.events) != 202 {
-			t.Fatalf("events: %d", len(a.events))
-		}
-		for i, e := range a.events {
-			reason := "redelivered"
-			if i == 201 {
-				reason = "unknown_command"
-			}
-			if e.Status != "approval-command_refused{"+reason+"}" {
-				t.Fatalf("event %d: %s", i, e.Status)
-			}
+		if len(a.events) != 1 || a.events[0].Status != "approval-command_refused{redelivered}" {
+			t.Fatalf("bounded drain events: %+v", a.events)
 		}
 	})
 }
@@ -232,7 +231,7 @@ func TestApprovalCommandForwardOrigin(t *testing.T) {
 	}
 }
 
-func TestApprovalRegisteredCommandTimestampSkew(t *testing.T) {
+func TestApprovalRegisteredCommandClockCorrection(t *testing.T) {
 	for _, skew := range []time.Duration{10 * time.Minute, -10 * time.Minute} {
 		t.Run(skew.String(), func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
@@ -251,9 +250,9 @@ func TestApprovalRegisteredCommandTimestampSkew(t *testing.T) {
 				}}
 				f.backend.runDone = make(chan struct{})
 				defer close(f.backend.runDone)
-				// Telegram's clock disagrees with the signer's startup clock.
-				// A correction cannot change which side of the update cut a command occupies.
-				telegramNow := time.Now().Add(-skew)
+				// Start skewed, then correct the signer's wall clock after startup drain.
+				telegramNow := f.clock.Wall()
+				f.clock.StepWall(skew)
 				batch := 0
 				f.api.hook = func(r *http.Request, _ int) (string, error) {
 					if !strings.HasSuffix(r.URL.Path, "getUpdates") {
@@ -262,6 +261,9 @@ func TestApprovalRegisteredCommandTimestampSkew(t *testing.T) {
 					batch++
 					if batch > 2 {
 						t.Fatal("post-drain command did not execute")
+					}
+					if batch == 2 {
+						f.clock.StepWall(-skew)
 					}
 					u := commandUpdate(batch, "/test")
 					u.Message.MessageID = batch
@@ -282,4 +284,154 @@ func TestApprovalRegisteredCommandTimestampSkew(t *testing.T) {
 			})
 		})
 	}
+}
+
+func TestApprovalCommandStrangerFlood(t *testing.T) {
+	for _, auditFails := range []bool{false, true} {
+		t.Run(strconv.FormatBool(auditFails), func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				f := newCallbackFixture(t)
+				a := &commandAudit{fail: auditFails}
+				f.backend.CommandAudit = a
+				var logs bytes.Buffer
+				f.backend.logger = log.New(&logs, "", 0)
+				flood := func() {
+					for i := 0; i < 1000; i++ {
+						u := commandUpdate(i+1, "/cancel secret-argument")
+						if i%2 == 0 {
+							u.Message.From.ID = 99
+						} else {
+							u.Message.Chat.Type = "group"
+						}
+						f.backend.dispatch(u)
+						if i == 500 && !auditFails {
+							f.start(t)
+							if f.card(t) == nil {
+								t.Fatal("approval card not delivered during flood")
+							}
+						}
+					}
+				}
+				flood()
+				if len(a.events) != 0 || len(f.backend.notifications) != 0 {
+					t.Fatal("stranger flood produced immediate output")
+				}
+				if auditFails && len(f.api.snapshot()) != 0 {
+					t.Fatal("stranger flood sent a message")
+				}
+				for _, call := range f.api.snapshot() {
+					if strings.Contains(call.form.Get("text"), "command refused") {
+						t.Fatal("stranger reply sent")
+					}
+				}
+				f.clock.StepWall(time.Hour)
+				f.backend.flushCommandRefusals()
+				if len(a.events) != 0 {
+					t.Fatal("wall correction flushed early")
+				}
+				f.clock.Advance(time.Minute)
+				f.backend.flushCommandRefusals()
+				f.backend.flushCommandRefusals()
+				want := "command_refused{count=1000,wrong_user=500,not_private=500}"
+				if len(a.events) != 1 || a.events[0].Approval.Transition != want || a.events[0].Approval.Replay {
+					t.Fatalf("summary: %+v", a.events)
+				}
+				if strings.Count(logs.String(), "\n") != 1 || !strings.Contains(logs.String(), want) {
+					t.Fatalf("logs: %s", logs.String())
+				}
+				// A second interval must reset the count, without replying.
+				u := commandUpdate(1001, "/cancel secret-argument")
+				u.Message.From.ID = 99
+				f.backend.dispatch(u)
+				f.clock.StepWall(-2 * time.Hour)
+				f.clock.Advance(time.Minute - time.Nanosecond)
+				f.backend.flushCommandRefusals()
+				if len(a.events) != 1 {
+					t.Fatal("second interval flushed early")
+				}
+				f.clock.Advance(time.Nanosecond)
+				f.backend.flushCommandRefusals()
+				if len(a.events) != 2 || a.events[1].Approval.Transition != "command_refused{count=1,wrong_user=1,not_private=0}" || len(f.backend.notifications) != 0 {
+					t.Fatalf("second interval: %+v", a.events)
+				}
+			})
+		})
+	}
+}
+
+func TestApprovalCommandAuthenticatedFlood(t *testing.T) {
+	for _, reason := range []string{"forwarded", "redelivered", "unknown_command"} {
+		t.Run(reason, func(t *testing.T) {
+			f := newCallbackFixture(t)
+			a := &commandAudit{}
+			f.backend.CommandAudit = a
+			u := commandUpdate(1, "/cancel")
+			if reason == "forwarded" {
+				u.Message.ForwardDate = 1
+			}
+			f.backend.commandDrain = reason == "redelivered"
+			for i := 0; i < 1000; i++ {
+				f.backend.dispatch(u)
+			}
+			if len(a.events) != 1 || len(f.backend.notifications) != 1 {
+				t.Fatalf("unbounded refusal: audit=%d replies=%d", len(a.events), len(f.backend.notifications))
+			}
+			(<-f.backend.notifications)()
+			calls := f.api.snapshot()
+			if len(calls) != 1 || calls[0].form.Get("text") != "command refused: "+reason {
+				t.Fatalf("reply: %+v", calls)
+			}
+			f.clock.StepWall(time.Hour)
+			f.backend.dispatch(u)
+			if len(a.events) != 1 {
+				t.Fatal("wall correction reset limit")
+			}
+			f.clock.Advance(time.Minute)
+			f.backend.dispatch(u)
+			if len(a.events) != 2 || len(f.backend.notifications) != 1 {
+				t.Fatal("limit did not renew")
+			}
+		})
+	}
+}
+
+func TestApprovalCommandIdlePollFlush(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		f := newCallbackFixture(t)
+		a := &commandAudit{}
+		f.backend.CommandAudit = a
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		f.backend.runDone = make(chan struct{})
+		defer close(f.backend.runDone)
+		batch := 0
+		f.api.hook = func(_ *http.Request, _ int) (string, error) {
+			batch++
+			switch batch {
+			case 1:
+				u := commandUpdate(1, "/pending")
+				u.Message.From.ID = 99
+				data, err := json.Marshal(struct {
+					OK     bool              `json:"ok"`
+					Result []tgbotapi.Update `json:"result"`
+				}{true, []tgbotapi.Update{u}})
+				return string(data), err
+			case 2:
+				f.clock.Advance(time.Minute)
+			case 3:
+				if len(a.events) != 1 {
+					t.Fatal("idle poll did not flush refusal count")
+				}
+				cancel()
+				synctest.Wait()
+			default:
+				t.Fatal("extra poll")
+			}
+			return `{"ok":true,"result":[]}`, nil
+		}
+		f.backend.pollLoop(ctx)
+		if len(f.backend.notifications) != 0 {
+			t.Fatal("idle flush queued a reply")
+		}
+	})
 }
