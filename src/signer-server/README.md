@@ -180,3 +180,62 @@ rows.
 - `/healthz` is liveness, not dependency readiness; production monitoring should also exercise an authenticated workflow.
 
 The embeddable implementation lives under `pkg/signerkit` and `pkg/signerkit/hosted`; this binary is the reference deployment surface over the same signing core used by the local signer.
+
+## Durable ordinary approvals
+
+The `/v2/approvals` machine routes require the bearer credential and its fixed
+`--machine-client-id` in both machine-only and UI modes. The ordinary worker
+runs with or without the policy plane. It expires requests, sheds settled
+payloads, flushes durable audit events, and deletes eligible rows only when
+maximum age is enabled. Shutdown stops and joins it and the advisory pool
+before closing SQLite. The v2 human approval UI is a separate implementation
+step; exposing machine routes alone does not provide a v2 voting UI.
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--approval-validity` | `24h` | Pending validity, `5m` through `168h` |
+| `--approval-retention` | `168h` | Positive age for shedding settled payloads |
+| `--approval-max-age` | `0` | Zero keeps terminal rows indefinitely; a positive age enables eligible deletion |
+| `--approval-report-horizon` | `24h` | Report horizon, `1h` through `168h` |
+| `--approval-max-full-rows` | `4096` | Positive full-row ceiling, at most the total ceiling |
+| `--approval-max-rows` | `200000` | Positive total-row ceiling |
+| `--legacy-v1-pending-ttl` | `24h` | Positive lifetime frozen into new v1 pending requests |
+| `--assist-timeout` | `5s` | Positive advisory timeout, capped at five seconds |
+
+Durations use Go duration syntax (`168h`, not `7d`). The installed unit spells
+out these defaults. Customize its `ExecStart` with a systemd override, retaining
+the credential, identity and UI arguments. `--config` remains reserved; no new
+TOML configuration is read. `--required-approvals` cannot exceed 256 in either
+mode. Existing rows keep their frozen policy and expiry. A draft may request a shorter
+validity; its expiry uses the smaller of that request and the configured validity.
+
+Advisory assessment is optional. Set all three of `--assist-endpoint` (the full
+Chat Completions URL), `--assist-model`, and `--assist-key-file` (a non-symlink,
+owner-only key file, normally mode 0600) to enable it. Startup validates the
+configuration without contacting the endpoint. Four calls may run concurrently,
+with no queue; saturation or failure yields an unavailable advisory and never
+an approval. Each call receives a separately redacted copy with a fresh salt.
+The stored review also uses the complete redaction rules and a fresh per-request
+salt. No salt is persisted.
+
+Ordinary audit JSON lines and diagnostics share one process-owned stderr
+transport, including HTTP errors and the default logger. Regular files, pipes,
+and journald are supported without changing descriptor flags. A stalled writer
+bounds audit waits to five seconds; a bounded diagnostic queue counts dropped
+lines. Audit failures leave durable outbox events pending for retry. Delivery
+is at least once: deduplicate by `event_key`. The installer uses journald;
+configure collection and retention on the host. The separate permanent-policy
+audit file remains required for the policy plane.
+
+For a separate administrator account, use `--bootstrap-admin administrator`
+in place of `--bootstrap-operator` with the same RP, database and enrollment
+artifact arguments. The installer accepts optional `SIGNER_SERVER_BOOTSTRAP_ADMIN`.
+The v2 engine excludes admins from votes and quorum. The legacy human vote
+route still needs A11's role barrier; this intermediate build is not ready for
+admin deployment. Bootstrap refuses an existing account with the other role;
+it never promotes an operator in place. Enrollment
+material remains in a mode-0600 artifact, never on stderr.
+
+Starting this version migrates SQLite forward, including approval records and
+the legacy-expiry outbox. Back up the database before upgrade; do not run an older
+binary against the migrated database. Upgrade the signer before its clients.

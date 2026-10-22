@@ -69,7 +69,8 @@ type Server struct {
 	// PollWait bounds the long-poll wait inside /v1/poll/{id}. The
 	// HTTP client may pass a shorter wait via ?wait= in a future release; today
 	// this is the only knob. Defaults to 30s in NewServer.
-	PollWait time.Duration
+	PollWait         time.Duration
+	LegacyPendingTTL time.Duration
 
 	// Logger receives one line per request (method, path, status,
 	// duration). Defaults to log.Default() if nil.

@@ -27,6 +27,14 @@ ExecStart=__BIN__ \
   --signing-key-file __SIGNING_KEY_FILE__ \
   --db __DB_PATH__ \
   --addr __LISTEN_ADDR__ \
+  --approval-validity 24h \
+  --approval-retention 168h \
+  --approval-max-age 0 \
+  --approval-report-horizon 24h \
+  --approval-max-full-rows 4096 \
+  --approval-max-rows 200000 \
+  --legacy-v1-pending-ttl 24h \
+  --assist-timeout 5s \
   --ui \
   --rp-id __RP_ID__ \
   --rp-origin __RP_ORIGIN__ \
@@ -41,6 +49,9 @@ ExecStart=__BIN__ \
 Restart=on-failure
 RestartSec=5
 UMask=0077
+# One process-owned transport serializes ordinary audit and diagnostics.
+StandardError=journal
+TimeoutStopSec=30s
 
 # Hardening — defence in depth for a daemon that owns approval state.
 NoNewPrivileges=true

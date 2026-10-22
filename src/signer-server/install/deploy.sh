@@ -53,6 +53,7 @@ SESSION_TTL="${SIGNER_SERVER_SESSION_TTL:-1h}"
 REQUIRE_STEP_UP="${SIGNER_SERVER_REQUIRE_STEP_UP:-true}"
 DENY_VETO="${SIGNER_SERVER_DENY_VETO:-true}"
 ALLOW_SELF_APPROVE="${SIGNER_SERVER_ALLOW_SELF_APPROVE:-false}"
+BOOTSTRAP_ADMIN="${SIGNER_SERVER_BOOTSTRAP_ADMIN:-}"
 BOOTSTRAP_OPERATOR="${SIGNER_SERVER_BOOTSTRAP_OPERATOR:-}"
 BOOTSTRAP_OPERATORS="${SIGNER_SERVER_BOOTSTRAP_OPERATORS:-${BOOTSTRAP_OPERATOR}}"
 MACHINE_CLIENT_ID="${SIGNER_SERVER_MACHINE_CLIENT_ID:-}"
@@ -100,6 +101,10 @@ for raw_name in "${configured_bootstrap_names[@]}"; do
   [[ "${name}" != "${MACHINE_CLIENT_ID}" ]] || machine_in_roster=true
 done
 [[ "${machine_in_roster}" == true ]] || fail "SIGNER_SERVER_MACHINE_CLIENT_ID must appear in SIGNER_SERVER_BOOTSTRAP_OPERATORS"
+if [[ -n "${BOOTSTRAP_ADMIN}" ]]; then
+  [[ "${BOOTSTRAP_ADMIN}" =~ ^[A-Za-z0-9][A-Za-z0-9._@-]{0,127}$ ]] || fail "invalid bootstrap admin name"
+  [[ -z "${bootstrap_seen[${BOOTSTRAP_ADMIN}]+x}" ]] || fail "bootstrap admin must be a separate account from the operator roster"
+fi
 eligible_count="${bootstrap_count}"
 if [[ "${ALLOW_SELF_APPROVE}" == false ]]; then
   eligible_count=$((eligible_count - 1))
@@ -208,6 +213,16 @@ for raw_name in "${configured_bootstrap_names[@]}"; do
 		--session-ttl "${SESSION_TTL}"
 done
 
+if [[ -n "${BOOTSTRAP_ADMIN}" ]]; then
+  artifact="${STATE_DIR}/bootstrap-${BOOTSTRAP_ADMIN}.txt"
+  refuse_symlink "${artifact}"
+  runuser -u "${SERVICE_USER}" -- "${INSTALL_DIR}/sshgate-signer-server" \
+    --bootstrap-admin "${BOOTSTRAP_ADMIN}" \
+    --bootstrap-output-file "${artifact}" \
+    --db "${DB_PATH}" --rp-id "${RP_ID}" --rp-origin "${RP_ORIGIN}" \
+    --rp-display-name "${RP_DISPLAY_NAME}" --session-ttl "${SESSION_TTL}"
+fi
+
 # ----- 6. systemd unit -----
 log "rendering systemd unit at ${UNIT_PATH}"
 TEMPLATE="${SCRIPT_DIR}/sshgate-signer-server.service"
@@ -265,6 +280,9 @@ for raw_name in "${configured_bootstrap_names[@]}"; do
   [[ ! -f "${STATE_DIR}/bootstrap-${name}.txt" ]] || log "  ${STATE_DIR}/bootstrap-${name}.txt"
 done
 log ""
+if [[ -n "${BOOTSTRAP_ADMIN}" && -f "${STATE_DIR}/bootstrap-${BOOTSTRAP_ADMIN}.txt" ]]; then
+  log "Admin bootstrap artifact: ${STATE_DIR}/bootstrap-${BOOTSTRAP_ADMIN}.txt"
+fi
 log "Next: stand up a reverse proxy (Caddy/nginx) terminating TLS on 443"
 log "      and forwarding to ${LISTEN_ADDR}. The server speaks plain HTTP;"
 log "      it expects TLS to be handled upstream."
