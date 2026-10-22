@@ -3,8 +3,12 @@ package hosted
 import (
 	"bytes"
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -12,6 +16,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -642,7 +647,12 @@ func (h *HumanAPI) buildTally(ctx context.Context, requestID string, required in
 }
 
 // handleUIPending lists the pending requests awaiting human decision.
-func (h *HumanAPI) handleUIPending(w http.ResponseWriter, r *http.Request, _ string) {
+func (h *HumanAPI) handleUIPending(w http.ResponseWriter, r *http.Request, userID string) {
+	v2, more, cursor, err := h.pendingV2(r, userID)
+	if err != nil {
+		writeUIListError(w, err)
+		return
+	}
 	const pageSize = 50
 	offset := 0
 	if raw := r.URL.Query().Get("offset"); raw != "" {
@@ -653,10 +663,7 @@ func (h *HumanAPI) handleUIPending(w http.ResponseWriter, r *http.Request, _ str
 			return
 		}
 	}
-	var (
-		rows []*store.Request
-		err  error
-	)
+	var rows []*store.Request
 	if pager, ok := h.Store.(interface {
 		ListPendingPage(context.Context, int, int) ([]*store.Request, error)
 	}); ok {
@@ -690,7 +697,10 @@ func (h *HumanAPI) handleUIPending(w http.ResponseWriter, r *http.Request, _ str
 		sum.Tally = h.buildTally(r.Context(), row.RequestID, row.RequiredApprovals, false)
 		out = append(out, sum)
 	}
-	response := map[string]interface{}{"pending": out, "has_more": hasMore}
+	response := map[string]interface{}{"pending": out, "has_more": hasMore, "v2_pending": v2, "v2_has_more": more}
+	if more {
+		response["v2_next_cursor"] = cursor
+	}
 	if hasMore {
 		response["next_offset"] = offset + len(out)
 	}
@@ -780,7 +790,7 @@ type uiV2Request struct {
 	Pruned            bool                 `json:"pruned"`
 	Details           string               `json:"details,omitempty"`
 	Review            *approvalreview.View `json:"review,omitempty"`
-	VoteChallenge     voteChallenge        `json:"vote_challenge"`
+	VoteChallenge     *voteChallenge       `json:"vote_challenge,omitempty"`
 }
 
 func (h *HumanAPI) handleUIV2Request(w http.ResponseWriter, r *http.Request, userID string) {
@@ -788,16 +798,29 @@ func (h *HumanAPI) handleUIV2Request(w http.ResponseWriter, r *http.Request, use
 	if row == nil {
 		return
 	}
+	out, err := renderUIV2(row)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "get review")
+		return
+	}
+	binding := v2VoteBinding(row, userID)
+	if row.Record.Header.Decision != nil {
+		binding.AllowedActions = []string{}
+	}
+	challenge, err := h.issueVoteChallenge(r.Context(), binding, row.Record.Header.RequestExpiresAt)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "issue challenge")
+		return
+	}
+	out.VoteChallenge = &challenge
+	writeJSON(w, http.StatusOK, out)
+}
+
+func renderUIV2(row *sqlitestore.V2Row) (uiV2Request, error) {
 	rec := row.Record
 	header := rec.Header
-	binding := ap.ChallengeBinding{
-		Plane: ap.PlaneV2, RecordKey: ap.HostedRecordKey(row.Key.ClientID, row.Key.SubPrincipal, row.Key.RequestID),
-		PlanHash: header.PlanHash, Operator: userID, AllowedActions: []string{ap.ActionDeny},
-	}
 	assist := approvalreview.Assist{State: ap.AssistPreparing}
 	if header.Assist != nil {
-		binding.AssistRevision, binding.AssistDigest = 1, header.Assist.Digest
-		binding.AllowedActions = []string{ap.ActionApprove, ap.ActionDeny}
 		assist.State, assist.Reason = header.Assist.State, header.Assist.Reason
 		if rec.Payload != nil {
 			assist.Result = rec.Payload.AssistResult
@@ -811,7 +834,6 @@ func (h *HumanAPI) handleUIV2Request(w http.ResponseWriter, r *http.Request, use
 	}
 	if header.Decision != nil {
 		out.ApprovalStatus = header.Decision.Status
-		binding.AllowedActions = []string{}
 	}
 	for _, vote := range header.Votes {
 		vote.Operator = approvalreview.NeutralizeText(vote.Operator)
@@ -822,23 +844,15 @@ func (h *HumanAPI) handleUIV2Request(w http.ResponseWriter, r *http.Request, use
 	} else {
 		snapshot, err := approvalreview.DecodeSnapshot(rec.Payload.ReviewSnapshot)
 		if err != nil {
-			writeJSONError(w, http.StatusInternalServerError, "get review")
-			return
+			return uiV2Request{}, err
 		}
 		view, err := approvalreview.BuildView(snapshot, assist)
 		if err != nil {
-			writeJSONError(w, http.StatusInternalServerError, "get review")
-			return
+			return uiV2Request{}, err
 		}
 		out.Review = &view
 	}
-	challenge, err := h.issueVoteChallenge(r.Context(), binding, header.RequestExpiresAt)
-	if err != nil {
-		writeJSONError(w, http.StatusInternalServerError, "issue challenge")
-		return
-	}
-	out.VoteChallenge = challenge
-	writeJSON(w, http.StatusOK, out)
+	return out, nil
 }
 
 // voteRequest is the body of approve/deny. step_up carries an optional
@@ -1184,7 +1198,12 @@ func (h *HumanAPI) voteV2Error(w http.ResponseWriter, err error, spent bool) boo
 
 // handleUIAudit returns the recent decisions for the UI's audit view. It
 // reuses the store's RecentAudit but renders the UI summary shape.
-func (h *HumanAPI) handleUIAudit(w http.ResponseWriter, r *http.Request, _ string) {
+func (h *HumanAPI) handleUIAudit(w http.ResponseWriter, r *http.Request, userID string) {
+	v2, err := h.auditV2(r, userID)
+	if err != nil {
+		writeUIListError(w, err)
+		return
+	}
 	rows, err := h.Store.RecentAudit(r.Context(), 100)
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "audit")
@@ -1194,7 +1213,7 @@ func (h *HumanAPI) handleUIAudit(w http.ResponseWriter, r *http.Request, _ strin
 	for _, row := range rows {
 		out = append(out, summarize(row))
 	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{"entries": out})
+	writeJSON(w, http.StatusOK, map[string]interface{}{"entries": out, "v2_entries": v2})
 }
 
 // ---------------------------------------------------------------------
@@ -1411,4 +1430,182 @@ func (h *HumanAPI) allowPrincipal(w http.ResponseWriter, principal, scope string
 func writeRateLimited(w http.ResponseWriter) {
 	w.Header().Set("Retry-After", "60")
 	writeJSONError(w, http.StatusTooManyRequests, "too many authentication attempts")
+}
+
+var (
+	errUIListCursor = errors.New("invalid v2_cursor")
+	errUIListRole   = errors.New("reader role required")
+)
+
+// Both human roles can inspect approvals; only operators can vote.
+func (h *HumanAPI) authorizeUIList(ctx context.Context, userID string) error {
+	user, err := h.Store.GetUser(ctx, userID)
+	if errors.Is(err, store.ErrNotFound) {
+		return errUIListRole
+	}
+	if err != nil {
+		return err
+	}
+	if user == nil || (user.Role != "operator" && user.Role != "admin") {
+		return errUIListRole
+	}
+	return nil
+}
+
+func writeUIListError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, errUIListCursor):
+		writeJSONError(w, http.StatusBadRequest, errUIListCursor.Error())
+	case errors.Is(err, errUIListRole):
+		writeJSONError(w, http.StatusForbidden, errUIListRole.Error())
+	case IsApprovalBusy(err):
+		writeJSONError(w, http.StatusServiceUnavailable, "busy — retry")
+	default:
+		writeJSONError(w, http.StatusInternalServerError, "list approvals")
+	}
+}
+
+// Domain and session binding keep cursors separate from vote tokens and other logins.
+func (h *HumanAPI) pendingCursorCipher(ctx context.Context) (cipher.AEAD, []byte, error) {
+	session, ok := ctx.Value(voteSessionContextKey{}).(voteSession)
+	if !ok || session.ID == "" || h.voteMACKey == nil {
+		return nil, nil, errUIListCursor
+	}
+	block, err := aes.NewCipher(h.voteMACKey[:])
+	if err != nil {
+		return nil, nil, err
+	}
+	aead, err := cipher.NewGCM(block)
+	return aead, []byte("sshgate-ui-pending-v2\x00" + ap.SessionBinding(session.ID)), err
+}
+
+func (h *HumanAPI) encodePendingCursor(ctx context.Context, row *sqlitestore.V2Row) (string, error) {
+	aead, binding, err := h.pendingCursorCipher(ctx)
+	if err != nil {
+		return "", err
+	}
+	data, err := json.Marshal(sqlitestore.V2PendingCursor{CreatedAt: row.Record.Header.CreatedAt, Key: row.Key})
+	if err != nil {
+		return "", err
+	}
+	nonce := make([]byte, aead.NonceSize())
+	rand.Read(nonce)
+	return base64.RawURLEncoding.EncodeToString(aead.Seal(nonce, nonce, data, binding)), nil
+}
+
+func (h *HumanAPI) decodePendingCursor(ctx context.Context, raw string) (*sqlitestore.V2PendingCursor, error) {
+	if len(raw) == 0 || len(raw) > 4096 {
+		return nil, errUIListCursor
+	}
+	aead, binding, err := h.pendingCursorCipher(ctx)
+	if err != nil {
+		return nil, err
+	}
+	token, err := base64.RawURLEncoding.Strict().DecodeString(raw)
+	if err != nil || len(token) < aead.NonceSize()+aead.Overhead() || base64.RawURLEncoding.EncodeToString(token) != raw {
+		return nil, errUIListCursor
+	}
+	data, err := aead.Open(nil, token[:aead.NonceSize()], token[aead.NonceSize():], binding)
+	if err != nil {
+		return nil, errUIListCursor
+	}
+	var cursor sqlitestore.V2PendingCursor
+	if json.Unmarshal(data, &cursor) != nil || cursor.CreatedAt.IsZero() || cursor.Key.ClientID == "" || !ap.ValidRequestID(cursor.Key.RequestID) {
+		return nil, errUIListCursor
+	}
+	return &cursor, nil
+}
+
+func (h *HumanAPI) pendingV2(r *http.Request, userID string) ([]uiV2Request, bool, string, error) {
+	out := make([]uiV2Request, 0)
+	var cursor *sqlitestore.V2PendingCursor
+	query, err := url.ParseQuery(r.URL.RawQuery)
+	if err != nil {
+		return nil, false, "", errUIListCursor
+	}
+	if values, present := query["v2_cursor"]; present {
+		if len(values) != 1 {
+			return nil, false, "", errUIListCursor
+		}
+		var err error
+		cursor, err = h.decodePendingCursor(r.Context(), values[0])
+		if err != nil {
+			return nil, false, "", err
+		}
+	}
+	reader, ok := h.Store.(interface {
+		ListPendingV2(context.Context, *sqlitestore.V2PendingCursor, int) ([]*sqlitestore.V2Row, error)
+	})
+	if !ok {
+		return out, false, "", nil
+	}
+	if err := h.authorizeUIList(r.Context(), userID); err != nil {
+		return nil, false, "", err
+	}
+	rows, err := reader.ListPendingV2(r.Context(), cursor, 51)
+	if err != nil {
+		return nil, false, "", err
+	}
+	more := len(rows) > 50
+	if more {
+		rows = rows[:50]
+	}
+	for _, row := range rows {
+		item, err := renderUIV2(row)
+		if err != nil {
+			return nil, false, "", err
+		}
+		out = append(out, item)
+	}
+	next := ""
+	if more {
+		next, err = h.encodePendingCursor(r.Context(), rows[len(rows)-1])
+	}
+	return out, more, next, err
+}
+
+type uiV2AuditEntry struct {
+	RecordHandle      string            `json:"record_handle"`
+	SubPrincipal      string            `json:"sub_principal"`
+	Decision          ap.ApprovalStatus `json:"decision"`
+	DecidedAt         time.Time         `json:"decided_at"`
+	DecidedBy         string            `json:"decided_by"`
+	Votes             []ap.Vote         `json:"votes"`
+	RationaleRedacted string            `json:"rationale_redacted"`
+	AssistBound       ap.AssistBound    `json:"assist_bound"`
+}
+
+func (h *HumanAPI) auditV2(r *http.Request, userID string) ([]uiV2AuditEntry, error) {
+	out := make([]uiV2AuditEntry, 0)
+	reader, ok := h.Store.(interface {
+		RecentDecidedV2(context.Context, int) ([]*sqlitestore.V2Row, error)
+	})
+	if !ok {
+		return out, nil
+	}
+	if err := h.authorizeUIList(r.Context(), userID); err != nil {
+		return nil, err
+	}
+	rows, err := reader.RecentDecidedV2(r.Context(), 100)
+	if err != nil {
+		return nil, err
+	}
+	for _, row := range rows {
+		header := row.Record.Header
+		decision := header.Decision
+		if decision == nil {
+			return nil, errors.New("decided approval missing decision")
+		}
+		votes := make([]ap.Vote, 0, len(header.Votes))
+		for _, vote := range header.Votes {
+			vote.Operator = approvalreview.NeutralizeText(vote.Operator)
+			votes = append(votes, vote)
+		}
+		out = append(out, uiV2AuditEntry{
+			RecordHandle: row.RecordHandle, SubPrincipal: approvalreview.NeutralizeText(header.SubPrincipal),
+			Decision: decision.Status, DecidedAt: decision.DecidedAt, DecidedBy: approvalreview.NeutralizeText(decision.DecidedBy),
+			Votes: votes, RationaleRedacted: header.RationaleRedacted, AssistBound: decision.AssistBound,
+		})
+	}
+	return out, nil
 }
