@@ -36,7 +36,11 @@ func envelopeDecisionTable(t *testing.T, name string) {
 	p := newProof(t, name)
 	different := false
 	for _, pin := range []string{"", pinDeny, pinAllow, "damaged"} {
-		for _, network := range []bool{false, true} {
+		for _, source := range []string{"confined", "confined,net", "signed"} {
+			if source == "signed" && name != "U-DaemonReadNetRefused" {
+				continue
+			}
+			network := source != "confined"
 			commands := []string{"cat /file"}
 			if name == "U-DaemonReadNetRefused" {
 				commands = []string{"docker ps", "systemctl status fixture.service"}
@@ -46,7 +50,7 @@ func envelopeDecisionTable(t *testing.T, name string) {
 			}
 			for _, absent := range []bool{false, true} {
 				for _, command := range commands {
-					t.Run(pin+command+map[bool]string{false: "plain", true: "net"}[network], func(t *testing.T) {
+					t.Run(pin+command+source, func(t *testing.T) {
 						dir := t.TempDir()
 						withGateDir(t, dir)
 						if pin != "" {
@@ -68,7 +72,11 @@ func envelopeDecisionTable(t *testing.T, name string) {
 						if network {
 							flags += ",net"
 						}
-						code, _, stderr := runWith(t, "SSHGATE_READ1 "+flags+" "+command)
+						raw := "SSHGATE_READ1 " + flags + " " + command
+						if source == "signed" {
+							raw = signedNetRead(t, dir, command)
+						}
+						code, _, stderr := runWith(t, raw)
 						denied := pin == "damaged" || network && pin != pinAllow || name == "U-DaemonReadNetRefused"
 						if denied {
 							different = different || code != exitNoPermVal || calls != 0

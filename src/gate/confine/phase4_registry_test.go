@@ -33,6 +33,17 @@ func phase4Registry() []prot {
 		}
 		result = append(result, prot{ID: row.id, Site: row.site, Class: "single", DirectLeg: row.direct, EffectLegs: row.effects, MutationSets: []harness.MutationSet{{IDs: []string{row.id}, Legs: legs}}})
 	}
+	for i := range result {
+		p := &result[i]
+		if p.ID != "P-G-NET-DAEMON-READ" {
+			continue
+		}
+		p.Class = "multi"
+		p.Partners = []string{"P-G-CONFINE-REQUIRED"}
+		p.EffectLegs = append(p.EffectLegs, "G-NET-LANE2-ABSENT")
+		p.MutationSets[0].Legs = append(p.MutationSets[0].Legs, phase4Leg("G-NET-LANE2-ABSENT"), phase4Leg("G-NET-LANE2-ABSENT-TWIN"))
+		p.MutationSets = append(p.MutationSets, harness.MutationSet{IDs: []string{"P-G-NET-DAEMON-READ", "P-G-CONFINE-REQUIRED"}, Legs: []harness.Leg{phase4Leg("G-NET-LANE2-ABSENT", "MUTATION-EFFECT lane2-ran"), phase4Leg("G-NET-LANE2-ABSENT-TWIN")}})
+	}
 	return result
 }
 
@@ -41,7 +52,7 @@ func phase4Extend(registry []prot) {
 		p := &registry[i]
 		if p.ID == "P-G-CONFINE-REQUIRED" {
 			p.EffectLegs = append(p.EffectLegs, "G-ENVELOPE-ABSENT")
-			p.MutationSets[0].Legs = append(p.MutationSets[0].Legs, phase4Leg("G-ENVELOPE-ABSENT", "MUTATION-EFFECT ran-unconfined"), phase4Leg("G-ENVELOPE-ABSENT-TWIN"))
+			p.MutationSets[0].Legs = append(p.MutationSets[0].Legs, phase4Leg("G-ENVELOPE-ABSENT", "MUTATION-EFFECT ran-unconfined"), phase4Leg("G-ENVELOPE-ABSENT-TWIN"), phase4Leg("G-NET-NO-FALLBACK-TWIN"), phase4Leg("G-NET-LANE2-ABSENT"), phase4Leg("G-NET-LANE2-ABSENT-TWIN"))
 		}
 		if p.ID == "P-G-NET-STRICT" {
 			p.EffectLegs = append(p.EffectLegs, "G-ENVELOPE-UNMET")
@@ -52,7 +63,7 @@ func phase4Extend(registry []prot) {
 				continue
 			}
 			for _, leg := range set.Legs {
-				if leg.Name == "G-NET-STRICT-UNMET-FUSE" {
+				if leg.Name == "G-NET-UNMET" {
 					set.Legs = append(set.Legs, phase4Leg("G-ENVELOPE-UNMET", leg.Markers...))
 					break
 				}

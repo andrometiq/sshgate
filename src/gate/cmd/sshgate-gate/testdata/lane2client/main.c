@@ -286,7 +286,39 @@ static int mode_of(int argc, char **argv, char *mode, size_t size, const char **
 	return 0;
 }
 
+static int ps_connect(int argc, char **argv) {
+	char lines[1][256], message[272];
+	int verb = 1;
+	while (verb < argc && argv[verb][0] == '-')
+		verb++;
+	if (verb == argc || strcmp(argv[verb], "ps") != 0 || own_file("ps-connect", lines, 1) != 1)
+		return -1;
+	const char *path = NULL;
+	for (int i = 1; i < argc; i++)
+		if (strncmp(argv[i], "--host=unix://", 14) == 0)
+			path = argv[i] + 14;
+	if (path == NULL) {
+		printf("ps-connect:no-endpoint\n");
+		return 1;
+	}
+	snprintf(message, sizeof message, "SG-PS %s", lines[0]);
+	int e = connect_send(path, 0, message);
+	if (e != 0) {
+		printf("ps-connect:%s\n", errname(e));
+		return 1;
+	}
+	printf("CONTAINER ID   IMAGE   COMMAND   CREATED   STATUS   PORTS   NAMES\n");
+	return 0;
+}
+
 int main(int argc, char **argv) {
+	char self[4096];
+	snprintf(self, sizeof self, "%s", argv[0]);
+	snprintf(own_dir, sizeof own_dir, "%s", dirname(self));
+	int ps = ps_connect(argc, argv);
+	if (ps >= 0)
+		return ps;
+
 	char mode[64];
 	const char *nonce = NULL;
 	int at = mode_of(argc, argv, mode, sizeof mode, &nonce);
@@ -298,9 +330,6 @@ int main(int argc, char **argv) {
 	printf("REPLACED-RAN %s\n", nonce);
 	return 0;
 #endif
-	char self[4096];
-	snprintf(self, sizeof self, "%s", argv[0]);
-	snprintf(own_dir, sizeof own_dir, "%s", dirname(self));
 	if (strcmp(mode, "report") == 0)
 		return report(argc, argv);
 	if (strcmp(mode, "host") == 0)

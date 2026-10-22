@@ -249,13 +249,14 @@ func run() int {
 	// like any other output). The agent cannot set this; only a human approval
 	// turned into a signature can.
 	reveal := false
+	netGrant := false
 	if signed {
-		// Self-derive THIS gate's host-key fingerprints so VerifySigned can
+		// Self-derive THIS gate's host-key fingerprints so Verify can
 		// enforce the per-server binding: a signature approved for server X
 		// must name X's pinned host key, so it cannot be replayed on server Y.
 		// Reading the world-readable static /etc/ssh/ssh_host_*.pub files at
 		// process start is identity, not decision state — the gate stays
-		// stateless. An empty set fails closed inside VerifySigned
+		// stateless. An empty set fails closed inside Verify
 		// (ErrHostMismatch), which is the correct outcome when the gate cannot
 		// identify itself; we surface a clearer error here when the glob itself
 		// errored.
@@ -264,7 +265,7 @@ func run() int {
 			logf("derive host-key fingerprints: %v", herr)
 			return exitSoftware
 		}
-		ic, rev, err := gate.VerifySigned(raw, pubkey, time.Now(), selfHostFPs)
+		verified, err := gate.Verify(raw, pubkey, time.Now(), selfHostFPs)
 		if err != nil {
 			logf("%v", err)
 			// A signature that failed to verify (bad/expired/wrong-host) is a
@@ -275,8 +276,17 @@ func run() int {
 			auditNoExec(audit, raw, "write", "denied", exitDataErr)
 			return exitDataErr
 		}
-		innerCmd = ic
-		reveal = rev
+		innerCmd, reveal, netGrant = verified.Cmd, verified.Reveal, verified.Net
+		if strings.HasPrefix(innerCmd, sigwire.EnvelopePrefix) {
+			logf(sigwire.GateDenySignedEnvelope)
+			auditNoExecReason(audit, innerCmd, "write", "denied", exitNoPermVal, "envelope:signed", readFlags{netGrant: netGrant})
+			return exitNoPermVal
+		}
+		if netGrant && (strings.HasPrefix(innerCmd, "SSHGATE_") || classify.Classify(innerCmd) != classify.KindRead) {
+			logf(sigwire.GateDenyNetReadsOnly)
+			auditNoExecReason(audit, innerCmd, "write", "denied", exitNoPermVal, "net:not-a-read", readFlags{netGrant: true})
+			return exitNoPermVal
+		}
 	}
 
 	// Administrative commands. Only valid when signed.
@@ -324,7 +334,7 @@ func run() int {
 		if signed {
 			status = "signed"
 		}
-		return execRead(audit, innerCmd, status, reveal, readFlags{})
+		return execRead(audit, innerCmd, status, reveal, readFlags{netGrant: netGrant})
 	case classify.KindWrite, classify.KindUnknown:
 		// Fail-safe: unknown is treated as write (classify.Classify
 		// already returns KindWrite for the truly-unknown cases; an
@@ -572,6 +582,7 @@ func execAndAudit(audit *gate.AuditLogger, cmd, classification, approval string,
 		Stderr:    res.Stderr,
 		ReadAudit: plan.read,
 		Envelope:  plan.envelope,
+		NetGrant:  plan.netGrant,
 	}
 	if res.Transport.CleanupError == "" {
 		res.Transport.CleanupError = res.CleanupError
@@ -617,6 +628,7 @@ func auditNoExecReason(audit *gate.AuditLogger, cmd, classification, approval st
 	record := gate.AuditRecord{
 		DenyReason: denyReason,
 		Envelope:   flags.envelope,
+		NetGrant:   flags.netGrant,
 		TS:         time.Now().UTC().Unix(),
 		// Redact a secret embedded in the command string even on the no-exec
 		// (denial / admin-verb) path — a denied command can still carry a

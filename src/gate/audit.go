@@ -220,6 +220,7 @@ type AuditRecord struct {
 	// chat, not this on-disk record.
 	Revealed bool `json:"revealed,omitempty"`
 	Envelope bool `json:"envelope,omitempty"`
+	NetGrant bool `json:"net_grant,omitempty"`
 	// ReadAudit is how an executed read was enforced. nil (no keys) on every
 	// other record.
 	*ReadAudit

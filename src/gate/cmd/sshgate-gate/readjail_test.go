@@ -459,12 +459,14 @@ func TestRunReadAbsentPinnedDenies(t *testing.T) {
 			if tc.pin != "" {
 				plantPin(t, dir, tc.pin, 0o644)
 			}
-			forceNetGrant = tc.grant
-			t.Cleanup(func() { forceNetGrant = false })
 			fake := withFakeAttempt(t, gate.ExecResult{}, nil)
 			fake.result, fake.err = setupFailure("landlock", syscall.ENOSYS)
 			target := seedTarget(t, dir)
-			code, out, stderr := runWith(t, "stat "+target+" ran")
+			command := "stat " + target + " ran"
+			if tc.grant {
+				command = signedNetRead(t, dir, command)
+			}
+			code, out, stderr := runWith(t, command)
 			if code != exitNoPermVal || out != "" || !strings.Contains(stderr, "gate: read jail unavailable: this host has no usable jail (landlock: function not implemented) "+tc.line+"; nothing ran") {
 				t.Fatalf("exit = %d, stdout = %q, stderr = %q", code, out, stderr)
 			}
@@ -769,4 +771,14 @@ func TestNetworkHintReachesClient(t *testing.T) {
 	if len(recs) != 1 || recs[0]["exit_code"] != float64(6) || recs[0]["enforcement"] != "kernel" || recs[0]["net"] != false {
 		t.Fatalf("audit = %v", recs)
 	}
+}
+
+func signedNetRead(t *testing.T, dir, command string) string {
+	t.Helper()
+	pub, private := genKey(t)
+	seedPub(t, dir, pub, 0600)
+	withHostFPs(t, testGateHostFP)
+	payload := freshPayload(command)
+	payload.Net = true
+	return signedLine(t, private, payload)
 }

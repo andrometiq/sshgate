@@ -38,29 +38,29 @@ func phase2Leg(name string, markers ...string) harness.Leg {
 // without it.
 func phase2Registry() []prot {
 	fuse := func(strict string) harness.MutationSet {
-		twin := map[string]string{"G-STRICT-UNMET-FUSE": "G-NET-STRICT-UNMET-FUSE", "G-NET-STRICT-UNMET-FUSE": "G-STRICT-UNMET-FUSE"}[strict]
+		twin := map[string]string{"G-STRICT-UNMET-FUSE": "G-NET-UNMET", "G-NET-UNMET": "G-STRICT-UNMET-FUSE"}[strict]
 		return harness.MutationSet{Legs: []harness.Leg{
 			phase2Leg(strict, "MUTATION-EFFECT fuse-ioctl"),
 			phase2Leg(twin, "MUTATION-ABORT selfcheck"),
 			phase2Leg("G-UNPINNED-UNMET-FUSE", "MUTATION-EFFECT fuse-ioctl"),
 		}}
 	}
-	strictSet, netStrictSet := fuse("G-STRICT-UNMET-FUSE"), fuse("G-NET-STRICT-UNMET-FUSE")
+	strictSet, netStrictSet := fuse("G-STRICT-UNMET-FUSE"), fuse("G-NET-UNMET")
 	strictSet.IDs, netStrictSet.IDs = []string{"P-G-STRICT", "P-COVERS"}, []string{"P-G-NET-STRICT", "P-COVERS"}
 	one := func(id string, legs ...harness.Leg) harness.MutationSet {
 		return harness.MutationSet{IDs: []string{id}, Legs: legs}
 	}
 	return []prot{
 		{ID: "P-G-CONFINE-REQUIRED", Site: "routeAfterSetupFailure requires term", Class: "single", DirectLeg: "U-ExecReadConfineRequired",
-			EffectLegs: []string{"G-CONFINE-REQUIRED-ABSENT", "G-CONFINE-REQUIRED-LANE2"},
+			EffectLegs: []string{"G-NET-NO-FALLBACK", "G-CONFINE-REQUIRED-LANE2"},
 			MutationSets: []harness.MutationSet{one("P-G-CONFINE-REQUIRED", phase2Leg("U-ExecReadConfineRequired", "MUTATION-EFFECT decision"),
-				phase2Leg("G-CONFINE-REQUIRED-ABSENT", "MUTATION-EFFECT ran-unconfined"), phase2Leg("G-CONFINE-REQUIRED-LANE2", "MUTATION-EFFECT lane2-ran"))}},
+				phase2Leg("G-NET-NO-FALLBACK", "MUTATION-EFFECT ran-unconfined"), phase2Leg("G-CONFINE-REQUIRED-LANE2", "MUTATION-EFFECT lane2-ran"))}},
 		{ID: "P-G-STRICT", Site: "readSpec Strict from a valid pin", Class: "multi", Partners: []string{"P-COVERS"}, DirectLeg: "U-SpecStrictSources",
 			EffectLegs:   []string{"G-STRICT-UNMET-FUSE"},
 			MutationSets: []harness.MutationSet{one("P-G-STRICT", phase2Leg("U-SpecStrictSources", "MUTATION-EFFECT decision"), phase2Leg("G-STRICT-UNMET-FUSE")), strictSet}},
 		{ID: "P-G-NET-STRICT", Site: "readSpec Strict from required confinement", Class: "multi", Partners: []string{"P-COVERS"}, DirectLeg: "U-SpecStrictSources",
-			EffectLegs:   []string{"G-NET-STRICT-UNMET-FUSE"},
-			MutationSets: []harness.MutationSet{one("P-G-NET-STRICT", phase2Leg("U-SpecStrictSources", "MUTATION-EFFECT decision"), phase2Leg("G-NET-STRICT-UNMET-FUSE")), netStrictSet}},
+			EffectLegs:   []string{"G-NET-UNMET"},
+			MutationSets: []harness.MutationSet{one("P-G-NET-STRICT", phase2Leg("U-SpecStrictSources", "MUTATION-EFFECT decision"), phase2Leg("G-NET-UNMET")), netStrictSet}},
 		{ID: "P-G-SEAL", Site: "sealRead PR_SET_DUMPABLE after a jailed read starts", Class: "single", DirectLeg: "U-SealReads", EffectLegs: []string{"G-GATE-SEAL"},
 			MutationSets: []harness.MutationSet{one("P-G-SEAL", phase2Leg("U-SealReads", "MUTATION-EFFECT decision"),
 				phase2Leg("G-GATE-SEAL", "MUTATION-EFFECT gate-environ", "MUTATION-EFFECT gate-fd"))}},
@@ -87,7 +87,7 @@ func phase2Extend(registry []prot) {
 		var legs []harness.Leg
 		switch p.ID {
 		case "P-COVERS":
-			legs = []harness.Leg{phase2Leg("G-STRICT-UNMET-FUSE", "MUTATION-ABORT selfcheck"), phase2Leg("G-NET-STRICT-UNMET-FUSE", "MUTATION-ABORT selfcheck"), phase2Leg("G-UNPINNED-UNMET-FUSE", "MUTATION-EFFECT fuse-ioctl")}
+			legs = []harness.Leg{phase2Leg("G-STRICT-UNMET-FUSE", "MUTATION-ABORT selfcheck"), phase2Leg("G-NET-UNMET", "MUTATION-ABORT selfcheck"), phase2Leg("G-UNPINNED-UNMET-FUSE", "MUTATION-EFFECT fuse-ioctl")}
 		case "P-CLONE-MNT":
 			legs = []harness.Leg{phase2Leg("G-NSDROP-MNT", "MUTATION-ABORT nsverify")}
 		case "P-SC-NET":

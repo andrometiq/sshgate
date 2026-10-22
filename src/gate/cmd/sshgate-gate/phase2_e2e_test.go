@@ -34,10 +34,10 @@ func TestJailMatrixPhase2(t *testing.T) {
 	}
 	for _, abi := range []string{"native", "abi1"} {
 		t.Run(abi, func(t *testing.T) {
-			t.Run("G-CONFINE-REQUIRED-ABSENT", func(t *testing.T) { legConfineRequiredAbsent(t, abi) })
+			t.Run("G-NET-NO-FALLBACK", func(t *testing.T) { legConfineRequiredAbsent(t, abi) })
 			t.Run("G-CONFINE-REQUIRED-LANE2", legConfineRequiredLane2)
 			t.Run("G-STRICT-UNMET-FUSE", func(t *testing.T) { legUnmetFuse(t, abi, "G-STRICT-UNMET-FUSE", pinDeny, false) })
-			t.Run("G-NET-STRICT-UNMET-FUSE", func(t *testing.T) { legUnmetFuse(t, abi, "G-NET-STRICT-UNMET-FUSE", "", true) })
+			t.Run("G-NET-UNMET", func(t *testing.T) { legUnmetFuse(t, abi, "G-NET-UNMET", "", true) })
 			t.Run("G-UNPINNED-UNMET-FUSE", func(t *testing.T) { legUnmetFuse(t, abi, "G-UNPINNED-UNMET-FUSE", "", false) })
 			t.Run("G-NSDROP-MNT", func(t *testing.T) { legNSDropMnt(t, abi) })
 			t.Run("G-FAULT", func(t *testing.T) { legFault(t, abi) })
@@ -69,12 +69,6 @@ func withReadSpec(t *testing.T, abi string, change func(*confine.Spec)) {
 	t.Cleanup(func() { readSpecHook = nil })
 }
 
-func withNetGrant(t *testing.T) {
-	t.Helper()
-	forceNetGrant = true
-	t.Cleanup(func() { forceNetGrant = false })
-}
-
 // countAttempts wraps the real executor and counts jail attempts and
 // unconfined runs.
 func countAttempts(t *testing.T) *fakeAttempt {
@@ -101,7 +95,7 @@ func readFile(path string) string {
 // legConfineRequiredAbsent: a read that requires confinement (a network grant)
 // on an unpinned host whose jail is Absent is denied, never run outside it.
 func legConfineRequiredAbsent(t *testing.T, abi string) {
-	p := newProof(t, "G-CONFINE-REQUIRED-ABSENT")
+	p := newProof(t, "G-NET-NO-FALLBACK")
 	readNamedWriter(t)
 	dir := t.TempDir()
 	withGateDir(t, dir)
@@ -112,13 +106,12 @@ func legConfineRequiredAbsent(t *testing.T, abi string) {
 	stat, err := exec.LookPath("stat")
 	p.Control("edit", err == nil && exec.Command(stat, twin, "edited").Run() == nil && readFile(twin) == "edited\n")
 
-	withNetGrant(t)
 	withReadSpec(t, abi, func(spec *confine.Spec) { spec.ForceABI = confine.ForceNoLandlock })
-	code, _, _ := runWith(t, "stat "+target+" edited")
+	code, _, stderr := runWith(t, signedNetRead(t, dir, "stat "+target+" edited"))
 	recs := auditRecords(t, dir)
 	ran := readFile(target) == "edited\n"
 	p.Effect("ran-unconfined", ran)
-	denied := code == exitNoPermVal && len(recs) == 1 && recs[0]["deny_reason"] == "jail:absent:landlock:ENOSYS"
+	denied := code == exitNoPermVal && stderr == "gate: read jail unavailable: this host has no usable jail (landlock: function not implemented) and this read must run confined; nothing ran\n" && len(recs) == 1 && recs[0]["deny_reason"] == "jail:absent:landlock:ENOSYS"
 	p.Jailed("edit", denied && !ran || ran && code == exitOK)
 	p.Observed("target", ran || readFile(target) == "orig\n")
 	p.Finish()
@@ -168,7 +161,12 @@ func legUnmetFuse(t *testing.T, abi, name, pin string, grant bool) {
 	if name == "G-ENVELOPE-UNMET" {
 		command = "SSHGATE_READ1 confined " + command
 	}
-	code, out := runTestGate(t, testGateConfig{Dir: dir, ABI: abi, Grant: grant}, tools.bin, command)
+	config := testGateConfig{Dir: dir, ABI: abi}
+	if grant {
+		command = signedNetRead(t, dir, command)
+		config.HostFPs = []string{testGateHostFP}
+	}
+	code, out := runTestGate(t, config, tools.bin, command)
 	records := fixture.seal(t, mark)
 	recs := auditRecords(t, dir)
 	landed := slices.Contains(records, "IOCTL 42")
@@ -386,13 +384,17 @@ func legInet(t *testing.T, abi, name string) {
 				plantPin(t, dir, pin, 0o644)
 			}
 			withReadSpec(t, abi, nil)
-			code, out, _ := runWith(t, "cat "+operation+" "+port)
+			command := "cat " + operation + " " + port
+			if name == "G-NET-GRANT-CONNECT" {
+				command = signedNetRead(t, dir, command)
+			}
+			code, out, _ := runWith(t, command)
 			connected := accepted(t, tcp)
 			listener.Close()
 			recs := auditRecords(t, dir)
 			ok := len(recs) == 1 && recs[0]["enforcement"] == "kernel"
 			switch {
-			case name == "G-INET-ALLOW":
+			case name == "G-INET-ALLOW" || name == "G-NET-GRANT-CONNECT":
 				ok = ok && connected && code == exitOK && out == "socket=ok\nconnect=ok\n" && recs[0]["net"] == true && recs[0]["requires_confinement"] == true
 			case connected:
 				p.Effect("connected", true)
@@ -402,6 +404,9 @@ func legInet(t *testing.T, abi, name string) {
 			}
 			if !ok {
 				t.Errorf("%s pin=%q %s: exit %d, stdout %q, connected %v, audit %v", name, pin, network, code, out, connected, recs)
+			}
+			if name == "G-NET-GRANT-CONNECT" {
+				ok = ok && recs[0]["net_grant"] == true
 			}
 			jailed, observed = jailed && ok, observed && (connected || name == "G-INET-DENY")
 		}

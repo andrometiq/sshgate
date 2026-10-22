@@ -4,8 +4,10 @@ package main
 
 import (
 	"crypto/rand"
+	_ "embed"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net"
 	"os"
 	"os/exec"
@@ -24,45 +26,60 @@ import (
 // redactor would scrub as high-entropy, so the test compares output raw.
 func buildLane2Fixtures(t *testing.T) string {
 	t.Helper()
-	cc, err := exec.LookPath("cc")
-	if err != nil {
-		t.Fatalf("SETUP: cc: %v", err)
-	}
-	client := filepath.Join(t.TempDir(), "lane2client")
-	if output, err := exec.Command(cc, "-O2", "-Wall", "-Werror", "-o", client, "testdata/lane2client/main.c").CombinedOutput(); err != nil {
-		t.Fatalf("SETUP: build the daemon-read client: %v\n%s", err, output)
-	}
-	data, err := os.ReadFile(client)
-	if err != nil {
-		t.Fatal(err)
-	}
 	dir := t.TempDir()
-	for _, name := range []string{"systemctl", "docker"} {
-		path := filepath.Join(dir, name)
-		if err := os.WriteFile(path, data, 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.Chmod(path, 0o755); err != nil {
-			t.Fatal(err)
-		}
-	}
-	plugins := filepath.Join(dir, "plugins")
-	if err := os.Mkdir(plugins, 0o755); err != nil {
+	if err := buildLane2FixtureFiles(dir); err != nil {
 		t.Fatal(err)
-	}
-	if output, err := exec.Command(cc, "-O2", "-Wall", "-Werror", "-o", filepath.Join(plugins, "sg-plugin"), "testdata/lane2client/sg-plugin.c").CombinedOutput(); err != nil {
-		t.Fatalf("SETUP: build the plugin: %v\n%s", err, output)
-	}
-	for _, path := range []string{plugins, dir} {
-		if err := os.Chmod(path, 0o755); err != nil {
-			t.Fatal(err)
-		}
 	}
 	withLane2Seams(t, dir)
 	previousRules := redactRules
 	redactRules = []redact.Rule{}
 	t.Cleanup(func() { redactRules = previousRules })
 	return dir
+}
+
+//go:embed testdata/lane2client/main.c
+var lane2ClientSource string
+
+//go:embed testdata/lane2client/sg-plugin.c
+var lane2PluginSource string
+
+// buildLane2FixtureFiles also serves the subprocess fixture sentinel.
+func buildLane2FixtureFiles(dir string) error {
+	cc, err := exec.LookPath("cc")
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	client := filepath.Join(dir, "docker")
+	command := exec.Command(cc, "-O2", "-Wall", "-Werror", "-x", "c", "-o", client, "-")
+	command.Stdin = strings.NewReader(lane2ClientSource)
+	if output, err := command.CombinedOutput(); err != nil {
+		return fmt.Errorf("build daemon-read client: %w: %s", err, output)
+	}
+	data, err := os.ReadFile(client)
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(dir, "systemctl"), data, 0o755); err != nil {
+		return err
+	}
+	plugins := filepath.Join(dir, "plugins")
+	if err := os.Mkdir(plugins, 0o755); err != nil {
+		return err
+	}
+	command = exec.Command(cc, "-O2", "-Wall", "-Werror", "-x", "c", "-o", filepath.Join(plugins, "sg-plugin"), "-")
+	command.Stdin = strings.NewReader(lane2PluginSource)
+	if output, err := command.CombinedOutput(); err != nil {
+		return fmt.Errorf("build plugin: %w: %s", err, output)
+	}
+	for _, path := range []string{dir, plugins, client, filepath.Join(dir, "systemctl"), filepath.Join(plugins, "sg-plugin")} {
+		if err := os.Chmod(path, 0o755); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // lane2Replacement builds, in dir, a client that only prints REPLACED-RAN
@@ -113,7 +130,7 @@ func lane2Reported(output []byte, mode string, args ...string) bool {
 func withLane2Seams(t *testing.T, dir string) {
 	t.Helper()
 	previousDirs, previousUIDs, previousEndpoints := lane2BinDirs, lane2TrustedUIDs, lane2SystemEndpoints
-	lane2BinDirs, lane2TrustedUIDs = []string{dir}, []uint32{0, uint32(os.Getuid())}
+
 	// Unix socket paths are limited to 108 bytes; proof subtest names make
 	// t.TempDir paths too long under the jail-visible test cache.
 	socketDir, err := os.MkdirTemp("", "l2-sockets-")
@@ -133,7 +150,7 @@ func withLane2Seams(t *testing.T, dir string) {
 		t.Cleanup(func() { listener.Close() })
 		return path
 	}
-	lane2SystemEndpoints = lane2Endpoints{docker: listen("docker"), bus: listen("bus"), private: listen("private")}
+	applyLane2TestConfig(testLane2Config{BinDir: dir, TrustedUIDs: []uint32{0, uint32(os.Getuid())}, Endpoints: map[string]string{"docker": listen("docker"), "bus": listen("bus"), "private": listen("private")}})
 	t.Cleanup(func() {
 		lane2BinDirs, lane2TrustedUIDs, lane2SystemEndpoints = previousDirs, previousUIDs, previousEndpoints
 	})

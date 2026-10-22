@@ -20,9 +20,6 @@ import (
 // Test-only seams, the same class as executeCommand and gateDirFn: package
 // variables, never the environment.
 var (
-	// forceNetGrant stands in for a signed network grant until the signed
-	// wire carries one.
-	forceNetGrant bool
 	// readSpecHook adjusts the read Spec (ForceABI, InjectFailAt).
 	readSpecHook func(*confine.Spec)
 	hostFactsFn  = confine.ReadHostFacts
@@ -200,7 +197,6 @@ var readAdmittedHook func(pinState)
 // an unconfined run: classifier-only, or the shell-free client for a daemon
 // read. Nothing that may have reached the command is ever run again.
 func execRead(audit *gate.AuditLogger, cmd, approval string, reveal bool, flags readFlags) int {
-	flags.netGrant = flags.netGrant || forceNetGrant
 	if _, matched := lane2Parse(cmd); matched && (flags.netGrant || flags.expectNet) && !jailmut.On("P-G-NET-DAEMON-READ") {
 		logf("%s", sigwire.GateDenyNetDaemonRead)
 		auditReadDenied(audit, cmd, "net:daemon-read", exitNoPermVal, flags)

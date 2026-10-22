@@ -45,7 +45,7 @@ func TestEnvelopeDispatch(t *testing.T) {
 }
 
 func TestAuditNetFields(t *testing.T) {
-	for _, source := range []string{"pin", "envelope"} {
+	for _, source := range []string{"pin", "signed", "envelope"} {
 		for _, denied := range []bool{false, true} {
 			name := source + "/executed"
 			if denied {
@@ -54,7 +54,9 @@ func TestAuditNetFields(t *testing.T) {
 			t.Run(name, func(t *testing.T) {
 				dir := t.TempDir()
 				withGateDir(t, dir)
-				plantPin(t, dir, pinAllow, 0644)
+				if source != "signed" {
+					plantPin(t, dir, pinAllow, 0644)
+				}
 				previous := executeCommand
 				executeCommand = func(_ context.Context, _ string, opts gate.ExecOpts) (gate.ExecResult, error) {
 					if opts.Confine == nil || !opts.Confine.Net || !opts.Confine.Strict {
@@ -70,6 +72,9 @@ func TestAuditNetFields(t *testing.T) {
 				if source == "envelope" {
 					command = "SSHGATE_READ1 confined,net " + command
 				}
+				if source == "signed" {
+					command = signedNetRead(t, dir, command)
+				}
 				code, _, _ := runWith(t, command)
 				want := 0
 				if denied {
@@ -83,7 +88,7 @@ func TestAuditNetFields(t *testing.T) {
 					t.Fatalf("audit=%v", rows)
 				}
 				row := rows[0]
-				if _, ok := row["net_grant"]; ok {
+				if value, ok := row["net_grant"]; ok != (source == "signed") || (ok && value != true) {
 					t.Fatalf("unexpected grant: %v", row)
 				}
 				if source == "envelope" {

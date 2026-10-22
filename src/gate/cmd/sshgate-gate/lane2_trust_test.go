@@ -156,3 +156,31 @@ func TestLane2TrustGuardMutations(t *testing.T) {
 		})
 	}
 }
+
+// The subprocess gate shares the fixture seam setter; its assignments must
+// remain visible to the production-mutation guard.
+func TestLane2SubprocessSeamGuard(t *testing.T) {
+	file, err := parser.ParseFile(token.NewFileSet(), "jail_testmain_test.go", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mutations := map[string]int{}
+	want := map[string]int{"applyLane2TestConfig": 3, "testGateMain": 1}
+	for _, declaration := range file.Decls {
+		function, ok := declaration.(*ast.FuncDecl)
+		if !ok || want[function.Name.Name] == 0 {
+			continue
+		}
+		ast.Inspect(function.Body, func(node ast.Node) bool {
+			if lane2TrustMutation(node) {
+				mutations[function.Name.Name]++
+			}
+			return true
+		})
+	}
+	for name, count := range want {
+		if mutations[name] != count {
+			t.Errorf("%s has %d guarded mutations; want %d", name, mutations[name], count)
+		}
+	}
+}

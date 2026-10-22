@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/karthikeyan5/sshgate/src/gate"
 	"github.com/karthikeyan5/sshgate/src/gate/confine"
@@ -50,6 +51,10 @@ func TestJailMatrixPhase4(t *testing.T) {
 			t.Run("G-ENVELOPE-ABSENT-TWIN", func(t *testing.T) { legEnvelopeAbsent(t, abi, "G-ENVELOPE-ABSENT-TWIN") })
 			t.Run("G-ENVELOPE-UNMET", func(t *testing.T) { legUnmetFuse(t, abi, "G-ENVELOPE-UNMET", "", false) })
 			t.Run("G-NET-LANE2-AVAILABLE", func(t *testing.T) { legEnvelopeDaemon(t, abi) })
+			t.Run("G-NET-LANE2-ABSENT", func(t *testing.T) { legNetDaemonAbsent(t, abi, false) })
+			t.Run("G-NET-LANE2-ABSENT-TWIN", func(t *testing.T) { legNetDaemonAbsent(t, abi, true) })
+			t.Run("G-NET-NO-FALLBACK-TWIN", func(t *testing.T) { legEnvelopeAbsent(t, abi, "G-NET-NO-FALLBACK-TWIN") })
+			t.Run("G-NET-GRANT-CONNECT", func(t *testing.T) { legInet(t, abi, "G-NET-GRANT-CONNECT") })
 			t.Run("G-ENVELOPE-NEW-GATE", func(t *testing.T) {
 				p := newProof(t, "G-ENVELOPE-NEW-GATE")
 				dir := t.TempDir()
@@ -101,7 +106,7 @@ func legEnvelopeAbsent(t *testing.T, abi, name string) {
 	dir := t.TempDir()
 	withGateDir(t, dir)
 	target := seedTarget(t, dir)
-	twin := name == "G-ENVELOPE-ABSENT-TWIN"
+	twin := strings.HasSuffix(name, "-TWIN")
 	if !twin {
 		control := filepath.Join(dir, "control")
 		if err := os.WriteFile(control, []byte("orig\n"), 0600); err != nil {
@@ -216,20 +221,74 @@ func legEnvelopeDaemon(t *testing.T, abi string) {
 		fields := strings.Fields(command)
 		out, err := exec.Command(filepath.Join(bin, fields[0]), fields[1:]...).Output()
 		controls = controls && (err == nil || fields[0] == "docker") && len(out) > 0
-		dir := t.TempDir()
-		withGateDir(t, dir)
-		plantPin(t, dir, pinAllow, 0644)
-		withReadSpec(t, abi, nil)
-		code, out2, stderr := runWith(t, "SSHGATE_READ1 confined,net "+command)
-		ran := lane2Reported([]byte(out2), mode)
-		if fields[0] == "docker" {
-			ran = out2 == "SG-FIXTURE no mode\n"
+		for _, signed := range []bool{false, true} {
+			dir := t.TempDir()
+			withGateDir(t, dir)
+			plantPin(t, dir, pinAllow, 0644)
+			withReadSpec(t, abi, nil)
+			raw := "SSHGATE_READ1 confined,net " + command
+			if signed {
+				raw = signedNetRead(t, dir, command)
+			}
+			code, out2, stderr := runWith(t, raw)
+			ran := lane2Reported([]byte(out2), mode)
+			if fields[0] == "docker" {
+				ran = out2 == "SG-FIXTURE no mode\n"
+			}
+			p.Effect("lane2-ran", ran)
+			valid = valid && (code == 77 && stderr == "gate: "+sigwire.GateDenyNetDaemonRead+"\n" && !ran || (code == 0 || code == 2) && ran)
 		}
-		p.Effect("lane2-ran", ran)
-		valid = valid && (code == 77 && stderr == "gate: "+sigwire.GateDenyNetDaemonRead+"\n" && !ran || (code == 0 || code == 2) && ran)
 	}
 	p.Control("effect", controls)
 	p.Jailed("attempt", valid)
 	p.Observed("effect", valid)
+	p.Finish()
+}
+
+func legNetDaemonAbsent(t *testing.T, abi string, twin bool) {
+	name := "G-NET-LANE2-ABSENT"
+	if twin {
+		name += "-TWIN"
+	}
+	p := newProof(t, name)
+	bin := buildLane2Fixtures(t)
+	socket := filepath.Join(lane2SocketDir(t), "docker")
+	listener := lane2UnixListen(t, socket)
+	previous := lane2SystemEndpoints
+	lane2SystemEndpoints.docker = socket
+	t.Cleanup(func() { lane2SystemEndpoints = previous })
+	dir := t.TempDir()
+	withGateDir(t, dir)
+	withReadSpec(t, abi, func(spec *confine.Spec) { spec.ForceABI = confine.ForceNoLandlock })
+	if !twin {
+		nonce := lane2Nonce(lane2Mode(t, "ps"))
+		lane2FixtureFile(t, bin, "ps-connect", nonce)
+		code, out, _ := runWith(t, "docker ps")
+		received, healthy := lane2Received(listener, time.Second)
+		records := auditRecords(t, dir)
+		p.Control("effect", code == 0 && strings.HasPrefix(out, "CONTAINER ID") && healthy && received == "SG-PS "+nonce && len(records) == 1 && records[0]["enforcement"] == "daemon-read" && records[0]["jail_absent"] == "landlock:ENOSYS")
+	}
+	nonce := lane2Nonce(lane2Mode(t, "ps"))
+	lane2FixtureFile(t, bin, "ps-connect", nonce)
+	command := "docker ps"
+	if !twin {
+		command = signedNetRead(t, dir, command)
+	}
+	code, out, stderr := runWith(t, command)
+	received, healthy := lane2Received(listener, time.Second)
+	ran := received == "SG-PS "+nonce
+	records := auditRecords(t, dir)
+	valid := false
+	if twin {
+		valid = code == 0 && ran && len(records) == 1 && records[0]["enforcement"] == "daemon-read" && records[0]["jail_absent"] == "landlock:ENOSYS"
+	} else {
+		p.Effect("lane2-ran", ran)
+		if len(records) == 2 {
+			record := records[1]
+			valid = code == 77 && out == "" && (record["deny_reason"] == "net:daemon-read" && stderr == "gate: "+sigwire.GateDenyNetDaemonRead+"\n" || record["deny_reason"] == "jail:absent:landlock:ENOSYS") || code == 0 && ran
+		}
+	}
+	p.Jailed("attempt", valid)
+	p.Observed("effect", healthy && (received == "" || ran))
 	p.Finish()
 }

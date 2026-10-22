@@ -47,6 +47,8 @@ func TestMain(m *testing.M) {
 			os.Exit(confine.RunWorker(os.Args[2:]))
 		case sentinelSelftest:
 			os.Exit(runJailSelftest(os.Args[2:]))
+		case sentinelLane2Fixtures:
+			os.Exit(testLane2FixturesMain(os.Args[2:]))
 		case sentinelCaplessReader:
 			os.Exit(runCaplessReader(os.Args[2:]))
 		}
@@ -97,8 +99,11 @@ func TestMain(m *testing.M) {
 const testGateEnv = "SSHGATE_TEST_GATE"
 
 type testGateConfig struct {
-	Dir, ABI string
-	Grant    bool
+	Dir, ABI          string
+	HostFPs           []string
+	Absent            bool
+	Lane2             *testLane2Config
+	Lane2IsolationDir string
 	// NoSeal runs the jailed read without sealing the gate (a leg's twin).
 	NoSeal bool
 	// Repeat runs the read a second time in the same gate process, after the
@@ -127,8 +132,19 @@ func testGateMain(raw string) int {
 		return 2
 	}
 	gateDirFn = func() (string, string, error) { return config.Dir, filepath.Join(config.Dir, "gate"), nil }
-	forceNetGrant = config.Grant
-	if config.ABI == "abi1" {
+	if config.HostFPs != nil {
+		hostKeyFPsFn = func() ([]string, error) { return config.HostFPs, nil }
+	}
+	if config.Lane2IsolationDir != "" {
+		lane2BinDirs = []string{config.Lane2IsolationDir}
+	}
+	if config.Lane2 != nil {
+		applyLane2TestConfig(*config.Lane2)
+	}
+	if config.Absent {
+		readSpecHook = func(spec *confine.Spec) { spec.ForceABI = confine.ForceNoLandlock }
+	}
+	if config.ABI == "abi1" && !config.Absent {
 		readSpecHook = func(spec *confine.Spec) { spec.ForceABI = 1 }
 		rehearsalSpecHook = readSpecHook
 	}
@@ -346,4 +362,33 @@ func appendText(path, text string) error {
 	}
 	_, err = file.WriteString(text)
 	return errors.Join(err, file.Close())
+}
+
+const sentinelLane2Fixtures = "__jailtest_lane2fixtures"
+
+type testLane2Config struct {
+	BinDir      string            `json:"bin_dir"`
+	TrustedUIDs []uint32          `json:"trusted_uids"`
+	Endpoints   map[string]string `json:"endpoints"`
+}
+
+func applyLane2TestConfig(config testLane2Config) {
+	lane2BinDirs = []string{config.BinDir}
+	lane2TrustedUIDs = config.TrustedUIDs
+	lane2SystemEndpoints = lane2Endpoints{docker: config.Endpoints["docker"], bus: config.Endpoints["bus"], private: config.Endpoints["private"]}
+}
+
+func testLane2FixturesMain(args []string) int {
+	if len(args) != 2 || !filepath.IsAbs(args[0]) || !filepath.IsAbs(args[1]) {
+		return 2
+	}
+	if err := buildLane2FixtureFiles(args[0]); err != nil {
+		fmt.Fprintln(os.Stderr, "TestMain: lane2 fixtures:", err)
+		return 2
+	}
+	config := testLane2Config{BinDir: args[0], TrustedUIDs: []uint32{0, uint32(os.Getuid())}, Endpoints: map[string]string{"docker": args[1]}}
+	if err := json.NewEncoder(os.Stdout).Encode(config); err != nil {
+		return 2
+	}
+	return 0
 }
