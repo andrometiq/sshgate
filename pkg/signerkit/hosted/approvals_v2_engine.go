@@ -455,12 +455,23 @@ func (e *ApprovalV2Engine) WaitMany(ctx context.Context, client, sub string, ids
 }
 
 // Vote accepts a verified hosted challenge from the human adapter, which owns
-// role and step-up checks. Apply derives policy from the row inside this commit.
+// step-up checks. The transaction rechecks the operator role and derives policy
+// from the stored row.
 func (e *ApprovalV2Engine) Vote(ctx context.Context, key sqlitestore.V2Key, vote ap.CastVote) (ap.Answer, error) {
 	if vote.Hosted == nil || vote.Card != nil {
 		return ap.Answer{}, &ap.CodeError{Code: ap.CodeInvalidRequest}
 	}
-	_, answer, err := e.mutate(ctx, key, vote, ap.Inputs{})
+	_, answer, err := e.transact(ctx, key, func(tx *sql.Tx, _ *ap.R1, _ ap.Now) (ap.Command, ap.Inputs, error) {
+		var role string
+		err := tx.QueryRowContext(ctx, "SELECT role FROM users WHERE id = ?", vote.Operator).Scan(&role)
+		if errors.Is(err, sql.ErrNoRows) || (err == nil && role != "operator") {
+			return nil, ap.Inputs{}, &ap.CodeError{Code: ap.CodeInvalidRequest}
+		}
+		if err != nil {
+			return nil, ap.Inputs{}, approvalTransactionError(err)
+		}
+		return vote, ap.Inputs{}, nil
+	})
 	return answer, err
 }
 
