@@ -15,6 +15,7 @@ import (
 // Serve owns connection lifetimes. An uncertain commit stops acceptance and
 // returns a fatal error to the process owner; it never reopens the store.
 func (s *Service) Serve(ctx context.Context, local *Local) (serveErr error) {
+	s.startWaiter()
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	var handlers sync.WaitGroup

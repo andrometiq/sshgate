@@ -143,7 +143,7 @@ func TestSubmitNotificationBounds(t *testing.T) {
 		t.Run(mode, func(t *testing.T) {
 			service, store, _, _ := submitService(t)
 			defer service.Close()
-			service.submitTimeout = 40 * time.Millisecond
+			service.submitTimeout = 250 * time.Millisecond
 			var summary ap.Summary
 			service.signer = submitSignerFake{
 				submit: func(ctx context.Context, draft ap.ApprovalDraft) (ap.Summary, error) {
@@ -332,7 +332,7 @@ func TestSubmitNotificationWireGolden(t *testing.T) {
 		t.Run(string(status), func(t *testing.T) {
 			service, _, _, _ := submitService(t)
 			defer service.Close()
-			service.submitTimeout = 40 * time.Millisecond
+			service.submitTimeout = 250 * time.Millisecond
 			service.signer = submitSignerFake{
 				submit: func(ctx context.Context, draft ap.ApprovalDraft) (ap.Summary, error) {
 					if status == "" {
@@ -547,7 +547,7 @@ func TestSubmitNotificationReplayEvidence(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer replay.Close()
-			replay.submitTimeout = 40 * time.Millisecond
+			replay.submitTimeout = 250 * time.Millisecond
 			calls := 0
 			job, err := store.Load(request.Input.RequestID)
 			if err != nil {

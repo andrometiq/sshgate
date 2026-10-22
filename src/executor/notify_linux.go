@@ -104,7 +104,11 @@ func (s *Service) Close() {
 	for _, attempt := range s.submissions {
 		attempts = append(attempts, attempt)
 	}
+	waiterStarted := s.waiterStarted
 	s.mu.Unlock()
+	if waiterStarted {
+		<-s.waiterDone
+	}
 	for _, attempt := range attempts {
 		<-attempt.done
 	}
@@ -236,6 +240,7 @@ func (s *Service) commitSubmission(job ap.R2, command ap.JobCommand) (ap.R2, err
 		if err := s.store.Commit(next); err != nil {
 			return job, err
 		}
+		s.jobCommittedLocked(next)
 	}
 	return next, nil
 }

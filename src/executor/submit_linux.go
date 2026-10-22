@@ -35,20 +35,27 @@ type Config struct {
 // Service serializes admission with job commits. C2's job transitions must use
 // this same critical section so released reservations cannot race admission.
 type Service struct {
-	mu               sync.Mutex
-	signer           SubmitSigner
-	submissions      map[string]*submitAttempt
-	fatal            chan error
-	effects          context.Context
-	cancelEffects    context.CancelFunc
-	stopping         bool
-	submitTimeout    time.Duration
-	store            Store
-	servers          *registry.Servers
-	clock            elapsed.Clock
-	stagedGatePath   string
-	epoch            string
-	reservationLimit int64 // Test seam; production uses R2Max.
+	mu                sync.Mutex
+	signer            SubmitSigner
+	submissions       map[string]*submitAttempt
+	fatal             chan error
+	effects           context.Context
+	cancelEffects     context.CancelFunc
+	stopping          bool
+	waitSigner        WaitSigner // Immutable constructor dependency, separate from submission test seams.
+	waiterStarted     bool
+	waiterDone        chan struct{}
+	waiterWake        chan struct{}
+	waiterInitialized bool
+	waitJobs          map[string]bool
+	jobNudges         map[string]chan struct{}
+	submitTimeout     time.Duration
+	store             Store
+	servers           *registry.Servers
+	clock             elapsed.Clock
+	stagedGatePath    string
+	epoch             string
+	reservationLimit  int64 // Test seam; production uses R2Max.
 }
 
 func NewService(config Config) (*Service, error) {
@@ -62,11 +69,13 @@ func NewService(config Config) (*Service, error) {
 	if _, err := rand.Read(epoch[:]); err != nil {
 		return nil, err
 	}
+	waitSigner, _ := config.Signer.(WaitSigner)
 	effects, cancelEffects := context.WithCancel(context.Background())
 	return &Service{
 		store: config.Store, servers: config.Servers, clock: config.Clock,
-		signer: config.Signer, submissions: make(map[string]*submitAttempt), fatal: make(chan error, 1),
+		signer: config.Signer, waitSigner: waitSigner, submissions: make(map[string]*submitAttempt), fatal: make(chan error, 1),
 		effects: effects, cancelEffects: cancelEffects, submitTimeout: SubmitNotificationTimeout,
+		waiterDone: make(chan struct{}), waiterWake: make(chan struct{}, 1), jobNudges: make(map[string]chan struct{}), waitJobs: make(map[string]bool),
 		stagedGatePath: config.StagedGatePath, epoch: hex.EncodeToString(epoch[:]), reservationLimit: ap.R2Max,
 	}, nil
 }
@@ -144,6 +153,7 @@ func (s *Service) Submit(request executorwire.SubmitRequest) (executorwire.Job, 
 	if err := s.store.Commit(job); err != nil {
 		return executorwire.Job{}, err
 	}
+	s.jobCommittedLocked(job)
 	return executorwire.FromSummary(ap.JobView(job, s.epoch)), nil
 }
 
