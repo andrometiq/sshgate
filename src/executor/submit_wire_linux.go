@@ -44,11 +44,8 @@ func (s *Service) ServeConn(ctx context.Context, conn net.Conn) error {
 		switch request := request.(type) {
 		case executorwire.SubmitRequest:
 			response.Kind = executorwire.KindSubmit
-			var job executorwire.Job
-			job, err = s.Submit(request)
-			if err == nil {
-				response.OK, response.Job = true, &job
-			}
+			response, err = s.SubmitAndNotify(ctx, request)
+			response.ProtoVersion, response.Kind = executorwire.Proto, executorwire.KindSubmit
 		case executorwire.GetRequest:
 			response.Kind = executorwire.KindGet
 			var job executorwire.Job

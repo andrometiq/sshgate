@@ -20,15 +20,23 @@ func (s *Service) Serve(ctx context.Context, local *Local) (serveErr error) {
 	var handlers sync.WaitGroup
 	var mu sync.Mutex
 	connections := make(map[*net.UnixConn]bool)
-	fatal := make(chan error, 1)
+	var fatalErr error
 	stopped := make(chan struct{})
 	go func() {
 		defer close(stopped)
-		<-ctx.Done()
+		select {
+		case fatalErr = <-s.fatal:
+			cancel()
+		case <-ctx.Done():
+		}
 		local.listener.Close()
+		s.Close()
 		mu.Lock()
+		drainDeadline := time.Now().Add(time.Second)
 		for conn := range connections {
-			conn.Close()
+			// Wake incomplete frames while allowing committed replies to finish.
+			conn.SetReadDeadline(time.Now())
+			conn.SetWriteDeadline(drainDeadline)
 		}
 		mu.Unlock()
 	}()
@@ -36,8 +44,12 @@ func (s *Service) Serve(ctx context.Context, local *Local) (serveErr error) {
 		cancel()
 		<-stopped
 		handlers.Wait()
+		if fatalErr != nil {
+			serveErr = fatalErr
+			return
+		}
 		select {
-		case err := <-fatal:
+		case err := <-s.fatal:
 			serveErr = err
 		default:
 		}
@@ -46,12 +58,7 @@ func (s *Service) Serve(ctx context.Context, local *Local) (serveErr error) {
 		conn, err := local.AcceptUnix()
 		if err != nil {
 			if ctx.Err() != nil {
-				select {
-				case err := <-fatal:
-					return err
-				default:
-					return nil
-				}
+				return nil
 			}
 			if errors.Is(err, errPeerRefused) {
 				continue
@@ -64,21 +71,26 @@ func (s *Service) Serve(ctx context.Context, local *Local) (serveErr error) {
 			mu.Unlock()
 			continue
 		}
+		// Initialize before publishing so shutdown deadlines cannot be overwritten.
+		conn.SetDeadline(time.Now().Add(90 * time.Second))
 		connections[conn] = true
 		mu.Unlock()
 		handlers.Add(1)
 		go func() {
 			defer handlers.Done()
 			defer func() { mu.Lock(); delete(connections, conn); mu.Unlock() }()
-			// Covers frame reads, the maximum await, and a stalled response consumer.
-			conn.SetDeadline(time.Now().Add(90 * time.Second))
 			if err := s.ServeConn(ctx, conn); errors.Is(err, securestate.ErrCommitUncertain) {
-				select {
-				case fatal <- err:
-				default:
-				}
+				s.reportFatal(err)
 				cancel()
 			}
 		}()
+	}
+}
+
+// reportFatal keeps storage failure delivery independent of caller lifetimes.
+func (s *Service) reportFatal(err error) {
+	select {
+	case s.fatal <- err:
+	default:
 	}
 }

@@ -3,10 +3,12 @@
 package executor
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
 	"sync"
+	"time"
 
 	"github.com/karthikeyan5/sshgate/internal/elapsed"
 	"github.com/karthikeyan5/sshgate/internal/securestate"
@@ -27,12 +29,20 @@ type Config struct {
 	Servers        *registry.Servers
 	Clock          elapsed.Clock
 	StagedGatePath string
+	Signer         SubmitSigner
 }
 
 // Service serializes admission with job commits. C2's job transitions must use
 // this same critical section so released reservations cannot race admission.
 type Service struct {
 	mu               sync.Mutex
+	signer           SubmitSigner
+	submissions      map[string]*submitAttempt
+	fatal            chan error
+	effects          context.Context
+	cancelEffects    context.CancelFunc
+	stopping         bool
+	submitTimeout    time.Duration
 	store            Store
 	servers          *registry.Servers
 	clock            elapsed.Clock
@@ -52,8 +62,13 @@ func NewService(config Config) (*Service, error) {
 	if _, err := rand.Read(epoch[:]); err != nil {
 		return nil, err
 	}
-	return &Service{store: config.Store, servers: config.Servers, clock: config.Clock,
-		stagedGatePath: config.StagedGatePath, epoch: hex.EncodeToString(epoch[:]), reservationLimit: ap.R2Max}, nil
+	effects, cancelEffects := context.WithCancel(context.Background())
+	return &Service{
+		store: config.Store, servers: config.Servers, clock: config.Clock,
+		signer: config.Signer, submissions: make(map[string]*submitAttempt), fatal: make(chan error, 1),
+		effects: effects, cancelEffects: cancelEffects, submitTimeout: SubmitNotificationTimeout,
+		stagedGatePath: config.StagedGatePath, epoch: hex.EncodeToString(epoch[:]), reservationLimit: ap.R2Max,
+	}, nil
 }
 
 // Submit returns only public job facts, and only after the durable commit.
@@ -65,6 +80,9 @@ func (s *Service) Submit(request executorwire.SubmitRequest) (executorwire.Job, 
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.stopping {
+		return executorwire.Job{}, refusal("executor_unavailable")
+	}
 	in := request.Input
 	job, err := s.store.Load(in.RequestID)
 	if err == nil {

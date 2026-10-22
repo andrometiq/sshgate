@@ -9,6 +9,7 @@ import (
 
 	"github.com/karthikeyan5/sshgate/src/executor"
 	"github.com/karthikeyan5/sshgate/src/mcp/registry"
+	"github.com/karthikeyan5/sshgate/src/mcp/sign"
 )
 
 func run(ctx context.Context) error {
@@ -35,7 +36,11 @@ func run(ctx context.Context) error {
 	if gatePath == "" {
 		gatePath = filepath.Join(root, "bin", "sshgate-gate-linux-amd64")
 	}
-	service, err := executor.NewService(executor.Config{Store: store, Servers: servers, StagedGatePath: gatePath})
+	socket := os.Getenv("SSHGATE_SIGNER_SOCK")
+	if socket == "" {
+		socket = "/run/sshgatesigner/sock"
+	}
+	service, err := executor.NewService(executor.Config{Store: store, Servers: servers, StagedGatePath: gatePath, Signer: &sign.ApprovalClient{SocketPath: socket}})
 	if err != nil {
 		return err
 	}
