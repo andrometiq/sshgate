@@ -72,6 +72,7 @@ import (
 	"github.com/pquerna/otp/totp"
 
 	"github.com/karthikeyan5/sshgate/pkg/signerkit"
+	"github.com/karthikeyan5/sshgate/pkg/signerkit/assist"
 	"github.com/karthikeyan5/sshgate/pkg/signerkit/hosted"
 	"github.com/karthikeyan5/sshgate/pkg/signerkit/hosted/refapp"
 	"github.com/karthikeyan5/sshgate/pkg/signerkit/policyarchive"
@@ -97,16 +98,40 @@ func main() {
 }
 
 func run(args []string) int {
+	transport, err := hosted.NewProcessAuditSink(os.Stderr)
+	if err != nil {
+		return 1
+	}
+	previousLog := log.Writer()
+	log.SetOutput(transport)
+	defer log.SetOutput(previousLog)
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = transport.Drain(ctx)
+	}()
 	fs := flag.NewFlagSet("signer-server", flag.ContinueOnError)
-	fs.SetOutput(os.Stderr)
+	fs.SetOutput(transport)
 	apiKeyFile := fs.String("api-key-file", "", "Path to a 0600 file containing the bearer API key")
 	signingKeyFile := fs.String("signing-key-file", "", "Path to a 0600 file containing the 64-byte raw Ed25519 master signing key")
 	signingPublicKeyFile := fs.String("signing-public-key-file", "", "Path for the 32-byte public key written by --init-signing-key")
 	initSigningKey := fs.Bool("init-signing-key", false, "Generate a new signing keypair and exit; refuses to overwrite either file")
+	bootstrapAdminName := fs.String("bootstrap-admin", "", "Create a separate admin account with a TOTP factor and exit")
 	bootstrapOperatorName := fs.String("bootstrap-operator", "", "Create the first UI operator with a TOTP factor and exit")
-	bootstrapOutputFile := fs.String("bootstrap-output-file", "", "0600 artifact for bootstrap TOTP material (required with --bootstrap-operator)")
+	bootstrapOutputFile := fs.String("bootstrap-output-file", "", "0600 artifact for bootstrap TOTP material (required with --bootstrap-operator or --bootstrap-admin)")
 	machineClientID := fs.String("machine-client-id", "", "Stable operator ID bound to the machine bearer credential")
 	requiredApprovals := fs.Int("required-approvals", 1, "Number of distinct eligible approvals required per request")
+	approvalValidity := fs.Duration("approval-validity", 24*time.Hour, "Pending approval validity (5m..168h)")
+	approvalRetention := fs.Duration("approval-retention", 7*24*time.Hour, "Age before shedding settled payloads")
+	approvalMaxAge := fs.Duration("approval-max-age", 0, "Terminal row deletion age; 0 disables deletion")
+	approvalReportHorizon := fs.Duration("approval-report-horizon", 24*time.Hour, "Execution report horizon (1h..168h)")
+	approvalMaxFullRows := fs.Int64("approval-max-full-rows", 4096, "Full approval row ceiling")
+	approvalMaxRows := fs.Int64("approval-max-rows", 200000, "Total approval row ceiling")
+	legacyTTL := fs.Duration("legacy-v1-pending-ttl", 24*time.Hour, "Pending v1 request lifetime")
+	assistEndpoint := fs.String("assist-endpoint", "", "Optional advisory Chat Completions endpoint")
+	assistModel := fs.String("assist-model", "", "Advisory model")
+	assistKeyFile := fs.String("assist-key-file", "", "Owner-only advisory API key file")
+	assistTimeout := fs.Duration("assist-timeout", 5*time.Second, "Advisory deadline (at most 5s)")
 	addr := fs.String("addr", ":8443", "Listen address (host:port). Default :8443; TLS terminated upstream.")
 	dbPath := fs.String("db", "/var/lib/signer-server/state.db", "SQLite database path")
 	compactPolicyBefore := fs.String("compact-policy-before", "", "Offline compact policy terminals resolved before RFC3339 time")
@@ -143,8 +168,16 @@ func run(args []string) int {
 		return 1
 	}
 
-	if *initSigningKey && strings.TrimSpace(*bootstrapOperatorName) != "" {
-		logf("--init-signing-key and --bootstrap-operator are mutually exclusive")
+	if strings.TrimSpace(*bootstrapAdminName) != "" && strings.TrimSpace(*bootstrapOperatorName) != "" {
+		logf("--bootstrap-admin and --bootstrap-operator are mutually exclusive")
+		return 1
+	}
+	bootstrapName, bootstrapRole := strings.TrimSpace(*bootstrapOperatorName), store.Role("operator")
+	if strings.TrimSpace(*bootstrapAdminName) != "" {
+		bootstrapName, bootstrapRole = strings.TrimSpace(*bootstrapAdminName), "admin"
+	}
+	if *initSigningKey && bootstrapName != "" {
+		logf("--init-signing-key and account bootstrap are mutually exclusive")
 		return 1
 	}
 	if *initSigningKey {
@@ -174,7 +207,7 @@ func run(args []string) int {
 		}
 		return 0
 	}
-	if name := strings.TrimSpace(*bootstrapOperatorName); name != "" {
+	if name := bootstrapName; name != "" {
 		if err := validateUIConfig(true, *rpID, rpOrigins, *sessionTTL); err != nil {
 			logf("bootstrap operator: %v", err)
 			return 1
@@ -185,18 +218,30 @@ func run(args []string) int {
 			return 1
 		}
 		defer func() { _ = db.Close() }()
-		err = bootstrapOperator(context.Background(), db, hosted.AuthConfig{
+		err = bootstrapAccount(context.Background(), db, hosted.AuthConfig{
 			RPID:          strings.TrimSpace(*rpID),
 			RPDisplayName: strings.TrimSpace(*rpDisplayName),
 			RPOrigins:     slices.Clone(rpOrigins),
 			SessionTTL:    *sessionTTL,
 			TOTPIssuer:    strings.TrimSpace(*totpIssuer),
-		}, name, strings.TrimSpace(*bootstrapOutputFile))
+		}, name, strings.TrimSpace(*bootstrapOutputFile), bootstrapRole)
 		if err != nil {
 			logf("bootstrap operator: %v", err)
 			return 1
 		}
 		return 0
+	}
+	ordinary := hosted.OrdinaryConfig{
+		Validity: *approvalValidity, Retention: *approvalRetention, MaxAge: *approvalMaxAge,
+		ReportHorizon: *approvalReportHorizon, MaxFullRows: *approvalMaxFullRows, MaxRows: *approvalMaxRows,
+		LegacyTTL: *legacyTTL, AssistTimeout: *assistTimeout,
+	}
+	if *assistEndpoint != "" || *assistModel != "" || *assistKeyFile != "" {
+		ordinary.Assist = &assist.OpenAI{Endpoint: *assistEndpoint, Model: *assistModel, APIKeyFile: *assistKeyFile}
+	}
+	if err := ordinary.Validate(); err != nil {
+		logf("approval configuration: %v", err)
+		return 1
 	}
 	policyOptions, err := resolvePolicyServingOptions(policyServingFlags{
 		AuthorityID: *policyAuthorityID, ArchiveDirectory: *policyArchiveDir,
@@ -254,14 +299,14 @@ func run(args []string) int {
 	}
 	core, err := signerkit.New(signerkit.Config{
 		Signer: signingKey,
-		Audit:  signerkit.NewAppendOnlySink(os.Stderr),
+		Audit:  transport,
 	})
 	if err != nil {
 		logf("construct signing core: %v", err)
 		return 1
 	}
 
-	logger := log.New(os.Stderr, "signer-server: ", log.LstdFlags|log.Lmicroseconds)
+	logger := log.New(transport, "signer-server: ", log.LstdFlags|log.Lmicroseconds)
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 	policyLifetime := ctx
@@ -288,7 +333,15 @@ func run(args []string) int {
 				RequireStepUp:  *requireStepUp, SecureCookie: *secureCookie, TrustProxyHeaders: *trustProxyHeaders,
 			}
 		}
-		return hosted.New(config)
+		server, err := hosted.New(config)
+		if err != nil {
+			return nil, err
+		}
+		if err := server.StartApprovals(database, core, transport, ordinary); err != nil {
+			_ = server.Close()
+			return nil, err
+		}
+		return server, nil
 	}
 
 	var srv *hosted.Server
@@ -351,7 +404,10 @@ func run(args []string) int {
 		}
 	}
 
+	defer func() { _ = srv.Close() }()
+
 	httpSrv = &http.Server{
+		ErrorLog:          logger,
 		Addr:              *addr,
 		Handler:           hostedHTTPHandler(*uiEnabled, srv, refapp.Handler()),
 		ReadHeaderTimeout: 10 * time.Second,
@@ -636,6 +692,10 @@ func validateUIConfig(enabled bool, rpID string, rpOrigins []string, sessionTTL 
 var operatorNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._@-]{0,127}$`)
 
 func bootstrapOperator(ctx context.Context, db *sqlitestore.DB, authCfg hosted.AuthConfig, username, outputPath string) error {
+	return bootstrapAccount(ctx, db, authCfg, username, outputPath, "operator")
+}
+
+func bootstrapAccount(ctx context.Context, db *sqlitestore.DB, authCfg hosted.AuthConfig, username, outputPath string, role store.Role) error {
 	username = strings.TrimSpace(username)
 	if !operatorNamePattern.MatchString(username) {
 		return errors.New("operator must be 1-128 characters: letters, digits, dot, underscore, @, or hyphen")
@@ -652,12 +712,16 @@ func bootstrapOperator(ctx context.Context, db *sqlitestore.DB, authCfg hosted.A
 	}
 	user, err := db.GetUserByName(ctx, username)
 	if errors.Is(err, store.ErrNotFound) {
-		user = &store.User{ID: username, Username: username, Role: "operator"}
+		user = &store.User{ID: username, Username: username, Role: role}
 		if err := db.CreateUser(ctx, user); err != nil {
 			return fmt.Errorf("create operator: %w", err)
 		}
 	} else if err != nil {
 		return fmt.Errorf("look up operator: %w", err)
+	}
+
+	if user.Role != role {
+		return errors.New("bootstrap account already exists with a different role")
 	}
 
 	existingSecret, factorErr := db.GetTOTP(ctx, user.ID)
@@ -881,5 +945,5 @@ func assertNonRoot() error {
 // logf writes one line to stderr with the daemon prefix. Mirrors the
 // pattern used by the v1 signer main.
 func logf(format string, args ...any) {
-	fmt.Fprintf(os.Stderr, "signer-server: "+format+"\n", args...)
+	log.Printf("signer-server: "+format, args...)
 }

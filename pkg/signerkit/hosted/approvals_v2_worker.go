@@ -560,3 +560,23 @@ func (e *ApprovalV2Engine) finishAssist(key sqlitestore.V2Key, deadline time.Tim
 		}
 	}
 }
+
+// Drain waits for queued process diagnostics before exit, bounded by ctx.
+// It never closes the process writer or interrupts a blocking write.
+func (s *ProcessAuditSink) Drain(ctx context.Context) error {
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	for {
+		s.mu.Lock()
+		busy := s.busy
+		s.mu.Unlock()
+		if !busy {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
+	}
+}

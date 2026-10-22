@@ -1,14 +1,17 @@
 package hosted
 
 import (
+	"context"
 	"crypto/rand"
 	"errors"
 	"fmt"
 	"log"
 	"time"
 
+	"github.com/karthikeyan5/sshgate/internal/elapsed"
 	"github.com/karthikeyan5/sshgate/pkg/signerkit"
 	"github.com/karthikeyan5/sshgate/pkg/signerkit/assist"
+	"github.com/karthikeyan5/sshgate/pkg/signerkit/sqlitestore"
 	"github.com/karthikeyan5/sshgate/pkg/signerkit/store"
 	"github.com/karthikeyan5/sshgate/src/approvalplan"
 	"github.com/karthikeyan5/sshgate/src/approvalreview"
@@ -188,4 +191,107 @@ func (hostedAssistInputBuilder) BuildAssistInput(plan approvalplan.ApprovalPlanV
 		return assist.Input{}, err
 	}
 	return assist.RedactForProvider(plan, salt, redactrules.Combined())
+}
+
+// OrdinaryConfig configures the hosted approval lifecycle independently of policy.
+type OrdinaryConfig struct {
+	Validity, Retention, MaxAge, ReportHorizon, LegacyTTL, AssistTimeout time.Duration
+	MaxFullRows, MaxRows                                                 int64
+	Assist                                                               *assist.OpenAI
+}
+
+func (c OrdinaryConfig) Validate() error {
+	if c.Validity < approvalplan.ValidityMin || c.Validity > approvalplan.ValidityMax {
+		return errors.New("approval-validity must be between 5m and 168h")
+	}
+	if c.Retention <= 0 || c.MaxAge < 0 || c.LegacyTTL <= 0 {
+		return errors.New("approval-retention and legacy-v1-pending-ttl must be positive; approval-max-age must be non-negative")
+	}
+	if c.ReportHorizon < approvalplan.ReportHorizonMin || c.ReportHorizon > approvalplan.ReportHorizonMax {
+		return errors.New("approval-report-horizon must be between 1h and 168h")
+	}
+	if c.MaxFullRows <= 0 || c.MaxFullRows > c.MaxRows {
+		return errors.New("approval row ceilings must be positive; full rows must not exceed total rows")
+	}
+	if c.AssistTimeout <= 0 {
+		return errors.New("assist-timeout must be positive")
+	}
+	if c.Assist != nil {
+		return c.Assist.Check()
+	}
+	return nil
+}
+
+// StartApprovals attaches the machine plane and transfers worker ownership to s.
+func (s *Server) StartApprovals(database *sqlitestore.DB, core *signerkit.Service, audit signerkit.AuditSink, c OrdinaryConfig) error {
+	if err := c.Validate(); err != nil {
+		return err
+	}
+	if s.MachineClientID == "" {
+		return ErrNoMachineClientID
+	}
+	config := ApprovalV2Config{
+		Store: database, LegacyStore: database, Clock: elapsed.Real(),
+		Freezer: ordinaryFreezer{c.Validity}, SnapshotBuilder: ordinarySnapshot{},
+		Minter: ApprovalV2Minter{Core: core}, AuditSink: audit, Logger: s.Logger,
+		RequiredApprovals: s.RequiredApprovals, AssistTimeout: c.AssistTimeout,
+		Settings:    approvalplan.Settings{Hosted: true, Retention: c.Retention, MaxAge: c.MaxAge, ReportHorizon: c.ReportHorizon},
+		MaxFullRows: c.MaxFullRows, MaxRows: c.MaxRows,
+	}
+	if c.Assist != nil {
+		config.Assessor = c.Assist
+		config.AssistPool = assist.NewPool(4, assist.Timers{})
+	}
+	engine, err := NewApprovalV2Engine(config)
+	if err == nil {
+		err = s.AttachApprovals(engine)
+	}
+	if err == nil {
+		err = s.StartOrdinaryWorkers(engine)
+	}
+	if err != nil {
+		if engine != nil {
+			engine.assistCancel()
+		}
+		if config.AssistPool != nil {
+			config.AssistPool.Close()
+		}
+		return err
+	}
+	s.LegacyPendingTTL = c.LegacyTTL
+	return nil
+}
+
+type ordinaryFreezer struct{ validity time.Duration }
+
+func (f ordinaryFreezer) Freeze(ctx context.Context, draft approvalplan.ApprovalDraft, client, sub string, now time.Time) (approvalplan.ApprovalPlanV1, error) {
+	if err := ctx.Err(); err != nil {
+		return approvalplan.ApprovalPlanV1{}, err
+	}
+	if err := draft.Validate(); err != nil {
+		return approvalplan.ApprovalPlanV1{}, err
+	}
+	validity := f.validity
+	if seconds := draft.RequestedValiditySeconds; seconds != nil {
+		validity = min(validity, time.Duration(*seconds)*time.Second)
+	}
+	return approvalplan.FreezeDraft(draft, approvalplan.FreezeInputs{RequesterPrincipal: client, RequesterSub: sub, Now: now, Validity: validity})
+}
+
+type ordinarySnapshot struct{}
+
+func (ordinarySnapshot) BuildSnapshot(ctx context.Context, plan approvalplan.ApprovalPlanV1) ([]byte, string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, "", err
+	}
+	snapshot, err := BuildApprovalSnapshot(plan)
+	if err != nil {
+		return nil, "", err
+	}
+	view, err := approvalreview.BuildView(snapshot, approvalreview.Assist{State: approvalplan.AssistPreparing})
+	if err != nil {
+		return nil, "", err
+	}
+	encoded, err := snapshot.Encode()
+	return encoded, view.Reason, err
 }
