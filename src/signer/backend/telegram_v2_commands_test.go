@@ -1,0 +1,225 @@
+package backend
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"strconv"
+	"strings"
+	"testing"
+	"testing/synctest"
+	"time"
+
+	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
+	"github.com/karthikeyan5/sshgate/pkg/signerkit"
+)
+
+type commandAudit struct {
+	events []signerkit.AuditEvent
+	fail   bool
+}
+
+func (a *commandAudit) Write(e signerkit.AuditEvent) error {
+	a.events = append(a.events, e)
+	if a.fail {
+		return errors.New("audit unavailable")
+	}
+	return nil
+}
+func commandUpdate(id int, text string) tgbotapi.Update {
+	return tgbotapi.Update{UpdateID: id, Message: &tgbotapi.Message{From: &tgbotapi.User{ID: 42}, Chat: &tgbotapi.Chat{ID: 42, Type: "private"}, Text: text, Entities: []tgbotapi.MessageEntity{{Type: "bot_command", Offset: 0, Length: len(strings.Fields(text)[0])}}}}
+}
+func TestApprovalCommandGate(t *testing.T) {
+	tests := []struct {
+		name, reason string
+		change       func(*TelegramBackend, *tgbotapi.Message)
+	}{
+		{"unknown", "unknown_command", func(_ *TelegramBackend, _ *tgbotapi.Message) {}},
+		{"wrong user", "wrong_user", func(_ *TelegramBackend, m *tgbotapi.Message) { m.From.ID = 99 }},
+		{"missing user", "wrong_user", func(_ *TelegramBackend, m *tgbotapi.Message) { m.From = nil }},
+		{"group", "not_private", func(_ *TelegramBackend, m *tgbotapi.Message) { m.Chat.Type = "group" }},
+		{"wrong chat", "not_private", func(_ *TelegramBackend, m *tgbotapi.Message) { m.Chat.ID = 99 }},
+		{"missing chat", "not_private", func(_ *TelegramBackend, m *tgbotapi.Message) { m.Chat = nil }},
+		{"forward user", "forwarded", func(_ *TelegramBackend, m *tgbotapi.Message) { m.ForwardFrom = &tgbotapi.User{ID: 99} }},
+		{"forward chat", "forwarded", func(_ *TelegramBackend, m *tgbotapi.Message) { m.ForwardFromChat = &tgbotapi.Chat{ID: 99} }},
+		{"forward message", "forwarded", func(_ *TelegramBackend, m *tgbotapi.Message) { m.ForwardFromMessageID = 1 }},
+		{"forward signature", "forwarded", func(_ *TelegramBackend, m *tgbotapi.Message) { m.ForwardSignature = "private" }},
+		{"forward name", "forwarded", func(_ *TelegramBackend, m *tgbotapi.Message) { m.ForwardSenderName = "private" }},
+		{"forward date", "forwarded", func(_ *TelegramBackend, m *tgbotapi.Message) { m.ForwardDate = 1 }},
+		{"automatic forward", "forwarded", func(_ *TelegramBackend, m *tgbotapi.Message) { m.IsAutomaticForward = true }},
+		{"drained", "redelivered", func(b *TelegramBackend, _ *tgbotapi.Message) { b.commandDrain = true }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newCallbackFixture(t)
+			a := &commandAudit{}
+			f.backend.CommandAudit = a
+			u := commandUpdate(100, "/cancel secret-argument")
+			tt.change(f.backend, u.Message)
+			before := time.Now()
+			f.backend.dispatch(u)
+			if len(a.events) != 1 {
+				t.Fatalf("audit events: %v", a.events)
+			}
+			e := a.events[0]
+			transition := "command_refused{" + tt.reason + "}"
+			if e.Status != "approval-"+transition || e.Approval == nil || e.Approval.Transition != transition || !e.Approval.Replay || e.TS.Before(before) || e.TS.After(time.Now()) {
+				t.Fatalf("event: %+v", e)
+			}
+			encoded, _ := json.Marshal(e)
+			if strings.Contains(string(encoded), "secret-argument") || e.RequestID != "" || len(e.Commands) != 0 || len(e.Servers) != 0 {
+				t.Fatalf("audit leaked input: %s", encoded)
+			}
+			select {
+			case notify := <-f.backend.notifications:
+				notify()
+			default:
+				t.Fatal("no refusal reply")
+			}
+			calls := f.api.snapshot()
+			if len(calls) != 1 || calls[0].form.Get("chat_id") != "42" || calls[0].form.Get("text") != "command refused: "+tt.reason {
+				t.Fatalf("reply: %+v", calls)
+			}
+		})
+	}
+}
+func TestApprovalCommandReplyAndLegacy(t *testing.T) {
+	for _, linked := range []int64{42, -42, 0} {
+		t.Run(strconv.FormatInt(linked, 10), func(t *testing.T) {
+			f := newCallbackFixture(t)
+			a := &commandAudit{fail: true}
+			f.backend.CommandAudit = a
+			f.backend.chatStore.Save(linked)
+			f.backend.dispatch(commandUpdate(1, "/deny_all"))
+			if len(a.events) != 1 {
+				t.Fatal("missing failed audit attempt")
+			}
+			if (len(f.backend.notifications) == 1) != (linked == 42) {
+				t.Fatal("reply escaped linked DM")
+			}
+		})
+	}
+	f := newCallbackFixture(t)
+	a := &commandAudit{}
+	f.backend.CommandAudit = a
+	f.backend.commandDrain = true
+	f.backend.dispatch(commandUpdate(1, "/start"))
+	if len(a.events) != 0 || len(f.api.snapshot()) != 1 {
+		t.Fatal("start changed")
+	}
+	f.backend.approvalCallbacks = nil
+	f.api.reset()
+	f.backend.dispatch(commandUpdate(2, "/pending"))
+	if len(a.events) != 0 || len(f.api.snapshot()) != 0 || len(f.backend.notifications) != 0 {
+		t.Fatal("legacy command handling changed")
+	}
+}
+func TestApprovalCommandStartupDrain(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		f := newCallbackFixture(t)
+		a := &commandAudit{}
+		f.backend.CommandAudit = a
+		f.backend.pollTimeout = 30
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		f.backend.runDone = make(chan struct{})
+		defer close(f.backend.runDone)
+		batch := 0
+		f.api.hook = func(r *http.Request, _ int) (string, error) {
+			if !strings.HasSuffix(r.URL.Path, "getUpdates") {
+				t.Fatal("unexpected API call")
+			}
+			batch++
+			wantTimeout := "0"
+			if batch == 4 {
+				wantTimeout = "30"
+			}
+			if r.Form.Get("timeout") != wantTimeout && !(wantTimeout == "0" && r.Form.Get("timeout") == "") {
+				t.Errorf("batch %d timeout %q", batch, r.Form.Get("timeout"))
+			}
+			if r.Form.Get("limit") != "100" {
+				t.Error("missing explicit fetch limit")
+			}
+			var updates []tgbotapi.Update
+			switch batch {
+			case 1, 2:
+				for i := 0; i < 100; i++ {
+					updates = append(updates, commandUpdate((batch-1)*100+i+1, "/pending"))
+				}
+			case 3:
+				updates = []tgbotapi.Update{commandUpdate(201, "/pending"), {UpdateID: 202, CallbackQuery: &tgbotapi.CallbackQuery{ID: "drained-callback", From: &tgbotapi.User{ID: 42}, Data: "v:invalid"}}}
+			case 4:
+				u := commandUpdate(203, "/pending")
+				u.Message.Date = 1
+				updates = []tgbotapi.Update{u}
+				cancel()
+				synctest.Wait()
+			default:
+				t.Fatal("extra poll")
+			}
+			b, _ := json.Marshal(struct {
+				OK     bool              `json:"ok"`
+				Result []tgbotapi.Update `json:"result"`
+			}{true, updates})
+			return string(b), nil
+		}
+		f.backend.pollLoop(ctx)
+		f.api.hook = nil
+		f.api.reset()
+		for len(f.backend.notifications) > 0 {
+			(<-f.backend.notifications)()
+		}
+		answered := 0
+		for _, call := range f.api.snapshot() {
+			if call.method == "answerCallbackQuery" && call.form.Get("callback_query_id") == "drained-callback" {
+				answered++
+			}
+		}
+		if answered != 1 {
+			t.Fatalf("drained callback answered %d times", answered)
+		}
+		if len(a.events) != 202 {
+			t.Fatalf("events: %d", len(a.events))
+		}
+		for i, e := range a.events {
+			reason := "redelivered"
+			if i == 201 {
+				reason = "unknown_command"
+			}
+			if e.Status != "approval-command_refused{"+reason+"}" {
+				t.Fatalf("event %d: %s", i, e.Status)
+			}
+		}
+	})
+}
+
+func TestApprovalCommandForwardOrigin(t *testing.T) {
+	for _, origin := range []string{`{"type":"user","sender_user":{"id":99},"date":1}`, `{"type":"hidden_user","sender_user_name":"private","date":1}`, `{"type":"chat","sender_chat":{"id":99},"date":1}`, `{"type":"channel","chat":{"id":99},"message_id":3,"date":1}`} {
+		t.Run(origin, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				f := newCallbackFixture(t)
+				a := &commandAudit{}
+				f.backend.CommandAudit = a
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				f.backend.runDone = make(chan struct{})
+				defer close(f.backend.runDone)
+				batch := 0
+				f.api.hook = func(_ *http.Request, _ int) (string, error) {
+					batch++
+					if batch == 1 {
+						return `{"ok":true,"result":[]}`, nil
+					}
+					cancel()
+					synctest.Wait()
+					return `{"ok":true,"result":[{"update_id":1,"message":{"from":{"id":42},"chat":{"id":42,"type":"private"},"text":"/pending","entities":[{"type":"bot_command","offset":0,"length":8}],"forward_origin":` + origin + `}}]}`, nil
+				}
+				f.backend.pollLoop(ctx)
+				if len(a.events) != 1 || a.events[0].Status != "approval-command_refused{forwarded}" {
+					t.Fatalf("events: %+v", a.events)
+				}
+			})
+		})
+	}
+}

@@ -41,6 +41,11 @@ import (
 //     {approve, deny, timeout, ctx-cancel} wins.
 type TelegramBackend struct {
 	approvalCallbacks *telegramApprovalCallbacks
+	commandDrain      bool // owned by the poller
+	// CommandAudit is wired to the local AuditLog before Run.
+	CommandAudit interface {
+		Write(signerkit.AuditEvent) error
+	}
 
 	// Static config — set at construction, never mutated.
 	allowedUserID int64
@@ -466,6 +471,7 @@ func (t *TelegramBackend) pollLoop(ctx context.Context) {
 	}()
 
 	offset := 0
+	t.commandDrain = t.approvalCallbacks != nil
 	backoff := 100 * time.Millisecond
 	const backoffCap = 30 * time.Second
 
@@ -507,7 +513,10 @@ func (t *TelegramBackend) pollLoop(ctx context.Context) {
 			if u.UpdateID >= offset {
 				offset = u.UpdateID + 1
 			}
-			t.dispatch(u)
+			t.dispatchUpdate(u.Update, u.forwarded)
+		}
+		if t.commandDrain && len(updates) < approvalUpdateLimit {
+			t.commandDrain = false
 		}
 	}
 }
@@ -515,7 +524,7 @@ func (t *TelegramBackend) pollLoop(ctx context.Context) {
 // fetchUpdates wraps bot.GetUpdates with a recover. A panic in the
 // upstream library or our own dispatch must not kill the polling
 // goroutine (daemon.md §7); we log + count it and continue.
-func (t *TelegramBackend) fetchUpdates(offset int) (updates []tgbotapi.Update, retErr error) {
+func (t *TelegramBackend) fetchUpdates(offset int) (updates []approvalTelegramUpdate, retErr error) {
 	defer func() {
 		if r := recover(); r != nil {
 			t.panicsTotal.Add(1)
@@ -525,12 +534,22 @@ func (t *TelegramBackend) fetchUpdates(offset int) (updates []tgbotapi.Update, r
 	}()
 	cfg := tgbotapi.NewUpdate(offset)
 	cfg.Timeout = t.pollTimeout
-	return t.bot.GetUpdates(cfg)
+	if t.approvalCallbacks != nil {
+		cfg.Limit = approvalUpdateLimit
+		if t.commandDrain {
+			cfg.Timeout = 0
+		}
+	}
+	return t.fetchApprovalUpdates(cfg)
 }
 
 // dispatch routes a single Update. Wrapped in a recover so a poison
 // update can't take down the polling loop.
 func (t *TelegramBackend) dispatch(u tgbotapi.Update) {
+	t.dispatchUpdate(u, false)
+}
+
+func (t *TelegramBackend) dispatchUpdate(u tgbotapi.Update, forwarded bool) {
 	defer func() {
 		if r := recover(); r != nil {
 			t.panicsTotal.Add(1)
@@ -543,6 +562,8 @@ func (t *TelegramBackend) dispatch(u tgbotapi.Update) {
 		t.handleCallback(u.CallbackQuery)
 	case u.Message != nil && u.Message.IsCommand() && u.Message.Command() == "start":
 		t.handleStart(u.Message)
+	case u.Message != nil && u.Message.IsCommand() && t.approvalCallbacks != nil:
+		t.handleApprovalCommand(u.Message, forwarded)
 	}
 }
 
