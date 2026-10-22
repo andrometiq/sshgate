@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"reflect"
+	"time"
 
 	"github.com/karthikeyan5/sshgate/pkg/signerkit/assist"
 	ap "github.com/karthikeyan5/sshgate/src/approvalplan"
@@ -172,17 +173,54 @@ func (e *LegacyService) DeliverLegacy(reservation *LegacyReservation, artifact *
 	e.mu.Unlock()
 	report, err := e.config.LegacyNotifier.Deliver(r.ctx, &PreparedLegacyApproval{data: artifact.Data()})
 	e.mu.Lock()
-	defer e.mu.Unlock()
 	e.expireLegacyLocked(e.now())
 	if e.closed || r.result.Status != "" {
+		e.mu.Unlock()
 		return unavailable()
 	}
 	if err != nil || !report.AllDelivered {
 		e.resolveLegacyLocked(r, LegacyResult{Status: "error"})
+		// Optional transport cleanup follows resolution and cannot delay its caller.
+		var cleanup legacyIncompleteCleanup
+		hasCleanup := errors.As(err, &cleanup)
+		if hasCleanup {
+			e.joined.Add(1)
+		}
+		e.mu.Unlock()
+		if hasCleanup {
+			go e.runLegacyCleanup(cleanup)
+		}
 		return errors.New("backend: legacy card delivery failed")
 	}
 	r.live = true
+	e.mu.Unlock()
 	return nil
+}
+
+type legacyIncompleteCleanup interface{ MarkIncomplete(context.Context) }
+
+func (e *LegacyService) runLegacyCleanup(cleanup legacyIncompleteCleanup) {
+	defer e.joined.Done()
+	ctx, cancel := context.WithCancel(e.ctx)
+	defer cancel()
+	deadline := e.config.Clock.Elapsed() + time.Second
+	ticker := newReconcileTicker()
+	defer ticker.Stop()
+	done := make(chan struct{})
+	go func() { defer close(done); cleanup.MarkIncomplete(ctx) }()
+	for {
+		if e.config.Clock.Elapsed() >= deadline {
+			cancel()
+		}
+		select {
+		case <-done:
+			return
+		case <-ctx.Done():
+			<-done
+			return
+		case <-ticker.C:
+		}
+	}
 }
 
 func sameReservedContext(a, b LegacyRenderContext) bool {
