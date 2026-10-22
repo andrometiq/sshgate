@@ -227,14 +227,14 @@ is at least once: deduplicate by `event_key`. The installer uses journald;
 configure collection and retention on the host. The separate permanent-policy
 audit file remains required for the policy plane.
 
-For a separate administrator account, use `--bootstrap-admin administrator`
-in place of `--bootstrap-operator` with the same RP, database and enrollment
-artifact arguments. The installer accepts optional `SIGNER_SERVER_BOOTSTRAP_ADMIN`.
-The v2 engine excludes admins from votes and quorum. The legacy human vote
-route still needs A11's role barrier; this intermediate build is not ready for
-admin deployment. Bootstrap refuses an existing account with the other role;
-it never promotes an operator in place. Enrollment
-material remains in a mode-0600 artifact, never on stderr.
+Admin bootstrap is temporarily disabled until A11 enforces the legacy human
+vote handler's operator-role check. The installer refuses any nonempty
+`SIGNER_SERVER_BOOTSTRAP_ADMIN`, and signer-server refuses `--bootstrap-admin`,
+before creating an account or enrollment artifact. Both errors point here.
+The v2 engine already excludes admins from votes and quorum; the v1 handler
+does not yet enforce that boundary. Do not provision admin accounts through
+another path on this intermediate build. Ordinary operator bootstrap remains
+available.
 
 Starting this version migrates SQLite forward, including approval records and
 the legacy-expiry outbox. Back up the database before upgrade; do not run an older

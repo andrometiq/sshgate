@@ -116,7 +116,7 @@ func run(args []string) int {
 	signingKeyFile := fs.String("signing-key-file", "", "Path to a 0600 file containing the 64-byte raw Ed25519 master signing key")
 	signingPublicKeyFile := fs.String("signing-public-key-file", "", "Path for the 32-byte public key written by --init-signing-key")
 	initSigningKey := fs.Bool("init-signing-key", false, "Generate a new signing keypair and exit; refuses to overwrite either file")
-	bootstrapAdminName := fs.String("bootstrap-admin", "", "Create a separate admin account with a TOTP factor and exit")
+	bootstrapAdminName := fs.String("bootstrap-admin", "", "Temporarily disabled until legacy vote role enforcement; see src/signer-server/README.md")
 	bootstrapOperatorName := fs.String("bootstrap-operator", "", "Create the first UI operator with a TOTP factor and exit")
 	bootstrapOutputFile := fs.String("bootstrap-output-file", "", "0600 artifact for bootstrap TOTP material (required with --bootstrap-operator or --bootstrap-admin)")
 	machineClientID := fs.String("machine-client-id", "", "Stable operator ID bound to the machine bearer credential")
@@ -168,6 +168,10 @@ func run(args []string) int {
 		return 1
 	}
 
+	if *bootstrapAdminName != "" {
+		logf("bootstrap admin: disabled until A11 enforces legacy vote roles; see src/signer-server/README.md")
+		return 1
+	}
 	if strings.TrimSpace(*bootstrapAdminName) != "" && strings.TrimSpace(*bootstrapOperatorName) != "" {
 		logf("--bootstrap-admin and --bootstrap-operator are mutually exclusive")
 		return 1
@@ -209,12 +213,12 @@ func run(args []string) int {
 	}
 	if name := bootstrapName; name != "" {
 		if err := validateUIConfig(true, *rpID, rpOrigins, *sessionTTL); err != nil {
-			logf("bootstrap operator: %v", err)
+			logf("bootstrap %s: %v", bootstrapRole, err)
 			return 1
 		}
 		db, err := sqlitestore.Open(*dbPath)
 		if err != nil {
-			logf("bootstrap operator: open store: %v", err)
+			logf("bootstrap %s: open store: %v", bootstrapRole, err)
 			return 1
 		}
 		defer func() { _ = db.Close() }()
@@ -226,7 +230,7 @@ func run(args []string) int {
 			TOTPIssuer:    strings.TrimSpace(*totpIssuer),
 		}, name, strings.TrimSpace(*bootstrapOutputFile), bootstrapRole)
 		if err != nil {
-			logf("bootstrap operator: %v", err)
+			logf("bootstrap %s: %v", bootstrapRole, err)
 			return 1
 		}
 		return 0

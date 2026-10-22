@@ -6,7 +6,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/karthikeyan5/sshgate/pkg/signerkit/hosted"
 	"github.com/karthikeyan5/sshgate/pkg/signerkit/sqlitestore"
 )
 
@@ -58,29 +60,38 @@ func TestOrdinaryStartupFlagGuards(t *testing.T) {
 
 func TestBootstrapAdminSeparateRole(t *testing.T) {
 	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "state.db")
-	args := []string{"--bootstrap-admin", "administrator", "--bootstrap-output-file", filepath.Join(dir, "enrollment"), "--db", dbPath, "--rp-id", "signer.example.com", "--rp-origin", "https://signer.example.com"}
-	for i := 0; i < 2; i++ {
-		if code, output := captureStartup(t, args...); code != 0 {
-			t.Fatalf("bootstrap %d: %s", code, output)
-		}
-	}
-	db, err := sqlitestore.Open(dbPath)
+	db, err := sqlitestore.Open(filepath.Join(dir, "state.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer db.Close()
+	cfg := hosted.AuthConfig{SessionTTL: time.Hour, RPID: "signer.example.com", RPOrigins: []string{"https://signer.example.com"}}
+	for i := 0; i < 2; i++ {
+		if err := bootstrapAccount(context.Background(), db, cfg, "administrator", filepath.Join(dir, "enrollment"), "admin"); err != nil {
+			t.Fatal(err)
+		}
+	}
 	user, err := db.GetUserByName(context.Background(), "administrator")
-	db.Close()
 	if err != nil || user.Role != "admin" {
-		t.Fatalf("admin role: %#v %v", user, err)
+		t.Fatalf("role: %#v %v", user, err)
 	}
-	args[0] = "--bootstrap-operator"
-	if code, output := captureStartup(t, args...); code != 1 || !strings.Contains(output, "different role") {
-		t.Fatalf("role changed: %d %s", code, output)
+	if err := bootstrapAccount(context.Background(), db, cfg, "administrator", filepath.Join(dir, "enrollment"), "operator"); err == nil || !strings.Contains(err.Error(), "different role") {
+		t.Fatalf("role changed: %v", err)
 	}
-	args = append(args, "--bootstrap-admin", "other")
-	if code, output := captureStartup(t, args...); code != 1 || !strings.Contains(output, "mutually exclusive") {
-		t.Fatalf("mixed bootstrap: %d %s", code, output)
+}
+
+func TestBootstrapAdminRefusedUntilRoleBarrier(t *testing.T) {
+	for _, name := range []string{"administrator", " "} {
+		dir := t.TempDir()
+		db, artifact := filepath.Join(dir, "state.db"), filepath.Join(dir, "enrollment")
+		code, output := captureStartup(t, "--bootstrap-admin", name, "--db", db, "--bootstrap-output-file", artifact, "--rp-id", "signer.example.com", "--rp-origin", "https://signer.example.com")
+		if code != 1 || !strings.Contains(output, "bootstrap admin: disabled") || !strings.Contains(output, "README.md") {
+			t.Fatalf("admin not refused: %d %s", code, output)
+		}
+		entries, err := os.ReadDir(dir)
+		if err != nil || len(entries) != 0 {
+			t.Fatalf("refusal wrote bootstrap state: %v %v", entries, err)
+		}
 	}
 }
 
@@ -90,6 +101,7 @@ func TestHostedProcessDiagnosticWiring(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := string(source)
+	checkHostedDiagnosticClosure(t)
 	// fd 2 is handed only to the process transport, never to another writer.
 	if strings.Count(text, "os.Stderr") != 1 || !strings.Contains(text, "hosted.NewProcessAuditSink(os.Stderr)") {
 		t.Fatal("direct stderr writer on hosted process path")

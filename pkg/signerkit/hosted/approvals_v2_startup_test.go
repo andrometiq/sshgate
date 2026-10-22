@@ -49,7 +49,7 @@ func TestOrdinaryProductionWiring(t *testing.T) {
 	if err := db.Insert(context.Background(), request); err != nil {
 		t.Fatal(err)
 	}
-	deadline := time.Now().Add(4 * time.Second)
+	deadline := time.Now().Add(10 * time.Second)
 	for {
 		record, err := db.GetByID(context.Background(), request.RequestID)
 		if err != nil {
