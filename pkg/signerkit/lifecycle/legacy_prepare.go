@@ -17,6 +17,8 @@ type LegacyInstance struct {
 	ID        string
 	UID       uint32
 	RequestID string
+	// RedactionFailed skips the provider and freezes an unavailable advisory.
+	RedactionFailed bool
 }
 
 // LegacyReservation is a preparation capability bound to one legacy service/request.
@@ -78,25 +80,29 @@ func (e *LegacyService) ReserveLegacy(ctx context.Context, instance LegacyInstan
 		e.CancelLegacy(reservation)
 		return nil, errors.New("lifecycle: invalid legacy destination")
 	}
-	workCtx := r.ctx
-	completed := make(chan assist.Snapshot, 1)
-	outcome := e.assistPool.TrySubmit(workCtx, e.config.Assessor, input, deadline, func(s assist.Snapshot) { completed <- s })
-	switch outcome {
-	case assist.Closed:
-		e.CancelLegacy(reservation)
-		return nil, unavailable()
-	case assist.Full:
-		reservation.render.Assist = assist.Snapshot{State: ap.AssistUnavailable, Reason: assist.ReasonBusy}
-	case assist.Accepted:
-		select {
-		case reservation.render.Assist = <-completed:
-		case <-r.done:
+	if instance.RedactionFailed {
+		reservation.render.Assist = assist.Snapshot{State: ap.AssistUnavailable, Reason: assist.ReasonRedaction}
+	} else {
+		workCtx := r.ctx
+		completed := make(chan assist.Snapshot, 1)
+		outcome := e.assistPool.TrySubmit(workCtx, e.config.Assessor, input, deadline, func(s assist.Snapshot) { completed <- s })
+		switch outcome {
+		case assist.Closed:
+			e.CancelLegacy(reservation)
 			return nil, unavailable()
-		case <-workCtx.Done():
-			e.mu.Lock()
-			e.resolveLegacyLocked(r, LegacyResult{Status: "timeout"})
-			e.mu.Unlock()
-			return nil, unavailable()
+		case assist.Full:
+			reservation.render.Assist = assist.Snapshot{State: ap.AssistUnavailable, Reason: assist.ReasonBusy}
+		case assist.Accepted:
+			select {
+			case reservation.render.Assist = <-completed:
+			case <-r.done:
+				return nil, unavailable()
+			case <-workCtx.Done():
+				e.mu.Lock()
+				e.resolveLegacyLocked(r, LegacyResult{Status: "timeout"})
+				e.mu.Unlock()
+				return nil, unavailable()
+			}
 		}
 	}
 	// Run enforces legacy alignment for synthesized inputs. Reject any input that

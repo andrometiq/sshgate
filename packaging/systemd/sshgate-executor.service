@@ -1,0 +1,14 @@
+[Unit]
+Description=SSHGate asynchronous executor
+
+[Service]
+ExecStart=@EXECUTOR_BIN@
+Environment=@CONFIG_ENV@
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=90s
+UMask=0077
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=default.target

@@ -20,7 +20,7 @@ type notifyActor struct {
 }
 
 func (e *Engine) nudgeNotifyLocked(key string) {
-	if e.stopping || e.config.Notifier == nil || e.notifyContext == nil || e.notifyContext.Err() != nil {
+	if e.availabilityLocked() != nil || e.config.Notifier == nil || e.notifyContext == nil || e.notifyContext.Err() != nil {
 		return
 	}
 	a := e.notifyActors[key]

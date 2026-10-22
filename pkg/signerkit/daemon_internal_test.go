@@ -82,8 +82,8 @@ func (r *rwBuf) Write(p []byte) (int, error) { return r.out.Write(p) }
 
 // TestVerbClassifiers_TransferVerbsAreAdminVerbs pins the §4a invariant: every
 // SSHGATE_XFER_* verb is BOTH a transfer verb (rejected on the sign path) AND an
-// admin verb (so matchGrant's short-circuit refuses to auto-sign it from a
-// standing grant). isAdminVerb must therefore stay a superset of isTransferVerb.
+// admin verb (subject to the lone-admin rule and network refusal).
+// isAdminVerb must therefore stay a superset of isTransferVerb.
 func TestVerbClassifiers_TransferVerbsAreAdminVerbs(t *testing.T) {
 	for _, cmd := range []string{
 		"SSHGATE_XFER_SEND a b c d",

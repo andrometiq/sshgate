@@ -94,35 +94,56 @@ func TestSignRejectsNetOnWrite(t *testing.T) {
 	}
 }
 
-func TestMatchGrantNeverAutoSignsNet(t *testing.T) {
-	// Keep both scopes in this leaf so srcmut judges one complete protection.
+func TestV1GrantNeverAutoSignsPlainOrNet(t *testing.T) {
 	for _, scope := range []string{"all", "commands"} {
-		bk := &netCountingBackend{MockBackend: signerkit.NewMockBackend()}
-		d, _, audit, _, _ := newGrantDaemon(t, bk, time.Unix(1000, 0))
-		defer audit.Close()
-		bk.Approve("grant", "operator")
-		var commands []string
-		if scope == "commands" {
-			commands = []string{"curl https://example.com"}
-		}
-		grant := createGrant(t, d, "grant", "prod", scope, commands, 3600)
-		if grant.Status != "approved" {
-			t.Fatalf("grant=%+v", grant)
-		}
-		// Prove the live grant actually covers this command before asking for network.
-		plain := networkCommand()
-		plain["net"] = false
-		if resp := signNetwork(t, d, "plain", plain); resp.Status != "approved" || resp.AuthMode != "grant:"+grant.GrantID || len(bk.requests) != 0 {
-			t.Fatalf("grant control=%+v prompts=%d", resp, len(bk.requests))
-		}
-		bk.Deny("net")
-		resp := signNetwork(t, d, "net", networkCommand())
-		if len(bk.requests) == 0 && resp.Status == "approved" && len(resp.Signatures) == 1 {
-			t.Fatal("MUTATION-EFFECT grant-autosigned-net")
-		}
-		if len(bk.requests) != 1 || !bk.requests[0].Commands[0].Net || resp.Status != "denied" || len(resp.Signatures) != 0 {
-			t.Fatalf("scope=%s response=%+v prompts=%+v", scope, resp, bk.requests)
-		}
+		t.Run(scope, func(t *testing.T) {
+			for _, approved := range []bool{false, true} {
+				bk := &netCountingBackend{MockBackend: signerkit.NewMockBackend()}
+				d, _, audit, path, _ := newGrantDaemon(t, bk, time.Unix(1000, 0))
+				defer audit.Close()
+				bk.Approve("grant", "operator")
+				var commands []string
+				if scope == "commands" {
+					commands = []string{"curl https://example.com"}
+				}
+				grant := createGrant(t, d, "grant", "prod", scope, commands, 3600)
+				if grant.Status != "approved" || grant.GrantID == "" {
+					t.Fatalf("grant=%+v", grant)
+				}
+				for i, id := range []string{"plain", "net"} {
+					wantStatus, wantMode, wantSignatures := "denied", "", 0
+					if approved {
+						bk.Approve(id, "operator")
+						wantStatus, wantMode, wantSignatures = "approved", "human", 1
+					} else {
+						bk.Deny(id)
+					}
+					command := networkCommand()
+					command["net"] = i == 1
+					resp := signNetwork(t, d, id, command)
+					if len(bk.requests) != i+1 {
+						t.Fatalf("%s: prompts=%d, want %d", id, len(bk.requests), i+1)
+					}
+					prompt := bk.requests[i]
+					if prompt.RequestID != id || len(prompt.Commands) != 1 || prompt.Commands[0].Net != (i == 1) {
+						t.Fatalf("%s: prompt=%+v", id, prompt)
+					}
+					if resp.Status != wantStatus || resp.AuthMode != wantMode || len(resp.Signatures) != wantSignatures {
+						t.Fatalf("%s: response=%+v", id, resp)
+					}
+					if got := authModeFor(t, path, id); got != wantMode {
+						t.Fatalf("%s: audit auth mode=%q, want %q", id, got, wantMode)
+					}
+					wantApprover := ""
+					if approved {
+						wantApprover = "operator"
+					}
+					if got := approverFor(t, path, id); got != wantApprover {
+						t.Fatalf("%s: approver=%q, want %q", id, got, wantApprover)
+					}
+				}
+			}
+		})
 	}
 }
 

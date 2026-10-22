@@ -20,17 +20,17 @@ func startWait(t *testing.T, e *Engine, ids ...string) (<-chan waitAnswer, conte
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	e.mu.Lock()
-	previous := len(e.waiters[ap.RecordKey(st.PrincipalA, ids[0])])
-	e.mu.Unlock()
+	e.published.mu.Lock()
+	previous := len(e.published.waiters[ap.RecordKey(st.PrincipalA, ids[0])])
+	e.published.mu.Unlock()
 	done := make(chan waitAnswer, 1)
 	go func() { r, err := e.WaitMany(ctx, st.PrincipalA, ids, ap.AwaitMaxWait); done <- waitAnswer{r, err} }()
 	deadline := time.NewTimer(5 * time.Second)
 	defer deadline.Stop()
 	for {
-		e.mu.Lock()
-		registered := len(e.waiters[ap.RecordKey(st.PrincipalA, ids[0])]) > previous
-		e.mu.Unlock()
+		e.published.mu.Lock()
+		registered := len(e.published.waiters[ap.RecordKey(st.PrincipalA, ids[0])]) > previous
+		e.published.mu.Unlock()
 		if registered {
 			return done, cancel
 		}
@@ -85,9 +85,9 @@ func TestWaitManyConfirmedCommitOnly(t *testing.T) {
 	if got.err != nil || got.result.WaitElapsed || len(got.result.Summaries) != 2 || got.result.Summaries[0].RequestID != st.ID(2) || got.result.Summaries[1].ApprovalStatus == ap.ApprovalPending {
 		t.Fatalf("bad wake: %+v", got)
 	}
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if len(e.waiters) != 0 {
+	e.published.mu.Lock()
+	defer e.published.mu.Unlock()
+	if len(e.published.waiters) != 0 {
 		t.Fatal("leaked registrations")
 	}
 }
@@ -112,6 +112,9 @@ func TestWaitManyReadOnlyTimeoutAndIsolation(t *testing.T) {
 			rec.Header.Shed = true
 			rec.Payload = nil
 			err := store.MemStore.Commit(key, *rec)
+			if err == nil {
+				e.publishLocked(key, rec)
+			}
 			e.mu.Unlock()
 			if err != nil {
 				t.Fatal(err)
@@ -136,7 +139,7 @@ func TestWaitManyCancellationAndBounds(t *testing.T) {
 	if got := receiveWait(t, done); !errors.Is(got.err, context.Canceled) {
 		t.Fatalf("cancel: %+v", got)
 	}
-	if len(e.waiters) != 0 {
+	if len(e.published.waiters) != 0 {
 		t.Fatal("canceled waiter leaked")
 	}
 	for _, tc := range []struct {
@@ -181,9 +184,9 @@ func TestWaitManyBroadcastAndRemoval(t *testing.T) {
 			t.Fatalf("removed record: %+v", got)
 		}
 	}
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if len(e.waiters) != 0 {
+	e.published.mu.Lock()
+	defer e.published.mu.Unlock()
+	if len(e.published.waiters) != 0 {
 		t.Fatal("broadcast leaked registrations")
 	}
 }

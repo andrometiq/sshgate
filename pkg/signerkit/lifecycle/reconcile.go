@@ -54,9 +54,11 @@ func (e *Engine) Run(ctx context.Context) (result error) {
 		}
 		e.waitJoined.Wait()
 		e.mu.Lock()
-		if e.stopCause != nil {
-			result = e.stopCause
+		e.published.mu.RLock()
+		if e.published.stopCause != nil {
+			result = e.published.stopCause
 		}
+		e.published.mu.RUnlock()
 		e.running = false
 		close(e.runDone)
 		e.mu.Unlock()
@@ -93,7 +95,7 @@ func (e *Engine) Reconcile() error {
 		return err
 	}
 	now := e.now()
-	e.projections.expireGrants(now)
+	e.expireGrantsLocked(now)
 	for _, key := range e.dueKeys(now) {
 		if err := e.reconcileLocked(key, now); err != nil {
 			return err

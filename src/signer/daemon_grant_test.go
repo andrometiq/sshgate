@@ -259,14 +259,8 @@ func TestSignRequest_AdminVerbMustBeSoleCommand(t *testing.T) {
 	})
 }
 
-// TestGrant_ScopeAll_AutoSignsWithoutPrompt is the core auto-approve
-// happy path: after a scope=all grant on an alias, a subsequent write on
-// that alias auto-signs WITHOUT consulting the backend. We prove "no
-// prompt" by leaving the sign request's reqID UNARMED on the mock — if
-// the daemon prompted, the unarmed channel would never resolve and the
-// test would hang to the package timeout (a loud failure). The approver
-// in the audit log is "grant:<id>", confirming the grant path.
-func TestGrant_ScopeAll_AutoSignsWithoutPrompt(t *testing.T) {
+// A live v1 grant never bypasses human approval.
+func TestGrant_V1GrantNeverAutoSigns(t *testing.T) {
 	t.Parallel()
 	mock := signerkit.NewMockBackend()
 	d, pub, audit, auditPath, _ := newGrantDaemon(t, mock, time.Unix(1000, 0))
@@ -281,7 +275,7 @@ func TestGrant_ScopeAll_AutoSignsWithoutPrompt(t *testing.T) {
 		t.Fatal("grant_id empty on approval")
 	}
 
-	// Sign reqID is NOT armed — only a grant auto-approve can resolve it.
+	mock.Approve("s_auto", "operator")
 	resp := signOne(t, d, "s_auto", "prod", "systemctl restart nginx", grantHost, false, "")
 	if resp.Status != "approved" {
 		t.Fatalf("sign status = %q; want approved", resp.Status)
@@ -289,60 +283,50 @@ func TestGrant_ScopeAll_AutoSignsWithoutPrompt(t *testing.T) {
 	if len(resp.Signatures) != 1 {
 		t.Fatalf("got %d sigs; want 1", len(resp.Signatures))
 	}
-	// The auto-signed signature must verify under the daemon key.
+	// The human-approved signature must verify under the daemon key.
 	sig, payload, err := sigwire.DecodeSigned(resp.Signatures[0].Sig)
 	if err != nil {
 		t.Fatalf("decode sig: %v", err)
 	}
 	signedBytes, _ := json.Marshal(payload)
 	if !ed25519.Verify(pub, signedBytes, sig) {
-		t.Error("auto-signed signature does not verify")
+		t.Error("human-approved signature does not verify")
 	}
 	if payload.Host != grantHost {
 		t.Errorf("payload.Host = %q; want %q (host-binding preserved under a grant)", payload.Host, grantHost)
 	}
-	// Audit proves the grant path (not a human prompt).
-	if got := approverFor(t, auditPath, "s_auto"); !strings.HasPrefix(got, "grant:") {
-		t.Errorf("approved_by = %q; want grant:<id> (auto-approved)", got)
+	// Audit identifies the human decision.
+	if got := approverFor(t, auditPath, "s_auto"); got != "operator" {
+		t.Errorf("approved_by = %q; want operator", got)
 	}
 }
 
-// TestGrant_AuthModeOnSignResponseAndAudit pins F4: a grant auto-sign carries
-// auth_mode="grant:<id>" on BOTH the socket response and the signer audit;
-// a human-tap sign carries auth_mode="human" on both. The socket response is
-// the new single-surface human-vs-grant field (gate-invisible, signature
-// unchanged); the audit's auth_mode is the same value via the shared helper.
+// A live v1 grant leaves response and audit attribution with the human.
 func TestGrant_AuthModeOnSignResponseAndAudit(t *testing.T) {
 	t.Parallel()
 	mock := signerkit.NewMockBackend()
 	d, _, audit, auditPath, _ := newGrantDaemon(t, mock, time.Unix(1000, 0))
 	defer audit.Close()
 
-	// Grant auto-sign path.
+	// Human approval with a live grant.
 	mock.Approve("g_req", "operator")
 	gr := createGrant(t, d, "g_req", "prod", "all", nil, 3600)
 	if gr.Status != "approved" {
 		t.Fatalf("grant status = %q; want approved (err=%q)", gr.Status, gr.Error)
 	}
-	// Sign reqID UNARMED — only the grant can resolve it.
+	mock.Approve("s_auto", "operator")
 	auto := signOne(t, d, "s_auto", "prod", "systemctl restart nginx", grantHost, false, "")
 	if auto.Status != "approved" {
 		t.Fatalf("auto sign status = %q; want approved", auto.Status)
 	}
-	// Socket response auth_mode is exactly "grant:<grant_id>" — the same
-	// "grant:<id>" string approved_by carries (the shared helper returns it
-	// verbatim). createGrant returns the bare id, so prefix it here.
-	wantGrantMode := "grant:" + gr.GrantID
-	if auto.AuthMode != wantGrantMode {
-		t.Errorf("auto sign-response auth_mode = %q; want %q", auto.AuthMode, wantGrantMode)
+	if auto.AuthMode != "human" {
+		t.Errorf("sign-response auth_mode = %q; want human", auto.AuthMode)
 	}
-	// approved_by carries the same value, and the audit's first-class
-	// auth_mode equals it — proving the response and the audit never drift.
-	if got := approverFor(t, auditPath, "s_auto"); got != wantGrantMode {
-		t.Errorf("auto approved_by = %q; want %q", got, wantGrantMode)
+	if got := approverFor(t, auditPath, "s_auto"); got != "operator" {
+		t.Errorf("approved_by = %q; want operator", got)
 	}
-	if got := authModeFor(t, auditPath, "s_auto"); got != wantGrantMode {
-		t.Errorf("auto audit auth_mode = %q; want %q (must equal the socket response)", got, wantGrantMode)
+	if got := authModeFor(t, auditPath, "s_auto"); got != "human" {
+		t.Errorf("audit auth_mode = %q; want human", got)
 	}
 
 	// Human-tap path (different alias so no grant covers it).
@@ -359,9 +343,7 @@ func TestGrant_AuthModeOnSignResponseAndAudit(t *testing.T) {
 	}
 }
 
-// TestGrant_ScopeCommands_ExactMatchOnly pins exact-string scope: the
-// exact command auto-signs; a near-miss (extra arg) and a different alias
-// both fall through to the human prompt.
+// Even an exact match in a v1 commands grant still prompts.
 func TestGrant_ScopeCommands_ExactMatchOnly(t *testing.T) {
 	t.Parallel()
 	mock := signerkit.NewMockBackend()
@@ -374,13 +356,13 @@ func TestGrant_ScopeCommands_ExactMatchOnly(t *testing.T) {
 		t.Fatalf("grant status = %q; want approved", gr.Status)
 	}
 
-	// Exact match → auto-signs (reqID unarmed, only grant can resolve it).
+	mock.Approve("s_exact", "operator")
 	resp := signOne(t, d, "s_exact", "src", "systemctl stop app", grantHost, false, "")
 	if resp.Status != "approved" {
 		t.Fatalf("exact-match sign status = %q; want approved", resp.Status)
 	}
-	if got := approverFor(t, auditPath, "s_exact"); !strings.HasPrefix(got, "grant:") {
-		t.Errorf("exact match approved_by = %q; want grant:<id>", got)
+	if got := approverFor(t, auditPath, "s_exact"); got != "operator" {
+		t.Errorf("exact match approved_by = %q; want operator", got)
 	}
 
 	// Near-miss (extra arg) → must prompt. Arm the reqID so the prompt
@@ -447,12 +429,9 @@ func TestGrant_RevealNeverAutoSigned(t *testing.T) {
 // TestGrant_AdminVerbNeverAutoSigned is the SSHGATE_UPDATE security test:
 // even under a scope=all grant, an administrative verb (SSHGATE_UPDATE /
 // SSHGATE_REVOKE) must ALWAYS prompt the human — a grant must never
-// auto-sign a gate-replacement or a gate-teardown. The gate dispatches on
-// the command PREFIX regardless of which signer path minted the signature,
-// so this signer-side carve-out is the ONLY control that stops a scope=all
-// grant from silently authorizing an admin verb (see
-// docs/proposed/sshgate-update-verb-2026-07.md Finding 1). A benign write on
-// the same alias must STILL auto-sign — the carve-out must not over-reach.
+// auto-sign a gate-replacement or a gate-teardown (see
+// docs/proposed/sshgate-update-verb-2026-07.md Finding 1). Since OQ3 a v1
+// grant authorizes nothing, so a benign write on the same alias prompts too.
 func TestGrant_AdminVerbNeverAutoSigned(t *testing.T) {
 	t.Parallel()
 	mock := signerkit.NewMockBackend()
@@ -483,23 +462,21 @@ func TestGrant_AdminVerbNeverAutoSigned(t *testing.T) {
 		}
 	}
 
-	// Control: a benign write on the SAME alias STILL auto-signs (the
-	// carve-out must not disable grants for ordinary commands). reqID
-	// UNARMED — only the grant can resolve it.
+	// Ordinary writes also require a human decision.
+	mock.Approve("s_benign", "operator")
 	resp := signOne(t, d, "s_benign", "prod", "systemctl restart nginx", grantHost, false, "")
 	if resp.Status != "approved" {
 		t.Fatalf("benign sign status = %q; want approved", resp.Status)
 	}
-	if got := approverFor(t, auditPath, "s_benign"); !strings.HasPrefix(got, "grant:") {
-		t.Errorf("benign approved_by = %q; want grant:<id> (carve-out must not over-reach)", got)
+	if got := approverFor(t, auditPath, "s_benign"); got != "operator" {
+		t.Errorf("benign approved_by = %q; want operator", got)
 	}
 }
 
-// TestGrant_CrossServer pins that a grant for alias X never auto-signs a
-// command aimed at alias Y.
+// A v1 grant cannot authorise a request bound to another host.
 func TestGrant_CrossServer(t *testing.T) {
 	t.Parallel()
-	mock := signerkit.NewMockBackend()
+	mock := &netCountingBackend{MockBackend: signerkit.NewMockBackend()}
 	d, _, audit, auditPath, _ := newGrantDaemon(t, mock, time.Unix(1000, 0))
 	defer audit.Close()
 
@@ -514,10 +491,17 @@ func TestGrant_CrossServer(t *testing.T) {
 	if got := approverFor(t, auditPath, "s_y"); got != "operator" {
 		t.Errorf("cross-server approved_by = %q; want human (grant for X must not cover Y)", got)
 	}
+	mock.Deny("s_crosshost")
+	resp = signOne(t, d, "s_crosshost", "X", "rm -rf /tmp/x", "SHA256:another-host", false, "")
+	if len(mock.requests) != 2 || resp.Status != "denied" || len(resp.Signatures) != 0 || resp.AuthMode != "" {
+		t.Fatalf("cross-host response=%+v prompts=%d", resp, len(mock.requests))
+	}
+	if got := approverFor(t, auditPath, "s_crosshost"); got != "" {
+		t.Fatalf("cross-host approver=%q; want no grant attribution", got)
+	}
 }
 
-// TestGrant_Expired pins that once a grant's window elapses, a matching
-// command prompts again (the signer never auto-signs past expiry).
+// An expired v1 grant still leaves every sign request to the human.
 func TestGrant_Expired(t *testing.T) {
 	t.Parallel()
 	mock := signerkit.NewMockBackend()
@@ -645,8 +629,7 @@ func TestGrant_BoundaryExact24hAllowed(t *testing.T) {
 	}
 }
 
-// TestGrant_Revoke pins that revoke_grant drops the grant: a matching
-// write that auto-signed before revoke prompts again after.
+// Revocation clears the v1 grant; signs prompt both before and after.
 func TestGrant_Revoke(t *testing.T) {
 	t.Parallel()
 	mock := signerkit.NewMockBackend()
@@ -656,12 +639,17 @@ func TestGrant_Revoke(t *testing.T) {
 	mock.Approve("g_req", "operator")
 	createGrant(t, d, "g_req", "prod", "all", nil, 3600)
 
-	// Before revoke: auto-signs (unarmed sign reqID).
+	mock.Approve("s_before", "operator")
 	resp := signOne(t, d, "s_before", "prod", "systemctl restart nginx", grantHost, false, "")
-	if got := approverFor(t, auditPath, "s_before"); !strings.HasPrefix(got, "grant:") {
-		t.Fatalf("pre-revoke approved_by = %q; want grant:<id>", got)
+	if got := approverFor(t, auditPath, "s_before"); got != "operator" {
+		t.Fatalf("pre-revoke approved_by = %q; want operator", got)
 	}
-	_ = resp
+	if resp.Status != "approved" || resp.AuthMode != "human" {
+		t.Fatalf("pre-revoke response=%+v", resp)
+	}
+	if grants := listGrants(t, d, "l_before", "prod"); len(grants.Grants) != 1 {
+		t.Fatalf("live grant missing: %+v", grants)
+	}
 
 	// Revoke (no approval needed; never touches the backend).
 	revBody := map[string]any{"kind": "revoke_grant", "request_id": "rv_req", "alias": "prod"}
@@ -676,6 +664,10 @@ func TestGrant_Revoke(t *testing.T) {
 	}
 	if rv.Status != "approved" {
 		t.Fatalf("revoke status = %q; want approved", rv.Status)
+	}
+
+	if grants := listGrants(t, d, "l_after", "prod"); grants.Status != "ok" || len(grants.Grants) != 0 {
+		t.Fatalf("revoked grant still listed: %+v", grants)
 	}
 
 	// After revoke: must prompt again.
@@ -696,11 +688,8 @@ type revokeGrantResp struct {
 	Error     string `json:"error"`
 }
 
-// TestGrant_ByteIdenticalToHumanApproved pins the gate-unchanged
-// invariant: an auto-signed payload and a human-approved payload for the
-// SAME (command, host, ttl) are identical in every field except the
-// random Nonce, and both verify under the daemon key. This is what lets
-// the gate stay completely unaware of grants.
+// Prompted signing with or without a v1 grant has the same payload and response
+// fields, except for independent signature entropy.
 func TestGrant_ByteIdenticalToHumanApproved(t *testing.T) {
 	t.Parallel()
 	base := time.Unix(1000, 0)
@@ -715,18 +704,19 @@ func TestGrant_ByteIdenticalToHumanApproved(t *testing.T) {
 		t.Fatalf("human sign status = %q; want approved", human.Status)
 	}
 
-	// Grant-auto-signed sign on a fresh daemon at the SAME clock.
+	// Human-approved sign with a live grant at the same clock.
 	mock2 := signerkit.NewMockBackend()
 	dG, pubG, auditG, auditPathG, _ := newGrantDaemon(t, mock2, base)
 	defer auditG.Close()
 	mock2.Approve("g_req", "operator")
 	createGrant(t, dG, "g_req", "prod", "all", nil, 3600)
+	mock2.Approve("s_auto", "operator")
 	auto := signOne(t, dG, "s_auto", "prod", "systemctl restart nginx", grantHost, false, "")
 	if auto.Status != "approved" {
 		t.Fatalf("auto sign status = %q; want approved", auto.Status)
 	}
-	if got := approverFor(t, auditPathG, "s_auto"); !strings.HasPrefix(got, "grant:") {
-		t.Fatalf("auto approved_by = %q; want grant:<id>", got)
+	if got := approverFor(t, auditPathG, "s_auto"); got != "operator" {
+		t.Fatalf("auto approved_by = %q; want operator", got)
 	}
 
 	_, ph, err := sigwire.DecodeSigned(human.Signatures[0].Sig)
@@ -766,6 +756,19 @@ func TestGrant_ByteIdenticalToHumanApproved(t *testing.T) {
 	gb, _ := json.Marshal(pg)
 	if !ed25519.Verify(pubG, gb, mustSig(t, auto.Signatures[0].Sig)) {
 		t.Error("auto signature does not verify")
+	}
+	ph.Nonce, pg.Nonce = "", ""
+	hb, _ = json.Marshal(ph)
+	gb, _ = json.Marshal(pg)
+	if !bytes.Equal(hb, gb) {
+		t.Fatalf("payload bytes differ: %s vs %s", hb, gb)
+	}
+	human.RequestID, auto.RequestID = "", ""
+	human.Signatures[0].Sig, auto.Signatures[0].Sig = "", ""
+	hb, _ = json.Marshal(human)
+	gb, _ = json.Marshal(auto)
+	if !bytes.Equal(hb, gb) || human.AuthMode != "human" {
+		t.Fatalf("response fields differ: %s vs %s", hb, gb)
 	}
 }
 

@@ -2,6 +2,8 @@ package signerkit
 
 import (
 	"crypto/ed25519"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -187,4 +189,43 @@ func (r *XferRegistry) persistLocked() error {
 		return fmt.Errorf("write xfer registry: %w", err)
 	}
 	return nil
+}
+
+// XferKeySnapshot is a detached, validated enrollment and its canonical digest.
+type XferKeySnapshot struct {
+	Label       string
+	BoxPub      string
+	IDPub       string
+	AddedAt     string
+	EntryDigest string
+}
+
+// Snapshot fails closed on an absent or malformed enrollment. Its digest covers
+// all stored entry fields, including the enrollment time and both public keys.
+func (r *XferRegistry) Snapshot(fp string) (XferKeySnapshot, error) {
+	if r == nil {
+		return XferKeySnapshot{}, errors.New("transfer registry unavailable")
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.snapshotLocked(fp)
+}
+
+func (r *XferRegistry) snapshotLocked(fp string) (XferKeySnapshot, error) {
+	e, ok := r.servers[fp]
+	if !ok {
+		return XferKeySnapshot{}, errors.New("server not registered for transfer")
+	}
+	if _, err := xfer.ParseBoxPublicText(e.boxPub); err != nil {
+		return XferKeySnapshot{}, err
+	}
+	if _, err := xfer.ParseIDPublicText(e.idPub); err != nil {
+		return XferKeySnapshot{}, err
+	}
+	raw, err := json.Marshal(xferEntryOnDisk{Label: e.label, BoxPub: e.boxPub, IDPub: e.idPub, AddedAt: e.addedAt})
+	if err != nil {
+		return XferKeySnapshot{}, err
+	}
+	digest := sha256.Sum256(raw)
+	return XferKeySnapshot{Label: e.label, BoxPub: e.boxPub, IDPub: e.idPub, AddedAt: e.addedAt, EntryDigest: hex.EncodeToString(digest[:])}, nil
 }

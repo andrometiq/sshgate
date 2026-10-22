@@ -58,6 +58,11 @@ func TestMain(m *testing.M) {
 	if config := os.Getenv(testGateEnv); config != "" {
 		os.Exit(testGateMain(config))
 	}
+	// Fixtures (cc outputs, t.TempDir, gate dirs) take their modes from the
+	// umask; admission rightly refuses group-writable ones, so a caller's 0002
+	// (Ubuntu) must not decide results. Subprocess gates inherit it; product
+	// umask handling has its own explicit tests (doctor "umask 0").
+	syscall.Umask(0o022)
 	// In-process reads record their seal: a sealed test binary would refuse
 	// its next jail attempt. Subprocess gates keep the real seal.
 	sealFn = func() error {
