@@ -541,7 +541,7 @@ func TestHuman_ApproveDrivesGateValidSignature(t *testing.T) {
 	client := loginClient(t, ts, "alice", secret)
 
 	// Approve.
-	resp, err := client.Post(ts.URL+"/ui/request/r-approve-1/approve", "application/json", bytes.NewReader([]byte(`{}`)))
+	resp, err := client.Post(ts.URL+"/ui/request/r-approve-1/approve", "application/json", bytes.NewReader(humanChallengeBody(t, client, ts.URL, "r-approve-1", "")))
 	if err != nil {
 		t.Fatalf("approve POST: %v", err)
 	}
@@ -572,7 +572,7 @@ func TestHuman_ApproveDrivesGateValidSignature(t *testing.T) {
 	assertGateValid(t, got.Signatures, pub, cmd)
 
 	// A second approve on the now-resolved request is a no-op → 409.
-	resp2, err := client.Post(ts.URL+"/ui/request/r-approve-1/approve", "application/json", bytes.NewReader([]byte(`{}`)))
+	resp2, err := client.Post(ts.URL+"/ui/request/r-approve-1/approve", "application/json", bytes.NewReader(humanChallengeBody(t, client, ts.URL, "r-approve-1", "")))
 	if err != nil {
 		t.Fatalf("second approve POST: %v", err)
 	}
@@ -593,7 +593,7 @@ func TestHuman_DenyResolves(t *testing.T) {
 	seedPendingRequest(t, db, "r-deny-1", 2, "rm -rf /tmp/x", 60)
 
 	client := loginClient(t, ts, "alice", secret)
-	resp, err := client.Post(ts.URL+"/ui/request/r-deny-1/deny", "application/json", bytes.NewReader([]byte(`{}`)))
+	resp, err := client.Post(ts.URL+"/ui/request/r-deny-1/deny", "application/json", bytes.NewReader(humanChallengeBody(t, client, ts.URL, "r-deny-1", "")))
 	if err != nil {
 		t.Fatalf("deny POST: %v", err)
 	}
@@ -627,7 +627,7 @@ func TestHuman_StepUpEnforced(t *testing.T) {
 	client := loginClient(t, ts, "alice", secret)
 
 	// Approve with no step-up code → 401.
-	resp, err := client.Post(ts.URL+"/ui/request/r-step-1/approve", "application/json", bytes.NewReader([]byte(`{}`)))
+	resp, err := client.Post(ts.URL+"/ui/request/r-step-1/approve", "application/json", bytes.NewReader(humanChallengeBody(t, client, ts.URL, "r-step-1", "")))
 	if err != nil {
 		t.Fatalf("approve(no step-up): %v", err)
 	}
@@ -641,7 +641,7 @@ func TestHuman_StepUpEnforced(t *testing.T) {
 	// prove step-up without a real 30-second sleep; production operators wait
 	// for their authenticator to rotate to a new code.
 	code, _ := totp.GenerateCode(secret, time.Now().Add(30*time.Second))
-	body := mustMarshal(t, map[string]string{"step_up_totp": code})
+	body := humanChallengeBody(t, client, ts.URL, "r-step-1", code)
 	resp2, err := client.Post(ts.URL+"/ui/request/r-step-1/approve", "application/json", bytes.NewReader(body))
 	if err != nil {
 		t.Fatalf("approve(step-up): %v", err)
@@ -671,7 +671,7 @@ func TestUIRequest_ViewerVotePersistsAcrossReload(t *testing.T) {
 	seedPendingRequest(t, db, "r-viewer-vote", 2, "uptime", 60)
 	client := loginClient(t, ts, "alice", secret)
 
-	getJSONPost(t, client, ts.URL+"/ui/request/r-viewer-vote/approve", []byte(`{}`), http.StatusOK)
+	getJSONPost(t, client, ts.URL+"/ui/request/r-viewer-vote/approve", humanChallengeBody(t, client, ts.URL, "r-viewer-vote", ""), http.StatusOK)
 	body := getJSON(t, client, ts.URL+"/ui/request/r-viewer-vote", http.StatusOK)
 	var detail struct {
 		Status     string `json:"status"`
@@ -1039,4 +1039,25 @@ func mustMarshal(t *testing.T, v interface{}) []byte {
 		t.Fatalf("marshal: %v", err)
 	}
 	return b
+}
+
+func humanChallengeBody(t *testing.T, client *http.Client, base, id, code string) []byte {
+	t.Helper()
+	response, err := client.Get(base + "/ui/request/" + id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	var detail struct {
+		VoteChallenge struct {
+			Challenge string `json:"challenge"`
+		} `json:"vote_challenge"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&detail); err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusOK || detail.VoteChallenge.Challenge == "" {
+		t.Fatalf("challenge GET: %d", response.StatusCode)
+	}
+	return mustMarshal(t, map[string]string{"challenge": detail.VoteChallenge.Challenge, "step_up_totp": code})
 }

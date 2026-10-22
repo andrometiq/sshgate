@@ -235,6 +235,7 @@ func (s *Server) AttachHuman(h *HumanAPI) {
 	if s.RequiredApprovals <= 0 {
 		panic("hosted: AttachHuman: RequiredApprovals must be greater than zero")
 	}
+	h.ordinaryEngine = s.currentOrdinaryEngine
 	h.voteMACKey = &s.voteMACKey
 	s.Human = h
 	h.registerHumanRoutes(s.mux)

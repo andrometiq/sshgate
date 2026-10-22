@@ -488,6 +488,21 @@ func (s *Server) StartOrdinaryWorkers(engine *ApprovalV2Engine) error {
 	return nil
 }
 
+// currentOrdinaryEngine takes a snapshot without holding the server lock during I/O.
+func (s *Server) currentOrdinaryEngine() *ApprovalV2Engine {
+	s.ordinaryMu.Lock()
+	defer s.ordinaryMu.Unlock()
+	if s.ordinaryClosed || s.ordinaryEngine == nil {
+		return nil
+	}
+	select {
+	case <-s.ordinaryJoined:
+		return nil
+	default:
+		return s.ordinaryEngine
+	}
+}
+
 func (s *Server) closeOrdinaryWorkers() {
 	s.ordinaryClose.Do(func() {
 		s.ordinaryMu.Lock()
