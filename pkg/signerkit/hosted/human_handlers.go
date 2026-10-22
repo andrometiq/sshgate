@@ -55,16 +55,17 @@ const maxHumanBody = 64 * 1024
 // engine into the human-plane routes. It is constructed alongside the
 // machine-plane Server and mounted on the same mux (see Server.routes).
 //
-// It holds NO mutable state; all state lives in the store. Safe for
-// concurrent use.
+// Persistent state lives in the store; the vote MAC key lives only in memory.
+// Safe for concurrent use after attachment.
 type HumanAPI struct {
 	Auth   *AuthManager
 	Engine *ApprovalEngine
 	Store  store.Store
 	Cfg    HumanAPIConfig
 
-	limitOnce sync.Once
-	limits    *authRateLimiter
+	voteMACKey *[32]byte
+	limitOnce  sync.Once
+	limits     *authRateLimiter
 }
 
 // HumanAPIConfig is the per-deploy POLICY the human plane applies. Every
@@ -108,8 +109,8 @@ type HumanAPIConfig struct {
 // reads ONLY the session cookie (never the Authorization header), so a
 // bearer token presented here is structurally ignored. On a missing or
 // invalid/expired session it writes 401. On success it injects the
-// authenticated operator's user id into the request context for the
-// downstream handler.
+// session ID and expiry into the request context and passes the operator ID
+// to the downstream handler.
 //
 // This is the load-bearing half of plane separation: because it never
 // consults the bearer key, the machine credential cannot authenticate a
@@ -126,7 +127,8 @@ func (h *HumanAPI) withSession(next func(http.ResponseWriter, *http.Request, str
 			writeJSONError(w, http.StatusUnauthorized, "unauthorized")
 			return
 		}
-		next(w, r, sess.UserID)
+		ctx := context.WithValue(r.Context(), voteSessionContextKey{}, voteSession{ID: sess.ID, ExpiresAt: sess.ExpiresAt})
+		next(w, r.WithContext(ctx), sess.UserID)
 	})
 }
 

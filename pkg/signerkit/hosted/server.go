@@ -2,6 +2,7 @@ package hosted
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/subtle"
 	"log"
 	"net/http"
@@ -84,6 +85,7 @@ type Server struct {
 	// credentials: see human_handlers.go's plane-separation contract.
 	Human *HumanAPI
 
+	voteMACKey       [32]byte
 	mux              *http.ServeMux
 	approvalsMachine http.Handler
 
@@ -142,6 +144,7 @@ func NewServer(auth string, st store.Store, logger *log.Logger) *Server {
 		policyGetLimit:     &machineRateLimiter{},
 		policyRosterWait:   policyRosterSweepInterval,
 	}
+	rand.Read(s.voteMACKey[:])
 	s.AttachMachine()
 	return s
 }
@@ -232,6 +235,7 @@ func (s *Server) AttachHuman(h *HumanAPI) {
 	if s.RequiredApprovals <= 0 {
 		panic("hosted: AttachHuman: RequiredApprovals must be greater than zero")
 	}
+	h.voteMACKey = &s.voteMACKey
 	s.Human = h
 	h.registerHumanRoutes(s.mux)
 }
