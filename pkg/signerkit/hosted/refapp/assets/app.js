@@ -100,6 +100,7 @@ function fact(label, value) {
 
 function renderCommand(command, options) {
   const block = el('section', {class: 'cmd' + (options && options.prominent ? ' prominent' : '')});
+  if (command.redacted) block.appendChild(el('strong', {text: command.redacted_label}));
   block.appendChild(el('div', {class: 'label', text: 'command'}));
   block.appendChild(el('div', {class: 'text', text: neutralize(command.cmd || '')}));
   block.appendChild(el('div', {class: 'label', text: 'sha-256'}));

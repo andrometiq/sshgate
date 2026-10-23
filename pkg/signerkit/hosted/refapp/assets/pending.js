@@ -35,6 +35,7 @@ async function load(reset) {
       }));
       card.appendChild(el('p', {text: neutralize(row.legacy_label || 'Legacy v1 request')}));
       for (const command of row.command_details || []) card.appendChild(renderCommand(command));
+      if (row.display_failed) card.appendChild(el('p', {text: 'Command display unavailable; approval refused.'}));
       card.appendChild(renderTally(row.tally, false));
       list.appendChild(card);
     }
