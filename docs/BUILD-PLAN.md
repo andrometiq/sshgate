@@ -43,15 +43,13 @@ counts as done. Anyone picking up the repository, a developer or a coding agent,
 
 Development is paused. This section says what works, what is half built, where it lives and
 what to do next. The step statuses further down describe `main`; work done on feature branches
-is listed here and is marked `done` only when it reaches `main`. Nothing made since 2026-10-20
-is pushed. "Merged" below means merged into the integration branch, not into `main`.
+is listed here and is marked `done` only when it reaches `main`. "Merged" below means merged into the integration branch, not into `main`.
 
-**Where the branches are.** At this pause, the work after 2026-10-20 exists only in the
-maintainer's local clone until it is pushed. A fresh clone of the public repository has `main`
-at the 2026-10-20 pause, `feat/22-p4-g`, `wip/a10-5`, `wip/a8-1`, and older tips of
-`feat/76-65-approval-lifecycle`, `feat/22-p3` and `feat/journey-e2e`. It does not have
-`feat/22-p4-g-early`, `wi2/c2`, the other `wi2/*` lane branches, or anything in this section
-that is newer. Push them before work resumes from another machine.
+**Where the branches are.** Pushed on 2026-10-23: `main`, `feat/76-65-approval-lifecycle`,
+`feat/22-p3`, `feat/22-p4-g-early`, `feat/journey-e2e`, `wi2/c2` and `wi2/a12`, all at the tips
+named here. The other `wi2/*` lane branches stay local; their work is in the integration branch.
+The remote `wip/a10-5` and `wip/a8-1` still hold the older interrupted work in progress. Their
+finished versions are merged into the integration branch, so don't use the remote copies.
 
 **At a glance.**
 - **Fully working (on `main`):** the shipped baseline and #22 Phases 1–2 (v0.1.5).
