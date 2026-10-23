@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -610,7 +611,10 @@ func TestRun_SIGHUP(t *testing.T) {
 	defer restore()
 
 	done := make(chan int, 1)
-	go func() { done <- run([]string{"--config", configPath}) }()
+	ctx, cancel := context.WithCancel(context.Background())
+	joined := make(chan struct{})
+	go func() { defer close(joined); done <- runContext(ctx, []string{"--config", configPath}) }()
+	defer func() { cancel(); <-joined }()
 
 	waitForFile(t, sockPath)
 

@@ -690,10 +690,29 @@ func TestTelegram_StartFromAllowedUserCapturesChatID(t *testing.T) {
 	}
 }
 
+type recordingStartChatStore struct {
+	backend.MemChatStore
+	savesMu sync.Mutex
+	saves   []int64
+}
+
+func (s *recordingStartChatStore) Save(chatID int64) error {
+	s.savesMu.Lock()
+	defer s.savesMu.Unlock()
+	s.saves = append(s.saves, chatID)
+	return s.MemChatStore.Save(chatID)
+}
+
+func (s *recordingStartChatStore) savedChats() []int64 {
+	s.savesMu.Lock()
+	defer s.savesMu.Unlock()
+	return append([]int64(nil), s.saves...)
+}
+
 func TestTelegram_StartFromWrongUserDoesNotCapture(t *testing.T) {
 	t.Parallel()
 	fake := newFakeTelegram(t)
-	store := &backend.MemChatStore{}
+	store := &recordingStartChatStore{}
 	tb := newTestBackend(t, fake, store, 5*time.Second)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -704,11 +723,18 @@ func TestTelegram_StartFromWrongUserDoesNotCapture(t *testing.T) {
 
 	fake.pushMessage(int64(123), int64(456), "/start")
 
-	// Wait for the refusal message to fly out before asserting "store
-	// is empty" — otherwise we race the polling goroutine.
+	// The allowed user's next update is a barrier for the stranger update.
+	fake.pushMessage(allowedUserID, allowedChatID, "/start")
 	waitFor(t, time.Second, func() bool { return len(fake.sentSnapshot()) >= 1 })
-	if _, ok, _ := store.Load(); ok {
-		t.Error("store captured a chat_id from an unauthorized user")
+	sent := fake.sentSnapshot()
+	if len(sent) != 1 || !strings.Contains(sent[0].Text, "Linked") {
+		t.Fatalf("unexpected stranger reply: %+v", sent)
+	}
+	if writes := store.savedChats(); len(writes) != 1 || writes[0] != allowedChatID {
+		t.Fatalf("chat-store writes = %v; want only the allowed user's write, none from the stranger", writes)
+	}
+	if id, ok, _ := store.Load(); !ok || id != allowedChatID {
+		t.Error("allowed user's link was not preserved")
 	}
 }
 

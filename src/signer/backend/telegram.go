@@ -403,6 +403,9 @@ func NewTelegramBackend(opts TelegramOptions) (*TelegramBackend, error) {
 		pollTimeout:   poll,
 		bot:           bot,
 	}
+	if chat, linked, err := opts.ChatStore.Load(); err == nil && linked && chat != opts.AllowedUserID {
+		logger.Print("WARN: linked chat is not the allowed user’s private chat; v2 notifications refused; send /start again in the allowed user's private DM")
+	}
 	return t, nil
 }
 
@@ -456,6 +459,16 @@ func (t *TelegramBackend) Run(ctx context.Context) error {
 		t.runMu.Unlock()
 	}()
 	return nil
+}
+
+// Wait joins the poller and notification workers after its context is cancelled.
+func (t *TelegramBackend) Wait() {
+	t.runMu.Lock()
+	done := t.runDone
+	t.runMu.Unlock()
+	if done != nil {
+		<-done
+	}
 }
 
 // pollLoop dispatches updates until cancellation.
@@ -572,11 +585,13 @@ func (t *TelegramBackend) dispatchUpdate(u tgbotapi.Update, forwarded bool) {
 	}
 }
 
-// handleStart processes a /start message. Only the allowed user can
-// link a chat; messages from anyone else get a polite refusal and we
-// do NOT save their chat_id. This is the "single allowed peer" rule
-// the spec emphasises.
+// handleStart coalesces well-formed strangers before the legacy linking path.
 func (t *TelegramBackend) handleStart(m *tgbotapi.Message) {
+	if m.From != nil && m.Chat != nil && m.From.ID != t.allowedUserID {
+		t.countCommandRefusal("wrong_user")
+		return
+	}
+
 	if m.From == nil || m.From.ID != t.allowedUserID {
 		// Mask the allowed user_id so a curious third party scanning
 		// the bot's responses doesn't learn it verbatim — the bot

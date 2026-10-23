@@ -24,6 +24,7 @@ import (
 type TelegramLegacyNotifier struct {
 	backend     *TelegramBackend
 	destination lifecycle.LegacyDestination
+	linked      bool
 	mu          sync.Mutex
 	entries     map[string]*legacyDeliveryEntry
 	bindings    map[string]legacyCallbackBinding
@@ -45,7 +46,24 @@ func NewTelegramLegacyNotifier(backend *TelegramBackend, destination lifecycle.L
 	return &TelegramLegacyNotifier{backend: backend, destination: destination, entries: make(map[string]*legacyDeliveryEntry)}, nil
 }
 
-func (n *TelegramLegacyNotifier) Destination() lifecycle.LegacyDestination { return n.destination }
+// NewLinkedTelegramLegacyNotifier follows the operator's persisted /start link.
+func NewLinkedTelegramLegacyNotifier(backend *TelegramBackend) (*TelegramLegacyNotifier, error) {
+	if backend == nil {
+		return nil, errors.New("telegram: missing legacy backend")
+	}
+	return &TelegramLegacyNotifier{backend: backend, linked: true, entries: make(map[string]*legacyDeliveryEntry)}, nil
+}
+
+func (n *TelegramLegacyNotifier) Destination() lifecycle.LegacyDestination {
+	if !n.linked {
+		return n.destination
+	}
+	chat, ok, err := n.backend.chatStore.Load()
+	if err != nil || !ok {
+		return lifecycle.LegacyDestination{}
+	}
+	return lifecycle.LegacyDestination{ChatID: chat}
+}
 
 // Prepare installs an independent immutable copy before lifecycle compares it.
 func (n *TelegramLegacyNotifier) Prepare(artifact *lifecycle.PreparedLegacyApproval) error {
@@ -54,7 +72,7 @@ func (n *TelegramLegacyNotifier) Prepare(artifact *lifecycle.PreparedLegacyAppro
 	}
 	data := artifact.Data()
 	frozen := *artifact // Its private backing data is immutable; copy the replaceable value.
-	if data.Context.Destination != n.destination {
+	if destination := n.Destination(); destination.ChatID == 0 || data.Context.Destination != destination {
 		return errors.New("telegram: legacy destination mismatch")
 	}
 	if len(data.Payload) > ar.MaxMessages {
