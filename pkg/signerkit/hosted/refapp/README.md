@@ -14,3 +14,12 @@ response keeps it for an explicit retry and clears a spent step-up code.
 
 Run `make test-refapp-js` for the browser adapter and page tests. They use a DOM
 stub that rejects HTML insertion and a same-origin fetch stub; no network is used.
+
+Legacy commands whose displayed text differs from the original bytes carry the
+display-redacted warning beside each affected command. If a command display
+fails, Approve is disabled and the server refuses approval with HTTP 409 and an
+inert `vote_refused{display_unavailable}` audit entry. Deny remains available.
+
+`test/legacy-display-mutations.py` checks the display guards using Go overlays
+and temporary browser assets. Set `TEST_LOCK` to the shared test lock and
+`GOCACHE` to a writable cache before running it from any directory.

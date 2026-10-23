@@ -77,6 +77,7 @@ type HumanAPI struct {
 	Store  store.Store
 	Cfg    HumanAPIConfig
 
+	legacyRedactor func(string, [32]byte, []redact.Rule) (string, bool)
 	ordinaryEngine func() *ApprovalV2Engine
 	voteMACKey     *[32]byte
 	limitOnce      sync.Once
@@ -517,6 +518,8 @@ func (h *HumanAPI) handleLogout(w http.ResponseWriter, r *http.Request, _ string
 // existing consumers and the loose /ui tests stay valid. Both command fields
 // carry redacted display text; the digest identifies the original bytes.
 type uiRequestSummary struct {
+	Redacted       bool        `json:"redacted"`
+	DisplayFailed  bool        `json:"display_failed"`
 	LegacyLabel    string      `json:"legacy_label"`
 	TerminalReason string      `json:"terminal_reason,omitempty"`
 	RequestID      string      `json:"request_id"`
@@ -551,11 +554,13 @@ type uiRequestSummary struct {
 // human cross-checks against what the agent showed them. Additive: it sits
 // alongside the retained Commands []string, never replacing it.
 type uiCommand struct {
-	Server     string `json:"server"`                // signRequestCmd.Server (was dropped)
-	Cmd        string `json:"cmd"`                   // redacted display text
-	HostKeyFP  string `json:"host_key_fp,omitempty"` // signRequestCmd.HostKeyFP (was dropped)
-	TTLSeconds int64  `json:"ttl_seconds"`           // signRequestCmd.TTLSeconds (was dropped)
-	SHA256     string `json:"sha256"`                // hex sha256([]byte(cmd)) — NEW
+	Redacted      bool   `json:"redacted"`
+	RedactedLabel string `json:"redacted_label,omitempty"`
+	Server        string `json:"server"`                // signRequestCmd.Server (was dropped)
+	Cmd           string `json:"cmd"`                   // redacted display text
+	HostKeyFP     string `json:"host_key_fp,omitempty"` // signRequestCmd.HostKeyFP (was dropped)
+	TTLSeconds    int64  `json:"ttl_seconds"`           // signRequestCmd.TTLSeconds (was dropped)
+	SHA256        string `json:"sha256"`                // hex sha256([]byte(cmd)) — NEW
 }
 
 // uiTally is the N-of-M vote tally for a request. Required mirrors the
@@ -579,23 +584,39 @@ type uiVoter struct {
 	TS          time.Time `json:"ts"`
 }
 
-func summarize(r *store.Request) uiRequestSummary {
+func (h *HumanAPI) summarize(r *store.Request) uiRequestSummary {
 	var salt [32]byte
 	rand.Read(salt[:])
 	defer clear(salt[:])
-	return summarizeWithSalt(r, salt)
+	redactor := h.legacyRedactor
+	if redactor == nil {
+		redactor = redact.RedactString
+	}
+	return summarizeWithRedactor(r, salt, redactor)
 }
 
 func summarizeWithSalt(r *store.Request, salt [32]byte) uiRequestSummary {
+	return summarizeWithRedactor(r, salt, redact.RedactString)
+}
+
+func summarizeWithRedactor(r *store.Request, salt [32]byte, redactor func(string, [32]byte, []redact.Rule) (string, bool)) uiRequestSummary {
 	defer clear(salt[:])
 	var cmdObjs []signRequestCmd
-	_ = json.Unmarshal(r.Commands, &cmdObjs)
+	displayFailed := json.Unmarshal(r.Commands, &cmdObjs) != nil
+	anyRedacted := false
 	cmds := make([]string, len(cmdObjs))
 	details := make([]uiCommand, len(cmdObjs))
 	for i, c := range cmdObjs {
-		display, ok := redact.RedactString(c.Cmd, salt, redactrules.Combined())
+		display, ok := redactor(c.Cmd, salt, redactrules.Combined())
 		if !ok {
 			display = "[command unavailable]"
+			displayFailed = true
+		}
+		isRedacted := display != c.Cmd
+		anyRedacted = anyRedacted || isRedacted
+		label := ""
+		if isRedacted {
+			label = ap.LabelRedactedDisplay
 		}
 		cmds[i] = display
 		// Per-command SHA-256 over the EXACT command bytes (not the whole
@@ -603,14 +624,18 @@ func summarizeWithSalt(r *store.Request, salt [32]byte) uiRequestSummary {
 		// agent's prompt.
 		sum := sha256.Sum256([]byte(c.Cmd))
 		details[i] = uiCommand{
-			Server:     c.Server,
-			Cmd:        cmds[i],
-			HostKeyFP:  c.HostKeyFP,
-			TTLSeconds: c.TTLSeconds,
-			SHA256:     hex.EncodeToString(sum[:]),
+			Redacted:      isRedacted,
+			RedactedLabel: label,
+			Server:        c.Server,
+			Cmd:           cmds[i],
+			HostKeyFP:     c.HostKeyFP,
+			TTLSeconds:    c.TTLSeconds,
+			SHA256:        hex.EncodeToString(sum[:]),
 		}
 	}
 	return uiRequestSummary{
+		Redacted:          anyRedacted,
+		DisplayFailed:     displayFailed,
 		LegacyLabel:       ap.LabelLegacyIntent,
 		TerminalReason:    r.TerminalReason,
 		RequestID:         r.RequestID,
@@ -708,7 +733,7 @@ func (h *HumanAPI) handleUIPending(w http.ResponseWriter, r *http.Request, userI
 	}
 	out := make([]uiRequestSummary, 0, len(rows))
 	for _, row := range rows {
-		sum := summarize(row)
+		sum := h.summarize(row)
 		// Counts-only tally per row (Voters omitted). One ListVotes per
 		// row — O(rows), acceptable at v2.0 scale (see buildTally).
 		sum.Tally = h.buildTally(r.Context(), row.RequestID, row.RequiredApprovals, false)
@@ -740,7 +765,7 @@ func (h *HumanAPI) handleUIRequest(w http.ResponseWriter, r *http.Request, userI
 		writeJSONError(w, http.StatusInternalServerError, "get request")
 		return
 	}
-	sum := summarize(row)
+	sum := h.summarize(row)
 	// Full tally including the voter list on the detail view.
 	sum.Tally = h.buildTally(r.Context(), row.RequestID, row.RequiredApprovals, true)
 	if sum.Tally != nil {
@@ -1042,6 +1067,11 @@ func (h *HumanAPI) handleVote(w http.ResponseWriter, r *http.Request, userID str
 		writeJSONError(w, http.StatusConflict, "view changed")
 		return
 	}
+	if !isV2 && decision == store.DecisionApprove && h.summarize(legacy).DisplayFailed {
+		h.auditLegacyVote(ctx, legacy, userID, decision, authn, "vote_refused{display_unavailable}")
+		writeJSONError(w, http.StatusConflict, "command display unavailable; approval refused")
+		return
+	}
 	if h.Cfg.RequireStepUp {
 		if !h.allowAuth(w, r, userID, "vote") {
 			return
@@ -1233,7 +1263,7 @@ func (h *HumanAPI) handleUIAudit(w http.ResponseWriter, r *http.Request, userID 
 	}
 	out := make([]uiRequestSummary, 0, len(rows))
 	for _, row := range rows {
-		out = append(out, summarize(row))
+		out = append(out, h.summarize(row))
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{"entries": out, "v2_entries": v2})
 }

@@ -217,3 +217,30 @@ test('v1 redacted command display neutralizes controls in every view', async () 
     assert.ok(!text.includes('\u202e'));
   }
 });
+
+test('legacy redaction label appears beside only redacted commands in both pages', async () => {
+  const label = 'Display-redacted command — signature covers undisplayed original bytes';
+  for (const redacted of [false, true]) {
+    const row = {request_id: 'r_test', status: 'pending', command_details: [{cmd: '[hidden]', redacted, redacted_label: redacted ? label : ''}], vote_challenge: challenge};
+    const p = await page('request.js', row, '?id=r_test');
+    const q = await page('pending.js', {pending: [row]});
+    for (const node of [p.nodes.get('integrity'), q.nodes.get('list')]) {
+      assert.equal(node.textContent.includes(label), redacted);
+    }
+  }
+});
+
+test('legacy display failure disables approval and permits denial', async () => {
+  const row = {request_id: 'r_test', status: 'pending', display_failed: true, vote_challenge: challenge};
+  const p = await page('request.js', row, '?id=r_test');
+  assert.equal(p.nodes.get('approve').disabled, true);
+  assert.equal(p.nodes.get('deny').disabled, false);
+  assert.match(p.nodes.get('integrity').textContent, /Command display unavailable; approval refused/);
+  await p.run("vote('approve')");
+  assert.equal(p.posts.length, 0);
+  await p.run("vote('deny')");
+  assert.equal(p.posts.length, 1);
+  assert.equal(p.posts[0].url, '/ui/request/r_test/deny');
+  const q = await page('pending.js', {pending: [row]});
+  assert.match(q.nodes.get('list').textContent, /Command display unavailable; approval refused/);
+});

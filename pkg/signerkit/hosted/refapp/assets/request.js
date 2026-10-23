@@ -6,6 +6,7 @@ const requestID = params.get(isV2 ? 'h' : 'id') || '';
 const requestPath = (isV2 ? '/ui/v2/request/' : '/ui/request/') + encodeURIComponent(requestID);
 let voteChallenge = null;
 let resolved = false;
+let displayFailed = false;
 let voted = false;
 let submitting = false;
 document.getElementById('request-id').textContent = requestID ? 'Request ' + neutralize(requestID) : 'No request id given';
@@ -17,7 +18,7 @@ function terminal(status) {
 function updateVoteControls() {
   const disabled = resolved || voted || submitting || !voteChallenge;
   const actions = voteChallenge && voteChallenge.allowed_actions || [];
-  document.getElementById('approve').disabled = disabled || !actions.includes('approve');
+  document.getElementById('approve').disabled = disabled || displayFailed || !actions.includes('approve');
   document.getElementById('deny').disabled = disabled || !actions.includes('deny');
   document.getElementById('actions').hidden = resolved || voted;
 }
@@ -30,10 +31,12 @@ async function load() {
   if (result.status === 404) { setStatus('Unknown request.', 'error'); return; }
   if (!result.ok) { setStatus('Could not load the request.', 'error'); return; }
   const request = result.data;
+  displayFailed = !isV2 && Boolean(request.display_failed);
   const integrity = document.getElementById('integrity');
   integrity.textContent = '';
   if (isV2) integrity.appendChild(renderV2Review(request));
   else integrity.appendChild(el('p', {text: neutralize(request.legacy_label || 'Legacy v1 request')}));
+  if (displayFailed) integrity.appendChild(el('p', {text: 'Command display unavailable; approval refused.'}));
   if (request.terminal_reason) integrity.appendChild(el('p', {text: neutralize(request.terminal_reason)}));
   for (const command of request.command_details || []) integrity.appendChild(renderCommand(command, {prominent: true}));
   document.getElementById('requester').textContent = isV2 ? (request.review && request.review.requester || '—') : neutralize(request.client_id || '—');
@@ -53,7 +56,7 @@ async function load() {
 }
 
 async function vote(decision) {
-  if (resolved || voted || submitting || !voteChallenge || !voteChallenge.allowed_actions.includes(decision)) return;
+  if ((decision === 'approve' && displayFailed) || resolved || voted || submitting || !voteChallenge || !voteChallenge.allowed_actions.includes(decision)) return;
   const code = document.getElementById('step-up-code').value.trim();
   const body = {challenge: voteChallenge.challenge};
   if (code) body.step_up_totp = code;

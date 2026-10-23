@@ -143,7 +143,7 @@ func TestWireFrozen_UIV1SecretRowGolden(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const want = `{"legacy_label":"Protocol-generated legacy intent (unverified; client supplied no reason)","terminal_reason":"canceled","request_id":"r_secret","status":"denied","client_id":"client","commands":["PASSWORD=[SSHGATE_REDACTED key=6a428a71] true"],"command_details":[{"server":"web","cmd":"PASSWORD=[SSHGATE_REDACTED key=6a428a71] true","ttl_seconds":60,"sha256":"2403e76cc001d395b149c80985e95a6ad2a130bf7e8f58c817a8273d5b188584"}],"created_at":"2026-01-01T00:00:00Z","required_approvals":1}`
+	const want = `{"redacted":true,"display_failed":false,"legacy_label":"Protocol-generated legacy intent (unverified; client supplied no reason)","terminal_reason":"canceled","request_id":"r_secret","status":"denied","client_id":"client","commands":["PASSWORD=[SSHGATE_REDACTED key=6a428a71] true"],"command_details":[{"redacted":true,"redacted_label":"Display-redacted command — signature covers undisplayed original bytes","server":"web","cmd":"PASSWORD=[SSHGATE_REDACTED key=6a428a71] true","ttl_seconds":60,"sha256":"2403e76cc001d395b149c80985e95a6ad2a130bf7e8f58c817a8273d5b188584"}],"created_at":"2026-01-01T00:00:00Z","required_approvals":1}`
 	if string(got) != want {
 		t.Fatalf("secret-bearing v1 row golden:\n%s", got)
 	}
