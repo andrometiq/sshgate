@@ -655,3 +655,11 @@ rulings, the new lanes A1a-auth and B1f, the C2a–C2d split and the DAG amendme
 [wave3-gap-rulings.md](wave3-gap-rulings.md). They passed three independent verification rounds;
 the fourth revision's last five fixes were applied without a further round. Its owner questions
 are open until answered; a lane blocked by one does not start.
+
+### Rulings 2026-10-23 — A11 (orchestrator)
+- **Step-5 reasons.** The vote challenge keeps E7 step 5's split. A MAC failure (forged, from another session or from before a restart) is `stale_challenge`. An authentic but expired challenge is `expired_challenge`. Both answer the same 409 "view changed". Q2(b) changes nothing about expiry.
+- **Engine wiring.** A11 may touch `server.go` and `approvals_v2_worker.go` for the human plane's engine wiring only. Handlers reach the ordinary engine through a synchronized accessor. A stopped engine answers 503 "busy — retry".
+- **Frozen-test inputs.** The named E7 change to `unit3_wire_ratchet_test.go` and `wire_frozen_test.go` (vote requests carry the challenge) moved from A11 commit 6 to commit 3, to keep every commit green. Response and signature assertions are unchanged.
+- **Non-operator noise.** At vote step 3, non-operator sessions append no v2 noise event, as on v1.
+- **Cursor key.** The pending-cursor key is derived from the vote MAC key with HKDF-SHA256 under its own label.
+- **Pending query scan, deferred.** The v2 pending page query scans `approvals_v2`; at 200k rows that is milliseconds, and only an operator session can trigger it. An indexed keyset waits for the next hosted migration, with an EXPLAIN QUERY PLAN regression.
