@@ -28,19 +28,20 @@ type LegacyResult struct {
 // LegacyRequest is memory-only. All mutable fields belong to LegacyService.mu.
 // The prepared artifact is the sole owner of display and delivery material.
 type LegacyRequest struct {
-	owner                 legacyOwner
-	instance              string
-	delivering            bool
-	handle, challengeHash string
-	artifact              *PreparedLegacyApproval
-	live                  bool
-	ctx                   context.Context
-	cancel                context.CancelFunc
-	deadline              time.Duration
-	done                  chan struct{}
-	ready                 chan struct{}
-	result                LegacyResult
-	noise                 int
+	owner                  legacyOwner
+	instance               string
+	delivering             bool
+	deliveryDone, editDone chan struct{}
+	handle, challengeHash  string
+	artifact               *PreparedLegacyApproval
+	live                   bool
+	ctx                    context.Context
+	cancel                 context.CancelFunc
+	deadline               time.Duration
+	done                   chan struct{}
+	ready                  chan struct{}
+	result                 LegacyResult
+	noise                  int
 }
 
 type legacyOwner struct {
@@ -160,6 +161,7 @@ func (e *LegacyService) reserveLegacyLocked(ctx context.Context, uid uint32, req
 		for {
 			select {
 			case <-r.done:
+				e.releaseLegacyRequest(r)
 				return
 			case <-ctx.Done():
 			case <-ticker.C:
@@ -196,9 +198,11 @@ func (e *LegacyService) resolveLegacyLocked(r *LegacyRequest, result LegacyResul
 		if status == "timeout" {
 			status = "expired"
 		}
+		r.editDone = make(chan struct{})
 		e.joined.Add(1)
 		go func() {
 			defer e.joined.Done()
+			defer close(r.editDone)
 			if err := e.config.LegacyNotifier.EditStatus(e.ctx, artifact, status); err != nil {
 				slog.Warn("lifecycle: legacy status edit failed")
 			}
@@ -348,4 +352,26 @@ func (e *LegacyService) CallbackReadiness(handle, challenge string) (CallbackRea
 		state.Pending, state.Changed = true, r.ready
 	}
 	return state, nil
+}
+
+// The existing request watcher releases outside the owner lock after all I/O.
+func (e *LegacyService) releaseLegacyRequest(r *LegacyRequest) {
+	e.mu.Lock()
+	deliveryDone, editDone, instance := r.deliveryDone, r.editDone, r.instance
+	e.mu.Unlock()
+	if deliveryDone != nil {
+		<-deliveryDone
+	}
+	if editDone != nil {
+		<-editDone
+	}
+	e.releaseLegacyInstance(instance)
+}
+
+// A8 owner-release ruling (2026-10-23): optional cleanup must be idempotent;
+// abandonment may release again after preparation finishes late.
+func (e *LegacyService) releaseLegacyInstance(instance string) {
+	if notifier, ok := e.config.LegacyNotifier.(interface{ Release(string) }); ok {
+		notifier.Release(instance)
+	}
 }

@@ -125,9 +125,18 @@ func (e *LegacyService) ReserveLegacy(ctx context.Context, instance LegacyInstan
 // It cancels preparation and delivery; a live approval is already committed.
 func (e *LegacyService) CancelLegacy(reservation *LegacyReservation) {
 	e.mu.Lock()
-	defer e.mu.Unlock()
+	var instance string
 	if reservation != nil && reservation.service == e && !reservation.request.live {
-		e.resolveLegacyLocked(reservation.request, LegacyResult{Status: "error"})
+		r := reservation.request
+		e.resolveLegacyLocked(r, LegacyResult{Status: "error"})
+		// Preparation can finish after resolution and its watcher's release.
+		if r.deliveryDone == nil {
+			instance = r.instance
+		}
+	}
+	e.mu.Unlock()
+	if instance != "" {
+		e.releaseLegacyInstance(instance)
 	}
 }
 
@@ -154,9 +163,11 @@ func (e *LegacyService) DeliverLegacy(reservation *LegacyReservation, artifact *
 	artifact = &PreparedLegacyApproval{data: artifact.Data()}
 	r.artifact = artifact
 	r.delivering = true
+	r.deliveryDone = make(chan struct{})
 	e.joined.Add(1)
 	e.mu.Unlock()
 	defer e.joined.Done()
+	defer close(r.deliveryDone)
 	prepared, err := e.config.LegacyNotifier.Prepared(reservation.instance)
 	if err != nil || !sameLegacyPrepared(artifact, prepared) {
 		e.mu.Lock()

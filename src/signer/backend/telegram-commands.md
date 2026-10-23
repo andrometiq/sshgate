@@ -13,4 +13,10 @@ elapsed minute. Excess refusals are silently dropped. This bounds their use of
 the notification queue. Only `redelivered` sets the audit replay flag. Registered
 commands that pass the gate do not consume this refusal budget.
 
-The legacy `/start` handler is separate and unchanged.
+The legacy `/start` handler silently counts well-formed wrong-user messages in
+the same summary. Its allowed-user linking behavior is unchanged.
+
+Callback taps retain their existing handling: unauthorized taps receive a
+`not authorized` answer and a per-tap log entry. This remains an accepted
+limitation for operator-linked legacy group chats; the callback-binding
+carry-forward tests pin these answers.

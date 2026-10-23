@@ -123,6 +123,9 @@ func (c approvalsConfig) durations() (approvalDurations, error) {
 // B1w replaces this volatile store with the journal ownership adapter.
 type approvalMemoryStore struct{ lifecycle.MemStore }
 
+var newApprovalStore = func() signerkit.RecoverableStore { return &approvalMemoryStore{} }
+var listenSignerSocket = (*signerkit.Server).Listen
+
 func (*approvalMemoryStore) Reopen() error { return nil }
 func (*approvalMemoryStore) Close() error  { return nil }
 
@@ -174,7 +177,7 @@ func attachApprovals(svc *signerkit.Service, bk signerkit.Backend, cfg tomlConfi
 	settings := ap.LocalSettings
 	settings.Retention, settings.ReportHorizon = durations.retention, durations.report
 	runtime, err := signerkit.NewApprovalRuntime(signerkit.ApprovalRuntimeConfig{
-		Store: &approvalMemoryStore{}, AllowedUIDs: cfg.Approvals.AllowedUIDs, Legacy: legacy, PrepareLegacy: prepare,
+		Store: newApprovalStore(), AllowedUIDs: cfg.Approvals.AllowedUIDs, Legacy: legacy, PrepareLegacy: prepare,
 		NewEngine: func(store lifecycle.Store) (*lifecycle.Engine, error) {
 			pool := assist.NewPool(1, assist.Timers{Now: clock.Wall})
 			engine, err := lifecycle.New(lifecycle.Config{Store: store, Clock: clock,
@@ -466,7 +469,7 @@ func runContext(parent context.Context, args []string) int {
 	}()
 
 	logf("ready (socket=%s backend=%s)", cfg.Paths.Socket, cfg.Backend.Type)
-	listenErr := srv.Listen(ctx)
+	listenErr := listenSignerSocket(srv, ctx)
 	logf("shutting down")
 	stop()
 	<-hupDone
