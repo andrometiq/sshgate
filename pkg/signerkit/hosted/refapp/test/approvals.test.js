@@ -80,9 +80,10 @@ test('v1 route, command rendering and step-up still work with challenge', async 
   assert.equal(p.posts[1].body.challenge, 'opaque-token');
 });
 test('legacy terminal reason hides actions', async () => {
-  const p = await page('request.js', {status: 'pending', terminal_reason: 'canceled', vote_challenge: challenge}, '?id=r_test');
+  const p = await page('request.js', {request_id: 'r_test', status: 'denied', terminal_reason: 'canceled', legacy_label: 'Protocol-generated legacy intent (unverified; client supplied no reason)', client_id: 'client', created_at: '2026-01-01T00:00:00Z', resolved_at: '2026-01-01T00:01:00Z', commands: [], command_details: [], required_approvals: 1, tally: {required: 1, approvals: 0, denials: 0, voters: null}, vote_challenge: challenge}, '?id=r_test');
   assert.equal(p.nodes.get('actions').hidden, true);
   assert.match(p.nodes.get('integrity').textContent, /canceled/);
+  assert.match(p.nodes.get('integrity').textContent, /Protocol-generated legacy intent/);
 });
 test('busy messages retain challenge and require a fresh code only when spent', async () => {
   for (const fresh of [false, true]) {
@@ -107,8 +108,9 @@ test('stale challenge reloads and a failed reload disables stale actions', async
 });
 test('pending pages each plane independently with opaque cursor and no duplicates', async () => {
   for (const moreV1 of [false, true]) {
-    const p = await page('pending.js', {pending: [{request_id: 'r_one'}], has_more: moreV1, next_offset: 50, v2_pending: [detail()], v2_has_more: !moreV1, v2_next_cursor: 'opaque+/='});
+    const p = await page('pending.js', {pending: [{request_id: 'r_one', legacy_label: 'Protocol-generated legacy intent (unverified; client supplied no reason)'}], has_more: moreV1, next_offset: 50, v2_pending: [detail()], v2_has_more: !moreV1, v2_next_cursor: 'opaque+/='});
     assert.equal(p.nodes.get('list').children.length, 2);
+    assert.match(p.nodes.get('list').children[0].textContent, /Protocol-generated legacy intent/);
     assert.equal(p.nodes.get('load-more').hidden, false);
     p.context.getResult = ok({pending: [{request_id: 'r_two'}], has_more: false, v2_pending: [detail({record_handle: 'SECOND'})], v2_has_more: false});
     await p.run('load(false)');
@@ -203,3 +205,15 @@ for (const subPrincipal of ['', 'local-uid:1000']) {
     });
   }
 }
+
+test('v1 redacted command display neutralizes controls in every view', async () => {
+  const cmd = 'echo \u202e PASSWORD=[SSHGATE_REDACTED key=12345678]';
+  const row = {request_id: 'r_test', status: 'pending', commands: [cmd], command_details: [{cmd}], vote_challenge: challenge};
+  for (const script of ['request.js', 'pending.js', 'audit.js']) {
+    const data = script === 'request.js' ? row : script === 'pending.js' ? {pending: [row]} : {entries: [row]};
+    const p = await page(script, data, '?id=r_test');
+    const text = p.nodes.get(script === 'request.js' ? 'integrity' : 'list').textContent;
+    assert.ok(text.includes('echo \\u{202e} PASSWORD=[SSHGATE_REDACTED key=12345678]'));
+    assert.ok(!text.includes('\u202e'));
+  }
+});

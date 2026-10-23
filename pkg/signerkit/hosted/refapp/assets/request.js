@@ -33,7 +33,7 @@ async function load() {
   const integrity = document.getElementById('integrity');
   integrity.textContent = '';
   if (isV2) integrity.appendChild(renderV2Review(request));
-  else integrity.appendChild(el('p', {text: 'Legacy request'}));
+  else integrity.appendChild(el('p', {text: neutralize(request.legacy_label || 'Legacy v1 request')}));
   if (request.terminal_reason) integrity.appendChild(el('p', {text: neutralize(request.terminal_reason)}));
   for (const command of request.command_details || []) integrity.appendChild(renderCommand(command, {prominent: true}));
   document.getElementById('requester').textContent = isV2 ? (request.review && request.review.requester || '—') : neutralize(request.client_id || '—');

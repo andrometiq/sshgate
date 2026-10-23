@@ -103,11 +103,23 @@ func TestHumanVoteV2OrderedChecks(t *testing.T) {
 	if len(rec.Header.Votes) != 1 || rec.Header.Outbox[len(rec.Header.Outbox)-1].Kind != ap.EventVoteReplay {
 		t.Fatalf("replay: %+v", rec.Header)
 	}
+	if err := db.CreateUser(ctx, &store.User{ID: "admin", Username: "admin", Role: "admin"}); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := json.Marshal(rec)
+	for _, user := range []string{"missing", "admin"} {
+		s.Human.Auth.store.(*voteSessionStore).session.UserID = user
+		check("", 409, "request already resolved")
+		after, _ := json.Marshal(readApproval(t, db, 1).Record)
+		if !bytes.Equal(before, after) {
+			t.Fatalf("non-operator %s appended noise", user)
+		}
+	}
 	s.Human.Auth.store.(*voteSessionStore).session.UserID = "other"
 	check("", 409, "request already resolved")
-	rec = readApproval(t, db, 1).Record
-	if rec.Header.Outbox[len(rec.Header.Outbox)-1].Detail != "resolved" {
-		t.Fatal("missing resolved refusal")
+	after := readApproval(t, db, 1).Record
+	if len(after.Header.Outbox) != len(rec.Header.Outbox)+1 || after.Header.Outbox[len(after.Header.Outbox)-1].Detail != "resolved" {
+		t.Fatal("operator resolved refusal not audited")
 	}
 	_ = clock
 }

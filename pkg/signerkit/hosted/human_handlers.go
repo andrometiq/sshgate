@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/hkdf"
 	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
@@ -27,6 +28,8 @@ import (
 	"github.com/karthikeyan5/sshgate/pkg/signerkit/store"
 	ap "github.com/karthikeyan5/sshgate/src/approvalplan"
 	"github.com/karthikeyan5/sshgate/src/approvalreview"
+	"github.com/karthikeyan5/sshgate/src/redact"
+	redactrules "github.com/karthikeyan5/sshgate/src/redact/rules"
 )
 
 // human_handlers.go is Phase E: the HUMAN-PLANE HTTP surface — the
@@ -511,11 +514,11 @@ func (h *HumanAPI) handleLogout(w http.ResponseWriter, r *http.Request, _ string
 //
 // The render-integrity + tally fields (CommandDetails, RequiredApprovals,
 // Tally) are ADDITIVE — every original field keeps its exact JSON name so
-// existing consumers and the loose /ui tests stay valid. Commands (the
-// flattened text slice) is retained verbatim; CommandDetails is the richer
-// per-command view the browser cross-checks (server, host-key FP, exact
-// bytes, per-command SHA-256).
+// existing consumers and the loose /ui tests stay valid. Both command fields
+// carry redacted display text; the digest identifies the original bytes.
 type uiRequestSummary struct {
+	LegacyLabel    string      `json:"legacy_label"`
+	TerminalReason string      `json:"terminal_reason,omitempty"`
 	RequestID      string      `json:"request_id"`
 	Status         string      `json:"status"`
 	ClientID       string      `json:"client_id"`
@@ -549,7 +552,7 @@ type uiRequestSummary struct {
 // alongside the retained Commands []string, never replacing it.
 type uiCommand struct {
 	Server     string `json:"server"`                // signRequestCmd.Server (was dropped)
-	Cmd        string `json:"cmd"`                   // exact command text
+	Cmd        string `json:"cmd"`                   // redacted display text
 	HostKeyFP  string `json:"host_key_fp,omitempty"` // signRequestCmd.HostKeyFP (was dropped)
 	TTLSeconds int64  `json:"ttl_seconds"`           // signRequestCmd.TTLSeconds (was dropped)
 	SHA256     string `json:"sha256"`                // hex sha256([]byte(cmd)) — NEW
@@ -577,25 +580,39 @@ type uiVoter struct {
 }
 
 func summarize(r *store.Request) uiRequestSummary {
+	var salt [32]byte
+	rand.Read(salt[:])
+	defer clear(salt[:])
+	return summarizeWithSalt(r, salt)
+}
+
+func summarizeWithSalt(r *store.Request, salt [32]byte) uiRequestSummary {
+	defer clear(salt[:])
 	var cmdObjs []signRequestCmd
 	_ = json.Unmarshal(r.Commands, &cmdObjs)
 	cmds := make([]string, len(cmdObjs))
 	details := make([]uiCommand, len(cmdObjs))
 	for i, c := range cmdObjs {
-		cmds[i] = c.Cmd
+		display, ok := redact.RedactString(c.Cmd, salt, redactrules.Combined())
+		if !ok {
+			display = "[command unavailable]"
+		}
+		cmds[i] = display
 		// Per-command SHA-256 over the EXACT command bytes (not the whole
 		// blob) — this is the fingerprint a human eyeballs against the
 		// agent's prompt.
 		sum := sha256.Sum256([]byte(c.Cmd))
 		details[i] = uiCommand{
 			Server:     c.Server,
-			Cmd:        c.Cmd,
+			Cmd:        cmds[i],
 			HostKeyFP:  c.HostKeyFP,
 			TTLSeconds: c.TTLSeconds,
 			SHA256:     hex.EncodeToString(sum[:]),
 		}
 	}
 	return uiRequestSummary{
+		LegacyLabel:       ap.LabelLegacyIntent,
+		TerminalReason:    r.TerminalReason,
 		RequestID:         r.RequestID,
 		Status:            string(r.Status),
 		ClientID:          r.ClientID,
@@ -902,12 +919,17 @@ func (h *HumanAPI) handleVote(w http.ResponseWriter, r *http.Request, userID str
 			writeJSONError(w, http.StatusServiceUnavailable, "busy — retry")
 			return
 		}
-		rec, answer, err := engine.transact(ctx, row.Key, func(_ *sql.Tx, before *ap.R1, now ap.Now) (ap.Command, ap.Inputs, error) {
+		rec, answer, err := engine.transact(ctx, row.Key, func(tx *sql.Tx, before *ap.R1, now ap.Now) (ap.Command, ap.Inputs, error) {
 			if before == nil {
 				return nil, ap.Inputs{}, &ap.CodeError{Code: ap.CodeNotFound}
 			}
 			after, _ := ap.Apply(before, ap.Tick{}, now, ap.Inputs{Epoch: engine.epoch, Settings: engine.config.Settings})
-			if after.Header.Decision != nil {
+			var role string
+			roleErr := tx.QueryRowContext(ctx, "SELECT role FROM users WHERE id = ?", userID).Scan(&role)
+			if roleErr != nil && !errors.Is(roleErr, sql.ErrNoRows) {
+				return nil, ap.Inputs{}, approvalTransactionError(roleErr)
+			}
+			if after.Header.Decision != nil && role == "operator" {
 				return ap.CastVote{Operator: userID, Decision: string(decision), Authn: authn, Hosted: &ap.HostedTap{}}, ap.Inputs{}, nil
 			}
 			return ap.Tick{}, ap.Inputs{}, nil
@@ -1471,7 +1493,12 @@ func (h *HumanAPI) pendingCursorCipher(ctx context.Context) (cipher.AEAD, []byte
 	if !ok || session.ID == "" || h.voteMACKey == nil {
 		return nil, nil, errUIListCursor
 	}
-	block, err := aes.NewCipher(h.voteMACKey[:])
+	key, err := hkdf.Key(sha256.New, h.voteMACKey[:], nil, "sshgate-ui-pending-cursor-v2", 32)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer clear(key)
+	block, err := aes.NewCipher(key)
 	if err != nil {
 		return nil, nil, err
 	}

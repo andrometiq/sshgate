@@ -749,7 +749,7 @@ func TestUIPending_RenderIntegrityFields(t *testing.T) {
 	t.Parallel()
 	ts, _, db, am, _ := humanFixture(t)
 	_, secret := seedTOTPUser(t, db, am, "alice")
-	const cmd = "systemctl restart nginx"
+	const cmd = "PASSWORD=planted-secret-value systemctl restart nginx"
 	seedPendingRequest(t, db, "r-int-1", 2, cmd, 120)
 
 	client := loginClient(t, ts, "alice", secret)
@@ -757,8 +757,10 @@ func TestUIPending_RenderIntegrityFields(t *testing.T) {
 
 	var out struct {
 		Pending []struct {
-			RequestID         string `json:"request_id"`
-			RequiredApprovals int    `json:"required_approvals"`
+			RequestID         string   `json:"request_id"`
+			LegacyLabel       string   `json:"legacy_label"`
+			Commands          []string `json:"commands"`
+			RequiredApprovals int      `json:"required_approvals"`
 			CommandDetails    []struct {
 				Server     string `json:"server"`
 				Cmd        string `json:"cmd"`
@@ -797,8 +799,15 @@ func TestUIPending_RenderIntegrityFields(t *testing.T) {
 	if cd.SHA256 == "" {
 		t.Errorf("command_details[0].sha256 is empty")
 	}
-	if cd.Cmd != cmd {
-		t.Errorf("command_details[0].cmd = %q; want %q", cd.Cmd, cmd)
+	sum := sha256.Sum256([]byte(cmd))
+	if cd.SHA256 != hex.EncodeToString(sum[:]) {
+		t.Fatal("digest no longer binds raw command")
+	}
+	if len(row.Commands) != 1 || row.Commands[0] != cd.Cmd || strings.Contains(cd.Cmd, "planted-secret-value") || cd.Cmd == cmd {
+		t.Fatalf("unredacted or inconsistent command: %q", cd.Cmd)
+	}
+	if row.LegacyLabel != "Protocol-generated legacy intent (unverified; client supplied no reason)" {
+		t.Fatalf("legacy label: %q", row.LegacyLabel)
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/hkdf"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -368,7 +369,11 @@ func TestUIListsV2AuthenticatedMalformedCursor(t *testing.T) {
 	_, db, _ := approvalEngineFixture(t, false)
 	s, _, _, _ := voteChallengeFixture(t, false)
 	s.Human.Store = db
-	block, err := aes.NewCipher(s.Human.voteMACKey[:])
+	key, err := hkdf.Key(sha256.New, s.Human.voteMACKey[:], nil, "sshgate-ui-pending-cursor-v2", 32)
+	if err != nil {
+		t.Fatal(err)
+	}
+	block, err := aes.NewCipher(key)
 	if err != nil {
 		t.Fatal(err)
 	}

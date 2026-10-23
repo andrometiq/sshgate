@@ -33,6 +33,7 @@ async function load(reset) {
         class: 'meta',
         text: 'from ' + neutralize(row.client_id) + ' · submitted ' + fmtTime(row.created_at),
       }));
+      card.appendChild(el('p', {text: neutralize(row.legacy_label || 'Legacy v1 request')}));
       for (const command of row.command_details || []) card.appendChild(renderCommand(command));
       card.appendChild(renderTally(row.tally, false));
       list.appendChild(card);
