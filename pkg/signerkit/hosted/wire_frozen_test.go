@@ -67,7 +67,7 @@ func TestWireFrozen_HostedClientStillDecodesV1(t *testing.T) {
 
 	// Approve via the human plane while the frozen client long-polls.
 	httpClient := loginClient(t, ts, "alice", secret)
-	approveResp, err := httpClient.Post(ts.URL+"/ui/request/"+requestID+"/approve", "application/json", nil)
+	approveResp, err := httpClient.Post(ts.URL+"/ui/request/"+requestID+"/approve", "application/json", readerOf(humanChallengeBody(t, httpClient, ts.URL, requestID, "")))
 	if err != nil {
 		t.Fatalf("approve: %v", err)
 	}

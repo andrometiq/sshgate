@@ -3,19 +3,33 @@ package hosted
 import (
 	"bytes"
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/hkdf"
+	"crypto/rand"
 	"crypto/sha256"
+	"database/sql"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/karthikeyan5/sshgate/pkg/signerkit"
+	"github.com/karthikeyan5/sshgate/pkg/signerkit/sqlitestore"
 	"github.com/karthikeyan5/sshgate/pkg/signerkit/store"
+	ap "github.com/karthikeyan5/sshgate/src/approvalplan"
+	"github.com/karthikeyan5/sshgate/src/approvalreview"
+	"github.com/karthikeyan5/sshgate/src/redact"
+	redactrules "github.com/karthikeyan5/sshgate/src/redact/rules"
 )
 
 // human_handlers.go is Phase E: the HUMAN-PLANE HTTP surface — the
@@ -55,16 +69,18 @@ const maxHumanBody = 64 * 1024
 // engine into the human-plane routes. It is constructed alongside the
 // machine-plane Server and mounted on the same mux (see Server.routes).
 //
-// It holds NO mutable state; all state lives in the store. Safe for
-// concurrent use.
+// Persistent state lives in the store; the vote MAC key lives only in memory.
+// Safe for concurrent use after attachment.
 type HumanAPI struct {
 	Auth   *AuthManager
 	Engine *ApprovalEngine
 	Store  store.Store
 	Cfg    HumanAPIConfig
 
-	limitOnce sync.Once
-	limits    *authRateLimiter
+	ordinaryEngine func() *ApprovalV2Engine
+	voteMACKey     *[32]byte
+	limitOnce      sync.Once
+	limits         *authRateLimiter
 }
 
 // HumanAPIConfig is the per-deploy POLICY the human plane applies. Every
@@ -108,8 +124,8 @@ type HumanAPIConfig struct {
 // reads ONLY the session cookie (never the Authorization header), so a
 // bearer token presented here is structurally ignored. On a missing or
 // invalid/expired session it writes 401. On success it injects the
-// authenticated operator's user id into the request context for the
-// downstream handler.
+// session ID and expiry into the request context and passes the operator ID
+// to the downstream handler.
 //
 // This is the load-bearing half of plane separation: because it never
 // consults the bearer key, the machine credential cannot authenticate a
@@ -126,7 +142,8 @@ func (h *HumanAPI) withSession(next func(http.ResponseWriter, *http.Request, str
 			writeJSONError(w, http.StatusUnauthorized, "unauthorized")
 			return
 		}
-		next(w, r, sess.UserID)
+		ctx := context.WithValue(r.Context(), voteSessionContextKey{}, voteSession{ID: sess.ID, ExpiresAt: sess.ExpiresAt})
+		next(w, r.WithContext(ctx), sess.UserID)
 	})
 }
 
@@ -205,6 +222,9 @@ func (h *HumanAPI) registerHumanRoutes(mux *http.ServeMux) {
 	mux.Handle("POST /auth/logout", h.withSessionMutation(h.handleLogout))
 
 	// --- ui: all session-gated ---
+	mux.Handle("GET /ui/v2/request/{handle}", h.withSession(h.handleUIV2Request))
+	mux.Handle("POST /ui/v2/request/{handle}/approve", h.withSessionMutation(h.handleUIV2Vote))
+	mux.Handle("POST /ui/v2/request/{handle}/deny", h.withSessionMutation(h.handleUIV2Vote))
 	mux.Handle("GET /ui/pending", h.withSession(h.handleUIPending))
 	mux.Handle("GET /ui/request/{id}", h.withSession(h.handleUIRequest))
 	mux.Handle("POST /ui/request/{id}/approve", h.withSessionMutation(h.handleUIApprove))
@@ -494,11 +514,11 @@ func (h *HumanAPI) handleLogout(w http.ResponseWriter, r *http.Request, _ string
 //
 // The render-integrity + tally fields (CommandDetails, RequiredApprovals,
 // Tally) are ADDITIVE — every original field keeps its exact JSON name so
-// existing consumers and the loose /ui tests stay valid. Commands (the
-// flattened text slice) is retained verbatim; CommandDetails is the richer
-// per-command view the browser cross-checks (server, host-key FP, exact
-// bytes, per-command SHA-256).
+// existing consumers and the loose /ui tests stay valid. Both command fields
+// carry redacted display text; the digest identifies the original bytes.
 type uiRequestSummary struct {
+	LegacyLabel    string      `json:"legacy_label"`
+	TerminalReason string      `json:"terminal_reason,omitempty"`
 	RequestID      string      `json:"request_id"`
 	Status         string      `json:"status"`
 	ClientID       string      `json:"client_id"`
@@ -521,7 +541,8 @@ type uiRequestSummary struct {
 	// omitted for leanness) and with the full voter list on the
 	// /ui/request/{id} detail. nil (omitted) where no tally is computed
 	// (e.g. the audit list).
-	Tally *uiTally `json:"tally,omitempty"`
+	Tally         *uiTally       `json:"tally,omitempty"`
+	VoteChallenge *voteChallenge `json:"vote_challenge,omitempty"`
 }
 
 // uiCommand is the per-command render-integrity view. It surfaces the
@@ -531,7 +552,7 @@ type uiRequestSummary struct {
 // alongside the retained Commands []string, never replacing it.
 type uiCommand struct {
 	Server     string `json:"server"`                // signRequestCmd.Server (was dropped)
-	Cmd        string `json:"cmd"`                   // exact command text
+	Cmd        string `json:"cmd"`                   // redacted display text
 	HostKeyFP  string `json:"host_key_fp,omitempty"` // signRequestCmd.HostKeyFP (was dropped)
 	TTLSeconds int64  `json:"ttl_seconds"`           // signRequestCmd.TTLSeconds (was dropped)
 	SHA256     string `json:"sha256"`                // hex sha256([]byte(cmd)) — NEW
@@ -559,25 +580,39 @@ type uiVoter struct {
 }
 
 func summarize(r *store.Request) uiRequestSummary {
+	var salt [32]byte
+	rand.Read(salt[:])
+	defer clear(salt[:])
+	return summarizeWithSalt(r, salt)
+}
+
+func summarizeWithSalt(r *store.Request, salt [32]byte) uiRequestSummary {
+	defer clear(salt[:])
 	var cmdObjs []signRequestCmd
 	_ = json.Unmarshal(r.Commands, &cmdObjs)
 	cmds := make([]string, len(cmdObjs))
 	details := make([]uiCommand, len(cmdObjs))
 	for i, c := range cmdObjs {
-		cmds[i] = c.Cmd
+		display, ok := redact.RedactString(c.Cmd, salt, redactrules.Combined())
+		if !ok {
+			display = "[command unavailable]"
+		}
+		cmds[i] = display
 		// Per-command SHA-256 over the EXACT command bytes (not the whole
 		// blob) — this is the fingerprint a human eyeballs against the
 		// agent's prompt.
 		sum := sha256.Sum256([]byte(c.Cmd))
 		details[i] = uiCommand{
 			Server:     c.Server,
-			Cmd:        c.Cmd,
+			Cmd:        cmds[i],
 			HostKeyFP:  c.HostKeyFP,
 			TTLSeconds: c.TTLSeconds,
 			SHA256:     hex.EncodeToString(sum[:]),
 		}
 	}
 	return uiRequestSummary{
+		LegacyLabel:       ap.LabelLegacyIntent,
+		TerminalReason:    r.TerminalReason,
 		RequestID:         r.RequestID,
 		Status:            string(r.Status),
 		ClientID:          r.ClientID,
@@ -629,7 +664,12 @@ func (h *HumanAPI) buildTally(ctx context.Context, requestID string, required in
 }
 
 // handleUIPending lists the pending requests awaiting human decision.
-func (h *HumanAPI) handleUIPending(w http.ResponseWriter, r *http.Request, _ string) {
+func (h *HumanAPI) handleUIPending(w http.ResponseWriter, r *http.Request, userID string) {
+	v2, more, cursor, err := h.pendingV2(r, userID)
+	if err != nil {
+		writeUIListError(w, err)
+		return
+	}
 	const pageSize = 50
 	offset := 0
 	if raw := r.URL.Query().Get("offset"); raw != "" {
@@ -640,10 +680,7 @@ func (h *HumanAPI) handleUIPending(w http.ResponseWriter, r *http.Request, _ str
 			return
 		}
 	}
-	var (
-		rows []*store.Request
-		err  error
-	)
+	var rows []*store.Request
 	if pager, ok := h.Store.(interface {
 		ListPendingPage(context.Context, int, int) ([]*store.Request, error)
 	}); ok {
@@ -677,7 +714,10 @@ func (h *HumanAPI) handleUIPending(w http.ResponseWriter, r *http.Request, _ str
 		sum.Tally = h.buildTally(r.Context(), row.RequestID, row.RequiredApprovals, false)
 		out = append(out, sum)
 	}
-	response := map[string]interface{}{"pending": out, "has_more": hasMore}
+	response := map[string]interface{}{"pending": out, "has_more": hasMore, "v2_pending": v2, "v2_has_more": more}
+	if more {
+		response["v2_next_cursor"] = cursor
+	}
 	if hasMore {
 		response["next_offset"] = offset + len(out)
 	}
@@ -711,7 +751,125 @@ func (h *HumanAPI) handleUIRequest(w http.ResponseWriter, r *http.Request, userI
 			}
 		}
 	}
+	challenge, err := h.issueVoteChallenge(r.Context(), legacyVoteBinding(row, userID), legacyVoteExpiry(row))
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "issue challenge")
+		return
+	}
+	sum.VoteChallenge = &challenge
 	writeJSON(w, http.StatusOK, sum)
+}
+
+// resolveUIV2 uses the operator-wide handle index, never a requester ID.
+func (h *HumanAPI) resolveUIV2(w http.ResponseWriter, r *http.Request) *sqlitestore.V2Row {
+	reader, ok := h.Store.(interface {
+		ByHandleV2(context.Context, string) (*sqlitestore.V2Row, error)
+	})
+	if !ok {
+		writeJSONError(w, http.StatusServiceUnavailable, "approvals unavailable")
+		return nil
+	}
+	row, err := reader.ByHandleV2(r.Context(), r.PathValue("handle"))
+	if err != nil {
+		switch {
+		case errors.Is(err, store.ErrNotFound):
+			writeJSONError(w, http.StatusNotFound, "unknown handle")
+		case IsApprovalBusy(err):
+			writeJSONError(w, http.StatusServiceUnavailable, "busy — retry")
+		case errors.Is(err, sqlitestore.ErrV2AmbiguousHandle):
+			writeJSONError(w, http.StatusConflict, "ambiguous handle")
+		default:
+			writeJSONError(w, http.StatusInternalServerError, "get request")
+		}
+		return nil
+	}
+	return row
+}
+
+func (h *HumanAPI) handleUIV2Vote(w http.ResponseWriter, r *http.Request, userID string) {
+	decision := store.DecisionApprove
+	if strings.HasSuffix(r.URL.Path, "/deny") {
+		decision = store.DecisionDeny
+	}
+	h.handleVote(w, r, userID, decision)
+}
+
+type uiV2Request struct {
+	RecordHandle      string               `json:"record_handle"`
+	SubPrincipal      string               `json:"sub_principal"`
+	RequestID         string               `json:"request_id"`
+	PlanHash          string               `json:"plan_hash"`
+	ApprovalStatus    ap.ApprovalStatus    `json:"approval_status"`
+	RequestExpiresAt  time.Time            `json:"request_expires_at"`
+	RequiredApprovals int                  `json:"required_approvals"`
+	Reason            string               `json:"rationale_redacted"`
+	Votes             []ap.Vote            `json:"votes"`
+	Pruned            bool                 `json:"pruned"`
+	Details           string               `json:"details,omitempty"`
+	Review            *approvalreview.View `json:"review,omitempty"`
+	VoteChallenge     *voteChallenge       `json:"vote_challenge,omitempty"`
+}
+
+func (h *HumanAPI) handleUIV2Request(w http.ResponseWriter, r *http.Request, userID string) {
+	row := h.resolveUIV2(w, r)
+	if row == nil {
+		return
+	}
+	out, err := renderUIV2(row)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "get review")
+		return
+	}
+	binding := v2VoteBinding(row, userID)
+	if row.Record.Header.Decision != nil {
+		binding.AllowedActions = []string{}
+	}
+	challenge, err := h.issueVoteChallenge(r.Context(), binding, row.Record.Header.RequestExpiresAt)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "issue challenge")
+		return
+	}
+	out.VoteChallenge = &challenge
+	writeJSON(w, http.StatusOK, out)
+}
+
+func renderUIV2(row *sqlitestore.V2Row) (uiV2Request, error) {
+	rec := row.Record
+	header := rec.Header
+	assist := approvalreview.Assist{State: ap.AssistPreparing}
+	if header.Assist != nil {
+		assist.State, assist.Reason = header.Assist.State, header.Assist.Reason
+		if rec.Payload != nil {
+			assist.Result = rec.Payload.AssistResult
+		}
+	}
+	out := uiV2Request{
+		RecordHandle: row.RecordHandle, SubPrincipal: approvalreview.NeutralizeText(header.SubPrincipal),
+		RequestID: header.RequestID, PlanHash: header.PlanHash, ApprovalStatus: ap.ApprovalPending,
+		RequestExpiresAt: header.RequestExpiresAt, RequiredApprovals: header.RequiredApprovals,
+		Reason: header.RationaleRedacted, Pruned: header.Shed,
+	}
+	if header.Decision != nil {
+		out.ApprovalStatus = header.Decision.Status
+	}
+	for _, vote := range header.Votes {
+		vote.Operator = approvalreview.NeutralizeText(vote.Operator)
+		out.Votes = append(out.Votes, vote)
+	}
+	if header.Shed {
+		out.Details = "details pruned"
+	} else {
+		snapshot, err := approvalreview.DecodeSnapshot(rec.Payload.ReviewSnapshot)
+		if err != nil {
+			return uiV2Request{}, err
+		}
+		view, err := approvalreview.BuildView(snapshot, assist)
+		if err != nil {
+			return uiV2Request{}, err
+		}
+		out.Review = &view
+	}
+	return out, nil
 }
 
 // voteRequest is the body of approve/deny. step_up carries an optional
@@ -721,6 +879,7 @@ func (h *HumanAPI) handleUIRequest(w http.ResponseWriter, r *http.Request, userI
 // then referenced — out of scope for the single POST; v2.1 ties an
 // asserted-recently token here.)
 type voteRequest struct {
+	Challenge  string `json:"challenge"`
 	StepUpTOTP string `json:"step_up_totp,omitempty"`
 }
 
@@ -737,66 +896,336 @@ func (h *HumanAPI) handleUIDeny(w http.ResponseWriter, r *http.Request, userID s
 	h.handleVote(w, r, userID, store.DecisionDeny)
 }
 
-// handleVote is the shared approve/deny body. It (optionally) enforces a
-// step-up, then submits the vote to the engine and renders the outcome.
+var errVoteOperatorRole = errors.New("hosted: operator role required")
+
+// handleVote checks the live view before spending a step-up proof.
 func (h *HumanAPI) handleVote(w http.ResponseWriter, r *http.Request, userID string, decision store.Decision) {
-	id := r.PathValue("id")
-	if id == "" {
-		writeJSONError(w, http.StatusBadRequest, "missing request id")
+	ctx := r.Context()
+	isV2 := r.PathValue("handle") != ""
+	var legacy *store.Request
+	var row *sqlitestore.V2Row
+	var engine *ApprovalV2Engine
+	var binding ap.ChallengeBinding
+	authn := "session"
+	if isV2 {
+		row = h.resolveUIV2(w, r)
+		if row == nil {
+			return
+		}
+		if h.ordinaryEngine != nil {
+			engine = h.ordinaryEngine()
+		}
+		if engine == nil {
+			writeJSONError(w, http.StatusServiceUnavailable, "busy — retry")
+			return
+		}
+		rec, answer, err := engine.transact(ctx, row.Key, func(tx *sql.Tx, before *ap.R1, now ap.Now) (ap.Command, ap.Inputs, error) {
+			if before == nil {
+				return nil, ap.Inputs{}, &ap.CodeError{Code: ap.CodeNotFound}
+			}
+			after, _ := ap.Apply(before, ap.Tick{}, now, ap.Inputs{Epoch: engine.epoch, Settings: engine.config.Settings})
+			var role string
+			roleErr := tx.QueryRowContext(ctx, "SELECT role FROM users WHERE id = ?", userID).Scan(&role)
+			if roleErr != nil && !errors.Is(roleErr, sql.ErrNoRows) {
+				return nil, ap.Inputs{}, approvalTransactionError(roleErr)
+			}
+			if after.Header.Decision != nil && role == "operator" {
+				return ap.CastVote{Operator: userID, Decision: string(decision), Authn: authn, Hosted: &ap.HostedTap{}}, ap.Inputs{}, nil
+			}
+			return ap.Tick{}, ap.Inputs{}, nil
+		})
+		if h.voteV2Error(w, err, false) {
+			return
+		}
+		if answer.Noise || rec.Header.Decision != nil {
+			writeJSONError(w, http.StatusConflict, "request already resolved")
+			return
+		}
+		row.Record = rec
+		binding = v2VoteBinding(row, userID)
+	} else {
+		id := r.PathValue("id")
+		var err error
+		legacy, err = h.Store.GetByID(ctx, id)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				writeJSONError(w, http.StatusNotFound, "unknown request_id")
+			} else {
+				writeJSONError(w, http.StatusInternalServerError, "get request")
+			}
+			return
+		}
+		if legacy.Status == store.StatusPending && !h.Auth.now().Before(legacyVoteExpiry(legacy)) {
+			resolver, ok := h.Store.(store.LegacyResolver)
+			if !ok {
+				writeJSONError(w, http.StatusInternalServerError, "expire request")
+				return
+			}
+			if _, _, err = resolver.ExpireLegacy(ctx, id, h.Auth.now()); err != nil {
+				writeJSONError(w, http.StatusInternalServerError, "expire request")
+				return
+			}
+			legacy, err = h.Store.GetByID(ctx, id)
+			if err != nil {
+				writeJSONError(w, http.StatusInternalServerError, "get request")
+				return
+			}
+		}
+		if legacy.Status != store.StatusPending {
+			if user, err := h.Store.GetUser(ctx, userID); err == nil && user.Role == "operator" {
+				h.auditLegacyResolved(ctx, legacy, userID, decision, authn)
+			}
+			writeJSONError(w, http.StatusConflict, "request already resolved")
+			return
+		}
+		binding = legacyVoteBinding(legacy, userID)
+	}
+	user, err := h.Store.GetUser(ctx, userID)
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		if isV2 && IsApprovalBusy(err) {
+			writeJSONError(w, http.StatusServiceUnavailable, "busy — retry")
+		} else {
+			writeJSONError(w, http.StatusInternalServerError, "get operator")
+		}
+		return
+	}
+	if user == nil || user.Role != "operator" {
+		writeJSONError(w, http.StatusForbidden, "operator role required")
 		return
 	}
 	var req voteRequest
-	// The frozen human contract permits an empty body when step-up is disabled.
-	// The mutation middleware still requires an exact trusted Origin and an
-	// application/json content type, closing CSRF without changing that body
-	// contract. Non-empty bodies are decoded strictly and size-capped.
-	if r.ContentLength != 0 {
-		if !decodeJSON(w, r, &req) {
+	if r.ContentLength != 0 && !decodeJSON(w, r, &req) {
+		return
+	}
+	if req.Challenge == "" {
+		writeJSONError(w, http.StatusBadRequest, "challenge is required")
+		return
+	}
+	now := h.Auth.now()
+	if isV2 {
+		now = engine.now().Wall
+	}
+	refusal := h.verifyVoteChallenge(ctx, binding, req.Challenge, now)
+	vote := ap.CastVote{Operator: userID, Decision: string(decision), Authn: authn,
+		Flags:  ap.VoteFlags{DenyVeto: h.Cfg.ApprovalPolicy.DenyVeto, AllowSelfApprove: h.Cfg.ApprovalPolicy.AllowSelfApprove},
+		Hosted: &ap.HostedTap{Refusal: refusal, PlanHash: binding.PlanHash, Revision: binding.AssistRevision, Digest: binding.AssistDigest, Actions: binding.AllowedActions}}
+	if isV2 {
+		// Probe with Apply under the writer lock, but commit only Clock or a refusal.
+		// A replay with a valid view belongs to step 7, after step-up.
+		checked, answer, err := engine.transact(ctx, row.Key, func(_ *sql.Tx, before *ap.R1, now ap.Now) (ap.Command, ap.Inputs, error) {
+			if before == nil {
+				return nil, ap.Inputs{}, &ap.CodeError{Code: ap.CodeNotFound}
+			}
+			inputs := ap.Inputs{Epoch: engine.epoch, Settings: engine.config.Settings}
+			probe := vote
+			probe.Hosted = &ap.HostedTap{Refusal: h.verifyVoteChallenge(ctx, binding, req.Challenge, now.Wall), PlanHash: binding.PlanHash, Revision: binding.AssistRevision, Digest: binding.AssistDigest, Actions: binding.AllowedActions}
+			_, answer := ap.Apply(before, probe, now, inputs)
+			after, _ := ap.Apply(before, ap.Tick{}, now, inputs)
+			if after.Header.Decision != nil || (answer.Noise && answer.Reason != "" && answer.Reason != "set_full") {
+				return probe, ap.Inputs{}, nil
+			}
+			return ap.Tick{}, ap.Inputs{}, nil
+		})
+		if h.voteV2Error(w, err, false) {
 			return
 		}
+		if checked.Header.Decision != nil {
+			writeJSONError(w, http.StatusConflict, "request already resolved")
+			return
+		}
+		if answer.Noise {
+			writeJSONError(w, http.StatusConflict, "view changed")
+			return
+		}
+	} else if refusal != "" {
+		h.auditLegacyVote(ctx, legacy, userID, decision, authn, "vote_refused{"+refusal+"}")
+		writeJSONError(w, http.StatusConflict, "view changed")
+		return
 	}
-
-	// authnMethod records how the operator proved liveness for THIS vote,
-	// for the audit trail. With step-up off, the session itself is the
-	// proof; with it on, the fresh factor is.
-	authnMethod := "session"
 	if h.Cfg.RequireStepUp {
 		if !h.allowAuth(w, r, userID, "vote") {
 			return
 		}
-		// Per-action step-up enforcement (the #2 product flag). We support
-		// a TOTP step-up inline; the mechanism's StepUp verb is the seam.
-		if _, err := h.Auth.StepUp(r.Context(), userID, StepUpTOTP, req.StepUpTOTP); err != nil {
-			writeJSONError(w, http.StatusUnauthorized, "step-up required")
+		if _, err := h.Auth.StepUp(ctx, userID, StepUpTOTP, req.StepUpTOTP); err != nil {
+			if isV2 && IsApprovalBusy(err) {
+				writeJSONError(w, http.StatusServiceUnavailable, "busy — retry with a fresh code")
+			} else {
+				writeJSONError(w, http.StatusUnauthorized, "step-up required")
+			}
 			return
 		}
-		authnMethod = string(StepUpTOTP)
+		authn = string(StepUpTOTP)
 	}
-
-	outcome, err := h.Engine.SubmitVote(r.Context(), id, userID, decision, authnMethod, h.Cfg.ApprovalPolicy)
+	if isV2 {
+		vote.Authn = authn
+		after, answer, err := engine.transact(ctx, row.Key, func(tx *sql.Tx, _ *ap.R1, now ap.Now) (ap.Command, ap.Inputs, error) {
+			var role string
+			err := tx.QueryRowContext(ctx, "SELECT role FROM users WHERE id = ?", userID).Scan(&role)
+			if errors.Is(err, sql.ErrNoRows) || (err == nil && role != "operator") {
+				return nil, ap.Inputs{}, errVoteOperatorRole
+			}
+			if err != nil {
+				return nil, ap.Inputs{}, approvalTransactionError(err)
+			}
+			vote.Hosted.Refusal = h.verifyVoteChallenge(ctx, binding, req.Challenge, now.Wall)
+			return vote, ap.Inputs{}, nil
+		})
+		if h.voteV2Error(w, err, h.Cfg.RequireStepUp) {
+			return
+		}
+		if answer.Noise {
+			message := "operator already voted"
+			switch answer.Reason {
+			case "set_full":
+				message = "vote limit reached: this vote cannot change the outcome"
+			case "resolved", "expired", "canceled":
+				message = "request already resolved"
+			case "stale_challenge", "expired_challenge", "session_mismatch", "action_not_allowed":
+				message = "view changed"
+			}
+			writeJSONError(w, http.StatusConflict, message)
+			return
+		}
+		result := "pending"
+		if after.Header.Decision != nil {
+			result = string(after.Header.Decision.Status)
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{"request_id": row.Key.RequestID, "decision": result, "flipped": after.Header.Decision != nil})
+		return
+	}
+	votes, err := h.Store.ListVotes(ctx, legacy.RequestID)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "list votes")
+		return
+	}
+	audited := false
+	for _, vote := range votes {
+		if vote.Operator == userID {
+			h.auditLegacyVote(ctx, legacy, userID, decision, authn, "vote_duplicate")
+			audited = true
+			break
+		}
+	}
+	outcome, err := h.Engine.SubmitVote(ctx, legacy.RequestID, userID, decision, authn, h.Cfg.ApprovalPolicy)
 	if err != nil {
 		switch {
 		case errors.Is(err, ErrRequestNotFound):
 			writeJSONError(w, http.StatusNotFound, "unknown request_id")
 		case errors.Is(err, ErrAlreadyResolved):
+			if !audited {
+				current, readErr := h.Store.GetByID(ctx, legacy.RequestID)
+				if readErr == nil {
+					h.auditLegacyResolved(ctx, current, userID, decision, authn)
+				}
+			}
 			writeJSONError(w, http.StatusConflict, "request already resolved")
 		case errors.Is(err, store.ErrVoteConflict):
+			if !audited {
+				h.auditLegacyVote(ctx, legacy, userID, decision, authn, "vote_duplicate")
+			}
 			writeJSONError(w, http.StatusConflict, "operator already voted")
 		default:
 			writeJSONError(w, http.StatusInternalServerError, "submit vote")
 		}
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"request_id": id,
-		"decision":   string(outcome.Decision),
-		"flipped":    outcome.Flipped,
-	})
+	if !outcome.Flipped {
+		current, err := h.Store.GetByID(ctx, legacy.RequestID)
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "get request")
+			return
+		}
+		expected := store.StatusApproved
+		if decision == store.DecisionDeny {
+			expected = store.StatusDenied
+		}
+		if current.Status != store.StatusPending && (current.Status != expected || current.TerminalReason != "") {
+			writeJSONError(w, http.StatusConflict, "request already resolved")
+			return
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"request_id": legacy.RequestID, "decision": string(outcome.Decision), "flipped": outcome.Flipped})
+}
+
+func legacyVoteExpiry(row *store.Request) time.Time {
+	if row.ExpiresAt != nil {
+		return *row.ExpiresAt
+	}
+	return row.CreatedAt.Add(24 * time.Hour)
+}
+
+func legacyVoteBinding(row *store.Request, operator string) ap.ChallengeBinding {
+	return ap.ChallengeBinding{Plane: ap.PlaneV1, RecordKey: row.RequestID, PlanHash: ap.LegacyHostedPlanHash(row.RequestID, row.ClientID, row.Commands, row.CreatedAt, row.RequiredApprovals), Operator: operator, AllowedActions: []string{ap.ActionApprove, ap.ActionDeny}}
+}
+
+func v2VoteBinding(row *sqlitestore.V2Row, operator string) ap.ChallengeBinding {
+	header := row.Record.Header
+	binding := ap.ChallengeBinding{Plane: ap.PlaneV2, RecordKey: ap.HostedRecordKey(row.Key.ClientID, row.Key.SubPrincipal, row.Key.RequestID), PlanHash: header.PlanHash, Operator: operator}
+	if header.Assist != nil {
+		binding.AssistRevision, binding.AssistDigest = 1, header.Assist.Digest
+	}
+	binding.AllowedActions = ap.ActionsAt(binding.AssistRevision)
+	return binding
+}
+
+func (h *HumanAPI) auditLegacyVote(ctx context.Context, row *store.Request, operator string, decision store.Decision, authn, transition string) {
+	if err := h.Engine.Core.Verdict(ctx, signerkit.AuditVerdict{Time: h.Auth.now().UTC(), RequestID: row.RequestID,
+		Operator: signerkit.Operator{ID: operator, DisplayName: operator, Verified: true, AuthnMethod: authn}, CommandSHA256: commandsSHA256(row.Commands), Approved: decision == store.DecisionApprove,
+		Approval: &ap.AuditMetadata{Transition: transition, Decision: string(decision), Replay: true}}); err != nil {
+		log.Print("hosted: inert vote audit failed")
+	}
+}
+
+func (h *HumanAPI) auditLegacyResolved(ctx context.Context, row *store.Request, operator string, decision store.Decision, authn string) {
+	votes, err := h.Store.ListVotes(ctx, row.RequestID)
+	if err != nil {
+		log.Print("hosted: inert vote audit could not load votes")
+		return
+	}
+	for _, vote := range votes {
+		if vote.Operator == operator {
+			h.auditLegacyVote(ctx, row, operator, decision, authn, "vote_duplicate")
+			return
+		}
+	}
+	reason := "resolved"
+	if row.TerminalReason == "expired" || row.TerminalReason == "canceled" {
+		reason = row.TerminalReason
+	}
+	h.auditLegacyVote(ctx, row, operator, decision, authn, "vote_refused{"+reason+"}")
+}
+
+func (h *HumanAPI) voteV2Error(w http.ResponseWriter, err error, spent bool) bool {
+	if err == nil {
+		return false
+	}
+	var coded *ap.CodeError
+	if errors.Is(err, errVoteOperatorRole) {
+		writeJSONError(w, http.StatusForbidden, "operator role required")
+	} else if errors.As(err, &coded) && coded.Code == ap.CodeBusy {
+		message := "busy — retry"
+		if spent {
+			message = "busy — retry with a fresh code"
+		}
+		writeJSONError(w, http.StatusServiceUnavailable, message)
+	} else if errors.As(err, &coded) && coded.Code == ap.CodeStorageUncertain {
+		writeJSONError(w, http.StatusServiceUnavailable, "storage uncertain — retry")
+	} else if errors.As(err, &coded) && coded.Code == ap.CodeNotFound {
+		writeJSONError(w, http.StatusNotFound, "unknown handle")
+	} else {
+		writeJSONError(w, http.StatusInternalServerError, "submit vote")
+	}
+	return true
 }
 
 // handleUIAudit returns the recent decisions for the UI's audit view. It
 // reuses the store's RecentAudit but renders the UI summary shape.
-func (h *HumanAPI) handleUIAudit(w http.ResponseWriter, r *http.Request, _ string) {
+func (h *HumanAPI) handleUIAudit(w http.ResponseWriter, r *http.Request, userID string) {
+	v2, err := h.auditV2(r, userID)
+	if err != nil {
+		writeUIListError(w, err)
+		return
+	}
 	rows, err := h.Store.RecentAudit(r.Context(), 100)
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "audit")
@@ -806,7 +1235,7 @@ func (h *HumanAPI) handleUIAudit(w http.ResponseWriter, r *http.Request, _ strin
 	for _, row := range rows {
 		out = append(out, summarize(row))
 	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{"entries": out})
+	writeJSON(w, http.StatusOK, map[string]interface{}{"entries": out, "v2_entries": v2})
 }
 
 // ---------------------------------------------------------------------
@@ -1023,4 +1452,187 @@ func (h *HumanAPI) allowPrincipal(w http.ResponseWriter, principal, scope string
 func writeRateLimited(w http.ResponseWriter) {
 	w.Header().Set("Retry-After", "60")
 	writeJSONError(w, http.StatusTooManyRequests, "too many authentication attempts")
+}
+
+var (
+	errUIListCursor = errors.New("invalid v2_cursor")
+	errUIListRole   = errors.New("reader role required")
+)
+
+// Both human roles can inspect approvals; only operators can vote.
+func (h *HumanAPI) authorizeUIList(ctx context.Context, userID string) error {
+	user, err := h.Store.GetUser(ctx, userID)
+	if errors.Is(err, store.ErrNotFound) {
+		return errUIListRole
+	}
+	if err != nil {
+		return err
+	}
+	if user == nil || (user.Role != "operator" && user.Role != "admin") {
+		return errUIListRole
+	}
+	return nil
+}
+
+func writeUIListError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, errUIListCursor):
+		writeJSONError(w, http.StatusBadRequest, errUIListCursor.Error())
+	case errors.Is(err, errUIListRole):
+		writeJSONError(w, http.StatusForbidden, errUIListRole.Error())
+	case IsApprovalBusy(err):
+		writeJSONError(w, http.StatusServiceUnavailable, "busy — retry")
+	default:
+		writeJSONError(w, http.StatusInternalServerError, "list approvals")
+	}
+}
+
+// Domain and session binding keep cursors separate from vote tokens and other logins.
+func (h *HumanAPI) pendingCursorCipher(ctx context.Context) (cipher.AEAD, []byte, error) {
+	session, ok := ctx.Value(voteSessionContextKey{}).(voteSession)
+	if !ok || session.ID == "" || h.voteMACKey == nil {
+		return nil, nil, errUIListCursor
+	}
+	key, err := hkdf.Key(sha256.New, h.voteMACKey[:], nil, "sshgate-ui-pending-cursor-v2", 32)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer clear(key)
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, nil, err
+	}
+	aead, err := cipher.NewGCM(block)
+	return aead, []byte("sshgate-ui-pending-v2\x00" + ap.SessionBinding(session.ID)), err
+}
+
+func (h *HumanAPI) encodePendingCursor(ctx context.Context, row *sqlitestore.V2Row) (string, error) {
+	aead, binding, err := h.pendingCursorCipher(ctx)
+	if err != nil {
+		return "", err
+	}
+	data, err := json.Marshal(sqlitestore.V2PendingCursor{CreatedAt: row.Record.Header.CreatedAt, Key: row.Key})
+	if err != nil {
+		return "", err
+	}
+	nonce := make([]byte, aead.NonceSize())
+	rand.Read(nonce)
+	return base64.RawURLEncoding.EncodeToString(aead.Seal(nonce, nonce, data, binding)), nil
+}
+
+func (h *HumanAPI) decodePendingCursor(ctx context.Context, raw string) (*sqlitestore.V2PendingCursor, error) {
+	if len(raw) == 0 || len(raw) > 4096 {
+		return nil, errUIListCursor
+	}
+	aead, binding, err := h.pendingCursorCipher(ctx)
+	if err != nil {
+		return nil, err
+	}
+	token, err := base64.RawURLEncoding.Strict().DecodeString(raw)
+	if err != nil || len(token) < aead.NonceSize()+aead.Overhead() || base64.RawURLEncoding.EncodeToString(token) != raw {
+		return nil, errUIListCursor
+	}
+	data, err := aead.Open(nil, token[:aead.NonceSize()], token[aead.NonceSize():], binding)
+	if err != nil {
+		return nil, errUIListCursor
+	}
+	var cursor sqlitestore.V2PendingCursor
+	if json.Unmarshal(data, &cursor) != nil || cursor.CreatedAt.IsZero() || cursor.Key.ClientID == "" || !ap.ValidRequestID(cursor.Key.RequestID) {
+		return nil, errUIListCursor
+	}
+	return &cursor, nil
+}
+
+func (h *HumanAPI) pendingV2(r *http.Request, userID string) ([]uiV2Request, bool, string, error) {
+	out := make([]uiV2Request, 0)
+	var cursor *sqlitestore.V2PendingCursor
+	query, err := url.ParseQuery(r.URL.RawQuery)
+	if err != nil {
+		return nil, false, "", errUIListCursor
+	}
+	if values, present := query["v2_cursor"]; present {
+		if len(values) != 1 {
+			return nil, false, "", errUIListCursor
+		}
+		var err error
+		cursor, err = h.decodePendingCursor(r.Context(), values[0])
+		if err != nil {
+			return nil, false, "", err
+		}
+	}
+	reader, ok := h.Store.(interface {
+		ListPendingV2(context.Context, *sqlitestore.V2PendingCursor, int) ([]*sqlitestore.V2Row, error)
+	})
+	if !ok {
+		return out, false, "", nil
+	}
+	if err := h.authorizeUIList(r.Context(), userID); err != nil {
+		return nil, false, "", err
+	}
+	rows, err := reader.ListPendingV2(r.Context(), cursor, 51)
+	if err != nil {
+		return nil, false, "", err
+	}
+	more := len(rows) > 50
+	if more {
+		rows = rows[:50]
+	}
+	for _, row := range rows {
+		item, err := renderUIV2(row)
+		if err != nil {
+			return nil, false, "", err
+		}
+		out = append(out, item)
+	}
+	next := ""
+	if more {
+		next, err = h.encodePendingCursor(r.Context(), rows[len(rows)-1])
+	}
+	return out, more, next, err
+}
+
+type uiV2AuditEntry struct {
+	RecordHandle      string            `json:"record_handle"`
+	SubPrincipal      string            `json:"sub_principal"`
+	Decision          ap.ApprovalStatus `json:"decision"`
+	DecidedAt         time.Time         `json:"decided_at"`
+	DecidedBy         string            `json:"decided_by"`
+	Votes             []ap.Vote         `json:"votes"`
+	RationaleRedacted string            `json:"rationale_redacted"`
+	AssistBound       ap.AssistBound    `json:"assist_bound"`
+}
+
+func (h *HumanAPI) auditV2(r *http.Request, userID string) ([]uiV2AuditEntry, error) {
+	out := make([]uiV2AuditEntry, 0)
+	reader, ok := h.Store.(interface {
+		RecentDecidedV2(context.Context, int) ([]*sqlitestore.V2Row, error)
+	})
+	if !ok {
+		return out, nil
+	}
+	if err := h.authorizeUIList(r.Context(), userID); err != nil {
+		return nil, err
+	}
+	rows, err := reader.RecentDecidedV2(r.Context(), 100)
+	if err != nil {
+		return nil, err
+	}
+	for _, row := range rows {
+		header := row.Record.Header
+		decision := header.Decision
+		if decision == nil {
+			return nil, errors.New("decided approval missing decision")
+		}
+		votes := make([]ap.Vote, 0, len(header.Votes))
+		for _, vote := range header.Votes {
+			vote.Operator = approvalreview.NeutralizeText(vote.Operator)
+			votes = append(votes, vote)
+		}
+		out = append(out, uiV2AuditEntry{
+			RecordHandle: row.RecordHandle, SubPrincipal: approvalreview.NeutralizeText(header.SubPrincipal),
+			Decision: decision.Status, DecidedAt: decision.DecidedAt, DecidedBy: approvalreview.NeutralizeText(decision.DecidedBy),
+			Votes: votes, RationaleRedacted: header.RationaleRedacted, AssistBound: decision.AssistBound,
+		})
+	}
+	return out, nil
 }
