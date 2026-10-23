@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/karthikeyan5/sshgate/internal/elapsed/elapsedtest"
@@ -20,6 +21,7 @@ import (
 	ap "github.com/karthikeyan5/sshgate/src/approvalplan"
 	st "github.com/karthikeyan5/sshgate/src/approvalplan/statetest"
 	ar "github.com/karthikeyan5/sshgate/src/approvalreview"
+	"go.uber.org/goleak"
 )
 
 type approvalAPICall struct {
@@ -225,67 +227,81 @@ func TestApprovalNotifierPartialAndCardFailure(t *testing.T) {
 	}
 }
 func TestApprovalNotifierRetryBudgetAndCancellation(t *testing.T) {
+	defer goleak.VerifyNone(t)
 	for _, mode := range []string{"retry", "cancel", "budget"} {
 		t.Run(mode, func(t *testing.T) {
-			backend, api := newApprovalAPI(t)
-			n := notificationFixture(t, 1)
-			waiting := make(chan struct{})
-			retryAfter := 30
-			if mode == "budget" {
-				retryAfter = 61
-			}
-			api.hook = func(w http.ResponseWriter, r *http.Request, i int) bool {
-				if i != 2 {
-					return false
+			synctest.Test(t, func(t *testing.T) {
+				legacy, api, _ := legacyNotifierFixture(t)
+				backend := legacy.backend
+				if err := backend.chatStore.Save(42); err != nil {
+					t.Fatal(err)
 				}
-				fmt.Fprintf(w, `{"ok":false,"error_code":429,"description":"retry","parameters":{"retry_after":%d}}`, retryAfter)
-				close(waiting)
-				return true
-			}
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			done := make(chan error, 1)
-			// A short deadline exercises the same 60-second budget path without sleeping a minute.
-			deadline := time.Now().Add(60 * time.Second)
-			if mode == "budget" {
-				deadline = time.Now().Add(100 * time.Millisecond)
-			}
-			started := time.Now()
-			go func() {
-				_, err := (&approvalBurst{backend: backend, deadline: deadline}).SendParts(ctx, n)
-				done <- err
-			}()
-			select {
-			case <-waiting:
-			case <-time.After(5 * time.Second):
-				t.Fatal("429 was not reached")
-			}
-			if mode == "cancel" {
-				started = time.Now()
-				cancel()
-			}
-			select {
-			case err := <-done:
-				switch mode {
-				case "cancel":
-					if !errors.Is(err, context.Canceled) || time.Since(started) > 100*time.Millisecond {
-						t.Fatalf("cancellation %v %s", err, time.Since(started))
-					}
-				case "budget":
-					if !errors.Is(err, errApprovalSendBudget) || errors.Is(err, context.DeadlineExceeded) {
-						t.Fatal(err)
-					}
-				case "retry":
-					if err != nil || time.Since(started) < 30*time.Second {
-						t.Fatalf("retry %v %s", err, time.Since(started))
-					}
+				n := notificationFixture(t, 1)
+				waiting := make(chan struct{})
+				retryAfter := 30
+				if mode == "budget" {
+					retryAfter = 61
 				}
-			case <-time.After(35 * time.Second):
-				t.Fatal("retry did not stop")
-			}
-			if mode != "retry" && len(api.snapshot()) != 2 {
-				t.Fatal("sent after failure")
-			}
+				api.hook = func(_ *http.Request, i int) (string, error) {
+					if i == 2 {
+						close(waiting)
+						return fmt.Sprintf(`{"ok":false,"error_code":429,"description":"retry","parameters":{"retry_after":%d}}`, retryAfter), nil
+					}
+					return fmt.Sprintf(`{"ok":true,"result":{"message_id":%d}}`, i), nil
+				}
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				done := make(chan error, 1)
+				started := time.Now()
+				go func() {
+					_, err := (&approvalBurst{backend: backend, deadline: started.Add(60 * time.Second)}).SendParts(ctx, n)
+					done <- err
+				}()
+				<-waiting
+				synctest.Wait()
+				if mode == "cancel" {
+					cancel()
+				} else {
+					wait := 29 * time.Second
+					if mode == "budget" {
+						wait = 59 * time.Second
+					}
+					time.Sleep(wait)
+					synctest.Wait()
+					if len(api.snapshot()) != 2 {
+						t.Fatal("retried before retry_after")
+					}
+					select {
+					case err := <-done:
+						t.Fatalf("finished early: %v", err)
+					default:
+					}
+					time.Sleep(time.Second)
+				}
+				synctest.Wait()
+				select {
+				case err := <-done:
+					switch mode {
+					case "cancel":
+						if !errors.Is(err, context.Canceled) || !time.Now().Equal(started) {
+							t.Fatalf("cancellation: %v, elapsed %s", err, time.Since(started))
+						}
+					case "budget":
+						if !errors.Is(err, errApprovalSendBudget) || errors.Is(err, context.DeadlineExceeded) {
+							t.Fatal(err)
+						}
+					case "retry":
+						if err != nil || time.Since(started) != 30*time.Second || len(api.snapshot()) <= 2 {
+							t.Fatalf("retry: %v, elapsed %s", err, time.Since(started))
+						}
+					}
+				default:
+					t.Fatal("send did not settle after cancellation or timer")
+				}
+				if mode != "retry" && len(api.snapshot()) != 2 {
+					t.Fatal("sent after failure")
+				}
+			})
 		})
 	}
 }
@@ -381,6 +397,7 @@ func (approvalTestSnapshotter) BuildSnapshot(_ context.Context, p ap.ApprovalPla
 }
 
 func TestApprovalNotifierActorRendererAndTap(t *testing.T) {
+	t.Cleanup(func() { goleak.VerifyNone(t) })
 	backend, api := newApprovalAPI(t)
 	store := &lifecycle.MemStore{}
 	clock := elapsedtest.NewFake(st.T0)
@@ -465,6 +482,7 @@ func waitApprovalRecord(t *testing.T, store lifecycle.Store, key string, ready f
 }
 
 func TestApprovalNotifierActorLiveFailures(t *testing.T) {
+	t.Cleanup(func() { goleak.VerifyNone(t) })
 	for _, failure := range []string{"part_400", "part_transport", "card_transport", "budget"} {
 		t.Run(failure, func(t *testing.T) {
 			backend, api := newApprovalAPI(t)
@@ -611,6 +629,7 @@ func TestApprovalNotExecutableStatusText(t *testing.T) {
 }
 
 func TestApprovalNotifierStatusReasonActorToAPI(t *testing.T) {
+	t.Cleanup(func() { goleak.VerifyNone(t) })
 	for _, reason := range []string{ap.MintReasonGrantNotLive, ap.MintReasonStaleTransferKey, ap.MintReasonReservedVerb, ap.MintReasonClockSkew, ap.MintReasonSigningFailed} {
 		t.Run(reason, func(t *testing.T) {
 			backend, api := newApprovalAPI(t)

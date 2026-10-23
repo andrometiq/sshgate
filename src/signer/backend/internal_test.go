@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	"github.com/karthikeyan5/sshgate/pkg/signerkit"
+	redactrules "github.com/karthikeyan5/sshgate/src/redact/rules"
 )
 
 // panicExplainer is the panicking-Explainer fixture from the brief: it
@@ -119,8 +120,9 @@ func TestMaskUserID(t *testing.T) {
 func TestRunExplainerRecoversPanic(t *testing.T) {
 	t.Parallel()
 	tb := &TelegramBackend{
-		logger:    log.New(io.Discard, "", 0),
-		Explainer: panicExplainer{},
+		logger:      log.New(io.Discard, "", 0),
+		Explainer:   panicExplainer{},
+		RedactRules: redactrules.Combined(),
 	}
 	before := tb.PanicsTotal()
 

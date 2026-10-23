@@ -124,13 +124,19 @@ func (b *approvalBurst) SendCard(ctx context.Context, n lifecycle.Notification) 
 }
 
 func (b *approvalBurst) send(ctx context.Context, msg tgbotapi.MessageConfig) (int64, error) {
+	return b.sendRequest(ctx, func(ctx context.Context) (*tgbotapi.APIResponse, error) {
+		return b.backend.approvalRequest(ctx, msg)
+	})
+}
+
+func (b *approvalBurst) sendRequest(ctx context.Context, request func(context.Context) (*tgbotapi.APIResponse, error)) (int64, error) {
 	budget, cancel := context.WithDeadlineCause(ctx, b.deadline, errApprovalSendBudget)
 	defer cancel()
 	for {
 		if budget.Err() != nil {
 			return 0, context.Cause(budget)
 		}
-		response, err := b.backend.approvalRequest(budget, msg)
+		response, err := request(budget)
 		if err != nil && budget.Err() != nil {
 			return 0, context.Cause(budget)
 		}

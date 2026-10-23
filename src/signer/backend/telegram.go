@@ -18,6 +18,8 @@ import (
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
 	"github.com/karthikeyan5/sshgate/pkg/signerkit"
+	"github.com/karthikeyan5/sshgate/pkg/signerkit/assist"
+	ap "github.com/karthikeyan5/sshgate/src/approvalplan"
 	"github.com/karthikeyan5/sshgate/src/redact"
 	"github.com/karthikeyan5/sshgate/src/sigwire"
 )
@@ -40,6 +42,15 @@ import (
 //   - Each pending request is resolved exactly once — the first of
 //     {approve, deny, timeout, ctx-cancel} wins.
 type TelegramBackend struct {
+	approvalCallbacks *telegramApprovalCallbacks
+	commandRefusals   commandRefusalState                // owned by the poller
+	commandDrain      bool                               // owned by the poller
+	approvalCommands  map[string]func(*tgbotapi.Message) // configured before polling
+	// CommandAudit is wired to the local AuditLog before Run.
+	CommandAudit interface {
+		Write(signerkit.AuditEvent) error
+	}
+
 	// Static config — set at construction, never mutated.
 	allowedUserID int64
 	chatStore     ChatStore
@@ -392,6 +403,9 @@ func NewTelegramBackend(opts TelegramOptions) (*TelegramBackend, error) {
 		pollTimeout:   poll,
 		bot:           bot,
 	}
+	if chat, linked, err := opts.ChatStore.Load(); err == nil && linked && chat != opts.AllowedUserID {
+		logger.Print("WARN: linked chat is not the allowed user’s private chat; v2 notifications refused; send /start again in the allowed user's private DM")
+	}
 	return t, nil
 }
 
@@ -436,6 +450,7 @@ func (t *TelegramBackend) Run(ctx context.Context) error {
 	go func() {
 		defer close(t.runDone)
 		t.pollLoop(ctx)
+		t.CloseApprovalCallbacks()
 		stopWorkers()
 		workers.Wait()
 		t.runMu.Lock()
@@ -444,6 +459,16 @@ func (t *TelegramBackend) Run(ctx context.Context) error {
 		t.runMu.Unlock()
 	}()
 	return nil
+}
+
+// Wait joins the poller and notification workers after its context is cancelled.
+func (t *TelegramBackend) Wait() {
+	t.runMu.Lock()
+	done := t.runDone
+	t.runMu.Unlock()
+	if done != nil {
+		<-done
+	}
 }
 
 // pollLoop dispatches updates until cancellation.
@@ -463,6 +488,7 @@ func (t *TelegramBackend) pollLoop(ctx context.Context) {
 	}()
 
 	offset := 0
+	t.commandDrain = t.approvalCallbacks != nil
 	backoff := 100 * time.Millisecond
 	const backoffCap = 30 * time.Second
 
@@ -474,6 +500,7 @@ func (t *TelegramBackend) pollLoop(ctx context.Context) {
 		default:
 		}
 
+		t.flushCommandRefusals()
 		updates, err := t.fetchUpdates(offset)
 		if err != nil {
 			// Distinguish ctx-cancel from a real upstream error.
@@ -504,7 +531,10 @@ func (t *TelegramBackend) pollLoop(ctx context.Context) {
 			if u.UpdateID >= offset {
 				offset = u.UpdateID + 1
 			}
-			t.dispatch(u)
+			t.dispatchUpdate(u.Update, u.forwarded)
+		}
+		if t.commandDrain && len(updates) < approvalUpdateLimit {
+			t.commandDrain = false
 		}
 	}
 }
@@ -512,7 +542,7 @@ func (t *TelegramBackend) pollLoop(ctx context.Context) {
 // fetchUpdates wraps bot.GetUpdates with a recover. A panic in the
 // upstream library or our own dispatch must not kill the polling
 // goroutine (daemon.md §7); we log + count it and continue.
-func (t *TelegramBackend) fetchUpdates(offset int) (updates []tgbotapi.Update, retErr error) {
+func (t *TelegramBackend) fetchUpdates(offset int) (updates []approvalTelegramUpdate, retErr error) {
 	defer func() {
 		if r := recover(); r != nil {
 			t.panicsTotal.Add(1)
@@ -522,12 +552,22 @@ func (t *TelegramBackend) fetchUpdates(offset int) (updates []tgbotapi.Update, r
 	}()
 	cfg := tgbotapi.NewUpdate(offset)
 	cfg.Timeout = t.pollTimeout
-	return t.bot.GetUpdates(cfg)
+	if t.approvalCallbacks != nil {
+		cfg.Limit = approvalUpdateLimit
+		if t.commandDrain {
+			cfg.Timeout = 0
+		}
+	}
+	return t.fetchApprovalUpdates(cfg)
 }
 
 // dispatch routes a single Update. Wrapped in a recover so a poison
 // update can't take down the polling loop.
 func (t *TelegramBackend) dispatch(u tgbotapi.Update) {
+	t.dispatchUpdate(u, false)
+}
+
+func (t *TelegramBackend) dispatchUpdate(u tgbotapi.Update, forwarded bool) {
 	defer func() {
 		if r := recover(); r != nil {
 			t.panicsTotal.Add(1)
@@ -540,14 +580,18 @@ func (t *TelegramBackend) dispatch(u tgbotapi.Update) {
 		t.handleCallback(u.CallbackQuery)
 	case u.Message != nil && u.Message.IsCommand() && u.Message.Command() == "start":
 		t.handleStart(u.Message)
+	case u.Message != nil && u.Message.IsCommand() && t.approvalCallbacks != nil:
+		t.handleApprovalCommand(u.Message, forwarded)
 	}
 }
 
-// handleStart processes a /start message. Only the allowed user can
-// link a chat; messages from anyone else get a polite refusal and we
-// do NOT save their chat_id. This is the "single allowed peer" rule
-// the spec emphasises.
+// handleStart coalesces well-formed strangers before the legacy linking path.
 func (t *TelegramBackend) handleStart(m *tgbotapi.Message) {
+	if m.From != nil && m.Chat != nil && m.From.ID != t.allowedUserID {
+		t.countCommandRefusal("wrong_user")
+		return
+	}
+
 	if m.From == nil || m.From.ID != t.allowedUserID {
 		// Mask the allowed user_id so a curious third party scanning
 		// the bot's responses doesn't learn it verbatim — the bot
@@ -593,6 +637,10 @@ func (t *TelegramBackend) handleCallback(cb *tgbotapi.CallbackQuery) {
 			fromID = cb.From.ID
 		}
 		t.logger.Printf("callback from unauthorized user_id=%d ignored", fromID)
+		return
+	}
+	if strings.HasPrefix(cb.Data, "v:") {
+		t.handleApprovalCallback(cb)
 		return
 	}
 	if strings.HasPrefix(cb.Data, "p:") {
@@ -1081,6 +1129,7 @@ func outcomeMark(s signerkit.ResultStatus) string {
 
 // runExplainer is a thin wrapper around t.Explainer.Explain that:
 //   - returns (nil, nil) if no explainer is configured
+//   - skips the provider if its command copy cannot be safely redacted
 //   - enforces ExplainerTimeout (default 5s)
 //   - never panics — any panic in the Explainer is caught and logged so
 //     a misbehaving model client cannot kill the request goroutine
@@ -1110,11 +1159,16 @@ func (t *TelegramBackend) runExplainer(ctx context.Context, cmds []signerkit.Com
 	ectx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	flat := make([]string, len(cmds))
-	for i, c := range cmds {
-		flat[i] = c.Cmd
+	// This synthesized plan is advisory input only, never an authorization.
+	plan := ap.ApprovalPlanV1{Kind: ap.KindCommandJob, RationaleOrigin: ap.OriginSynthesizedLegacyV1, Rationale: ap.LegacyRationaleText, CommandJob: &ap.CommandJob{}}
+	for _, c := range cmds {
+		plan.CommandJob.Steps = append(plan.CommandJob.Steps, ap.Step{ExactCommand: c.Cmd})
 	}
-	return t.Explainer.Explain(ectx, flat)
+	input, err := assist.RedactForProvider(plan, t.RedactSalt, t.RedactRules)
+	if err != nil {
+		return nil, err
+	}
+	return t.Explainer.Explain(ectx, input.Commands)
 }
 
 // sanitiseExplainerErr renders a short, credential-free reason string

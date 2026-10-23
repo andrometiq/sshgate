@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	ap "github.com/karthikeyan5/sshgate/src/approvalplan"
@@ -372,71 +373,82 @@ func TestNotifierRecoverySupersedesEditWithoutResendingParts(t *testing.T) {
 }
 
 func TestNotifierDerivedHandleRecoveryAndRenotify(t *testing.T) {
+	t.Cleanup(func() { goleak.VerifyNone(t) })
 	for _, cut := range []string{"burst_done", "renotify_before_card", "uncertain_burst"} {
 		t.Run(cut, func(t *testing.T) {
-			e, _, store, _ := engineFixture(t)
-			submitJob(t, e, 1)
-			command(t, e, 1, ap.AssistDone{Unavailable: "test"})
-			command(t, e, 1, ap.BurstStart{})
-			if cut != "uncertain_burst" {
-				command(t, e, 1, ap.BurstDone{PartMsgIDs: []int64{10}})
-			}
-			if cut == "renotify_before_card" {
-				command(t, e, 1, ap.Renotify{})
-			}
-			recovered, err := New(e.config)
-			if err != nil {
-				t.Fatal(err)
-			}
-			cards := make(chan Notification, 1)
-			parts := make(chan Notification, 1)
-			n := &testNotifier{parts: func(v Notification) ([]int64, error) { parts <- v; return []int64{11}, nil }, card: func(v Notification) (int64, error) { cards <- v; return 12, nil }}
-			runNotifier(t, recovered, n)
-			if recovered.epoch == e.epoch {
-				t.Fatal("restart reused epoch")
-			}
-			if cut == "uncertain_burst" {
-				select {
-				case <-parts:
-					t.Fatal("uncertain burst resent")
-				case <-cards:
-					t.Fatal("uncertain burst got card")
-				case <-time.After(50 * time.Millisecond):
+			synctest.Test(t, func(t *testing.T) {
+				e, clock, store, _ := engineFixture(t)
+				submitJob(t, e, 1)
+				command(t, e, 1, ap.AssistDone{Unavailable: "test"})
+				command(t, e, 1, ap.BurstStart{})
+				if cut != "uncertain_burst" {
+					command(t, e, 1, ap.BurstDone{PartMsgIDs: []int64{10}})
 				}
-				return
-			}
-			card := receiveNotify(t, cards)
-			gen := 0
-			if cut == "renotify_before_card" {
-				gen = 1
-				part := receiveNotify(t, parts)
-				if part.Handle != card.Handle {
-					t.Fatal("parts/card differ")
+				if cut == "renotify_before_card" {
+					command(t, e, 1, ap.Renotify{})
 				}
-				oldHandle := ap.CardHandleFor(ap.RecordKey(st.PrincipalA, st.ID(1)), 0)
-				answer, err := recovered.Vote(ap.CastVote{Operator: st.Operator, Decision: ap.VoteApprove, Authn: "telegram", Card: &ap.CardTap{Handle: oldHandle, Challenge: "0123456789abcdef", MsgID: 12}})
-				if err == nil && !answer.Noise {
-					t.Fatalf("pre-renotify handle was accepted: %+v", answer)
+				recovered, err := New(e.config)
+				if err != nil {
+					t.Fatal(err)
 				}
-			} else {
-				select {
-				case <-parts:
-					t.Fatal("recovery resent parts")
-				default:
+				cards := make(chan Notification, 1)
+				parts := make(chan Notification, 1)
+				n := &testNotifier{parts: func(v Notification) ([]int64, error) { parts <- v; return []int64{11}, nil }, card: func(v Notification) (int64, error) { cards <- v; return 12, nil }}
+				runNotifier(t, recovered, n)
+				if recovered.epoch == e.epoch {
+					t.Fatal("restart reused epoch")
 				}
-			}
-			want := ap.CardHandleFor(ap.RecordKey(st.PrincipalA, st.ID(1)), gen)
-			if card.Handle != want || card.PartsHandle != want || !ap.ValidChallenge(card.Challenge) {
-				t.Fatalf("card %+v, want %s", card, want)
-			}
-			waitNotifyRecord(t, store, func(r ap.R1) bool {
-				return len(r.Payload.CardEntries) > 0 && r.Payload.CardEntries[0].Outcome == ap.OutcomeSent
+				if cut == "uncertain_burst" {
+					synctest.Wait()
+					// Advance both clocks while the approval is still pending.
+					for range 30 {
+						clock.Advance(time.Minute)
+						time.Sleep(time.Minute)
+						synctest.Wait()
+					}
+					select {
+					case <-parts:
+						t.Fatal("uncertain burst resent")
+					case <-cards:
+						t.Fatal("uncertain burst got card")
+					default:
+					}
+					return
+				}
+				card := receiveNotify(t, cards)
+				gen := 0
+				if cut == "renotify_before_card" {
+					gen = 1
+					part := receiveNotify(t, parts)
+					if part.Handle != card.Handle {
+						t.Fatal("parts/card differ")
+					}
+					oldHandle := ap.CardHandleFor(ap.RecordKey(st.PrincipalA, st.ID(1)), 0)
+					answer, err := recovered.Vote(ap.CastVote{Operator: st.Operator, Decision: ap.VoteApprove, Authn: "telegram", Card: &ap.CardTap{Handle: oldHandle, Challenge: "0123456789abcdef", MsgID: 12}})
+					if err == nil && !answer.Noise {
+						t.Fatalf("pre-renotify handle was accepted: %+v", answer)
+					}
+				} else {
+					select {
+					case <-parts:
+						t.Fatal("recovery resent parts")
+					default:
+					}
+				}
+				want := ap.CardHandleFor(ap.RecordKey(st.PrincipalA, st.ID(1)), gen)
+				if card.Handle != want || card.PartsHandle != want || !ap.ValidChallenge(card.Challenge) {
+					t.Fatalf("card %+v, want %s", card, want)
+				}
+				waitNotifyRecord(t, store, func(r ap.R1) bool {
+					return len(r.Payload.CardEntries) > 0 && r.Payload.CardEntries[0].Outcome == ap.OutcomeSent
+				})
 			})
 		})
 	}
 }
 
 func TestNotifierDerivedHandleRendererAndVote(t *testing.T) {
+	t.Cleanup(func() { goleak.VerifyNone(t) })
 	e, _, store, _ := engineFixture(t)
 	key := ap.RecordKey(st.PrincipalA, st.ID(1))
 	cards := make(chan Notification, 2)
@@ -502,6 +514,7 @@ func TestNotifierDerivedHandleRendererAndVote(t *testing.T) {
 }
 
 func TestNotifierRecoveredFirstCardFreshChallenge(t *testing.T) {
+	t.Cleanup(func() { goleak.VerifyNone(t) })
 	e, _, _, _ := engineFixture(t)
 	submitJob(t, e, 1)
 	command(t, e, 1, ap.BurstStart{})
@@ -535,6 +548,7 @@ func TestNotifierRecoveredFirstCardFreshChallenge(t *testing.T) {
 }
 
 func TestNotifierNotExecutableReason(t *testing.T) {
+	t.Cleanup(func() { goleak.VerifyNone(t) })
 	for _, reason := range []string{ap.MintReasonGrantNotLive, ap.MintReasonStaleTransferKey, ap.MintReasonReservedVerb, ap.MintReasonClockSkew, ap.MintReasonSigningFailed} {
 		t.Run(reason, func(t *testing.T) {
 			e, _, store, _ := engineFixture(t)
