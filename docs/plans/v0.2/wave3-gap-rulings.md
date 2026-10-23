@@ -193,6 +193,7 @@ adapters: `pkg/signerkit/daemon_approvals_test.go:342`, `lifecycle/close_test.go
 > this commit merges before A10 c8 is cut (see #5).
 
 **4. Slash-command refusal audit: ORCH (rebutted in r2: no new field needed; r3: TS set).**
+> **Superseded in part 2026-10-23** by the A8 command-gate security ruling in `wave3-lanes.md` (Rulings 2026-10-23 — A8): `wrong_user` and `not_private` refusals are silent and coalesced, authenticated refusals are rate-limited, and `replay` is set only for `redelivered`.
 Check: the verification is right that no existing structure has command, sender or chat fields
 (`src/approvalplan/audit.go:11-26`, `pkg/signerkit/audit.go:39-50`). r2 drops those fields, so
 nothing new is persisted.
