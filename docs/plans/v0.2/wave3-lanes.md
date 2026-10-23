@@ -23,7 +23,7 @@
 |---|---|
 | Trial merges are clean: integration+main, integration+feat/22-p4, and (integration+main)+feat/22-p4 | `git merge-tree --write-tree` (no conflicts, no refs moved) |
 | The integration branch lacks the callback-binding fix (`ad7407a..5bb54bf` = `telegram.go`, `telegram_cardbind_test.go`, `telegram_transfer_test.go`) and #22 P2; feat/22-p4 has the fix (base `5bb54bf`) but not P2's final commits | `git merge-base`, `git diff --stat` |
-| Everything on feat/22-p4 is reviewed GO: `6cf81a1`+`64ec632`+`21c192d` (review note 1-P40-tgfix), P4.0c (`-2-P40c`), lane S @`0e3ca56` (`-1-P4-laneS`), lane M (`-3-P4-laneM`). Lane G and Stage I are open | `local-notes/reviews/` |
+| Everything on feat/22-p4 is reviewed GO: `6cf81a1`+`64ec632`+`21c192d` (review note 1-P40-tgfix), P4.0c (`-2-P40c`), lane S @`0e3ca56` (`-1-P4-laneS`), lane M (`-3-P4-laneM`). Lane G and Stage I are open | Internal review notes (not in the repository) |
 | feat/22-p4 changes gate bytes (`src/gate/{verify,errors}.go`, `src/sigwire/{net,payload}.go`), and so does main's P2. GATE-PROOF baselines must be re-measured after each base merge | `git diff --stat` |
 | Spec anchors moved (integration+P4 tree): v1 call sites `daemon.go:627,844,1173,1359` (spec `:608,818,1147,1333`); grant short-circuit `:623-626`; `matchGrant :1482`, `isAdminVerb :1535`, `isTransferVerb :1545`, `grantCovers :1552`, `signAll :1573`, `signTransferLegs :1247` (call `:1211`); dispatch switch `:510-523`; `handleRevokeGrant :912`, `handleListGrants :964`; `Service.Close` `service.go:138`; signer `main.go`: explainer block `:129-143`, `signerkit.New :275`, deferred `svc.Close :288-292`, `srv.Listen :321`, TOML decode `:337`, `buildHostedBackend :390`, `buildTelegramBackend :534` with `tb.Run :606`, `doInitFlow :808`; `telegram.go`: `dispatch :437`, `handleCallback :488`, `p:` branch `:503`, `runExplainer :935` | `git grep -n` on the trial tree |
 | Hosted anchors hold: `approval.go:94` `Decide`; `server.go:221-223,251,278`; `policy_runtime.go:212` `Server.Close`, `:463` `PolicyRuntime.Close`; signer-server `main.go:214` (spec `:213`), `:340`, `loadAPIKey :782`; `policy_migration_test.go:168` (version-7 "future" row → 8); `main_test.go:349` (`role: "auditor"`) | read |
@@ -648,3 +648,24 @@ Rule:
 - A committed `/renotify` gives gen+1, so a new derived handle.
 - The frozen R1 encoding and Apply stay unchanged. The "first CardStart uses the derived handle" rule is enforced in the lifecycle and pinned by tests, not by a core guard.
 Authorized edits for the A8 lane: the new function plus its test in `src/approvalplan/ids.go` (no other approvalplan change), `pkg/signerkit/lifecycle/notify.go` and its tests, and the one-line replacement note in `src/approvalreview/telegram.go`.
+
+### Rulings 2026-10-22 — gap sweep of the remaining lanes (orchestrator)
+A read-only sweep listed 43 underdetermined rules across the remaining lanes. The 28 orchestrator
+rulings, the new lanes A1a-auth and B1f, the C2a–C2d split and the DAG amendments are in
+[wave3-gap-rulings.md](wave3-gap-rulings.md). They passed three independent verification rounds;
+the fourth revision's last five fixes were applied without a further round. Its owner questions
+are open until answered; a lane blocked by one does not start.
+
+### Rulings 2026-10-23 — A11 (orchestrator)
+- **Step-5 reasons.** The vote challenge keeps E7 step 5's split. A MAC failure (forged, from another session or from before a restart) is `stale_challenge`. An authentic but expired challenge is `expired_challenge`. Both answer the same 409 "view changed". Q2(b) changes nothing about expiry.
+- **Engine wiring.** A11 may touch `server.go` and `approvals_v2_worker.go` for the human plane's engine wiring only. Handlers reach the ordinary engine through a synchronized accessor. A stopped engine answers 503 "busy — retry".
+- **Frozen-test inputs.** The named E7 change to `unit3_wire_ratchet_test.go` and `wire_frozen_test.go` (vote requests carry the challenge) moved from A11 commit 6 to commit 3, to keep every commit green. Response and signature assertions are unchanged.
+- **Non-operator noise.** At vote step 3, non-operator sessions append no v2 noise event, as on v1.
+- **Cursor key.** The pending-cursor key is derived from the vote MAC key with HKDF-SHA256 under its own label.
+- **Pending query scan, deferred.** The v2 pending page query scans `approvals_v2`; at 200k rows that is milliseconds, and only an operator session can trigger it. An indexed keyset waits for the next hosted migration, with an EXPLAIN QUERY PLAN regression.
+
+### Rulings 2026-10-23 — A8 (orchestrator)
+- **Command-gate flood resistance** (security review of A8 commit 4; supersedes gap ruling #4 in part). Anyone can message the bot. A `wrong_user` or `not_private` command gets no reply and no per-message audit line. Such refusals are counted, saturating, and summarised in at most one audit line and one log line a minute. The allowed user's own refusals (`forwarded`, `redelivered`, `unknown_command`) still audit and reply, at most once a minute, so they can't starve approval cards. `replay` is set only for `redelivered`. Spec :1698's "replies only to the linked DM" still holds.
+- **Legacy `/start` from strangers.** A well-formed `/start` from anyone other than `allowed_user_id` is silent and coalesced the same way. A malformed one (nil `From` or nil `Chat`) keeps the recovered-panic path that the frozen poison-update tests pin.
+- **Callback taps from strangers: accepted limitation.** A tap from a non-allowed user, which only members of a group-linked legacy chat can make, is still logged and answered per tap. The callback-binding carry-forward tests pin those answers. Revisit if group-linked legacy chats become common.
+- **Legacy notifier release.** A8 may edit the `pkg/signerkit/lifecycle` owner files only to call the legacy notifier's `Release` at a v1 approval's end of life: after the terminal edit, on resolution with no edit, and on cancellation or abandonment. This bounds the signer's memory. The same narrow-exception pattern as ruling #1's readiness hooks covers commit 2's `runLegacyCleanup`.

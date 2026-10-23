@@ -129,8 +129,9 @@ have them check the host's `/var/log/auth.log` and that the key line was pasted 
 
 - Read `docs/BUILD-PLAN.md` before starting any development work. It is the committed build
   order: work items and their steps run top to bottom, and each step has its own acceptance.
-  The v0.2 release is paused mid-build: its "Release v0.2" section maps the branches, the
-  lanes still open and how to resume, and `docs/plans/v0.2/` holds the detailed plans.
+  The v0.2 release is paused mid-build: its "Release v0.2" section says what works, what is
+  half built, which branch holds what, the open owner decisions and the ordered next steps.
+  `docs/plans/v0.2/` holds the detailed plans.
 - Take the first step that is not `done` and whose dependencies are done. Don't start work that
   is not in the plan; unscheduled ideas live in `docs/ROADMAP.md`.
 - When a step lands, set its status to `done` in the same commit. A change to the order or

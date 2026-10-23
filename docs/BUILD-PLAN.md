@@ -39,44 +39,104 @@ counts as done. Anyone picking up the repository, a developer or a coding agent,
 
 ## Current state
 
-### Release v0.2: paused 2026-10-20
+### Release v0.2: paused 2026-10-23
 
-Development is paused. This section says what is done, where it lives and how to resume.
+Development is paused. This section says what works, what is half built, where it lives and
+what to do next. The step statuses further down describe `main`; work done on feature branches
+is listed here and is marked `done` only when it reaches `main`. Nothing made since 2026-10-20
+is pushed. "Merged" below means merged into the integration branch, not into `main`.
+
+**Where the branches are.** At this pause, the work after 2026-10-20 exists only in the
+maintainer's local clone until it is pushed. A fresh clone of the public repository has `main`
+at the 2026-10-20 pause, `feat/22-p4-g`, `wip/a10-5`, `wip/a8-1`, and older tips of
+`feat/76-65-approval-lifecycle`, `feat/22-p3` and `feat/journey-e2e`. It does not have
+`feat/22-p4-g-early`, `wi2/c2`, the other `wi2/*` lane branches, or anything in this section
+that is newer. Push them before work resumes from another machine.
+
+**At a glance.**
+- **Fully working (on `main`):** the shipped baseline and #22 Phases 1–2 (v0.1.5).
+- **Built, reviewed and green on the integration branch:** most of the work item 2 approval
+  lifecycle. The new approval code runs in the local Telegram signer and in the hosted
+  signer's human plane. #22 P4.0 and the signer and MCP sides of the per-read network
+  permission are also there.
+- **Half built:** the hosted proxy (A12: commit 1 of 4 done), the job executor (C2, on its
+  own branch), #22 Phase 3 (code complete, phase-end runs left), Phase 4 lane G (root legs
+  left) and the journey test (first hosted CI run pending).
+- **Not started:** the rest of work item 2 (listed below) and #22 Phases 5–7.
 
 **Scope.** v0.2 is the rest of work item 1 (the read jail, #22 Phases 3–7), all of work item 2
 (the approval lifecycle, #76 and #65) and green CI, including the journey job. Everything else
 waits for v0.3 ([ROADMAP.md](ROADMAP.md)). Detailed plans: [plans/v0.2/](plans/v0.2/README.md).
 
-**Branches.** `main` is the working baseline: the shipped tool surface plus #22 Phases 1–2.
-Unfinished v0.2 work lives on feature branches, which stay off `main` until v0.2 passes its
-release gate.
+**Branches.** Unfinished v0.2 work stays off `main` until v0.2 passes its release gate.
 
 | Branch | Holds | State |
 |---|---|---|
-| `main` | The shipped baseline and #22 Phases 1–2 | Working and tested. The base for v0.2. |
-| `feat/journey-e2e` | Real-use journey test with a fake Telegram Bot API, `make test-journey`, the CI `journey` job, and a signer fix for a tap that arrives before its card is registered | Reviewed. Merge into `main` before v0.2; the first hosted CI run is still pending. |
-| `feat/22-p3` | #22 Phase 3 (P3.0–P3.2): daemon-read verbs inside the jail | Code complete. Phase-end runs on Debian 12 and Arch VMs, the CI union, the phase review and the merge to `main` remain. |
-| `feat/22-p4-g` | #22 Phase 4 gate lane G (G-1a only) | G-1b to G-3 wait for Phase 3 on `main`. |
-| `feat/76-65-approval-lifecycle` | Work item 2 integration, plus #22 P4.0 and the signer and MCP sides of the per-read network permission (P4 lanes S and M) | `make test` green. See the lane list below. |
-| `wip/a10-5`, `wip/a8-1` | Interrupted, unreviewed work in progress | Don't merge. Rebuild these steps from the lane contracts. |
+| `main` | The shipped baseline and #22 Phases 1–2 (v0.1.5) | Working and tested. Unchanged since the last pause. |
+| `feat/76-65-approval-lifecycle` | Work item 2 integration, plus #22 P4.0 and P4 lanes S and M (tip `bdd1427`) | `make test` green at the tip. Lane list below. |
+| `wi2/a12` | A12, cut from `bdd1427` | Commit 1 (`8f416ee`, the hosted v2 client) is committed, reviewed and race-tested. Commits 2–4 remain. |
+| `wi2/c2` | C2 commits a–d: the executor's Submit, JobNext, Claim, step, report and retention | Not merged. Waits for A12's proxy harness and an owner decision (below). |
+| `feat/22-p3` | #22 Phase 3 (P3.0–P3.2), with the phase-end review fixes (`cf7016b`) | Code complete. Phase-end VM runs, the CI union and the merge to `main` remain. |
+| `feat/22-p4-g-early` | Lane G (G-1b, G-2, G-3, docs) on top of `feat/22-p3` (`c638e6f`) | All non-root mutation cases are killed. The root and FUSE legs need `sudo make test-jail-root`, which the owner runs. |
+| `feat/22-p4-g` | The older lane G base (G-1a) | Keep it. |
+| `feat/journey-e2e` | Real-use journey test, `make test-journey`, the CI `journey` job, with `main` merged in (`bdabdcc`) | Its `make test` did not complete locally, and the journey test needs a privileged runner. The first hosted CI run is pending. |
+| `feat/v1.2-redactor` | Reference for a port, not a merge | Kept on purpose. Don't merge or delete it. |
+| `wip/a10-5`, `wip/a8-1`, `wi2/*` lane branches | Lane work already merged into integration | Kept for history. Safe to delete after v0.2. |
 
 **Work item 2 lanes.** The contracts are in [wave3-lanes.md](plans/v0.2/wave3-lanes.md) §3, with
-dated rulings at the end of that file. The spec is
+dated rulings at the end of that file. The 2026-10-22 gap sweep, its rulings and the owner
+questions are in [wave3-gap-rulings.md](plans/v0.2/wave3-gap-rulings.md). The spec is
 [approval-lifecycle-spec.md](plans/v0.2/approval-lifecycle-spec.md).
 
-- **Merged into the integration branch:** B0, A1a (with A1a-net, A1a-fr and A1a-oq1), A1b, A2,
-  A3, A4, A5, A6 (with A6E, A6R and A6P), A9, A13a, B1s, C1, C4, A7 (all nine commits) and A10
-  commits 1–4.
-- **In progress:**
-  - A10 commit 5: assist pool and `Server.Close`. Its last review found three issues: a
-    concurrent policy-close race, a restart-before-deadline test and a deadline-termination
-    test.
-  - A8 commit 1: start with the derived card-handle ruling at the end of `wave3-lanes.md`.
-- **Not started:** A10 commits 6–8, A11, A12, A13b (with its docs), D2, B1w, B2, D1a, D1b, C2,
-  C3, C5, A0b, D3, and the phase-end reviews for Phases A–D.
+- **Merged:** B0, A1a (with A1a-net, A1a-fr and A1a-oq1), A1b, A2, A3, A4, A5, A6 (with A6E,
+  A6R and A6P), A7, A9, A13a, B1s, C1, C4, A10 (all commits, including the approvals rate
+  limiter: 600/min in its own bucket), A8 (all six commits, a command-gate security fix and the
+  lane-closing fixes), A11 (all six commits and the redacted-display follow-up), B1f and
+  basefix. Each lane had an independent review per commit, an end-of-lane check against its
+  full contract, and race tests run outside the sandbox.
+- **Wired into binaries:** the local Telegram signer (A8: `main.go` always builds the
+  lifecycle; new `[approvals]` config section) and the hosted signer's human plane (A11).
+- **Not yet wired:** the hosted proxy (A12) and the MCP client (A13b).
+- **In progress:** A12. Commit 1, the hosted v2 client over `approvalwire`, is done (`8f416ee` on
+  `wi2/a12`). Commits 2–4 are not started: the forwarder in `daemon_approvals.go`, the `main.go` wiring, and `tests/hostedproxy`
+  with older-server fixtures captured from the last released `main`.
+- **Built, not merged:** C2 commits a–d on `wi2/c2`. The executor contention gate fails: each
+  step marker rewrites the whole job file, so 100 submitters got 23 admitted, with marker p99
+  9.5 s against a 1 s gate. The spec (#33) reserves a new body-file format for the owner.
+  `TestExecutorContention` sits behind the `sshgate_perf` build tag.
+- **Not started:** A13b and its docs, B1w (after A12), B2, D1a, D1b, D2 (cancel and deny-all,
+  waits for Q4), C3, C5, A0b, D3, and the phase-end reviews.
 
-**Work item 1.** Phase 3 needs the steps on its branch row above. Phase 4 needs lane G
-(P4.2), then P4.3 and P4.4 close. Phases 5–7 have not started.
+**Work item 1.** Phase 3 needs its phase-end runs on fresh Debian 12, Ubuntu 24.04 and Arch VMs,
+the CI union and the merge to `main`. Phase 4 needs lane G's root legs, then the P4.3 and P4.4
+close. Phase 5 has a plan that is parked on owner questions
+([read-jail-p5-plan.md](plans/v0.2/read-jail-p5-plan.md)). Phases 6–7 have a reviewed plan
+that depends on Phase 5 ([read-jail-p6-p7-plan.md](plans/v0.2/read-jail-p6-p7-plan.md)).
+
+**Open owner decisions.** Lanes blocked by one of these don't start until it is answered.
+- **Q3, scope of the new approval path in v0.2.** Recommended: `transfer`, `revoke_server` and
+  `update_gate` stay on the v1 path. Blocks A13b and C2's non-command kinds.
+- **Q4, cancel and deny-all scope.** Recommended: Telegram `/deny_all` and `/cancel` cover
+  new-path records only; hosted deny-all moves to v0.3. Blocks D1a and D2.
+- **The C2 durable job-file format** (see C2 above).
+- **Phase 5 questions O1–O5**, listed at the top of the Phase 5 plan.
+- **Release scope.** An internal velocity review recommends, not yet decided: make v0.2
+  local-signer only; move jail Phases 6–7 to a later release; gate commits only on serious
+  review findings; merge Phase 3 sooner.
+- **Hands-on steps for the owner:** create the VMs, and run `sudo make test-jail-root`.
+
+The text of Q3 and Q4 is in `wave3-gap-rulings.md` "Owner questions". Q1, Q2 and Q5 are ruled as
+recommended there. Q1: `[approvals]` durations are Go durations, parsed strictly. Q2: the hosted
+endpoint answers `busy` from its own 600/min bucket, a bad vote challenge logs one
+`stale_challenge` reason (`expired_challenge` is kept per E7), and the pending list pages with an
+opaque cursor, 50 per page. Q5: the async list is the simple form, signer records only, with one
+cursor.
+
+**Known follow-ups.**
+- `TestHumanVoteOrdinaryWorkerLifecycle` can flake (401) under full `make test` load.
+- The hosted v2 pending query does a full scan. An index waits for the next hosted migration.
+- Callback taps from non-allowed members of a group-linked legacy chat are still answered per
+  tap. This is an accepted limitation.
 
 **Release gate after the code.**
 - A PII audit of the repository and `make preflight`.
@@ -89,21 +149,34 @@ dated rulings at the end of that file. The spec is
 
 **Arrangements to know before resuming.** No feature flag or temporary workaround was added
 for this pause.
-- On the integration branch, the v2 approval code is not yet wired into any binary. The signer
-  `main.go` is A8, the hosted server is A10 commit 7, and the MCP client is A13b. Until then, the
-  v1 paths behave as on `main`, with one deliberate difference from the owner's OQ3 ruling: a v1
-  `sign` never auto-signs under a standing grant.
-- The disposable VMs used for phase-end and stock-Ubuntu checks were deleted to free disk. Create
-  fresh Debian 12, Ubuntu 24.04 and Arch VMs before the Phase 3 phase-end runs.
+- Until A12 and A13b land, the hosted proxy and the MCP client use the v1 paths as on `main`,
+  with one deliberate difference from the owner's OQ3 ruling: a v1 `sign` never auto-signs
+  under a standing grant.
+- The disposable VMs were deleted to free disk. Fresh Debian 12, Ubuntu 24.04 and Arch VMs are
+  needed before the Phase 3 phase-end runs.
 
 **How to resume.**
 1. Read this section, then `wave3-lanes.md` §2 (the dependency graph), §3 (lane contracts) and
-   its closing rulings.
+   its closing rulings, then `wave3-gap-rulings.md`.
 2. Test runs share one lock file (spec §0.3). Run the frozen selectors (spec "Frozen
    selectors") at every merge.
 3. Mutation checks use `go test -overlay` and never edit files in place.
-4. Each lane commit gets an independent review, and a step back after a third fix round on the
-   same subsystem.
+4. Each lane commit gets an independent review. Each lane ends with a check against its full
+   contract and every ruling that names it. Step back after a third fix round on the same
+   subsystem.
+5. A lane's task lists every ruling that names the lane, from both rulings files.
+
+**Next steps, in order.**
+0. Before any lane resumes, the owner reviews the release-scope and process findings (see "Open
+   owner decisions") and decides v0.2's scope. Then continue below.
+1. Finish A12 (commits 1–4), then B1w.
+2. Get the Q3 and Q4 answers. Then build A13b, A13b-docs, D2, B2, D1a, D1b and C3, then C2's
+   proxy-harness case, then C5.
+3. Get the C2 durable-format decision, then merge `wi2/c2`.
+4. #22: run the Phase 3 phase-end on the VMs and merge Phase 3 to `main`. Run lane G's root
+   legs, then close P4.3 and P4.4. Answer O1–O5 and revise the Phase 5 plan. Then build
+   Phases 5–7.
+5. Merge `feat/journey-e2e`. Then D3 and the release gate.
 
 ### Shipped baseline
 
