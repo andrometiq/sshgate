@@ -96,6 +96,7 @@ func TestProductionApprovalWiring(t *testing.T) {
 					t.Fatal(err)
 				}
 				root := t.TempDir()
+				cfg.Approvals.JournalRoot = filepath.Join(root, "approvals")
 				tokenPath := filepath.Join(root, "token")
 				if err := os.WriteFile(tokenPath, []byte("123:test-token"), 0600); err != nil {
 					t.Fatal(err)
@@ -151,7 +152,11 @@ func TestProductionApprovalWiring(t *testing.T) {
 					t.Fatal(err)
 				}
 				defer svc.Close()
-				runtime, err := attachApprovals(svc, bk, cfg, audit, nil)
+				store, err := newApprovalStore(cfg.Approvals.JournalRoot)
+				if err != nil {
+					t.Fatal(err)
+				}
+				runtime, err := attachApprovals(svc, bk, cfg, audit, nil, store)
 				if err != nil {
 					t.Fatal(err)
 				}
