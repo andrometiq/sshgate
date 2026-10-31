@@ -139,9 +139,20 @@ func (b approvalAssistInput) BuildAssistInput(plan ap.ApprovalPlanV1) (assist.In
 	return assist.RedactForProvider(plan, salt, b.rules)
 }
 
-// Construction runs lifecycle startup recovery before returning. Polling and
-// socket admission must follow this call, even with obsolete disabled switches.
+// Hosted mode attaches a stateless forwarder; local mode runs startup recovery.
+// Polling and socket admission must follow this call, even with obsolete disabled switches.
 func attachApprovals(svc *signerkit.Service, bk signerkit.Backend, cfg tomlConfig, audit *signerkit.AuditLog, rules []redact.Rule) (*signerkit.ApprovalRuntime, error) {
+	if hosted, ok := bk.(*signerkit.HostedServerBackend); ok {
+		runtime, err := signerkit.NewApprovalRuntime(signerkit.ApprovalRuntimeConfig{Forwarder: hosted, AllowedUIDs: cfg.Approvals.AllowedUIDs})
+		if err != nil {
+			return nil, err
+		}
+		if err := svc.AttachApprovals(runtime); err != nil {
+			runtime.Close()
+			return nil, err
+		}
+		return runtime, nil
+	}
 	durations, err := cfg.Approvals.durations()
 	if err != nil {
 		return nil, err
@@ -426,7 +437,9 @@ func runContext(parent context.Context, args []string) int {
 		logf("construct approvals: %v", err)
 		return 1
 	}
-	if err := runtime.Status(); err != nil {
+	if err := runtime.Status(); errors.Is(err, signerkit.ErrHostedForwarder) {
+		logf("approvals: %v", err)
+	} else if err != nil {
 		logf("approval lifecycle unavailable: %v", err)
 	}
 	runtimeDone := make(chan struct{})

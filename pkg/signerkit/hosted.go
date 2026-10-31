@@ -84,6 +84,7 @@ type signRequestBody struct {
 	Commands []signRequestCmdV2 `json:"commands"`
 }
 
+// V2 here names the frozen /v1 signing wire, not the approvalwire approvals plane.
 type signRequestCmdV2 struct {
 	Server     string `json:"server"`
 	Cmd        string `json:"cmd"`

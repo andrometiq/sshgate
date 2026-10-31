@@ -1,0 +1,174 @@
+{
+  "policy-absent": [
+    {
+      "method": "POST",
+      "target": "/v2/approvals",
+      "status": 404,
+      "header": {
+        "Content-Type": [
+          "text/plain; charset=utf-8"
+        ],
+        "X-Content-Type-Options": [
+          "nosniff"
+        ]
+      },
+      "body": "404 page not found\n"
+    },
+    {
+      "method": "GET",
+      "target": "/v2/approvals/a2_AAAAAAAAAAAAAAAAAAAAAA",
+      "status": 404,
+      "header": {
+        "Content-Type": [
+          "text/plain; charset=utf-8"
+        ],
+        "X-Content-Type-Options": [
+          "nosniff"
+        ]
+      },
+      "body": "404 page not found\n"
+    },
+    {
+      "method": "GET",
+      "target": "/v2/approvals?limit=10\u0026cursor=",
+      "status": 404,
+      "header": {
+        "Content-Type": [
+          "text/plain; charset=utf-8"
+        ],
+        "X-Content-Type-Options": [
+          "nosniff"
+        ]
+      },
+      "body": "404 page not found\n"
+    },
+    {
+      "method": "POST",
+      "target": "/v2/approvals/wait",
+      "status": 404,
+      "header": {
+        "Content-Type": [
+          "text/plain; charset=utf-8"
+        ],
+        "X-Content-Type-Options": [
+          "nosniff"
+        ]
+      },
+      "body": "404 page not found\n"
+    },
+    {
+      "method": "POST",
+      "target": "/v2/approvals/a2_AAAAAAAAAAAAAAAAAAAAAA/claim",
+      "status": 404,
+      "header": {
+        "Content-Type": [
+          "text/plain; charset=utf-8"
+        ],
+        "X-Content-Type-Options": [
+          "nosniff"
+        ]
+      },
+      "body": "404 page not found\n"
+    },
+    {
+      "method": "POST",
+      "target": "/v2/approvals/a2_AAAAAAAAAAAAAAAAAAAAAA/report",
+      "status": 404,
+      "header": {
+        "Content-Type": [
+          "text/plain; charset=utf-8"
+        ],
+        "X-Content-Type-Options": [
+          "nosniff"
+        ]
+      },
+      "body": "404 page not found\n"
+    }
+  ],
+  "policy-attached": [
+    {
+      "method": "POST",
+      "target": "/v2/approvals",
+      "status": 404,
+      "header": {
+        "Cache-Control": [
+          "no-store"
+        ],
+        "Content-Type": [
+          "application/json"
+        ]
+      },
+      "body": "{\"error\":\"not found\"}\n"
+    },
+    {
+      "method": "GET",
+      "target": "/v2/approvals/a2_AAAAAAAAAAAAAAAAAAAAAA",
+      "status": 404,
+      "header": {
+        "Cache-Control": [
+          "no-store"
+        ],
+        "Content-Type": [
+          "application/json"
+        ]
+      },
+      "body": "{\"error\":\"not found\"}\n"
+    },
+    {
+      "method": "GET",
+      "target": "/v2/approvals?limit=10\u0026cursor=",
+      "status": 404,
+      "header": {
+        "Cache-Control": [
+          "no-store"
+        ],
+        "Content-Type": [
+          "application/json"
+        ]
+      },
+      "body": "{\"error\":\"not found\"}\n"
+    },
+    {
+      "method": "POST",
+      "target": "/v2/approvals/wait",
+      "status": 404,
+      "header": {
+        "Cache-Control": [
+          "no-store"
+        ],
+        "Content-Type": [
+          "application/json"
+        ]
+      },
+      "body": "{\"error\":\"not found\"}\n"
+    },
+    {
+      "method": "POST",
+      "target": "/v2/approvals/a2_AAAAAAAAAAAAAAAAAAAAAA/claim",
+      "status": 404,
+      "header": {
+        "Cache-Control": [
+          "no-store"
+        ],
+        "Content-Type": [
+          "application/json"
+        ]
+      },
+      "body": "{\"error\":\"not found\"}\n"
+    },
+    {
+      "method": "POST",
+      "target": "/v2/approvals/a2_AAAAAAAAAAAAAAAAAAAAAA/report",
+      "status": 404,
+      "header": {
+        "Cache-Control": [
+          "no-store"
+        ],
+        "Content-Type": [
+          "application/json"
+        ]
+      },
+      "body": "{\"error\":\"not found\"}\n"
+    }
+  ]
+}
