@@ -18,6 +18,11 @@ import (
 	"github.com/karthikeyan5/sshgate/src/signer/backend"
 )
 
+type approvalMemoryStore struct{ lifecycle.MemStore }
+
+func (*approvalMemoryStore) Reopen() error { return nil }
+func (*approvalMemoryStore) Close() error  { return nil }
+
 type startupBarrierStore struct {
 	approvalMemoryStore
 	entered chan struct{}
@@ -70,7 +75,7 @@ func TestRunContextWaitsForLifecycleStartup(t *testing.T) {
 			http.DefaultTransport, newApprovalStore, listenSignerSocket = previousTransport, previousStore, previousListen
 		}()
 		http.DefaultTransport = api
-		newApprovalStore = func() signerkit.RecoverableStore { return store }
+		newApprovalStore = func(string) (signerkit.RecoverableStore, error) { return store, nil }
 		accepted := make(chan struct{})
 		response := make(chan string, 1)
 		listenSignerSocket = func(srv *signerkit.Server, ctx context.Context) error {

@@ -55,9 +55,13 @@ func TestHostedApprovalsWiring(t *testing.T) {
 	defer svc.Close()
 	cfg := tomlConfig{}
 	cfg.Approvals.AllowedUIDs = []uint32{17}
-	runtime, err := attachApprovals(svc, bk, cfg, audit, nil)
+	cfg.Approvals.JournalRoot = filepath.Join(dir, "approvals")
+	runtime, err := attachApprovals(svc, bk, cfg, audit, nil, nil)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if _, err := os.Lstat(cfg.Approvals.JournalRoot); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("hosted forwarder opened a local approval store: %v", err)
 	}
 	if !errors.Is(runtime.Status(), signerkit.ErrHostedForwarder) || runtime.Legacy() != nil {
 		t.Fatal("hosted runtime not wired", runtime.Status())

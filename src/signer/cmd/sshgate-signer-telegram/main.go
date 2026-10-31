@@ -21,7 +21,11 @@
 //     second start refuses immediately.
 //  3. Loads the private key via signerkit.LoadKey (mode 0o077 check).
 //  4. Opens the audit log in append mode.
-//  5. Builds the backend and recovers the approval lifecycle.
+//  5. Builds the backend and recovers the approval lifecycle. A local
+//     backend first acquires the approval store at [approvals] journal_root,
+//     right after step 2: an ownership failure exits non-zero before the key,
+//     policy journal or socket is touched; a load failure starts with the
+//     lifecycle unavailable and retries.
 //  6. Starts Telegram polling, then the Unix-socket server until SIGTERM/SIGINT.
 //
 // SIGHUP is logged as "not supported in v1; restart to apply changes"
@@ -120,14 +124,31 @@ func (c approvalsConfig) durations() (approvalDurations, error) {
 	return d, nil
 }
 
-// B1w replaces this volatile store with the journal ownership adapter.
-type approvalMemoryStore struct{ lifecycle.MemStore }
-
-var newApprovalStore = func() signerkit.RecoverableStore { return &approvalMemoryStore{} }
+// newApprovalStore acquires journal ownership without loading; every failure
+// names the directory and wraps lifecycle.ErrStoreFatal.
+var newApprovalStore = func(path string) (signerkit.RecoverableStore, error) {
+	store, err := lifecycle.AcquireFileStore(path, uint32(os.Geteuid()))
+	if err != nil {
+		return nil, fmt.Errorf("approval store %s: %w", path, err)
+	}
+	return store, nil
+}
+var newAssistPool = assist.NewPool
 var listenSignerSocket = (*signerkit.Server).Listen
 
-func (*approvalMemoryStore) Reopen() error { return nil }
-func (*approvalMemoryStore) Close() error  { return nil }
+// approvalEngineFactory gives every generation a fresh v2 assist pool and closes it if construction fails.
+func approvalEngineFactory(base lifecycle.Config) func(lifecycle.Store) (*lifecycle.Engine, error) {
+	return func(store lifecycle.Store) (*lifecycle.Engine, error) {
+		config := base
+		config.Store = store
+		config.AssistPool = newAssistPool(1, assist.Timers{Now: base.Clock.Wall})
+		engine, err := lifecycle.New(config)
+		if err != nil {
+			config.AssistPool.Close()
+		}
+		return engine, err
+	}
+}
 
 type approvalAssistInput struct{ rules []redact.Rule }
 
@@ -139,10 +160,19 @@ func (b approvalAssistInput) BuildAssistInput(plan ap.ApprovalPlanV1) (assist.In
 	return assist.RedactForProvider(plan, salt, b.rules)
 }
 
-// Hosted mode attaches a stateless forwarder; local mode runs startup recovery.
+// Hosted mode attaches a stateless forwarder; local mode runs startup recovery
+// over store, which the caller acquired and this call owns on every path.
 // Polling and socket admission must follow this call, even with obsolete disabled switches.
-func attachApprovals(svc *signerkit.Service, bk signerkit.Backend, cfg tomlConfig, audit *signerkit.AuditLog, rules []redact.Rule) (*signerkit.ApprovalRuntime, error) {
+func attachApprovals(svc *signerkit.Service, bk signerkit.Backend, cfg tomlConfig, audit *signerkit.AuditLog, rules []redact.Rule, store signerkit.RecoverableStore) (*signerkit.ApprovalRuntime, error) {
+	defer func() {
+		if store != nil { // not yet transferred to the runtime
+			store.Close()
+		}
+	}()
 	if hosted, ok := bk.(*signerkit.HostedServerBackend); ok {
+		if store != nil {
+			return nil, errors.New("hosted forwarder cannot own a local approval store")
+		}
 		runtime, err := signerkit.NewApprovalRuntime(signerkit.ApprovalRuntimeConfig{Forwarder: hosted, AllowedUIDs: cfg.Approvals.AllowedUIDs})
 		if err != nil {
 			return nil, err
@@ -152,6 +182,9 @@ func attachApprovals(svc *signerkit.Service, bk signerkit.Backend, cfg tomlConfi
 			return nil, err
 		}
 		return runtime, nil
+	}
+	if store == nil {
+		return nil, errors.New("local approvals require an acquired approval store")
 	}
 	durations, err := cfg.Approvals.durations()
 	if err != nil {
@@ -188,31 +221,26 @@ func attachApprovals(svc *signerkit.Service, bk signerkit.Backend, cfg tomlConfi
 	settings := ap.LocalSettings
 	settings.Retention, settings.ReportHorizon = durations.retention, durations.report
 	runtime, err := signerkit.NewApprovalRuntime(signerkit.ApprovalRuntimeConfig{
-		Store: newApprovalStore(), AllowedUIDs: cfg.Approvals.AllowedUIDs, Legacy: legacy, PrepareLegacy: prepare,
-		NewEngine: func(store lifecycle.Store) (*lifecycle.Engine, error) {
-			pool := assist.NewPool(1, assist.Timers{Now: clock.Wall})
-			engine, err := lifecycle.New(lifecycle.Config{Store: store, Clock: clock,
-				Freezer: svc.ApprovalFreezer(durations.pending), SnapshotBuilder: svc.ApprovalSnapshotBuilder(),
-				Minter: svc.ApprovalMinter(), XferDigests: svc.ApprovalXferDigests(), AuditWriter: svc.ApprovalAuditWriter(),
-				Notifier: notifier, LegacyService: legacy, Settings: settings,
-				AssistTimeout: timeout, AssistPool: pool, Assessor: assessor, AssistInputBuilder: approvalAssistInput{rules},
-			})
-			if err != nil {
-				pool.Close()
-			}
-			return engine, err
-		},
+		Store: store, AllowedUIDs: cfg.Approvals.AllowedUIDs, Legacy: legacy, PrepareLegacy: prepare,
+		NewEngine: approvalEngineFactory(lifecycle.Config{Clock: clock,
+			Freezer: svc.ApprovalFreezer(durations.pending), SnapshotBuilder: svc.ApprovalSnapshotBuilder(),
+			Minter: svc.ApprovalMinter(), XferDigests: svc.ApprovalXferDigests(), AuditWriter: svc.ApprovalAuditWriter(),
+			Notifier: notifier, LegacyService: legacy, Settings: settings,
+			AssistTimeout: timeout, Assessor: assessor, AssistInputBuilder: approvalAssistInput{rules},
+		}),
 	})
 	if err != nil {
 		legacy.Close()
 		return nil, err
 	}
+	store = nil // the runtime owns storage from here; runtime.Close releases it
 	if err := svc.AttachApprovals(runtime); err != nil {
 		runtime.Close()
 		return nil, err
 	}
 	if tb, ok := bk.(*backend.TelegramBackend); ok {
 		if err := tb.AttachApprovalCallbacks(runtime, telegramLegacy); err != nil {
+			runtime.Close() // releases journal ownership
 			return nil, err
 		}
 	}
@@ -342,6 +370,25 @@ func runContext(parent context.Context, args []string) int {
 	}
 	defer release()
 
+	// Journal ownership comes before any other durable state is opened, so a
+	// second signer on the same journal never runs policy recovery.
+	var store signerkit.RecoverableStore
+	if cfg.Backend.Type != "hosted" {
+		store, err = newApprovalStore(cfg.Approvals.JournalRoot)
+		if errors.Is(err, lifecycle.ErrStoreFatal) {
+			logf("fatal: %s", strings.ReplaceAll(err.Error(), "\n", ": "))
+			return 1
+		} else if err != nil {
+			logf("approval store: %v", err)
+			return 1
+		}
+		defer func() {
+			if store != nil { // never handed to attachApprovals
+				store.Close()
+			}
+		}()
+	}
+
 	priv, err := signerkit.LoadKey(cfg.Paths.Key)
 	if err != nil {
 		logf("load key: %v", err)
@@ -432,7 +479,8 @@ func runContext(parent context.Context, args []string) int {
 	if err := svc.PolicyRecoveryError(); err != nil {
 		logf("policy authority temporarily unavailable after startup recovery: %v (ordinary signing remains available)", err)
 	}
-	runtime, err := attachApprovals(svc, bk, cfg, audit, redactRules)
+	runtime, err := attachApprovals(svc, bk, cfg, audit, redactRules, store)
+	store = nil // attachApprovals owns it on every path
 	if err != nil {
 		logf("construct approvals: %v", err)
 		return 1
@@ -518,6 +566,9 @@ func loadConfig(path string) (tomlConfig, error) {
 	}
 	if cfg.Approvals.JournalRoot == "" {
 		cfg.Approvals.JournalRoot = filepath.Join(filepath.Dir(cfg.Paths.Key), "approvals")
+	}
+	if cfg.Backend.Type != "hosted" && !filepath.IsAbs(cfg.Approvals.JournalRoot) {
+		return cfg, fmt.Errorf("approvals.journal_root must be an absolute path (defaults to <dir of paths.key>/approvals); got %q", cfg.Approvals.JournalRoot)
 	}
 	return cfg, nil
 }
@@ -961,6 +1012,7 @@ func doInitFlow(configPath string, dev bool) error {
 		return err
 	}
 	keyPath, pubPath, auditPath, sockPath, policyJournalPath := p.KeyPath, p.PubPath, p.AuditPath, p.SockPath, p.PolicyJournalPath
+	journalRoot := filepath.Join(filepath.Dir(keyPath), "approvals")
 
 	// Make the directories the daemon will need.
 	dirs := []string{
@@ -977,6 +1029,17 @@ func doInitFlow(configPath string, dev bool) error {
 		if err := os.MkdirAll(d, 0o750); err != nil {
 			return fmt.Errorf("mkdir %s: %w", d, err)
 		}
+	}
+
+	// Create the approval store with the owner and mode the daemon's
+	// ownership check requires, through the same acquisition it runs, and
+	// before any key material exists so a store failure aborts --init cleanly.
+	journal, err := newApprovalStore(journalRoot)
+	if err != nil {
+		return fmt.Errorf("create approval store: %w", err)
+	}
+	if err := journal.Close(); err != nil {
+		return fmt.Errorf("create approval store: %w", err)
 	}
 
 	if err := signerkit.GenerateKeyPair(keyPath, pubPath); err != nil {
@@ -1013,7 +1076,7 @@ journal_root = %q
 # "telegram" after adding a complete [backend.telegram] block; the one-pass
 # installer does this interactively for Tier 2.
 type = "stub"
-`, version, keyPath, pubPath, auditPath, sockPath, policyJournalPath, filepath.Join(filepath.Dir(keyPath), "approvals"))
+`, version, keyPath, pubPath, auditPath, sockPath, policyJournalPath, journalRoot)
 
 	// 0600: the daemon runs as sshgatesigner and reads this as the file owner
 	// (systemd User=sshgatesigner; --init runs under `sudo -u sshgatesigner`), so
@@ -1026,6 +1089,7 @@ type = "stub"
 	logf("init: keys at %s, %s", keyPath, pubPath)
 	logf("init: audit log at %s", auditPath)
 	logf("init: socket at %s", sockPath)
+	logf("init: approval store at %s", journalRoot)
 	logf("init: config at %s", configPath)
 	return nil
 }
