@@ -915,7 +915,7 @@ func (d *Daemon) handleRevokeGrant(ctx context.Context, conn io.ReadWriter, line
 	d.grantsMu.Unlock()
 
 	caller, _ := ctx.Value(approvalCallerKey{}).(approvalCaller)
-	if caller.runtime != nil {
+	if caller.runtime != nil && caller.runtime.config.Forwarder == nil {
 		engine, err := caller.runtime.Current()
 		if err == nil {
 			err = engine.Revoke(req.Alias)
@@ -990,7 +990,7 @@ func (d *Daemon) handleListGrants(ctx context.Context, conn io.ReadWriter, line 
 	d.grantsMu.RUnlock()
 
 	caller, _ := ctx.Value(approvalCallerKey{}).(approvalCaller)
-	if caller.runtime != nil && caller.hasPeer {
+	if caller.runtime != nil && caller.runtime.config.Forwarder == nil && caller.hasPeer {
 		engine, err := caller.runtime.Current()
 		if err != nil {
 			return d.respondListGrantsError(conn, req.RequestID, err.Error())
