@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -326,5 +328,117 @@ func TestHostedForwarderTransportRefusal(t *testing.T) {
 				t.Fatalf("audit %+v", rows)
 			}
 		})
+	}
+}
+
+func TestHostedForwarderCloseFirstCancelsAndJoins(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		entered, canceled, release := make(chan struct{}), make(chan struct{}), make(chan struct{})
+		r := hostedRuntime(t, forwardFunc(func(ctx context.Context, _ string, _ any) (HostedApprovalResponse, error) {
+			close(entered)
+			<-ctx.Done()
+			close(canceled)
+			<-release
+			return HostedApprovalResponse{}, ctx.Err()
+		}))
+		callDone := make(chan error, 1)
+		go func() { _, err := r.forward(context.Background(), "local-uid:7", aw.GetRequest{}); callDone <- err }()
+		<-entered
+		closed := make(chan struct{})
+		go func() { r.Close(); close(closed) }()
+		synctest.Wait()
+		select {
+		case <-canceled:
+		default:
+			t.Error("Close did not cancel the hosted call")
+		}
+		select {
+		case <-closed:
+			t.Error("Close returned with a hosted call still running")
+		default:
+		}
+		close(release)
+		<-closed
+		if err := <-callDone; !errors.Is(err, context.Canceled) {
+			t.Fatalf("call error = %v", err)
+		}
+		_, err := r.forward(context.Background(), "local-uid:7", aw.GetRequest{})
+		runtimeCode(t, err, ap.CodeLifecycleUnavailable)
+	})
+}
+
+func TestHostedForwarderConcurrentAdmissionAndClose(t *testing.T) {
+	for round := 0; round < 200; round++ {
+		var active atomic.Int32
+		var closeReturned atomic.Bool
+		release := make(chan struct{})
+		r := hostedRuntime(t, forwardFunc(func(ctx context.Context, _ string, _ any) (HostedApprovalResponse, error) {
+			active.Add(1)
+			defer active.Add(-1)
+			if closeReturned.Load() {
+				t.Error("hosted call admitted after Close returned")
+			}
+			<-ctx.Done()
+			<-release
+			return HostedApprovalResponse{}, ctx.Err()
+		}))
+		var calls sync.WaitGroup
+		r.mu.Lock()
+		for i := 0; i < 32; i++ {
+			calls.Add(1)
+			go func() {
+				defer calls.Done()
+				_, err := r.forward(context.Background(), "local-uid:7", aw.GetRequest{})
+				if !errors.Is(err, context.Canceled) {
+					var coded *ap.CodeError
+					if !errors.As(err, &coded) || coded.Code != ap.CodeLifecycleUnavailable {
+						t.Errorf("unexpected result: %v", err)
+					}
+				}
+			}()
+		}
+		closed := make(chan struct{})
+		go func() {
+			r.Close()
+			closeReturned.Store(true)
+			if active.Load() != 0 {
+				t.Error("hosted call still active after Close")
+			}
+			close(closed)
+		}()
+		r.mu.Unlock()
+		<-r.ctx.Done()
+		close(release)
+		<-closed
+		calls.Wait()
+		_, err := r.forward(context.Background(), "local-uid:7", aw.GetRequest{})
+		runtimeCode(t, err, ap.CodeLifecycleUnavailable)
+	}
+}
+
+func TestHostedForwarderBusyAuditFailureIsFailOpen(t *testing.T) {
+	calls := 0
+	h := approvalBackend(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Retry-After", "1")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		body, err := json.Marshal(aw.ErrorResponse(ap.CodeBusy, "busy"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		w.Write(body)
+	})
+	svc, _ := hostedService(t, hostedRuntime(t, h), h)
+	if err := svc.daemon.Audit.Close(); err != nil {
+		t.Fatal(err)
+	}
+	frame := hostedFrame(t, svc, &PeerCredentials{UID: 7}, approvalFixture(t, "local/request-get.json"))
+	want, err := aw.MarshalLocalResponse(aw.KindGet, aw.ErrorResponse(ap.CodeBusy, "busy"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(frame, want) || calls != 1 {
+		t.Fatalf("frame %s; calls %d", frame, calls)
 	}
 }
