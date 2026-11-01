@@ -124,7 +124,11 @@ func (t *TelegramBackend) handleApprovalCommand(m *tgbotapi.Message, forwarded b
 func (t *TelegramBackend) handleRenotify(m *tgbotapi.Message) {
 	reply, refusal := t.renotify(strings.TrimSpace(m.CommandArguments()))
 	if refusal != "" {
-		if err := t.writeCommandRefusal("renotify_refused{"+refusal+"}", false); err != nil {
+		family := "renotify_refused"
+		if refusal == "ambiguous_id" { // an E64 gate reason (gap ruling 4)
+			family = "command_refused"
+		}
+		if err := t.writeCommandRefusal(family+"{"+refusal+"}", false); err != nil {
 			t.logger.Print("telegram renotify refusal audit failed")
 		}
 	}
@@ -156,7 +160,7 @@ func (t *TelegramBackend) renotify(id string) (string, string) {
 	case errors.As(err, &coded) && coded.Code == ap.CodeNotFound:
 		return "no record matches that id", "not_found"
 	case errors.As(err, &coded) && coded.Code == ap.CodeInvalidRequest && strings.HasPrefix(coded.Msg, "ambiguous"):
-		return coded.Msg, "ambiguous"
+		return coded.Msg, "ambiguous_id"
 	case errors.As(err, &coded) && coded.Code == ap.CodeInvalidRequest:
 		return "usage: /renotify <handle from /pending>", "usage"
 	case err != nil && answer.Reason == "":

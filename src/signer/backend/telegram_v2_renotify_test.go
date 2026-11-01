@@ -159,7 +159,7 @@ func TestRenotifyCommandAmbiguousRequestID(t *testing.T) {
 		if replies := f.replies(); !reflect.DeepEqual(replies, []string{"ambiguous id — use the handle from /pending"}) {
 			t.Fatalf("replies %q", replies)
 		}
-		if len(a.events) != 1 || a.events[0].Approval.Transition != "renotify_refused{ambiguous}" || strings.Contains(a.events[0].Status, st.ID(1)) {
+		if len(a.events) != 1 || a.events[0].Status != "approval-command_refused{ambiguous_id}" || a.events[0].Approval.Transition != "command_refused{ambiguous_id}" || a.events[0].Approval.Replay || strings.Contains(a.events[0].Status, st.ID(1)) {
 			t.Fatalf("audit %+v", a.events)
 		}
 		f.backend.dispatch(commandUpdate(11, "/renotify "+renotifyHandle(st.PrincipalB)))

@@ -266,8 +266,10 @@ func TestRestartClockBehind(t *testing.T) {
 
 	s.clock.StepWall(-time.Hour)
 	s.start()
-	if n := s.engine.FutureDatedAtStartup(); n != 3 {
-		t.Fatalf("future-dated records reported at Startup: %d, want 3", n)
+	// Records 2 (unclaimed) and 3 (bytes held) have open windows; pending
+	// record 1's future created_at is not counted (SA-1 rule 3).
+	if n := s.engine.FutureDatedAtStartup(); n != 2 {
+		t.Fatalf("future-dated records reported at Startup: %d, want 2", n)
 	}
 	time.Sleep(200 * time.Millisecond)
 	if after := s.snapshot(); len(after) != len(before) {

@@ -123,3 +123,43 @@ func TestStartupQuarantineAndFailures(t *testing.T) {
 		}
 	}
 }
+
+// SA-1 rule 3's Startup report counts only approved records with an open
+// window whose decided_at is more than 5 s ahead of the wall clock.
+func TestStartupFutureDatedDefinition(t *testing.T) {
+	wall := time.Date(2026, 10, 15, 14, 0, 0, 0, time.UTC)
+	now := ap.Now{Wall: wall}
+	approved := func(decidedAhead time.Duration) ap.R1 {
+		return ap.R1{Header: ap.R1Header{
+			Kind: ap.KindCommandJob, CreatedAt: wall.Add(time.Hour), StepTTLs: []int{60},
+			Decision: &ap.Decision{Status: ap.ApprovalApproved, DecidedAt: wall.Add(decidedAhead)},
+		}}
+	}
+	pending := ap.R1{Header: ap.R1Header{Kind: ap.KindCommandJob, CreatedAt: wall.Add(time.Hour), StepTTLs: []int{60}}}
+	nearDecision := approved(2 * time.Second)
+	justPastSkew := approved(6 * time.Second)
+	justPastSkew.Header.CreatedAt = wall
+	windowClosed := approved(time.Hour)
+	windowClosed.Header.Mint = &ap.MintSlot{State: ap.MintError, Reason: ap.MintReasonWindowClosed}
+	bytesHeld := approved(time.Hour)
+	bytesHeld.Header.Mint = &ap.MintSlot{State: ap.MintSignatures}
+	bytesHeld.Header.ClaimCount = 1
+	bytesHeld.Payload = &ap.R1Payload{Signatures: []string{"sig"}}
+	denied := approved(time.Hour)
+	denied.Header.Decision.Status = ap.ApprovalDenied
+	for name, tc := range map[string]struct {
+		rec  ap.R1
+		want bool
+	}{
+		"pending with a future created_at":  {pending, false},
+		"approved 2 s ahead":                {nearDecision, false},
+		"approved 6 s ahead, unclaimed":     {justPastSkew, true},
+		"approved 1 h ahead, window closed": {windowClosed, false},
+		"approved 1 h ahead, bytes held":    {bytesHeld, true},
+		"denied 1 h ahead":                  {denied, false},
+	} {
+		if got := futureDated(tc.rec, now, ap.Settings{}); got != tc.want {
+			t.Errorf("%s: futureDated = %v, want %v", name, got, tc.want)
+		}
+	}
+}

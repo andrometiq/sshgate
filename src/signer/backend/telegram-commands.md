@@ -37,4 +37,5 @@ updated — tap again". A new review burst and one card follow from that commit,
 even across a crash. It is refused while a resend is already pending, while a
 send is in progress, once the request is decided, and after the record's eight
 bursts. Each refusal after the gate is audited as `renotify_refused{<reason>}`
+(an ambiguous id as `command_refused{ambiguous_id}`, the gate's family)
 without the command's argument, and the reply goes only to the linked DM.
