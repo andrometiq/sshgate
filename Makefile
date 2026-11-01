@@ -176,8 +176,9 @@ install-local: build
 	@echo "  sshgate-mcp, sshgate-signer-telegram, sshgate -> $$(go env GOPATH)/bin (must be on PATH)"
 	@echo "  COMMITTED $(DIST_GATE_BIN) COPIED -> $${XDG_CONFIG_HOME:-$$HOME/.config}/sshgate/bin/ (the verified bytes update_gate pushes)"
 
+# 60m: pkg/signerkit/lifecycle takes 14-28 min under -race and timed out at 30m under machine load.
 test:
-	go test -race -timeout 30m ./...
+	go test -race -timeout 60m ./...
 
 # test-jail: the kernel-jail acceptance matrix (confine package, #22) PLUS
 # the gate-package real-effect confine tests (TestExecWithRedactionConfine*), which
