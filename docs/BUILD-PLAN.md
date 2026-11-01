@@ -194,6 +194,11 @@ against its full contract, race tests).
 - `Servers.Remove` persists the process's cached registry without reloading, so a concurrent add
   can be lost (pre-existing; Q3 port design §6.3).
 - `TestHumanVoteOrdinaryWorkerLifecycle` can flake (401) under full `make test` load.
+- Two more load flakes seen once on 2026-11-01 under heavy machine load (each passed alone, 10/10
+  and 3/3): `TestRestartAfterFastClockCorrectionKeepsWindow` (`src/signer/cmd/sshgate-signer-telegram`,
+  compares raw record bytes 200 ms after restart, so a late flusher write fails it) and
+  `TestMemStoreConformance/Grants/elapsed` (`pkg/signerkit/lifecycle/lifecycletest`, a bounded
+  wait in `grants.go:29`). Both need event-anchored waits instead of fixed sleeps.
 - The hosted v2 pending query does a full scan; an index waits for the next hosted migration.
 - Callback taps from non-allowed members of a group-linked legacy chat are still answered per tap
   (accepted limitation).
