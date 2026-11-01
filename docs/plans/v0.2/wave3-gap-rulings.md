@@ -1,4 +1,17 @@
-# WI2 gap rulings: all 43 sweep items (2026-10-22, revision 4)
+# WI2 gap rulings: all 43 sweep items (2026-10-22, revision 4; owner answers 2026-11-01)
+
+## Revision 5 changelog (2026-11-01: the owner answered Q3 and Q4)
+- **Q3 answered NO:** all six tools move to the v2 path in v0.2. Items 17, 18 and 34 are in scope
+  and become ORCH rulings under the Q3 port design
+  ([q3-tool-port-design.md](q3-tool-port-design.md); spec E29a). Item 34's refusal branch is dead:
+  the executor runs every kind it admits (C2f-C2i). A new lane, A13c, owns the shared jobplan code.
+  Item 20 narrows to network. `async` stays on `run`/`run_batch` (K9 unchanged, ruling O12).
+- **Q4 answered YES as recommended:** Telegram `/deny_all` and `/cancel` are v2-only; hosted keeps
+  per-request admin cancel for v1 and v2 rows with durable v1 cancel evidence; hosted deny-all moves
+  to v0.3. Items 27, 28 and 32 take their recommended cuts; items 26, 30 and 31 are built as
+  recommended.
+- The answers are recorded under each question and in "Rulings 2026-11-01" at the end of this file.
+  Earlier changelogs are history and are not edited.
 
 ## Revision 4 changelog (third verify: 5 points, all checked against code and accepted)
 - **#34:** the interim refusal is gone. C2 builds the command-job paths in isolation. Production
@@ -101,6 +114,11 @@ unshipped v2 wire). Answering either way approves that field.
 - Alternative: port all six tools to the new path now. That needs a new transfer
   success/failure table (including receipt checks) and new meanings for "failed" on admin tools.
 
+> **Answered (owner decision, 2026-11-01): NO**, the alternative: "port all six tools to the new
+> path now". `run`, `run_batch`, `request_grant`, `transfer`, `revoke_server` and `update_gate` all
+> move to the v2 approval path in v0.2. See "Rulings 2026-11-01" (R-Q3) at the end of this file and
+> [q3-tool-port-design.md](q3-tool-port-design.md).
+
 **Q4 — Cancel and deny-all scope (blocks D1a, then D2; items 26-32).**
 Background: an old-style v1 request on the **local** Telegram signer lives at most 5 minutes.
 On the **hosted** signer, each accepted v1 **sign** request is a row that lives **24 hours** by
@@ -122,6 +140,9 @@ Proposal:
   Telegram.
 - Alternative: build all of it as specified. Local v1 requests join snapshots and get a
   "canceled" result (answered to old clients as "denied"), and hosted deny-all gets its HTTP API.
+
+> **Answered (owner decision, 2026-11-01): YES, as recommended.** See "Rulings 2026-11-01" (R-Q4)
+> at the end of this file.
 
 **Q5 — Async results surface for the agent (blocks C3, then D3; items 37, 38, 43).**
 - **Cut to the simple form.** `list_pending_approvals` lists **signer records only**: one page
@@ -315,12 +336,14 @@ proxy).
 `authMode`. A deny has an operator in `DecidedBy` (`apply.go:521`) and gets no `auth_mode`.
 Named view and `approvalwire` golden updates, and a critique pass.
 
-**17. Transfer two-leg report: OWNER → Q3 (recommended cut).** If transfer stays on v1, no
+**17. Transfer two-leg report: OWNER → Q3 (recommended cut).** *(Answered 2026-11-01: Q3 = NO, so
+this is in scope; ruled by the Q3 port design §1.2, table T1-T16. See R-Q3.)* If transfer stays on v1, no
 reduction is needed. If the owner ports it, the table must also cover missing, malformed or
 wrong-transfer-ID receipts (`transfer.go:184`) and amend E28/E29, since `failed` means a known
 non-zero exit (S:554-561). The jobplan annotation edits would need an exception for A13b.
 
-**18. Exit-zero postconditions: OWNER → Q3 (recommended cut).** If revoke and update stay on v1,
+**18. Exit-zero postconditions: OWNER → Q3 (recommended cut).** *(Answered 2026-11-01: Q3 = NO, so
+this is in scope; ruled by the Q3 port design §1.3, rows A1-A5 and U1a-U7. See R-Q3.)* If revoke and update stay on v1,
 `StepOutcome` never sees them. Otherwise an E29 amendment must cover a missing marker, a
 malformed marker and a confirmed hash that differs from the approved one (`update_gate.go:219`).
 
@@ -336,6 +359,8 @@ malformed marker and a confirmed hash that differs from the approved one (`updat
 > **Ruling 2026-10-22 — reason sweep scope (orchestrator).** "Reconcile by Get" applies to v2
 > records only. The v1 "verdict undelivered — do not auto-retry" guidance stays for
 > `run(network:true)` and reveal+network, and for every tool Q3 keeps on v1.
+> *(2026-11-01: Q3 = NO keeps no other tool on v1, so the v1 guidance covers `run(network:true)`
+> and reveal+network only.)*
 
 **21. WI1 writers: ORCH (verify: fine).**
 > **Ruling 2026-10-22 — cross-work-item writers (orchestrator).** P5.2 and P7.1 land on main. The
@@ -395,11 +420,13 @@ requests live in `LegacyService` (`legacy.go:55`).
 
 ### D1a / D1b
 
-**27. Legacy snapshot binding: OWNER → Q4 (recommended: no v1 items).** If v1 is kept: items bind
+**27. Legacy snapshot binding: OWNER → Q4 (recommended: no v1 items).** *(Answered 2026-11-01: no
+v1 items. Snapshots hold v2 records only. See R-Q4.)* If v1 is kept: items bind
 the live request instance and its handle, compared and canceled under the same `LegacyService`
 mutex; preparing requests are excluded.
 
-**28. Local v1 cancel semantics: OWNER → Q4 (recommended: no v1 cancel).** If kept: canceled maps
+**28. Local v1 cancel semantics: OWNER → Q4 (recommended: no v1 cancel).** *(Answered 2026-11-01:
+no local v1 cancel. See R-Q4.)* If kept: canceled maps
 to the frozen v1 `denied`, the audit reason is `canceled`, and tombstone taps get
 `legacy_vote_refused{canceled}`.
 
@@ -416,14 +443,16 @@ Check: a commit can land and still return uncertain (`filestore_linux.go:249-255
 > of a confirm. **Lane:** D1a. **OWNS exception:** a runtime field and the invalidate-on-publish
 > hunk in `daemon_approvals.go`.
 
-**30. Selection and confirmation: OWNER → Q4 (the confirmation contract).** Fixed in r2: legacy
+**30. Selection and confirmation: OWNER → Q4 (the confirmation contract).** *(Answered 2026-11-01:
+the contract in Q4 is approved; no v1 items, so no "—" hash column. See R-Q4.)* Fixed in r2: legacy
 reservation has no live cap (`legacy.go:126-151`), so r1's "can't happen" was false. The
 12-message overflow refusal stays real, and enumeration is bounded (stop at the render limit plus
 one). If v1 items are kept, their hash column shows "—".
 
 ### D2
 
-**31. Hosted v1 cancel evidence: OWNER → Q4 (r3: recommended to keep, durable).** Under Q4
+**31. Hosted v1 cancel evidence: OWNER → Q4 (r3: recommended to keep, durable).** *(Answered
+2026-11-01: kept and durable; built in D2. See R-Q4.)* Under Q4
 yes, D2 builds it to this design: `store.LegacyResolver.CancelLegacy` gains an `admin` parameter
 (`store/store.go:329-332`; named change). Its transaction writes an outbox row with event key
 `legacy-cancel:<sha256(request_id)>:<unix>`. The `evidence` becomes a versioned object
@@ -435,7 +464,8 @@ as `evidence_malformed` and still flushed. The flusher (`approvals_v2_legacy.go:
 frozen-wire checks are extended. **OWNS exception (D2):** `pkg/signerkit/store/store.go` (that
 signature), `sqlitestore/legacy.go`, `hosted/approvals_v2_legacy.go`. Critique pass before code.
 
-**32. Hosted deny-all API: OWNER → Q4 (recommended: moves to v0.3).** If kept: the r1 HTTP
+**32. Hosted deny-all API: OWNER → Q4 (recommended: moves to v0.3).** *(Answered 2026-11-01: moves
+to v0.3. See R-Q4.)* If kept: the r1 HTTP
 schema plus a named `sqlitestore` operation for the cross-plane read (the connection is private,
 `sqlite.go:84`), with the specified per-item admin and busy checks preserved.
 
@@ -447,7 +477,9 @@ schema plus a named `sqlitestore` operation for the cross-plane read (the connec
 > C2. If the latency gate fails, C2 stops and a separate durable-format design goes to the owner.
 > No implicit schema change.
 
-**34. Executor intake scope: OWNER → Q3.** If yes: the executor's admission
+**34. Executor intake scope: OWNER → Q3.** *(Answered 2026-11-01: Q3 = NO. The refusal branch
+below is dead: admission refuses no tool, and the executor runs every kind it admits, in C2f-C2i
+per the Q3 port design §3 and §4.4. See R-Q3.)* If yes: the executor's admission
 (`src/executor/draft_linux.go:34-45`) refuses tools other than `run`/`run_batch` with
 `invalid_request` before durable admission or any signer call, and a test pins it. **r4, C2
 split:**
@@ -562,15 +594,59 @@ goldens with a critique pass before its commit 2.
   proxy-harness commit needs A12.
 - **Orchestrator:** fold the ORCH rulings and the acceptance corrections (13, 14, 19, 20, 40,
   42), and merge the reviewed journey branch to main ahead of C5.
-- **After any Q3 answer:** A1a-auth (the wire field is in both options).
+- **After any Q3 answer:** A1a-auth (the wire field is in both options). *(Merged, `756298d`.)*
 - **Not yet:**
   - A11: waits for all of A10 and Q2.
   - A12.
-  - A13b: waits for A12 and Q3.
+  - A13b: waits for A12 and Q3. *(2026-11-01: c1-c4 can start; c5-c6 wait for A13c.)*
   - A13b-docs: waits for P3's docs on main.
   - B1w: waits for A12, B1f and Q1.
   - B2.
-  - D1a, D1b and D2: wait for Q4.
+  - D1a, D1b and D2: wait for Q4. *(2026-11-01: Q4 answered; D2 is merged.)*
   - C3: waits for A13b-docs and Q5.
   - C5, A0b.
   - D3: waits for Q5.
+
+---
+
+## Rulings 2026-11-01 — owner answers to Q3 and Q4
+
+**R-Q3 — owner decision (2026-11-01): Q3 = NO.** All six MCP tools (`run`, `run_batch`,
+`request_grant`, `transfer`, `revoke_server`, `update_gate`) move to the v2 approval path in v0.2;
+nothing is deferred to v0.3.
+- Items 17 (transfer two-leg report, including missing, malformed and wrong-ID receipts, with the
+  E28/E29 amendments), 18 (exit-zero postconditions: missing or malformed receipt, hash mismatch,
+  with the E29 amendment) and 34 (the executor runs every kind it admits) are in scope.
+- The design is [q3-tool-port-design.md](q3-tool-port-design.md) (design GO, not built). Its
+  orchestrator rulings O1-O17 (§6.1) and its verify-r3 fold (§8) are binding for the lanes it
+  names: A13c (new, first), A13b c1-c7, C2f-C2i, C3 and A13b-docs.
+- **O12:** `async` stays on `run` and `run_batch` only (K9 unchanged). The other four tools run
+  synchronously on the v2 path. Reversible: adding the flag later is a K9 amendment plus a C3
+  schema change, with no executor work.
+- **Fold step:** the spec texts in the design's §1.5 (E10, E28, E29, the new E29a, E38, E74,
+  §1.3 item 40, S:1880, C-64, and ledger entries C-68 to C-70) and the rulings and lane-plan edits
+  in its §5 are folded into the spec, this file and `wave3-lanes.md` on the integration branch
+  before A13c is cut.
+
+**R-O14 — exit code of a lowered row (orchestrator, 2026-11-01; Q3 port).** When `AdminOutcome` or
+`TransferStepOutcome` lowers a step's status to `indeterminate`, the step stores **no**
+`exit_code`; its fixed annotation says the gate exited 0 without a valid receipt.
+- Scope: admin (`revoke_server`, `update_gate`) and transfer steps only. It never applies to
+  `RunStep`'s `unsigned_read` jail-refusal row, which keeps its exit 77.
+- Basis: the executor store admits `indeterminate` only with no exit code
+  (`src/executor/store_linux.go:309-318` on `wi2/c2`) and stays unchanged, so a lowered row commits
+  and reloads; `indeterminate` means the completion is not trusted, so no exit is reported for it.
+
+**R-Q4 — owner decision (2026-11-01): Q4 = YES, as recommended.**
+- Telegram `/deny_all` and `/cancel` cover v2 records only. Local v1 requests expire within 5
+  minutes and can be denied with one tap. No v1 snapshot items (item 27) and no local v1 cancel
+  (item 28). B2's composite resolver (item 26) resolves v2 only.
+- The hosted signer keeps **per-request admin cancel for both v1 and v2 rows**. A v1 cancel's audit
+  record is durable: it goes through the expiry outbox with versioned evidence naming the admin
+  (item 31). Built in D2.
+- **Hosted deny-all moves to v0.3** (item 32). `docs/BUILD-PLAN.md` no longer lists it for v0.2,
+  and the D2 row in `wave3-lanes.md` §3 ("deny-all snapshot/confirm") is read with this ruling: D2
+  shipped without it.
+- The `/deny_all` confirmation is one button under the full list. It works only for the owner, only
+  in a private chat, for 5 minutes, and once. If the list cannot be shown in full, deny-all refuses
+  rather than truncating (item 30). Built in D1a and D1b.
