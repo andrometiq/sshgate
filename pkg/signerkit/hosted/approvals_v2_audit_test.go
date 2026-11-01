@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/karthikeyan5/sshgate/pkg/signerkit"
+	"github.com/karthikeyan5/sshgate/pkg/signerkit/sqlitestore"
 	"github.com/karthikeyan5/sshgate/pkg/signerkit/store"
 )
 
@@ -286,6 +287,29 @@ func TestWireFrozen_LegacyExpiryAuditAddition(t *testing.T) {
 	}
 	if !strings.HasSuffix(string(call), `"legacy_expiry":`+want+`}`) {
 		t.Fatalf("wire member: %s", call)
+	}
+}
+
+// Ruling 31 extends the frozen legacy line additively: a cancel names its
+// lifecycle, reason and admin; the expiry golden above is unchanged.
+func TestWireFrozen_LegacyCancelAuditAddition(t *testing.T) {
+	call := signerkit.AuditCall{Time: time.Unix(3, 0).UTC(), RequestID: "r", Lifecycle: "legacy-canceled", Reason: "canceled",
+		Operator:     &signerkit.Operator{ID: "root", DisplayName: "root", Verified: true},
+		LegacyExpiry: &signerkit.LegacyExpiryAuditMetadata{EventKey: "legacy-cancel:key:3", ResolvedAt: time.Unix(3, 0).UTC(), Votes: []signerkit.LegacyExpiryAuditVote{}}}
+	data, err := json.Marshal(call)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const want = `{"time":"1970-01-01T00:00:03Z","request_id":"r","lifecycle":"legacy-canceled","reason":"canceled","operator":{"ID":"root","DisplayName":"root","Verified":true,"AuthnMethod":""},"legacy_expiry":{"event_key":"legacy-cancel:key:3","resolved_at":"1970-01-01T00:00:03Z","votes":[]}}`
+	if string(data) != want {
+		t.Fatalf("wire: %s", data)
+	}
+	evidence, err := json.Marshal(sqlitestore.LegacyCancelEvidence{V: 1, Reason: "canceled", Admin: "root", Votes: []*store.Vote{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(evidence) != `{"v":1,"reason":"canceled","admin":"root","votes":[]}` {
+		t.Fatalf("evidence: %s", evidence)
 	}
 }
 

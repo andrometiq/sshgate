@@ -1,12 +1,15 @@
 package hosted
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/karthikeyan5/sshgate/pkg/signerkit"
+	"github.com/karthikeyan5/sshgate/pkg/signerkit/sqlitestore"
 	"github.com/karthikeyan5/sshgate/pkg/signerkit/store"
 )
 
@@ -63,21 +66,33 @@ func (e *ApprovalV2Engine) flushLegacyAudit(ctx context.Context) error {
 		}
 		cursor = metadata.EventKey
 		call.Time = time.Unix(at, 0).UTC()
-		call.Lifecycle = "legacy-expired"
 		metadata.ResolvedAt = call.Time
 		metadata.Votes = []signerkit.LegacyExpiryAuditVote{}
+		call.Lifecycle = "legacy-expired"
+		canceled := strings.HasPrefix(metadata.EventKey, "legacy-cancel:")
+		if canceled {
+			call.Lifecycle = "legacy-canceled"
+		}
 		var votes []*store.Vote
-		decodeErr := json.Unmarshal(evidence, &votes)
-		for _, vote := range votes {
-			if vote == nil {
-				decodeErr = errors.New("null vote")
-				break
-			}
-			metadata.Votes = append(metadata.Votes, signerkit.LegacyExpiryAuditVote{Operator: vote.Operator, Decision: string(vote.Decision), AuthnMethod: vote.AuthnMethod, Time: vote.TS, Audited: vote.Audited})
+		var admin string
+		decodeErr := errors.New("unknown event key namespace")
+		// Only this code writes keys; any other namespace fails closed.
+		if canceled || strings.HasPrefix(metadata.EventKey, "legacy-expiry:") {
+			votes, admin, decodeErr = decodeLegacyEvidence(evidence, canceled)
 		}
 		if decodeErr != nil {
-			e.config.Logger.Printf("legacy audit evidence corrupt; retained for repair: event_key=%q", metadata.EventKey)
-			continue
+			// Ruling 31: the line still reaches the sink, marked, so a bad row can
+			// neither block the outbox nor vanish unaudited.
+			e.config.Logger.Printf("legacy audit evidence malformed; flushed as evidence_malformed: event_key=%q", metadata.EventKey)
+			call.Reason = "evidence_malformed"
+		} else {
+			for _, vote := range votes {
+				metadata.Votes = append(metadata.Votes, signerkit.LegacyExpiryAuditVote{Operator: vote.Operator, Decision: string(vote.Decision), AuthnMethod: vote.AuthnMethod, Time: vote.TS, Audited: vote.Audited})
+			}
+			if canceled {
+				call.Reason = "canceled"
+				call.Operator = &signerkit.Operator{ID: admin, DisplayName: admin, Verified: true}
+			}
 		}
 		call.LegacyExpiry = &metadata
 		calls = append(calls, call)
@@ -108,11 +123,37 @@ func (e *ApprovalV2Engine) flushLegacyAudit(ctx context.Context) error {
 			return err
 		}
 	}
-	// Advance only after all decodable lines in this page were acknowledged.
-	// Corrupt rows remain intact and are retried on the next sweep after repair.
+	// Advance only after every line in this page was acknowledged.
 	e.legacyAuditCursor = cursor
 	if count < 256 {
 		e.legacyAuditCursor = ""
 	}
 	return nil
+}
+
+// decodeLegacyEvidence reads outbox evidence. v0 (expiry) is a bare vote array,
+// or null for no votes. v1 (cancel) is the versioned object naming the admin.
+// Each shape is valid only under its own key namespace.
+func decodeLegacyEvidence(evidence []byte, canceled bool) ([]*store.Vote, string, error) {
+	var votes []*store.Vote
+	admin := ""
+	trimmed := bytes.TrimSpace(evidence)
+	if canceled {
+		var object sqlitestore.LegacyCancelEvidence
+		if len(trimmed) == 0 || trimmed[0] != '{' || decodeStrictJSON(trimmed, &object) != nil {
+			return nil, "", errors.New("not a v1 cancel object")
+		}
+		if object.V != 1 || object.Reason != "canceled" || object.Admin == "" {
+			return nil, "", errors.New("unsupported cancel evidence")
+		}
+		votes, admin = object.Votes, object.Admin
+	} else if len(trimmed) == 0 || trimmed[0] != '[' && !bytes.Equal(trimmed, []byte("null")) || json.Unmarshal(trimmed, &votes) != nil {
+		return nil, "", errors.New("not a v0 vote array")
+	}
+	for _, vote := range votes {
+		if vote == nil {
+			return nil, "", errors.New("null vote")
+		}
+	}
+	return votes, admin, nil
 }

@@ -163,7 +163,7 @@ func TestUIV1SecretJSONAndV2ID(t *testing.T) {
 	digest := sha256.Sum256([]byte("PASSWORD=planted-secret-value true"))
 	for _, canceled := range []bool{false, true} {
 		if canceled {
-			if changed, _, err := db.CancelLegacy(context.Background(), row.RequestID, now); err != nil || !changed {
+			if changed, _, err := db.CancelLegacy(context.Background(), row.RequestID, now, "admin"); err != nil || !changed {
 				t.Fatalf("cancel: %v %v", changed, err)
 			}
 		}
