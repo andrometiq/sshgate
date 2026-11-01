@@ -2,7 +2,13 @@
 
 package lifecycle
 
-import "log"
+import (
+	"errors"
+	"log"
+)
+
+// ErrStoreFatal marks ownership acquisition failures; later reload failures are recoverable.
+var ErrStoreFatal = errors.New("approval store ownership acquisition failed")
 
 // FileStore is volatile on platforms without the secure Linux journal.
 type FileStore struct{ MemStore }

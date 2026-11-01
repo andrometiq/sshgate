@@ -11,6 +11,7 @@ import (
 
 	"github.com/karthikeyan5/sshgate/internal/elapsed"
 	"github.com/karthikeyan5/sshgate/pkg/signerkit"
+	"github.com/karthikeyan5/sshgate/pkg/signerkit/assist"
 	"github.com/karthikeyan5/sshgate/pkg/signerkit/lifecycle"
 	"github.com/karthikeyan5/sshgate/pkg/signerkit/sqlitestore"
 	"github.com/karthikeyan5/sshgate/pkg/signerkit/store"
@@ -34,16 +35,19 @@ type ApprovalV2Store interface {
 // ApprovalV2Config contains only signer-owned inputs. Freezer and SnapshotBuilder
 // run inside Submit's transaction and must not query the database outside it.
 type ApprovalV2Config struct {
-	Store             ApprovalV2Store
-	Minter            lifecycle.Minter
-	Clock             elapsed.Clock
-	Freezer           lifecycle.Freezer
-	SnapshotBuilder   lifecycle.SnapshotBuilder
-	Settings          ap.Settings
-	RequiredApprovals int
-	AssistTimeout     time.Duration
-	MaxFullRows       int64
-	MaxRows           int64
+	Store              ApprovalV2Store
+	Minter             lifecycle.Minter
+	Clock              elapsed.Clock
+	Freezer            lifecycle.Freezer
+	SnapshotBuilder    lifecycle.SnapshotBuilder
+	Settings           ap.Settings
+	RequiredApprovals  int
+	AssistTimeout      time.Duration
+	AssistPool         *assist.Pool // Owned by the ordinary worker lifecycle; nil disables assessment.
+	Assessor           assist.Assessor
+	AssistInputBuilder lifecycle.AssistInputBuilder
+	MaxFullRows        int64
+	MaxRows            int64
 	// Use ProcessAuditSink for file output; custom sinks must honor cancellation.
 	AuditSink signerkit.AuditSink
 	Logger    *log.Logger
@@ -70,11 +74,18 @@ type ApprovalV2Engine struct {
 	runMu             sync.Mutex
 	running           bool
 	legacyAuditCursor string
+	assistContext     context.Context
+	assistCancel      context.CancelFunc
+	assistMu          sync.Mutex     // serializes effect registration with cancellation
+	assistJobs        sync.WaitGroup // includes synchronous full-pool completion
 }
 
 func NewApprovalV2Engine(c ApprovalV2Config) (*ApprovalV2Engine, error) {
 	if c.Store == nil || c.Clock == nil || c.Freezer == nil || c.SnapshotBuilder == nil {
 		return nil, errors.New("hosted: approval store, clock, freezer and snapshot builder are required")
+	}
+	if c.AssistPool != nil && c.AssistInputBuilder == nil {
+		c.AssistInputBuilder = hostedAssistInputBuilder{}
 	}
 	if c.RequiredApprovals > ap.MaxRequiredApprovals {
 		return nil, ErrInvalidRequiredApprovals
@@ -109,7 +120,9 @@ func NewApprovalV2Engine(c ApprovalV2Config) (*ApprovalV2Engine, error) {
 	if err != nil {
 		return nil, err
 	}
+	assistContext, assistCancel := context.WithCancel(context.Background())
 	return &ApprovalV2Engine{
+		assistContext: assistContext, assistCancel: assistCancel,
 		config: c, epoch: epoch, writerAdmission: make(chan struct{}, 1), commit: func(tx *sql.Tx) error { return tx.Commit() },
 		waiters: make(map[sqlitestore.V2Key]map[chan struct{}]struct{}), flushNudge: make(chan struct{}, 1),
 		newest: make(map[approvalGrantOwner]sqlitestore.V2Key), grants: make(map[sqlitestore.V2Key]ap.Held),
@@ -275,6 +288,7 @@ func (e *ApprovalV2Engine) Submit(ctx context.Context, client, sub string, draft
 	} else if err != nil {
 		return ap.Summary{}, approvalReadError(err)
 	}
+	isNew := false
 	after, _, err := e.transact(ctx, key, func(tx *sql.Tx, before *ap.R1, now ap.Now) (ap.Command, ap.Inputs, error) {
 		command := ap.Submit{Draft: draft, Allowance: ap.HostedSkew}
 		if before != nil {
@@ -297,12 +311,16 @@ func (e *ApprovalV2Engine) Submit(ctx context.Context, client, sub string, draft
 		if err != nil {
 			return nil, ap.Inputs{}, err
 		}
+		isNew = true
 		command.Plan, command.ReviewSnapshot, command.RationaleRedacted = plan, snapshot, reason
 		command.RequiredApprovals, command.AssistDeadline = e.config.RequiredApprovals, now.Wall.Add(e.config.AssistTimeout)
 		return command, ap.Inputs{}, nil
 	})
 	if err != nil {
 		return ap.Summary{}, err
+	}
+	if isNew {
+		e.startAssist(key, after)
 	}
 	return e.view(after, e.now()), nil
 }
@@ -437,12 +455,23 @@ func (e *ApprovalV2Engine) WaitMany(ctx context.Context, client, sub string, ids
 }
 
 // Vote accepts a verified hosted challenge from the human adapter, which owns
-// role and step-up checks. Apply derives policy from the row inside this commit.
+// step-up checks. The transaction rechecks the operator role and derives policy
+// from the stored row.
 func (e *ApprovalV2Engine) Vote(ctx context.Context, key sqlitestore.V2Key, vote ap.CastVote) (ap.Answer, error) {
 	if vote.Hosted == nil || vote.Card != nil {
 		return ap.Answer{}, &ap.CodeError{Code: ap.CodeInvalidRequest}
 	}
-	_, answer, err := e.mutate(ctx, key, vote, ap.Inputs{})
+	_, answer, err := e.transact(ctx, key, func(tx *sql.Tx, _ *ap.R1, _ ap.Now) (ap.Command, ap.Inputs, error) {
+		var role string
+		err := tx.QueryRowContext(ctx, "SELECT role FROM users WHERE id = ?", vote.Operator).Scan(&role)
+		if errors.Is(err, sql.ErrNoRows) || (err == nil && role != "operator") {
+			return nil, ap.Inputs{}, &ap.CodeError{Code: ap.CodeInvalidRequest}
+		}
+		if err != nil {
+			return nil, ap.Inputs{}, approvalTransactionError(err)
+		}
+		return vote, ap.Inputs{}, nil
+	})
 	return answer, err
 }
 

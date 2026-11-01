@@ -34,12 +34,22 @@ type RecoverableStore interface {
 	Close() error
 }
 
-// ApprovalRuntimeConfig transfers store and legacy ownership to the runtime.
+// ApprovalForwarder sends a validated local request to the hosted authority.
+type ApprovalForwarder interface {
+	RequestApproval(context.Context, string, any) (HostedApprovalResponse, error)
+}
+
+// ErrHostedForwarder is the informational Status result for a live stateless proxy.
+var ErrHostedForwarder = errors.New("hosted forwarder")
+
+// ApprovalRuntimeConfig selects either a stateless forwarder or a local lifecycle.
+// Local mode transfers store and legacy ownership to the runtime.
 // NewEngine must construct fresh generation-owned dependencies and clean them
 // up on failure. It must use the supplied store and persistent Legacy service.
 type ApprovalRuntimeConfig struct {
 	// AllowedUIDs restricts local v2 calls when nonempty.
 	AllowedUIDs []uint32
+	Forwarder   ApprovalForwarder
 	Store       RecoverableStore
 	Legacy      *lifecycle.LegacyService
 	// PrepareLegacy installs the artifact in the same notifier configured on Legacy.
@@ -61,20 +71,27 @@ type ApprovalRuntime struct {
 	done            chan struct{}
 	closeOnce       sync.Once
 	closeErr        error
+	forwardCalls    sync.WaitGroup
 	wait            func(context.Context, time.Duration) bool
 }
 
 // NewApprovalRuntime retains ownership even when initial loading fails. Status
 // diagnoses that state while Run retries. Acquire storage ownership beforehand.
 func NewApprovalRuntime(c ApprovalRuntimeConfig) (*ApprovalRuntime, error) {
-	if c.Store == nil || c.Legacy == nil || c.NewEngine == nil {
+	if c.Forwarder != nil {
+		if c.Store != nil || c.Legacy != nil || c.NewEngine != nil || c.PrepareLegacy != nil {
+			return nil, errors.New("signer: forwarder cannot own a local lifecycle or legacy adapter")
+		}
+	} else if c.Store == nil || c.Legacy == nil || c.NewEngine == nil {
 		return nil, errors.New("signer: approval store, legacy service and engine factory are required")
 	}
 	c.AllowedUIDs = slices.Clone(c.AllowedUIDs)
 	ctx, cancel := context.WithCancel(context.Background())
 	r := &ApprovalRuntime{config: c, ctx: ctx, cancel: cancel, done: make(chan struct{}), wait: waitApprovalRecovery}
-	if err := r.rebuild(); err != nil {
-		r.cause = approvalRecoveryCause(err)
+	if c.Forwarder == nil {
+		if err := r.rebuild(); err != nil {
+			r.cause = approvalRecoveryCause(err)
+		}
 	}
 	return r, nil
 }
@@ -149,8 +166,47 @@ func (r *ApprovalRuntime) Current() (*lifecycle.Engine, error) {
 	return r.engine, nil
 }
 
-// Status includes the latched recovery cause until a replacement is published.
-func (r *ApprovalRuntime) Status() error { _, err := r.Current(); return err }
+// Status reports ErrHostedForwarder for a live proxy, or the local recovery cause.
+func (r *ApprovalRuntime) Status() error {
+	if r.config.Forwarder != nil {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		if r.closed || r.ctx.Err() != nil {
+			return &ap.CodeError{Code: ap.CodeLifecycleUnavailable}
+		}
+		return ErrHostedForwarder
+	}
+	_, err := r.Current()
+	return err
+}
+
+func (r *ApprovalRuntime) forward(ctx context.Context, principal string, request any) (aw.Response, error) {
+	r.mu.Lock()
+	if r.closed || r.ctx.Err() != nil {
+		r.mu.Unlock()
+		return aw.Response{}, &ap.CodeError{Code: ap.CodeLifecycleUnavailable}
+	}
+	r.forwardCalls.Add(1)
+	r.mu.Unlock()
+	defer r.forwardCalls.Done()
+	ctx, cancel := context.WithCancel(ctx)
+	stop := context.AfterFunc(r.ctx, cancel)
+	defer stop()
+	defer cancel()
+	// The wire validator has already checked E71 and the claim-token hash.
+	if submit, ok := request.(aw.SubmitRequest); ok {
+		if submit.Draft.Kind != ap.KindCommandJob {
+			return aw.Response{}, &ap.CodeError{Code: ap.CodeInvalidRequest}
+		}
+		for _, step := range submit.Draft.CommandJob.Steps {
+			if step.Route == ap.RouteSignedReveal {
+				return aw.Response{}, &ap.CodeError{Code: ap.CodeInvalidRequest}
+			}
+		}
+	}
+	result, err := r.config.Forwarder.RequestApproval(ctx, principal, request)
+	return result.Response, err
+}
 
 // Legacy is the persistent callback and request owner across v2 recoveries.
 func (r *ApprovalRuntime) Legacy() *lifecycle.LegacyService { return r.config.Legacy }
@@ -176,6 +232,10 @@ func (r *ApprovalRuntime) Run(ctx context.Context) error {
 	}()
 	stop := context.AfterFunc(ctx, r.cancel)
 	defer stop()
+	if r.config.Forwarder != nil {
+		<-r.ctx.Done()
+		return r.ctx.Err()
+	}
 	delay := time.Second
 	for r.ctx.Err() == nil {
 		r.mu.Lock()
@@ -219,11 +279,16 @@ func (r *ApprovalRuntime) Close() error {
 		if engine != nil {
 			r.closeErr = engine.Close()
 		}
-		r.closeErr = errors.Join(r.closeErr, r.config.Legacy.Close())
+		if r.config.Legacy != nil {
+			r.closeErr = errors.Join(r.closeErr, r.config.Legacy.Close())
+		}
 		if started {
 			<-r.done
 		}
-		r.closeErr = errors.Join(r.closeErr, r.config.Store.Close())
+		r.forwardCalls.Wait()
+		if r.config.Store != nil {
+			r.closeErr = errors.Join(r.closeErr, r.config.Store.Close())
+		}
 	})
 	return r.closeErr
 }
@@ -359,8 +424,9 @@ func transferDigestsLocked(registry *XferRegistry, transfer ap.Transfer) (ap.Xfe
 	return ap.XferDigests{Source: source.EntryDigest, Destination: destination.EntryDigest}, nil
 }
 
-// ApprovalFreezer binds authenticated ownership and configured validity. Route
-// snapshots remain requester-supplied; transfer keys come only from the signer.
+// ApprovalFreezer binds authenticated ownership and caps requested validity at
+// the configured limit. Route snapshots remain requester-supplied; transfer
+// keys come only from the signer.
 func (s *Service) ApprovalFreezer(validity time.Duration) lifecycle.Freezer {
 	return approvalFreezer{s.daemon.XferRegistry, validity}
 }
@@ -377,7 +443,11 @@ func (f approvalFreezer) Freeze(ctx context.Context, draft ap.ApprovalDraft, pri
 	if err := draft.Validate(); err != nil {
 		return ap.ApprovalPlanV1{}, err
 	}
-	inputs := ap.FreezeInputs{RequesterPrincipal: principal, RequesterSub: sub, Now: now, Validity: f.validity}
+	validity := f.validity
+	if seconds := draft.RequestedValiditySeconds; seconds != nil {
+		validity = min(validity, time.Duration(*seconds)*time.Second)
+	}
+	inputs := ap.FreezeInputs{RequesterPrincipal: principal, RequesterSub: sub, Now: now, Validity: validity}
 	if draft.Transfer != nil {
 		transfer, err := f.freezeTransfer(*draft.Transfer)
 		if err != nil {
@@ -501,6 +571,8 @@ func (d *Daemon) handleApproval(ctx context.Context, conn io.ReadWriter, line []
 			err = &ap.CodeError{Code: ap.CodeInvalidRequest}
 		case len(caller.runtime.config.AllowedUIDs) > 0 && !slices.Contains(caller.runtime.config.AllowedUIDs, caller.uid):
 			err = &ap.CodeError{Code: ap.CodeNotFound}
+		case caller.runtime.config.Forwarder != nil:
+			response, err = caller.runtime.forward(ctx, caller.principal, request)
 		default:
 			var engine *lifecycle.Engine
 			engine, err = caller.runtime.Current()
@@ -509,11 +581,14 @@ func (d *Daemon) handleApproval(ctx context.Context, conn io.ReadWriter, line []
 			}
 		}
 	}
-	if err != nil {
+	if err != nil && response.Error == nil {
 		code := ap.CodeLifecycleUnavailable
 		var coded *ap.CodeError
 		if errors.As(err, &coded) && coded.Code.Valid() {
 			code = coded.Code
+		}
+		if errors.Is(err, aw.ErrSignerIncompatible) {
+			code = ap.CodeSignerIncompatible
 		}
 		// Never reflect internal errors or requester-controlled parser text.
 		response = aw.ErrorResponse(code, string(code))

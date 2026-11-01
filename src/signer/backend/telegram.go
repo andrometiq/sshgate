@@ -18,6 +18,8 @@ import (
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
 	"github.com/karthikeyan5/sshgate/pkg/signerkit"
+	"github.com/karthikeyan5/sshgate/pkg/signerkit/assist"
+	ap "github.com/karthikeyan5/sshgate/src/approvalplan"
 	"github.com/karthikeyan5/sshgate/src/redact"
 	"github.com/karthikeyan5/sshgate/src/sigwire"
 )
@@ -40,6 +42,15 @@ import (
 //   - Each pending request is resolved exactly once — the first of
 //     {approve, deny, timeout, ctx-cancel} wins.
 type TelegramBackend struct {
+	approvalCallbacks *telegramApprovalCallbacks
+	commandRefusals   commandRefusalState                // owned by the poller
+	commandDrain      bool                               // owned by the poller
+	approvalCommands  map[string]func(*tgbotapi.Message) // configured before polling
+	// CommandAudit is wired to the local AuditLog before Run.
+	CommandAudit interface {
+		Write(signerkit.AuditEvent) error
+	}
+
 	// Static config — set at construction, never mutated.
 	allowedUserID int64
 	chatStore     ChatStore
@@ -85,16 +96,23 @@ type TelegramBackend struct {
 	bot *tgbotapi.BotAPI
 
 	// Run lifecycle. running is set on Run and cleared when the loop
-	// returns; concurrent Run calls return an error.
-	runMu       sync.Mutex
-	running     bool
-	runDone     chan struct{}
-	panicsTotal atomic.Int64
+	// and notification workers return; concurrent Run calls return an error.
+	runMu                sync.Mutex
+	running              bool
+	runDone              chan struct{}
+	panicsTotal          atomic.Int64
+	notifications        chan func() // guarded by runMu; best-effort, bounded
+	notificationsDropped atomic.Uint64
 
 	// Pending requests keyed by RequestID. A slot holds a
 	// *pendingReservation while its card is being sent, then the
 	// *pendingState for that card.
-	pending sync.Map // map[string]*pendingState | *pendingReservation
+	pendingMu sync.Mutex // serializes buffered and live callback decisions
+	pending   sync.Map   // map[string]*pendingState | *pendingReservation
+
+	// Test barriers, configured before concurrent use.
+	beforeReplay       func()
+	beforeCallbackLock func()
 
 	// Policy approvals use a disjoint callback namespace and a separate state
 	// machine. Ordinary approve:/deny: behavior above must remain untouched.
@@ -120,37 +138,101 @@ type pendingState struct {
 	chatID    int64  // DM chat where the request message was posted
 	messageID int    // for editing the message on resolution
 	stopTimer func() // tears down the timer + ctx-watcher goroutine
+	ctx       context.Context
+	expires   time.Time
 }
 
-// pendingReservation claims a RequestID in TelegramBackend.pending
-// before the card is sent, so a second request reusing a pending
-// RequestID is refused before it can post a card or displace the first
-// request's state. The byte keeps each reservation a distinct pointer
-// (CompareAndSwap/CompareAndDelete compare by identity).
-type pendingReservation struct{ _ byte }
+// pendingReservation holds at most 16 early taps until sendMessage supplies
+// the authoritative message ID. pendingMu guards it; overflow denies the request.
+type pendingReservation struct {
+	callbacks []*tgbotapi.CallbackQuery
+	ctx       context.Context
+	expires   time.Time
+	chatID    int64
+	overflow  bool
+}
 
-// errDuplicateRequestID refuses a request whose RequestID is already
-// pending; the original pending request is left untouched.
 var errDuplicateRequestID = errors.New("telegram: request_id already pending — refusing duplicate")
 
-// reservePending atomically claims reqID (LoadOrStore: no check-then-store
-// window). On success the caller must either publish its pendingState with
-// publishPending or let release drop the reservation.
+const notificationWorkers = 4
+const notificationQueueSize = 64
+
+// Notification saturation never delays a decision or the poller. Dropped edits
+// may leave stale buttons visible, but those buttons cannot resolve a request again.
+func (t *TelegramBackend) enqueueNotification(notify func()) {
+	if notify == nil {
+		return
+	}
+	t.runMu.Lock()
+	select {
+	case t.notifications <- notify:
+		t.runMu.Unlock()
+	default:
+		t.runMu.Unlock()
+		t.logger.Printf("telegram notification dropped: total=%d", t.notificationsDropped.Add(1))
+	}
+}
+
 func (t *TelegramBackend) reservePending(reqID string) (res *pendingReservation, release func(), err error) {
 	res = &pendingReservation{}
 	if _, loaded := t.pending.LoadOrStore(reqID, res); loaded {
 		return nil, nil, errDuplicateRequestID
 	}
-	return res, func() { t.pending.CompareAndDelete(reqID, res) }, nil
+	return res, func() {
+		t.pendingMu.Lock()
+		callbacks := res.callbacks
+		res.callbacks = nil
+		t.pending.CompareAndDelete(reqID, res)
+		t.pendingMu.Unlock()
+		for _, cb := range callbacks {
+			t.enqueueNotification(func() { t.answerExpired(cb) })
+		}
+	}, nil
 }
 
-// publishPending swaps the caller's reservation for ps. Only the reservation
-// holder can reach this, so a failed swap is unreachable; it fails closed.
+// publishPending decides every buffered tap before releasing pendingMu to the
+// poller. Notifications run independently so Request can return and arm its timer.
 func (t *TelegramBackend) publishPending(reqID string, res *pendingReservation, ps *pendingState) error {
+	t.pendingMu.Lock()
+	ps.ctx, ps.expires = res.ctx, res.expires
 	if !t.pending.CompareAndSwap(reqID, res, ps) {
+		t.pendingMu.Unlock()
 		return errors.New("telegram: pending reservation lost")
 	}
+	callbacks := res.callbacks
+	res.callbacks = nil
+	if t.beforeReplay != nil {
+		t.beforeReplay()
+	}
+	var notifications []func()
+	if res.overflow {
+		_, expired := t.resolve(reqID, ps, signerkit.Result{Status: signerkit.StatusDenied})
+		notifications = append(notifications, func() {
+			if expired {
+				t.editExpired(ps)
+				return
+			}
+			t.logger.Print("request denied: early callback buffer overflow")
+			edit := tgbotapi.NewEditMessageText(ps.chatID, ps.messageID, "Denied: early callback buffer overflow")
+			if _, err := t.bot.Send(edit); err != nil {
+				t.logger.Printf("edit-on-overflow: %s", redactToken(err))
+			}
+		})
+	}
+	for _, cb := range callbacks {
+		notifications = append(notifications, t.decideBoundCallback(cb, ps))
+	}
+	t.pendingMu.Unlock()
+	for _, notify := range notifications {
+		t.enqueueNotification(notify)
+	}
 	return nil
+}
+
+func (t *TelegramBackend) answerExpired(cb *tgbotapi.CallbackQuery) {
+	if _, err := t.bot.Request(tgbotapi.NewCallback(cb.ID, "expired or already resolved")); err != nil {
+		t.logger.Printf("answer unknown-reqid callback: %s", redactToken(err))
+	}
 }
 
 // TelegramOptions configures a TelegramBackend.
@@ -169,7 +251,8 @@ type TelegramOptions struct {
 	// Logger receives structured-ish event lines. Defaults to a logger
 	// writing to os.Stderr with prefix "signer-bot: ".
 	Logger *log.Logger
-	// RequestTimeout is the per-request wait window — how long we wait
+	// RequestTimeout is the per-request wait window, starting before the card
+	// send (after any explanation) — how long we wait
 	// for the human Telegram tap before resolving as timed-out. Defaults
 	// to sigwire.ApprovalWindow. Tests inject a short duration.
 	RequestTimeout time.Duration
@@ -320,6 +403,9 @@ func NewTelegramBackend(opts TelegramOptions) (*TelegramBackend, error) {
 		pollTimeout:   poll,
 		bot:           bot,
 	}
+	if chat, linked, err := opts.ChatStore.Load(); err == nil && linked && chat != opts.AllowedUserID {
+		logger.Print("WARN: linked chat is not the allowed user’s private chat; v2 notifications refused; send /start again in the allowed user's private DM")
+	}
 	return t, nil
 }
 
@@ -339,22 +425,54 @@ func (t *TelegramBackend) Run(ctx context.Context) error {
 	}
 	t.running = true
 	t.runDone = make(chan struct{})
+	t.notifications = make(chan func(), notificationQueueSize)
+	workerContext, stopWorkers := context.WithCancel(ctx)
+	var workers sync.WaitGroup
+	for i := 0; i < notificationWorkers; i++ {
+		workers.Add(1)
+		go func(queue <-chan func()) {
+			defer workers.Done()
+			for {
+				select {
+				case <-workerContext.Done():
+					return
+				case notify := <-queue:
+					if workerContext.Err() != nil {
+						return
+					}
+					notify()
+				}
+			}
+		}(t.notifications)
+	}
 	t.runMu.Unlock()
 
-	go t.pollLoop(ctx)
-	return nil
-}
-
-// pollLoop is the goroutine started by Run. It owns the lifetime of
-// the polling loop and signals completion via runDone.
-func (t *TelegramBackend) pollLoop(ctx context.Context) {
-	defer close(t.runDone)
-	defer func() {
+	go func() {
+		defer close(t.runDone)
+		t.pollLoop(ctx)
+		t.CloseApprovalCallbacks()
+		stopWorkers()
+		workers.Wait()
 		t.runMu.Lock()
+		t.notifications = nil
 		t.running = false
 		t.runMu.Unlock()
 	}()
+	return nil
+}
 
+// Wait joins the poller and notification workers after its context is cancelled.
+func (t *TelegramBackend) Wait() {
+	t.runMu.Lock()
+	done := t.runDone
+	t.runMu.Unlock()
+	if done != nil {
+		<-done
+	}
+}
+
+// pollLoop dispatches updates until cancellation.
+func (t *TelegramBackend) pollLoop(ctx context.Context) {
 	// Cancel-watcher: cancelling ctx must terminate the long-poll
 	// even if Telegram is mid-response. StopReceivingUpdates closes
 	// the shutdown channel inside the BotAPI; our GetUpdates loop is
@@ -370,6 +488,7 @@ func (t *TelegramBackend) pollLoop(ctx context.Context) {
 	}()
 
 	offset := 0
+	t.commandDrain = t.approvalCallbacks != nil
 	backoff := 100 * time.Millisecond
 	const backoffCap = 30 * time.Second
 
@@ -381,6 +500,7 @@ func (t *TelegramBackend) pollLoop(ctx context.Context) {
 		default:
 		}
 
+		t.flushCommandRefusals()
 		updates, err := t.fetchUpdates(offset)
 		if err != nil {
 			// Distinguish ctx-cancel from a real upstream error.
@@ -411,7 +531,10 @@ func (t *TelegramBackend) pollLoop(ctx context.Context) {
 			if u.UpdateID >= offset {
 				offset = u.UpdateID + 1
 			}
-			t.dispatch(u)
+			t.dispatchUpdate(u.Update, u.forwarded)
+		}
+		if t.commandDrain && len(updates) < approvalUpdateLimit {
+			t.commandDrain = false
 		}
 	}
 }
@@ -419,7 +542,7 @@ func (t *TelegramBackend) pollLoop(ctx context.Context) {
 // fetchUpdates wraps bot.GetUpdates with a recover. A panic in the
 // upstream library or our own dispatch must not kill the polling
 // goroutine (daemon.md §7); we log + count it and continue.
-func (t *TelegramBackend) fetchUpdates(offset int) (updates []tgbotapi.Update, retErr error) {
+func (t *TelegramBackend) fetchUpdates(offset int) (updates []approvalTelegramUpdate, retErr error) {
 	defer func() {
 		if r := recover(); r != nil {
 			t.panicsTotal.Add(1)
@@ -429,12 +552,22 @@ func (t *TelegramBackend) fetchUpdates(offset int) (updates []tgbotapi.Update, r
 	}()
 	cfg := tgbotapi.NewUpdate(offset)
 	cfg.Timeout = t.pollTimeout
-	return t.bot.GetUpdates(cfg)
+	if t.approvalCallbacks != nil {
+		cfg.Limit = approvalUpdateLimit
+		if t.commandDrain {
+			cfg.Timeout = 0
+		}
+	}
+	return t.fetchApprovalUpdates(cfg)
 }
 
 // dispatch routes a single Update. Wrapped in a recover so a poison
 // update can't take down the polling loop.
 func (t *TelegramBackend) dispatch(u tgbotapi.Update) {
+	t.dispatchUpdate(u, false)
+}
+
+func (t *TelegramBackend) dispatchUpdate(u tgbotapi.Update, forwarded bool) {
 	defer func() {
 		if r := recover(); r != nil {
 			t.panicsTotal.Add(1)
@@ -447,14 +580,18 @@ func (t *TelegramBackend) dispatch(u tgbotapi.Update) {
 		t.handleCallback(u.CallbackQuery)
 	case u.Message != nil && u.Message.IsCommand() && u.Message.Command() == "start":
 		t.handleStart(u.Message)
+	case u.Message != nil && u.Message.IsCommand() && t.approvalCallbacks != nil:
+		t.handleApprovalCommand(u.Message, forwarded)
 	}
 }
 
-// handleStart processes a /start message. Only the allowed user can
-// link a chat; messages from anyone else get a polite refusal and we
-// do NOT save their chat_id. This is the "single allowed peer" rule
-// the spec emphasises.
+// handleStart coalesces well-formed strangers before the legacy linking path.
 func (t *TelegramBackend) handleStart(m *tgbotapi.Message) {
+	if m.From != nil && m.Chat != nil && m.From.ID != t.allowedUserID {
+		t.countCommandRefusal("wrong_user")
+		return
+	}
+
 	if m.From == nil || m.From.ID != t.allowedUserID {
 		// Mask the allowed user_id so a curious third party scanning
 		// the bot's responses doesn't learn it verbatim — the bot
@@ -490,9 +627,11 @@ func (t *TelegramBackend) handleCallback(cb *tgbotapi.CallbackQuery) {
 		// Wrong user — answer the callback to clear the spinner on
 		// their client but DO NOT touch any pending request.
 		ans := tgbotapi.NewCallbackWithAlert(cb.ID, "not authorized")
-		if _, err := t.bot.Request(ans); err != nil {
-			t.logger.Printf("answer unauthorized callback: %s", redactToken(err))
-		}
+		t.enqueueNotification(func() {
+			if _, err := t.bot.Request(ans); err != nil {
+				t.logger.Printf("answer unauthorized callback: %s", redactToken(err))
+			}
+		})
 		fromID := int64(0)
 		if cb.From != nil {
 			fromID = cb.From.ID
@@ -500,35 +639,70 @@ func (t *TelegramBackend) handleCallback(cb *tgbotapi.CallbackQuery) {
 		t.logger.Printf("callback from unauthorized user_id=%d ignored", fromID)
 		return
 	}
+	if strings.HasPrefix(cb.Data, "v:") {
+		t.handleApprovalCallback(cb)
+		return
+	}
 	if strings.HasPrefix(cb.Data, "p:") {
 		t.handlePolicyCallback(cb)
 		return
 	}
 
-	action, reqID, ok := parseCallbackData(cb.Data)
+	_, _, ok := parseCallbackData(cb.Data)
 	if !ok {
 		ans := tgbotapi.NewCallback(cb.ID, "invalid request")
-		if _, err := t.bot.Request(ans); err != nil {
-			t.logger.Printf("answer invalid-data callback: %s", redactToken(err))
-		}
+		t.enqueueNotification(func() {
+			if _, err := t.bot.Request(ans); err != nil {
+				t.logger.Printf("answer invalid-data callback: %s", redactToken(err))
+			}
+		})
 		return
 	}
 
+	if t.beforeCallbackLock != nil {
+		t.beforeCallbackLock()
+	}
+	t.pendingMu.Lock()
+	notify := t.decideCallback(cb)
+	t.pendingMu.Unlock()
+	t.enqueueNotification(notify)
+}
+
+// decideCallback arbitrates without Telegram I/O; the caller holds pendingMu.
+func (t *TelegramBackend) decideCallback(cb *tgbotapi.CallbackQuery) func() {
+	_, reqID, ok := parseCallbackData(cb.Data)
+	if !ok || cb.From == nil || cb.From.ID != t.allowedUserID {
+		return func() { t.answerExpired(cb) }
+	}
 	// The tap must come from the exact card posted for this pending state.
 	// request_id is caller-chosen, so it alone does not prove which card
-	// the operator read; a stale card, another chat, or a reservation whose
-	// card is still being sent resolves nothing.
+	// the operator read. Early taps wait for the authoritative send response.
 	raw, _ := t.pending.Load(reqID)
-	ps, ok := raw.(*pendingState)
-	if !ok || cb.Message == nil || cb.Message.Chat == nil || cb.Message.Chat.ID != ps.chatID || cb.Message.MessageID != ps.messageID {
-		if ok {
-			t.logger.Printf("callback for a pending request from a different message ignored")
+	if res, isReservation := raw.(*pendingReservation); isReservation {
+		if res.ctx != nil && res.ctx.Err() == nil && time.Now().Before(res.expires) && cb.Message != nil && cb.Message.Chat != nil && cb.Message.Chat.ID == res.chatID {
+			if len(res.callbacks) == 16 {
+				res.overflow = true
+			} else {
+				res.callbacks = append(res.callbacks, cb)
+				return nil
+			}
+			return func() { t.answerExpired(cb) }
 		}
-		ans := tgbotapi.NewCallback(cb.ID, "expired or already resolved")
-		if _, err := t.bot.Request(ans); err != nil {
-			t.logger.Printf("answer unknown-reqid callback: %s", redactToken(err))
-		}
-		return
+		return func() { t.answerExpired(cb) }
+	}
+	ps, _ := raw.(*pendingState)
+	return t.decideBoundCallback(cb, ps)
+}
+
+// decideBoundCallback applies the same card checks to replay and live taps.
+// The caller holds pendingMu, including throughout replay of the early queue.
+func (t *TelegramBackend) decideBoundCallback(cb *tgbotapi.CallbackQuery, ps *pendingState) func() {
+	action, reqID, ok := parseCallbackData(cb.Data)
+	if !ok || cb.From == nil || cb.From.ID != t.allowedUserID || ps == nil {
+		return func() { t.answerExpired(cb) }
+	}
+	if cb.Message == nil || cb.Message.Chat == nil || cb.Message.Chat.ID != ps.chatID || cb.Message.MessageID != ps.messageID {
+		return func() { t.answerExpired(cb) }
 	}
 
 	var status signerkit.ResultStatus
@@ -542,27 +716,37 @@ func (t *TelegramBackend) handleCallback(cb *tgbotapi.CallbackQuery) {
 		verbPast = "Denied"
 	default:
 		// parseCallbackData guarantees this; defensive.
-		return
+		return nil
 	}
 
 	approver := callbackApprover(cb)
-	t.resolve(reqID, ps, signerkit.Result{Status: status, ApprovedBy: approver})
-
-	// Answer the callback so the user's client clears its spinner.
-	ans := tgbotapi.NewCallback(cb.ID, strings.ToLower(verbPast))
-	if _, err := t.bot.Request(ans); err != nil {
-		t.logger.Printf("answer callback: %s", redactToken(err))
+	resolved, expired := t.resolve(reqID, ps, signerkit.Result{Status: status, ApprovedBy: approver})
+	if !resolved {
+		return func() {
+			t.answerExpired(cb)
+			if expired {
+				t.editExpired(ps)
+			}
+		}
 	}
 
-	// Edit the original message to remove buttons and record outcome.
-	footer := fmt.Sprintf("\n\n%s %s by %s at %s", outcomeMark(status), verbPast, approver, time.Now().UTC().Format(time.RFC3339))
-	origText := ""
-	if cb.Message != nil {
-		origText = cb.Message.Text
-	}
-	edit := tgbotapi.NewEditMessageText(ps.chatID, ps.messageID, origText+footer)
-	if _, err := t.bot.Send(edit); err != nil {
-		t.logger.Printf("edit message: %s", redactToken(err))
+	return func() {
+		// Answer the callback so the user's client clears its spinner.
+		ans := tgbotapi.NewCallback(cb.ID, strings.ToLower(verbPast))
+		if _, err := t.bot.Request(ans); err != nil {
+			t.logger.Printf("answer callback: %s", redactToken(err))
+		}
+
+		// Edit the original message to remove buttons and record outcome.
+		footer := fmt.Sprintf("\n\n%s %s by %s at %s", outcomeMark(status), verbPast, approver, time.Now().UTC().Format(time.RFC3339))
+		origText := ""
+		if cb.Message != nil {
+			origText = cb.Message.Text
+		}
+		edit := tgbotapi.NewEditMessageText(ps.chatID, ps.messageID, origText+footer)
+		if _, err := t.bot.Send(edit); err != nil {
+			t.logger.Printf("edit message: %s", redactToken(err))
+		}
 	}
 }
 
@@ -606,6 +790,9 @@ func (t *TelegramBackend) Request(ctx context.Context, req signerkit.ApprovalReq
 			tgbotapi.NewInlineKeyboardButtonData("✗ Deny", "deny:"+req.RequestID),
 		),
 	)
+	t.pendingMu.Lock()
+	res.ctx, res.expires, res.chatID = ctx, time.Now().Add(t.reqTimeout), chatID
+	t.pendingMu.Unlock()
 	sent, err := t.bot.Send(msg)
 	if err != nil {
 		// %s + redactToken (not %w): a transport-level send failure is a
@@ -644,7 +831,7 @@ func (t *TelegramBackend) Request(ctx context.Context, req signerkit.ApprovalReq
 	// first calls timeout(); the other branches are silent no-ops via
 	// sync.Once on the resolution side.
 	go func() {
-		timer := time.NewTimer(t.reqTimeout)
+		timer := time.NewTimer(time.Until(ps.expires))
 		defer timer.Stop()
 		select {
 		case <-timer.C:
@@ -694,6 +881,9 @@ func (t *TelegramBackend) RequestGrant(ctx context.Context, req signerkit.GrantA
 			tgbotapi.NewInlineKeyboardButtonData("✗ Deny", "deny:"+req.RequestID),
 		),
 	)
+	t.pendingMu.Lock()
+	res.ctx, res.expires, res.chatID = ctx, time.Now().Add(t.reqTimeout), chatID
+	t.pendingMu.Unlock()
 	sent, err := t.bot.Send(msg)
 	if err != nil {
 		// %s + redactToken (not %w): a transport-level send failure is a
@@ -722,7 +912,7 @@ func (t *TelegramBackend) RequestGrant(ctx context.Context, req signerkit.GrantA
 	}
 
 	go func() {
-		timer := time.NewTimer(t.reqTimeout)
+		timer := time.NewTimer(time.Until(ps.expires))
 		defer timer.Stop()
 		select {
 		case <-timer.C:
@@ -783,6 +973,9 @@ func (t *TelegramBackend) dispatchApproval(ctx context.Context, reqID, text, app
 			tgbotapi.NewInlineKeyboardButtonData("✗ Deny", "deny:"+reqID),
 		),
 	)
+	t.pendingMu.Lock()
+	res.ctx, res.expires, res.chatID = ctx, time.Now().Add(t.reqTimeout), chatID
+	t.pendingMu.Unlock()
 	sent, err := t.bot.Send(msg)
 	if err != nil {
 		// %s + redactToken (not %w): a transport-level send failure is a
@@ -808,7 +1001,7 @@ func (t *TelegramBackend) dispatchApproval(ctx context.Context, reqID, text, app
 	}
 
 	go func() {
-		timer := time.NewTimer(t.reqTimeout)
+		timer := time.NewTimer(time.Until(ps.expires))
 		defer timer.Stop()
 		select {
 		case <-timer.C:
@@ -824,19 +1017,27 @@ func (t *TelegramBackend) dispatchApproval(ctx context.Context, reqID, text, app
 // resolve sends r on ps.ch exactly once and tears down the watcher
 // goroutine. Subsequent resolves are silent no-ops (handled by
 // sync.Once).
-func (t *TelegramBackend) resolve(reqID string, ps *pendingState, r signerkit.Result) {
+func (t *TelegramBackend) resolve(reqID string, ps *pendingState, r signerkit.Result) (resolved, expired bool) {
 	ps.once.Do(func() {
+		if ps.ctx.Err() != nil || !time.Now().Before(ps.expires) {
+			r = signerkit.Result{Status: signerkit.StatusTimeout}
+			expired = true
+		} else {
+			resolved = true
+		}
 		ps.ch <- r
 		close(ps.ch)
 		ps.stopTimer()
 		t.pending.CompareAndDelete(reqID, ps)
 	})
+	return resolved, expired
 }
 
 // timeout edits the message to reflect expiration and resolves with
 // signerkit.StatusTimeout. Idempotent via sync.Once — if approve/deny got there
 // first, we don't edit the message (that path already did).
 func (t *TelegramBackend) timeout(reqID string, ps *pendingState) {
+	t.pendingMu.Lock()
 	resolved := false
 	ps.once.Do(func() {
 		ps.ch <- signerkit.Result{Status: signerkit.StatusTimeout}
@@ -845,9 +1046,14 @@ func (t *TelegramBackend) timeout(reqID string, ps *pendingState) {
 		t.pending.CompareAndDelete(reqID, ps)
 		resolved = true
 	})
+	t.pendingMu.Unlock()
 	if !resolved {
 		return
 	}
+	t.enqueueNotification(func() { t.editExpired(ps) })
+}
+
+func (t *TelegramBackend) editExpired(ps *pendingState) {
 	// Edit the original to indicate expiry. Best-effort; if Telegram
 	// rejects, the user just sees stale buttons that no longer work.
 	edit := tgbotapi.NewEditMessageText(ps.chatID, ps.messageID, fmt.Sprintf("⏰ Expired (no response in %s)", t.reqTimeout))
@@ -923,6 +1129,7 @@ func outcomeMark(s signerkit.ResultStatus) string {
 
 // runExplainer is a thin wrapper around t.Explainer.Explain that:
 //   - returns (nil, nil) if no explainer is configured
+//   - skips the provider if its command copy cannot be safely redacted
 //   - enforces ExplainerTimeout (default 5s)
 //   - never panics — any panic in the Explainer is caught and logged so
 //     a misbehaving model client cannot kill the request goroutine
@@ -952,11 +1159,16 @@ func (t *TelegramBackend) runExplainer(ctx context.Context, cmds []signerkit.Com
 	ectx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	flat := make([]string, len(cmds))
-	for i, c := range cmds {
-		flat[i] = c.Cmd
+	// This synthesized plan is advisory input only, never an authorization.
+	plan := ap.ApprovalPlanV1{Kind: ap.KindCommandJob, RationaleOrigin: ap.OriginSynthesizedLegacyV1, Rationale: ap.LegacyRationaleText, CommandJob: &ap.CommandJob{}}
+	for _, c := range cmds {
+		plan.CommandJob.Steps = append(plan.CommandJob.Steps, ap.Step{ExactCommand: c.Cmd})
 	}
-	return t.Explainer.Explain(ectx, flat)
+	input, err := assist.RedactForProvider(plan, t.RedactSalt, t.RedactRules)
+	if err != nil {
+		return nil, err
+	}
+	return t.Explainer.Explain(ectx, input.Commands)
 }
 
 // sanitiseExplainerErr renders a short, credential-free reason string

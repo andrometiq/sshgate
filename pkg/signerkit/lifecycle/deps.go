@@ -46,6 +46,7 @@ type Notification struct {
 	AssistState    approvalplan.AssistState
 	Revision       int
 	Handle         string
+	PartsHandle    string // First card handle printed on this generation's review parts.
 	Challenge      string
 	PartMessageIDs []int64
 }
@@ -67,12 +68,18 @@ type BurstSession interface {
 	SendCard(context.Context, Notification) (int64, error)
 }
 
+// StatusDisplay carries transient rendering details; only State is recorded in R1.
+type StatusDisplay struct {
+	State  string
+	Reason string
+}
+
 // Notifier holds its transport's burst lock until fn returns, including the
 // engine's intervening commits. Other methods perform only the requested I/O.
 type Notifier interface {
 	Burst(context.Context, func(BurstSession) error) error
 	EditCard(context.Context, int64, Notification) (EditOutcome, error)
-	EditStatus(context.Context, int64, string) error
+	EditStatus(context.Context, int64, StatusDisplay) error
 	MarkIncomplete(context.Context, int64) error
 }
 

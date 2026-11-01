@@ -53,6 +53,7 @@ SESSION_TTL="${SIGNER_SERVER_SESSION_TTL:-1h}"
 REQUIRE_STEP_UP="${SIGNER_SERVER_REQUIRE_STEP_UP:-true}"
 DENY_VETO="${SIGNER_SERVER_DENY_VETO:-true}"
 ALLOW_SELF_APPROVE="${SIGNER_SERVER_ALLOW_SELF_APPROVE:-false}"
+BOOTSTRAP_ADMIN="${SIGNER_SERVER_BOOTSTRAP_ADMIN:-}"
 BOOTSTRAP_OPERATOR="${SIGNER_SERVER_BOOTSTRAP_OPERATOR:-}"
 BOOTSTRAP_OPERATORS="${SIGNER_SERVER_BOOTSTRAP_OPERATORS:-${BOOTSTRAP_OPERATOR}}"
 MACHINE_CLIENT_ID="${SIGNER_SERVER_MACHINE_CLIENT_ID:-}"
@@ -65,6 +66,8 @@ log() { printf '[deploy] %s\n' "$*" >&2; }
 fail() { log "ERROR: $*"; exit 1; }
 need_sudo() { [[ $EUID -eq 0 ]] || fail "run as root (or via sudo)"; }
 refuse_symlink() { [[ ! -L "$1" ]] || fail "refusing symbolic-link path: $1"; }
+
+[[ -z "${BOOTSTRAP_ADMIN}" ]] || fail "SIGNER_SERVER_BOOTSTRAP_ADMIN is disabled until A11 enforces legacy vote roles; see src/signer-server/README.md"
 
 # Discover the repo root: this script lives at <repo>/src/signer-server/install/.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

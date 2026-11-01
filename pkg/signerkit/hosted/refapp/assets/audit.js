@@ -9,7 +9,8 @@ async function load() {
   const list = document.getElementById('list');
   list.textContent = '';
   const rows = result.data && Array.isArray(result.data.entries) ? result.data.entries : [];
-  if (!rows.length) list.appendChild(el('div', {class: 'empty', text: 'No decisions recorded yet.'}));
+  const v2Rows = result.data && Array.isArray(result.data.v2_entries) ? result.data.v2_entries : [];
+  if (!rows.length && !v2Rows.length) list.appendChild(el('div', {class: 'empty', text: 'No decisions recorded yet.'}));
   for (const row of rows) {
     const card = el('article', {class: 'card'});
     const heading = el('div');
@@ -23,6 +24,17 @@ async function load() {
     if (row.approved_by_user) meta += ' · by ' + neutralize(row.approved_by_user);
     card.appendChild(el('div', {class: 'meta', text: meta}));
     for (const command of row.command_details || []) card.appendChild(renderCommand(command));
+    list.appendChild(card);
+  }
+  for (const row of v2Rows) {
+    const card = el('article', {class: 'card'});
+    card.appendChild(el('a', {class: 'rid', href: 'request.html?h=' + encodeURIComponent(row.record_handle), text: row.record_handle}));
+    for (const line of [row.sub_principal, row.decision, fmtTime(row.decided_at), row.decided_by, row.rationale_redacted]) {
+      if (line) card.appendChild(el('p', {text: line}));
+    }
+    const assist = row.assist_bound || {};
+    card.appendChild(el('p', {text: 'AI advisory: ' + assist.state + ' · revision ' + assist.revision + ' · digest ' + assist.digest}));
+    card.appendChild(renderV2Votes(row.votes));
     list.appendChild(card);
   }
   setStatus('', '');

@@ -236,6 +236,12 @@ func (s *Server) handleSign(w http.ResponseWriter, r *http.Request) {
 			CreatedAt:         time.Now().UTC(),
 			RequiredApprovals: s.RequiredApprovals,
 		}
+		ttl := s.LegacyPendingTTL
+		if ttl == 0 {
+			ttl = 24 * time.Hour
+		}
+		expires := ins.CreatedAt.Add(ttl)
+		ins.ExpiresAt = &expires
 		if err := s.Store.Insert(insertCtx, ins); err != nil {
 			if errors.Is(err, store.ErrQueueFull) {
 				w.Header().Set("Retry-After", "60")

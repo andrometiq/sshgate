@@ -98,13 +98,31 @@ func TestUnit3WireRatchetOrdinaryHumanMutationResponses(t *testing.T) {
 	unit3AssertExactJSON(t, verified, `{"verified":true}`+"\n", "verified")
 
 	seedPendingRequest(t, db, "r-unit3-approve", 1, "echo approve", 60)
-	approved, _ := unit3JSONRequest(t, handler, http.MethodPost, "/ui/request/r-unit3-approve/approve", "", sessionCookie, []byte(`{}`), http.StatusOK)
+	approveDetail, _ := unit3JSONRequest(t, handler, http.MethodGet, "/ui/request/r-unit3-approve", "", sessionCookie, nil, http.StatusOK)
+	var approveView struct {
+		VoteChallenge struct {
+			Challenge string `json:"challenge"`
+		} `json:"vote_challenge"`
+	}
+	if err := json.Unmarshal(approveDetail, &approveView); err != nil {
+		t.Fatal(err)
+	}
+	approved, _ := unit3JSONRequest(t, handler, http.MethodPost, "/ui/request/r-unit3-approve/approve", "", sessionCookie, mustMarshal(t, map[string]string{"challenge": approveView.VoteChallenge.Challenge}), http.StatusOK)
 	unit3AssertExactJSON(t, approved,
 		`{"decision":"approved","flipped":true,"request_id":"r-unit3-approve"}`+"\n",
 		"decision", "flipped", "request_id")
 
 	seedPendingRequest(t, db, "r-unit3-deny", 1, "echo deny", 60)
-	denied, _ := unit3JSONRequest(t, handler, http.MethodPost, "/ui/request/r-unit3-deny/deny", "", sessionCookie, []byte(`{}`), http.StatusOK)
+	denyDetail, _ := unit3JSONRequest(t, handler, http.MethodGet, "/ui/request/r-unit3-deny", "", sessionCookie, nil, http.StatusOK)
+	var denyView struct {
+		VoteChallenge struct {
+			Challenge string `json:"challenge"`
+		} `json:"vote_challenge"`
+	}
+	if err := json.Unmarshal(denyDetail, &denyView); err != nil {
+		t.Fatal(err)
+	}
+	denied, _ := unit3JSONRequest(t, handler, http.MethodPost, "/ui/request/r-unit3-deny/deny", "", sessionCookie, mustMarshal(t, map[string]string{"challenge": denyView.VoteChallenge.Challenge}), http.StatusOK)
 	unit3AssertExactJSON(t, denied,
 		`{"decision":"pending","flipped":false,"request_id":"r-unit3-deny"}`+"\n",
 		"decision", "flipped", "request_id")

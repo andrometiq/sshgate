@@ -430,8 +430,11 @@ One idempotent pass does all of the following:
   settings (`NoNewPrivileges`, `ProtectSystem=strict`,
   `MemoryDenyWriteExecute`, etc.).
 - Runs `signer --init` (as the `sshgatesigner` user) to generate
-  `keys/gate.{key,pub}` and the skeleton `config/config.toml`
-  (initial `type = "stub"`).
+  `keys/gate.{key,pub}`, the approval store directory `keys/approvals`
+  (mode 0700; `[approvals] journal_root`) and the skeleton
+  `config/config.toml` (initial `type = "stub"`). Only one signer may own
+  an approval store: a second signer pointed at the same directory exits
+  at startup naming it.
 - **Configures the Telegram backend in the SAME run.** It prompts:
 
   ```

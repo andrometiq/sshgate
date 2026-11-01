@@ -431,7 +431,8 @@ func TestStorageUncertaintyWakesWaitAndClaim(t *testing.T) {
 			defer e.Close()
 			summary := submitJob(t, e, 1)
 			voteApprove(t, e, 1)
-			waiting, cancel := startWait(t, e, st.ID(1))
+			submitJob(t, e, 3)
+			waiting, cancel := startWait(t, e, st.ID(3))
 			defer cancel()
 			claimed := make(chan error, 1)
 			go func() {

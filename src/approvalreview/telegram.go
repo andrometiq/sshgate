@@ -215,8 +215,9 @@ func tokenLen(s string) int {
 // fills what is left of one part, in the order alignment, summary, concerns
 // by severity, effects; whatever does not fit is counted in an explicit
 // omission notice. The buttons (View.ApproveLabel, View.DenyLabel) are the
-// notifier's; a preparing card carries Deny only (K6).
-func DecisionCard(v View, handle string, parts int) (string, error) {
+// notifier's; a preparing card carries Deny only (K6). The optional partsHandle
+// identifies the original review parts when an edit or replacement rotates the handle.
+func DecisionCard(v View, handle string, parts int, partsHandle ...string) (string, error) {
 	if !approvalplan.ValidCardHandle(handle) {
 		return "", fmt.Errorf("approvalreview: invalid card handle %q", handle)
 	}
@@ -224,6 +225,12 @@ func DecisionCard(v View, handle string, parts int) (string, error) {
 	lines = append(lines, cardTitle,
 		fmt.Sprintf("Review the %d numbered part(s) above before deciding; Approve covers every displayed command.", parts),
 		"Request: "+v.RequestID+" · Card: "+handle)
+	if len(partsHandle) > 1 || (len(partsHandle) == 1 && !approvalplan.ValidCardHandle(partsHandle[0])) {
+		return "", fmt.Errorf("approvalreview: invalid review parts handle")
+	}
+	if len(partsHandle) == 1 && partsHandle[0] != handle {
+		lines = append(lines, "Review parts were sent under card "+partsHandle[0])
+	}
 	if v.PlanHash != "" {
 		lines = append(lines, "Plan hash: "+v.PlanHash)
 	} else {

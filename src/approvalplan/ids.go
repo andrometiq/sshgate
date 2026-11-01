@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 )
 
@@ -147,6 +148,11 @@ func JobKey(requestID string) string {
 // "sshgate-v2-record-handle-v1\0" ‖ record key)).
 func RecordHandle(recordKey string) string {
 	return digestBase32("sshgate-v2-record-handle-v1\x00", recordKey)[:RecordHandleLen]
+}
+
+// CardHandleFor derives the first card handle for a record's notification generation.
+func CardHandleFor(recordKey string, gen int) string {
+	return digestBase32("sshgate-v2-card-handle-v1\x00", recordKey, "\x00", strconv.Itoa(gen))[:CardHandleLen]
 }
 
 func digestBase32(parts ...string) string {

@@ -46,7 +46,7 @@ func (n *notifier) EditCard(ctx context.Context, _ int64, card lc.Notification) 
 	}
 	return lc.EditConfirmed, nil
 }
-func (n *notifier) EditStatus(ctx context.Context, _ int64, _ string) error {
+func (n *notifier) EditStatus(ctx context.Context, _ int64, _ lc.StatusDisplay) error {
 	return n.call(ctx, "status")
 }
 func (n *notifier) MarkIncomplete(ctx context.Context, _ int64) error {

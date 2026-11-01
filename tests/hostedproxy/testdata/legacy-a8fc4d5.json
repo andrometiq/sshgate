@@ -1,0 +1,30 @@
+[
+  {
+    "request": "{\"kind\":\"request_grant\",\"request_id\":\"grant\",\"alias\":\"web\",\"scope\":\"all\",\"duration_seconds\":60}",
+    "response": "{\"request_id\":\"grant\",\"status\":\"error\",\"error\":\"backend: hosted: standing grants are not supported on the hosted (Tier-3) signer backend yet; use the local Telegram signer\",\"proto_version\":1}\n",
+    "http": []
+  },
+  {
+    "request": "{\"kind\":\"list_grants\",\"request_id\":\"list\"}",
+    "response": "{\"request_id\":\"list\",\"status\":\"ok\",\"proto_version\":1}\n",
+    "http": []
+  },
+  {
+    "request": "{\"kind\":\"sign\",\"request_id\":\"sign\",\"commands\":[{\"server\":\"web\",\"cmd\":\"true\",\"ttl_seconds\":60}]}",
+    "response": "{\"request_id\":\"sign\",\"status\":\"denied\",\"proto_version\":1}\n",
+    "http": [
+      "POST /v1/sign {\"client_id\":\"client\",\"commands\":[{\"server\":\"web\",\"cmd\":\"true\",\"ttl_seconds\":60}]}",
+      "GET /v1/poll/r_fixture "
+    ]
+  },
+  {
+    "request": "{\"kind\":\"transfer\",\"request_id\":\"transfer\",\"src_alias\":\"source\",\"src_fp\":\"SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"src_path\":\"/secret\",\"dest_alias\":\"destination\",\"dest_fp\":\"SHA256:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB\",\"dest_path\":\"/secret\",\"mode\":\"0600\",\"ttl_seconds\":60}",
+    "response": "{\"request_id\":\"transfer\",\"status\":\"error\",\"error\":\"backend: hosted: box→box transfer is not supported on the hosted (Tier-3) signer backend yet; use the local Telegram signer\",\"proto_version\":1}\n",
+    "http": []
+  },
+  {
+    "request": "{\"box_pub\":\"sshgate-xfer-box-x25519 AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\",\"host_fp\":\"SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"id_pub\":\"sshgate-xfer-id-ed25519 O2onvM62pC1io6jQKm8Nc2UyFXcd4kOmOsBIoYtZ2ik=\",\"kind\":\"register_xfer_key\",\"label\":\"source\",\"request_id\":\"register\"}",
+    "response": "{\"request_id\":\"register\",\"status\":\"error\",\"error\":\"backend: hosted: box→box xfer-key registration is not supported on the hosted (Tier-3) signer backend yet; use the local Telegram signer\",\"proto_version\":1}\n",
+    "http": []
+  }
+]
