@@ -40,3 +40,4 @@ CLAUDE.local.md
 
 # agent work log — local only, never committed
 WORKLOG.md
+pkg/signerkit/lifecycle/filestore-stress-*/
