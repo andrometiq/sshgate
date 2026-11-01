@@ -193,6 +193,13 @@ against its full contract, race tests).
 - `pkg/signerkit/audit_sink.go:66` names only the legacy-expired outbox event (D3).
 - `Servers.Remove` persists the process's cached registry without reloading, so a concurrent add
   can be lost (pre-existing; Q3 port design §6.3).
+- CI `verify-gate` fails on this branch, as expected: `dist/gate/` holds the v0.1.5 binary and the
+  gate source has changed since. `make release-gate` at the v0.2 cut fixes it; don't hand-edit it.
+- `make preflight`'s `gitleaks` step scans `origin/main..HEAD`. On this branch that includes
+  already-pushed test fixtures (claim-token hashes, `EXAMPLEKEY` strings, the stray
+  `filestore-stress-*` records), so it reports findings. Before a push, scan the push delta instead:
+  `gitleaks detect -c .gitleaks.toml --log-opts="origin/<branch>..HEAD"`, then run the remaining
+  preflight targets. The scan range or a path-scoped allowlist for those fixtures is a follow-up.
 - `TestHumanVoteOrdinaryWorkerLifecycle` can flake (401) under full `make test` load.
 - Two more load flakes seen once on 2026-11-01 under heavy machine load (each passed alone, 10/10
   and 3/3): `TestRestartAfterFastClockCorrectionKeepsWindow` (`src/signer/cmd/sshgate-signer-telegram`,
