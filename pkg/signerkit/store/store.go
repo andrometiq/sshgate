@@ -324,9 +324,11 @@ var ErrRequestResolved = errors.New("store: request already resolved")
 
 // LegacyResolver is an optional extension for hosted v1 expiry and admin cancel.
 // Both methods return whether the pending-only CAS won and all preserved votes
-// (including unaudited votes) for the caller's terminal audit line. A missing or
-// terminal request is a no-op. Expiry also requires ExpiresAt <= now.
+// (including unaudited votes). A missing or terminal request is a no-op. Expiry
+// also requires ExpiresAt <= now. The winning transaction also writes the
+// terminal audit evidence to the durable legacy outbox; for a cancel that
+// evidence names admin, the canceling admin's operator ID.
 type LegacyResolver interface {
 	ExpireLegacy(ctx context.Context, id string, now time.Time) (bool, []*Vote, error)
-	CancelLegacy(ctx context.Context, id string, now time.Time) (bool, []*Vote, error)
+	CancelLegacy(ctx context.Context, id string, now time.Time, admin string) (bool, []*Vote, error)
 }

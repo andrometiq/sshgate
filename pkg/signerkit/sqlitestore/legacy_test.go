@@ -66,6 +66,12 @@ func TestLegacyInsertExpiry(t *testing.T) {
 	}
 }
 
+func cancelAsAdmin(db *DB) func(context.Context, string, time.Time) (bool, []*store.Vote, error) {
+	return func(ctx context.Context, id string, now time.Time) (bool, []*store.Vote, error) {
+		return db.CancelLegacy(ctx, id, now, "admin")
+	}
+}
+
 func TestLegacyResolutionPreservesVotes(t *testing.T) {
 	for _, reason := range []string{"expired", "canceled"} {
 		t.Run(reason, func(t *testing.T) {
@@ -91,7 +97,7 @@ func TestLegacyResolutionPreservesVotes(t *testing.T) {
 			resolve := db.ExpireLegacy
 			wantStatus := store.StatusError
 			if reason == "canceled" {
-				resolve = db.CancelLegacy
+				resolve = cancelAsAdmin(db)
 				wantStatus = store.StatusDenied
 			} else {
 				changed, votes, err := resolve(ctx, r.RequestID, deadline.Add(-time.Second))
@@ -125,7 +131,7 @@ func TestLegacyResolutionPreservesVotes(t *testing.T) {
 				t.Fatalf("terminal row: %+v err=%v", got, err)
 			}
 			for _, id := range []string{r.RequestID, "missing"} {
-				for _, fn := range []func(context.Context, string, time.Time) (bool, []*store.Vote, error){db.ExpireLegacy, db.CancelLegacy} {
+				for _, fn := range []func(context.Context, string, time.Time) (bool, []*store.Vote, error){db.ExpireLegacy, cancelAsAdmin(db)} {
 					changed, votes, err := fn(ctx, id, deadline.Add(time.Hour))
 					if err != nil || changed || len(votes) != 0 {
 						t.Fatalf("repeat/missing: %v %v %v", changed, votes, err)
@@ -241,7 +247,7 @@ func TestLegacyResolutionRace(t *testing.T) {
 			<-start
 			resolve := db.ExpireLegacy
 			if i%2 == 1 {
-				resolve = db.CancelLegacy
+				resolve = cancelAsAdmin(db)
 			}
 			changed, _, err := resolve(ctx, r.RequestID, deadline)
 			results <- changed

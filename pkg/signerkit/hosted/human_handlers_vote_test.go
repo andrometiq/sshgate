@@ -416,7 +416,7 @@ func TestHumanVoteV1RefusalAndRaces(t *testing.T) {
 			transition := ""
 			wantVotes := 0
 			cancel := func() {
-				if _, _, err := db.CancelLegacy(ctx, row.RequestID, now); err != nil {
+				if _, _, err := db.CancelLegacy(ctx, row.RequestID, now, "admin"); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -956,7 +956,7 @@ func TestHumanVoteV1RepeatedRefusals(t *testing.T) {
 					}
 				}
 				cancel := func() {
-					if _, _, err := db.CancelLegacy(ctx, row.RequestID, now); err != nil {
+					if _, _, err := db.CancelLegacy(ctx, row.RequestID, now, "admin"); err != nil {
 						t.Fatal(err)
 					}
 				}

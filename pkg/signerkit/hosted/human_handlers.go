@@ -34,7 +34,7 @@ import (
 
 // human_handlers.go is Phase E: the HUMAN-PLANE HTTP surface — the
 // /auth/* (enroll, verify, register, login, logout) and /ui/* (pending,
-// request detail, approve, deny, audit) routes — plus the session
+// request detail, approve, deny, admin cancel, audit) routes — plus the session
 // middleware that guards them. JSON only; no HTML yet (the browser UI is
 // a later phase).
 //
@@ -226,10 +226,12 @@ func (h *HumanAPI) registerHumanRoutes(mux *http.ServeMux) {
 	mux.Handle("GET /ui/v2/request/{handle}", h.withSession(h.handleUIV2Request))
 	mux.Handle("POST /ui/v2/request/{handle}/approve", h.withSessionMutation(h.handleUIV2Vote))
 	mux.Handle("POST /ui/v2/request/{handle}/deny", h.withSessionMutation(h.handleUIV2Vote))
+	mux.Handle("POST /ui/v2/request/{handle}/cancel", h.withSessionMutation(h.handleUIV2Cancel))
 	mux.Handle("GET /ui/pending", h.withSession(h.handleUIPending))
 	mux.Handle("GET /ui/request/{id}", h.withSession(h.handleUIRequest))
 	mux.Handle("POST /ui/request/{id}/approve", h.withSessionMutation(h.handleUIApprove))
 	mux.Handle("POST /ui/request/{id}/deny", h.withSessionMutation(h.handleUIDeny))
+	mux.Handle("POST /ui/request/{id}/cancel", h.withSessionMutation(h.handleUICancel))
 	mux.Handle("GET /ui/audit", h.withSession(h.handleUIAudit))
 }
 
@@ -546,6 +548,9 @@ type uiRequestSummary struct {
 	// (e.g. the audit list).
 	Tally         *uiTally       `json:"tally,omitempty"`
 	VoteChallenge *voteChallenge `json:"vote_challenge,omitempty"`
+	// ViewerCanCancel is the detail view's hint that the viewer is an admin and
+	// the row is pending; the cancel route enforces the role itself.
+	ViewerCanCancel bool `json:"viewer_can_cancel,omitempty"`
 }
 
 // uiCommand is the per-command render-integrity view. It surfaces the
@@ -782,6 +787,7 @@ func (h *HumanAPI) handleUIRequest(w http.ResponseWriter, r *http.Request, userI
 		return
 	}
 	sum.VoteChallenge = &challenge
+	sum.ViewerCanCancel = row.Status == store.StatusPending && h.viewerIsAdmin(r.Context(), userID)
 	writeJSON(w, http.StatusOK, sum)
 }
 
@@ -832,7 +838,41 @@ type uiV2Request struct {
 	Pruned            bool                 `json:"pruned"`
 	Details           string               `json:"details,omitempty"`
 	Review            *approvalreview.View `json:"review,omitempty"`
+	Execution         *uiV2Execution       `json:"execution,omitempty"`
 	VoteChallenge     *voteChallenge       `json:"vote_challenge,omitempty"`
+	ViewerCanCancel   bool                 `json:"viewer_can_cancel,omitempty"`
+}
+
+// uiV2Execution is the E49 execution view. Label says where it came from:
+// "client-reported" (the executor's claim or final report) or
+// "signer-derived" (the signer's own inference).
+type uiV2Execution struct {
+	Status ap.ExecutionStatus `json:"status"`
+	Class  ap.JobClass        `json:"class,omitempty"`
+	Reason string             `json:"reason,omitempty"`
+	Label  string             `json:"label"`
+}
+
+// executionV2 is nil while there is no execution view to show.
+func (h *HumanAPI) executionV2(row *sqlitestore.V2Row) *uiV2Execution {
+	if h.ordinaryEngine == nil {
+		return nil
+	}
+	engine := h.ordinaryEngine()
+	if engine == nil {
+		return nil
+	}
+	view := engine.view(row.Record, engine.now())
+	out := &uiV2Execution{Status: view.ExecutionStatus, Class: view.ExecutionClass, Reason: view.NotExecutableReason}
+	switch view.ExecutionStatus {
+	case ap.ExecutionExecuting, ap.ExecutionFinal:
+		out.Label = "client-reported"
+	case ap.ExecutionExpiredUnclaimed, ap.ExecutionNotExecutable, ap.ExecutionUnreported:
+		out.Label = "signer-derived"
+	default:
+		return nil
+	}
+	return out
 }
 
 func (h *HumanAPI) handleUIV2Request(w http.ResponseWriter, r *http.Request, userID string) {
@@ -855,6 +895,8 @@ func (h *HumanAPI) handleUIV2Request(w http.ResponseWriter, r *http.Request, use
 		return
 	}
 	out.VoteChallenge = &challenge
+	out.Execution = h.executionV2(row)
+	out.ViewerCanCancel = row.Record.Header.Decision == nil && h.viewerIsAdmin(r.Context(), userID)
 	writeJSON(w, http.StatusOK, out)
 }
 

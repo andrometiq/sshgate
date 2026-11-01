@@ -12,6 +12,17 @@ voting actions. Both planes send that challenge with each vote, and send a TOTP
 code when step-up is required. A changed view reloads the challenge; a busy
 response keeps it for an explicit retry and clears a spent step-up code.
 
+An admin sees a Cancel control on a pending request's page (the detail response
+carries `viewer_can_cancel`; the server enforces the admin role). The first click
+arms it and the second posts `POST /ui/request/{id}/cancel` with `{}` for a legacy
+row, or `POST /ui/v2/request/{handle}/cancel` with the reviewed `plan_hash` for a
+v2 record. A busy answer keeps the control for an explicit retry. Hosted
+deny-all (cancel everything pending) is not offered; it moves to v0.3.
+
+Approved v2 records show their execution view on the request page,
+labelled `client-reported` (from the executor's claim or final report) or
+`signer-derived` (expired unclaimed, not executable, or unreported).
+
 Run `make test-refapp-js` for the browser adapter and page tests. They use a DOM
 stub that rejects HTML insertion and a same-origin fetch stub; no network is used.
 

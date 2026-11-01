@@ -3,7 +3,6 @@ package sqlitestore
 import (
 	"context"
 	"crypto/sha256"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"time"
@@ -13,15 +12,37 @@ import (
 
 // ExpireLegacy ends an overdue pending request even if a vote's audit stalled.
 func (s *DB) ExpireLegacy(ctx context.Context, id string, now time.Time) (bool, []*store.Vote, error) {
-	return s.resolveLegacy(ctx, id, &now, `UPDATE requests SET status='error', terminal_reason='expired', resolved_at=? WHERE request_id=? AND status='pending' AND request_expires_at<=?`, now.Unix(), id, now.Unix())
+	return s.resolveLegacy(ctx, id, func(votes []*store.Vote) (string, []byte, error) {
+		evidence, err := json.Marshal(votes)
+		return legacyOutboxKey("legacy-expiry", id, now), evidence, err
+	}, now, `UPDATE requests SET status='error', terminal_reason='expired', resolved_at=? WHERE request_id=? AND status='pending' AND request_expires_at<=?`, now.Unix(), id, now.Unix())
+}
+
+// LegacyCancelEvidence is the versioned outbox evidence of a hosted v1 admin
+// cancel. Expiry evidence stays the v0 bare vote array.
+type LegacyCancelEvidence struct {
+	V      int           `json:"v"`
+	Reason string        `json:"reason"`
+	Admin  string        `json:"admin"`
+	Votes  []*store.Vote `json:"votes"`
 }
 
 // CancelLegacy ends a pending request without waiting for vote audit completion.
-func (s *DB) CancelLegacy(ctx context.Context, id string, now time.Time) (bool, []*store.Vote, error) {
-	return s.resolveLegacy(ctx, id, nil, `UPDATE requests SET status='denied', terminal_reason='canceled', resolved_at=? WHERE request_id=? AND status='pending'`, now.Unix(), id)
+// Its transaction writes admin-attributed evidence to the legacy outbox.
+func (s *DB) CancelLegacy(ctx context.Context, id string, now time.Time, admin string) (bool, []*store.Vote, error) {
+	if admin == "" {
+		return false, nil, fmt.Errorf("resolve legacy: cancel requires an admin")
+	}
+	return s.resolveLegacy(ctx, id, func(votes []*store.Vote) (string, []byte, error) {
+		if votes == nil {
+			votes = []*store.Vote{}
+		}
+		evidence, err := json.Marshal(LegacyCancelEvidence{V: 1, Reason: "canceled", Admin: admin, Votes: votes})
+		return legacyOutboxKey("legacy-cancel", id, now), evidence, err
+	}, now, `UPDATE requests SET status='denied', terminal_reason='canceled', resolved_at=? WHERE request_id=? AND status='pending'`, now.Unix(), id)
 }
 
-func (s *DB) resolveLegacy(ctx context.Context, id string, expiredAt *time.Time, query string, args ...any) (bool, []*store.Vote, error) {
+func (s *DB) resolveLegacy(ctx context.Context, id string, evidence func([]*store.Vote) (string, []byte, error), at time.Time, query string, args ...any) (bool, []*store.Vote, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return false, nil, fmt.Errorf("resolve legacy: begin: %w", err)
@@ -64,10 +85,12 @@ func (s *DB) resolveLegacy(ctx context.Context, id string, expiredAt *time.Time,
 	if err := rows.Close(); err != nil {
 		return false, nil, fmt.Errorf("resolve legacy: close votes: %w", err)
 	}
-	if expiredAt != nil {
-		if err := snapshotLegacyExpiry(ctx, tx, id, *expiredAt, votes); err != nil {
-			return false, nil, err
-		}
+	key, data, err := evidence(votes)
+	if err != nil {
+		return false, nil, fmt.Errorf("resolve legacy: evidence: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO legacy_expiry_outbox(event_key,request_id,resolved_at,evidence) VALUES (?,?,?,?)`, key, id, at.Unix(), data); err != nil {
+		return false, nil, fmt.Errorf("resolve legacy: outbox: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
 		return false, nil, fmt.Errorf("resolve legacy: commit: %w", err)
@@ -77,12 +100,8 @@ func (s *DB) resolveLegacy(ctx context.Context, id string, expiredAt *time.Time,
 
 var _ store.LegacyResolver = (*DB)(nil)
 
-func snapshotLegacyExpiry(ctx context.Context, tx *sql.Tx, id string, at time.Time, votes []*store.Vote) error {
-	evidence, err := json.Marshal(votes)
-	if err != nil {
-		return err
-	}
-	key := fmt.Sprintf("legacy-expiry:%x:%d", sha256.Sum256([]byte(id)), at.Unix())
-	_, err = tx.ExecContext(ctx, `INSERT INTO legacy_expiry_outbox(event_key,request_id,resolved_at,evidence) VALUES (?,?,?,?)`, key, id, at.Unix(), evidence)
-	return err
+// legacyOutboxKey is "<namespace>:<hex sha256(request_id)>:<unix>"; the
+// flusher derives the audit lifecycle from the namespace.
+func legacyOutboxKey(namespace, id string, at time.Time) string {
+	return fmt.Sprintf("%s:%x:%d", namespace, sha256.Sum256([]byte(id)), at.Unix())
 }

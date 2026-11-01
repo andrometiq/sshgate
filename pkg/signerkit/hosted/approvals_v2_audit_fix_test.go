@@ -149,7 +149,9 @@ func TestApprovalV2DiagnosticFloodDrainsOutbox(t *testing.T) {
 	}
 }
 
-func TestApprovalV2CorruptLegacyEvidenceSkipsAndRecovers(t *testing.T) {
+// Ruling 31: malformed evidence is audited as evidence_malformed and flushed,
+// so it can neither pin the outbox nor disappear without a line.
+func TestApprovalV2MalformedLegacyEvidenceIsFlushedMarked(t *testing.T) {
 	e, db, _ := approvalEngineFixture(t, false)
 	approvalWorkerSink(e)
 	var logs bytes.Buffer
@@ -158,50 +160,86 @@ func TestApprovalV2CorruptLegacyEvidenceSkipsAndRecovers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// More than one page proves corrupt evidence cannot pin the front of the queue.
+	cases := map[string]string{
+		"legacy-cancel:a:1": `{"v":1,"reason":"canceled","admin":"root","votes":[{"RequestID":"a","Operator":"operator","Decision":"deny","AuthnMethod":"totp","TS":"1970-01-01T00:00:01Z","Audited":true}]}`,
+		"legacy-cancel:b:1": `[]`,
+		"legacy-cancel:c:1": `{"v":2,"reason":"canceled","admin":"root","votes":[]}`,
+		"legacy-cancel:d:1": `{"v":1,"reason":"canceled","admin":"","votes":[]}`,
+		"legacy-cancel:e:1": `{"v":1,"reason":"canceled","admin":"root","votes":[],"extra":1}`,
+		"legacy-cancel:f:1": `{"v":1,"reason":"canceled","admin":"root","votes":[null]}`,
+		"legacy-expiry:g:1": `null`,
+		"legacy-expiry:h:1": `{"v":1,"reason":"canceled","admin":"root","votes":[]}`,
+		"legacy-expiry:i:1": `[null]`,
+		"legacy-expiry:j:1": `[{"Operator":"operator","Decision":"approve"}]`,
+		"legacy-expiry:k:1": `[]`,
+		// Unknown namespaces fail closed even with well-formed v0 evidence.
+		"legacy-other:l:1": `[]`,
+	}
+	// More than one page proves malformed evidence cannot pin the front of the queue.
 	for i := 0; i < 257; i++ {
 		evidence := "broken"
 		if i == 256 {
 			evidence = "[]"
 		}
-		if _, err = tx.Exec(`INSERT INTO legacy_expiry_outbox(event_key,request_id,resolved_at,evidence) VALUES(?,?,1,?)`, fmt.Sprintf("key:%03d", i), fmt.Sprint(i), evidence); err != nil {
+		cases[fmt.Sprintf("key:%03d", i)] = evidence
+	}
+	for key, evidence := range cases {
+		if _, err = tx.Exec(`INSERT INTO legacy_expiry_outbox(event_key,request_id,resolved_at,evidence) VALUES(?,?,1,?)`, key, key, evidence); err != nil {
 			t.Fatal(err)
 		}
 	}
 	if err = tx.Commit(); err != nil {
 		t.Fatal(err)
 	}
-	var calls []string
+	calls := map[string]signerkit.AuditCall{}
 	e.config.AuditSink = approvalSinkFunc(func(_ context.Context, c signerkit.AuditCall) error {
-		calls = append(calls, c.LegacyExpiry.EventKey)
+		calls[c.LegacyExpiry.EventKey] = c
 		return nil
 	})
 	for i := 0; i < 2; i++ {
 		if e.flushPass(context.Background()) {
-			t.Fatal("corruption treated as sink failure")
+			t.Fatal("malformed evidence treated as sink failure")
 		}
 	}
-	if len(calls) != 1 || calls[0] != "key:256" {
-		t.Fatalf("later evidence blocked: %v", calls)
+	if len(calls) != len(cases) {
+		t.Fatalf("flushed %d of %d", len(calls), len(cases))
 	}
-	if !strings.Contains(logs.String(), "legacy audit evidence corrupt; retained for repair") || strings.Contains(logs.String(), "sink unavailable") {
+	for key := range cases {
+		call := calls[key]
+		wantLifecycle, wantReason := "legacy-expired", "evidence_malformed"
+		if strings.HasPrefix(key, "legacy-cancel:") {
+			wantLifecycle = "legacy-canceled"
+		}
+		switch key {
+		case "legacy-cancel:a:1":
+			wantReason = "canceled"
+		case "legacy-expiry:g:1", "legacy-expiry:j:1", "legacy-expiry:k:1":
+			wantReason = ""
+		}
+		if call.Lifecycle != wantLifecycle || call.Reason != wantReason || call.RequestID != key {
+			t.Fatalf("%s: lifecycle %q reason %q request %q", key, call.Lifecycle, call.Reason, call.RequestID)
+		}
+		if (call.Operator != nil) != (key == "legacy-cancel:a:1") {
+			t.Fatalf("%s: operator %+v", key, call.Operator)
+		}
+		if wantReason == "evidence_malformed" && len(call.LegacyExpiry.Votes) != 0 {
+			t.Fatalf("%s: malformed votes surfaced: %+v", key, call.LegacyExpiry.Votes)
+		}
+	}
+	canceled := calls["legacy-cancel:a:1"]
+	if *canceled.Operator != (signerkit.Operator{ID: "root", DisplayName: "root", Verified: true}) || len(canceled.LegacyExpiry.Votes) != 1 || canceled.LegacyExpiry.Votes[0] != (signerkit.LegacyExpiryAuditVote{Operator: "operator", Decision: "deny", AuthnMethod: "totp", Time: time.Unix(1, 0).UTC(), Audited: true}) {
+		t.Fatalf("cancel line: %+v %+v", canceled.Operator, canceled.LegacyExpiry)
+	}
+	if !strings.Contains(logs.String(), "legacy audit evidence malformed; flushed as evidence_malformed") || strings.Contains(logs.String(), "sink unavailable") {
 		t.Fatalf("wrong diagnostic: %s", logs.String())
 	}
 	tx, err = db.BeginV2(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	var evidence string
-	if err = tx.QueryRow(`SELECT evidence FROM legacy_expiry_outbox WHERE event_key='key:000'`).Scan(&evidence); err != nil || evidence != "broken" {
-		t.Fatalf("evidence lost: %q %v", evidence, err)
-	}
-	if _, err = tx.Exec(`UPDATE legacy_expiry_outbox SET evidence='[]' WHERE event_key='key:000'`); err != nil {
-		t.Fatal(err)
-	}
-	if err = tx.Commit(); err != nil {
-		t.Fatal(err)
-	}
-	if e.flushPass(context.Background()) || len(calls) != 2 || calls[1] != "key:000" {
-		t.Fatalf("repair not recoverable: %v", calls)
+	defer tx.Rollback()
+	var left int
+	if err = tx.QueryRow(`SELECT count(*) FROM legacy_expiry_outbox`).Scan(&left); err != nil || left != 0 {
+		t.Fatalf("outbox left %d %v", left, err)
 	}
 }

@@ -9,6 +9,9 @@ let resolved = false;
 let displayFailed = false;
 let voted = false;
 let submitting = false;
+let canCancel = false;
+let cancelArmed = false;
+let planHash = '';
 document.getElementById('request-id').textContent = requestID ? 'Request ' + neutralize(requestID) : 'No request id given';
 
 function terminal(status) {
@@ -21,10 +24,16 @@ function updateVoteControls() {
   document.getElementById('approve').disabled = disabled || displayFailed || !actions.includes('approve');
   document.getElementById('deny').disabled = disabled || !actions.includes('deny');
   document.getElementById('actions').hidden = resolved || voted;
+  document.getElementById('admin-actions').hidden = resolved || !canCancel;
+  const cancel = document.getElementById('cancel');
+  cancel.disabled = submitting;
+  cancel.textContent = cancelArmed ? 'Confirm cancel' : 'Cancel request';
 }
 
 async function load() {
   voteChallenge = null;
+  canCancel = false;
+  cancelArmed = false;
   updateVoteControls();
   if (!requestID) { setStatus('No request id in the URL.', 'error'); return; }
   const result = await apiGet(requestPath);
@@ -34,8 +43,10 @@ async function load() {
   displayFailed = !isV2 && Boolean(request.display_failed);
   const integrity = document.getElementById('integrity');
   integrity.textContent = '';
-  if (isV2) integrity.appendChild(renderV2Review(request));
-  else integrity.appendChild(el('p', {text: neutralize(request.legacy_label || 'Legacy v1 request')}));
+  if (isV2) {
+    integrity.appendChild(renderV2Review(request));
+    if (request.execution) integrity.appendChild(renderExecution(request.execution));
+  } else integrity.appendChild(el('p', {text: neutralize(request.legacy_label || 'Legacy v1 request')}));
   if (displayFailed) integrity.appendChild(el('p', {text: 'Command display unavailable; approval refused.'}));
   if (request.terminal_reason) integrity.appendChild(el('p', {text: neutralize(request.terminal_reason)}));
   for (const command of request.command_details || []) integrity.appendChild(renderCommand(command, {prominent: true}));
@@ -49,6 +60,8 @@ async function load() {
   resolved = terminal(request.approval_status || request.status) || Boolean(request.terminal_reason);
   voted = voted || Boolean(request.viewer_vote);
   voteChallenge = request.vote_challenge || null;
+  canCancel = Boolean(request.viewer_can_cancel);
+  planHash = typeof request.plan_hash === 'string' ? request.plan_hash : '';
   document.getElementById('approve').textContent = isV2 && request.review ? request.review.approve_label : 'Approve';
   updateVoteControls();
   if (resolved) setStatus('This request is already ' + neutralize(request.terminal_reason || request.approval_status || request.status) + '.', '');
@@ -99,6 +112,38 @@ async function vote(decision) {
   }
 }
 
+// Admin cancel: the first click arms, the second sends. The server enforces
+// the admin role; the hint only shows the control.
+async function cancelRequest() {
+  if (resolved || submitting || !canCancel) return;
+  if (!cancelArmed) { cancelArmed = true; updateVoteControls(); return; }
+  cancelArmed = false;
+  submitting = true;
+  updateVoteControls();
+  setStatus('Canceling…', '');
+  try {
+    const result = await apiPost(requestPath + '/cancel', isV2 ? {plan_hash: planHash} : {});
+    if (result.status === 503 && result.data && typeof result.data.error === 'string' && result.data.error.startsWith('busy')) {
+      setStatus('The signer is busy — tap again.', 'error');
+      return;
+    }
+    if (result.status === 409) {
+      setStatus((result.data && result.data.error) || 'This request was already resolved.', 'error');
+      await load();
+      return;
+    }
+    if (result.status === 403) { setStatus('Only an admin can cancel a request.', 'error'); return; }
+    if (result.status === 404) { setStatus('Unknown request.', 'error'); return; }
+    if (!result.ok) { setStatus((result.data && result.data.error) || 'Could not cancel the request.', 'error'); return; }
+    await load();
+    setStatus('Canceled.', 'ok');
+  } finally {
+    submitting = false;
+    updateVoteControls();
+  }
+}
+
+document.getElementById('cancel').addEventListener('click', function () { cancelRequest(); });
 document.getElementById('approve').addEventListener('click', function () { vote('approve'); });
 document.getElementById('deny').addEventListener('click', function () { vote('deny'); });
 document.getElementById('logout').addEventListener('click', function (event) { event.preventDefault(); logout(); });

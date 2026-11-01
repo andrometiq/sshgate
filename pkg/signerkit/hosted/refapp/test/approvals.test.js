@@ -244,3 +244,49 @@ test('legacy display failure disables approval and permits denial', async () => 
   const q = await page('pending.js', {pending: [row]});
   assert.match(q.nodes.get('list').textContent, /Command display unavailable; approval refused/);
 });
+
+test('admin cancel arms then posts the reviewed plan hash, and busy keeps the control', async () => {
+  const p = await page('request.js', detail({plan_hash: 'PLAN', viewer_can_cancel: true}));
+  assert.equal(p.nodes.get('admin-actions').hidden, false);
+  await p.run('cancelRequest()');
+  assert.equal(p.posts.length, 0);
+  assert.equal(p.nodes.get('cancel').textContent, 'Confirm cancel');
+  p.context.postResult = {status: 503, data: {error: 'busy — retry'}};
+  await p.run('cancelRequest()');
+  assert.deepEqual(p.posts[0], {url: '/ui/v2/request/HANDLE/cancel', body: {plan_hash: 'PLAN'}});
+  assert.match(p.nodes.get('status').textContent, /signer is busy — tap again/);
+  assert.equal(p.nodes.get('admin-actions').hidden, false);
+  assert.equal(p.nodes.get('cancel').disabled, false);
+  p.context.postResult = ok({approval_status: 'canceled'});
+  p.context.getResult = ok(detail({plan_hash: 'PLAN', approval_status: 'canceled'}));
+  await p.run('cancelRequest()'); await p.run('cancelRequest()');
+  assert.equal(p.posts.length, 2);
+  assert.equal(p.nodes.get('status').textContent, 'Canceled.');
+  assert.equal(p.nodes.get('admin-actions').hidden, true);
+});
+test('cancel is hidden without the admin hint and on resolved rows, and v1 posts an empty body', async () => {
+  const p = await page('request.js', detail());
+  assert.equal(p.nodes.get('admin-actions').hidden, true);
+  await p.run('cancelRequest()'); await p.run('cancelRequest()');
+  assert.equal(p.posts.length, 0);
+  const q = await page('request.js', detail({approval_status: 'denied', viewer_can_cancel: true}));
+  assert.equal(q.nodes.get('admin-actions').hidden, true);
+  const v1 = await page('request.js', {status: 'pending', vote_challenge: challenge, viewer_can_cancel: true}, '?id=r_test');
+  v1.context.postResult = {status: 409, data: {error: 'request already resolved'}};
+  await v1.run('cancelRequest()'); await v1.run('cancelRequest()');
+  assert.deepEqual(v1.posts[0], {url: '/ui/request/r_test/cancel', body: {}});
+  assert.match(v1.nodes.get('status').textContent, /request already resolved/);
+});
+test('execution views carry their client-reported or signer-derived label as text', async () => {
+  for (const [execution, want] of [
+    [{status: 'final', class: 'succeeded', label: 'client-reported'}, 'Execution: final · succeeded (client-reported)'],
+    [{status: 'expired_unclaimed', label: 'signer-derived'}, 'Execution: expired_unclaimed (signer-derived)'],
+    [{status: '<img src=x onerror=bad>', label: 'client-reported‮'}, 'Execution: <img src=x onerror=bad> (client-reported\\u{202e})'],
+  ]) {
+    const p = await page('request.js', detail({approval_status: 'approved', execution}));
+    assert.ok(p.nodes.get('integrity').textContent.includes(want), p.nodes.get('integrity').textContent);
+  }
+  const none = await page('request.js', detail());
+  assert.ok(!none.nodes.get('integrity').textContent.includes('Execution:'));
+  assert.ok(!none.nodes.get('integrity').textContent.includes('Legacy v1 request'));
+});

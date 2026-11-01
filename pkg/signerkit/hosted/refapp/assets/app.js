@@ -233,3 +233,12 @@ function renderV2Votes(votes, required) {
   for (const vote of votes) block.appendChild(el('p', {text: vote.operator + ' — ' + vote.decision}));
   return block;
 }
+
+// E49 execution view; the label says whether the client reported it or the
+// signer derived it.
+function renderExecution(execution) {
+  let text = 'Execution: ' + neutralize(execution.status || '—');
+  if (execution.class) text += ' · ' + neutralize(execution.class);
+  if (execution.reason) text += ' · ' + neutralize(execution.reason);
+  return el('p', {text: text + ' (' + neutralize(execution.label || 'unlabelled') + ')'});
+}
