@@ -45,6 +45,9 @@ func (e *Engine) startup() error {
 		if rec == nil {
 			return fmt.Errorf("lifecycle: listed record missing")
 		}
+		if futureDated(*rec, now, e.config.Settings) {
+			e.futureDatedAtStartup++
+		}
 		e.projections.update(entry.Key, nil, *rec, now, e.epoch, e.config.Settings)
 		e.published.loadLocked(entry.Key, rec)
 	}
@@ -58,4 +61,25 @@ func (e *Engine) startup() error {
 		}
 	}
 	return nil
+}
+
+// futureDated is SA-1 rule 3's Startup report: an approved record with an
+// open window (live by the retention class: mint slot empty or still holding
+// bytes, before claim_end) whose decided_at is more than ReleaseSkew (3.2's
+// threshold) ahead of the wall clock.
+func futureDated(rec ap.R1, now ap.Now, settings ap.Settings) bool {
+	end, isApproved := ap.ClaimEnd(rec)
+	if !isApproved || !now.Wall.Before(end) || ap.Class(rec, now, settings, false) != ap.ClassLive {
+		return false
+	}
+	return rec.Header.Decision.DecidedAt.After(now.Wall.Add(ap.ReleaseSkew))
+}
+
+// FutureDatedAtStartup is E59's "future-dated stamps found at Startup": the
+// approved records with an open window this generation loaded with decided_at
+// more than 5 s ahead. It is reported only; Startup changes nothing because of it.
+func (e *Engine) FutureDatedAtStartup() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.futureDatedAtStartup
 }

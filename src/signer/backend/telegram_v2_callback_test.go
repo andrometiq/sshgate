@@ -40,6 +40,14 @@ func (r *callbackRuntime) Current() (*lc.Engine, error) {
 	return r.engine, nil
 }
 func (r *callbackRuntime) Legacy() *lc.LegacyService { return r.legacy }
+func (r *callbackRuntime) ResolveAdmin(id string) (*lc.Engine, string, error) {
+	engine, err := r.Current()
+	if err != nil {
+		return nil, "", &ap.CodeError{Code: ap.CodeLifecycleUnavailable}
+	}
+	handle, err := engine.ResolveAdmin(id)
+	return engine, handle, err
+}
 
 type callbackAudit struct {
 	mu     sync.Mutex

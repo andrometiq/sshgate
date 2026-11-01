@@ -2,8 +2,10 @@ package backend
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
+	"strings"
 	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
@@ -72,7 +74,8 @@ func (t *TelegramBackend) writeCommandRefusal(transition string, replay bool) er
 	return nil
 }
 
-// No lifecycle commands are registered in production yet. /start retains its legacy handler.
+// AttachApprovalCallbacks registers /renotify; D1b adds the other commands.
+// /start retains its legacy handler.
 func (t *TelegramBackend) handleApprovalCommand(m *tgbotapi.Message, forwarded bool) {
 	reason := "unknown_command"
 	switch {
@@ -114,6 +117,62 @@ func (t *TelegramBackend) handleApprovalCommand(m *tgbotapi.Message, forwarded b
 			t.logger.Printf("send command refusal: %s", redactToken(err))
 		}
 	})
+}
+
+// handleRenotify runs only after the E64 gate. It applies Renotify to the one
+// record the id resolves to; each refusal is audited without the argument.
+func (t *TelegramBackend) handleRenotify(m *tgbotapi.Message) {
+	reply, refusal := t.renotify(strings.TrimSpace(m.CommandArguments()))
+	if refusal != "" {
+		family := "renotify_refused"
+		if refusal == "ambiguous_id" { // an E64 gate reason (gap ruling 4)
+			family = "command_refused"
+		}
+		if err := t.writeCommandRefusal(family+"{"+refusal+"}", false); err != nil {
+			t.logger.Print("telegram renotify refusal audit failed")
+		}
+	}
+	chat, err := t.approvalChat()
+	if err != nil {
+		return
+	}
+	t.enqueueNotification(func() {
+		if _, err := t.bot.Send(tgbotapi.NewMessage(chat, reply)); err != nil {
+			t.logger.Printf("send renotify reply: %s", redactToken(err))
+		}
+	})
+}
+
+// renotify returns the operator reply and, for a refusal, its audit reason.
+func (t *TelegramBackend) renotify(id string) (string, string) {
+	if id == "" || strings.ContainsAny(id, " \t\n") {
+		return "usage: /renotify <handle from /pending>", "usage"
+	}
+	engine, handle, err := t.approvalCallbacks.runtime.ResolveAdmin(id)
+	var answer ap.Answer
+	if err == nil {
+		answer, err = engine.Renotify(handle)
+	}
+	var coded *ap.CodeError
+	switch {
+	case callbackUnavailable(err):
+		return "signer recovering — try again", "recovering"
+	case errors.As(err, &coded) && coded.Code == ap.CodeNotFound:
+		return "no record matches that id", "not_found"
+	case errors.As(err, &coded) && coded.Code == ap.CodeInvalidRequest && strings.HasPrefix(coded.Msg, "ambiguous"):
+		return coded.Msg, "ambiguous_id"
+	case errors.As(err, &coded) && coded.Code == ap.CodeInvalidRequest:
+		return "usage: /renotify <handle from /pending>", "usage"
+	case err != nil && answer.Reason == "":
+		return "renotify failed — try again", "error"
+	case answer.Reason == "already_pending":
+		return "re-notify already pending", answer.Reason
+	case answer.Reason == "in_progress":
+		return "a send is in progress — try again", answer.Reason
+	case answer.Reason != "":
+		return "renotify refused: " + answer.Reason, answer.Reason
+	}
+	return "re-notify accepted: a new review and card follow", ""
 }
 
 // The pinned Bot API client predates forward_origin. Preserve it at intake.

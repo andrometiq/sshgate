@@ -13,11 +13,14 @@ import (
 	ap "github.com/karthikeyan5/sshgate/src/approvalplan"
 )
 
-// ApprovalCallbackRuntime resolves the current generation for every tap.
-// Wire once before starting the Telegram poller.
+// ApprovalCallbackRuntime resolves the current generation for every tap and
+// admin command. Wire once before starting the Telegram poller.
 type ApprovalCallbackRuntime interface {
 	Current() (*lifecycle.Engine, error)
 	Legacy() *lifecycle.LegacyService
+	// ResolveAdmin maps a record handle or unique request_id to its record's
+	// handle and generation; unavailable while no generation serves.
+	ResolveAdmin(string) (*lifecycle.Engine, string, error)
 }
 
 type telegramApprovalCallbacks struct {
@@ -38,6 +41,7 @@ func (t *TelegramBackend) AttachApprovalCallbacks(runtime ApprovalCallbackRuntim
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	t.approvalCallbacks = &telegramApprovalCallbacks{runtime: runtime, legacy: legacy, queues: make(map[string][]*tgbotapi.CallbackQuery), ctx: ctx, cancel: cancel}
+	t.approvalCommands = map[string]func(*tgbotapi.Message){"renotify": t.handleRenotify}
 	return nil
 }
 
