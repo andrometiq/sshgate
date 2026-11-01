@@ -422,6 +422,7 @@ func TestWorstCasePagesFitOneFrame(t *testing.T) {
 	worst := syncFinalSummary(idOne)
 	reason := strings.Repeat("<", approvalwire.MaxMessageLen) // json escapes '<' to six bytes
 	worst.TerminalReason, worst.NotExecutableReason, worst.Pruned = reason, reason, true
+	worst.AuthMode = approvalplan.GrantDecidedPrefix + idOne // request IDs are fixed-length
 	worst.ExecutedOrdinals = make([]int, approvalplan.MaxSteps)
 	for i := range worst.ExecutedOrdinals {
 		worst.ExecutedOrdinals[i] = i + 1
