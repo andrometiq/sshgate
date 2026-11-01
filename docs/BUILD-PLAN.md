@@ -41,6 +41,12 @@ counts as done. Anyone picking up the repository, a developer or a coding agent,
 
 ### Release v0.2: paused 2026-10-23
 
+> **Status update 2026-11-01.** v0.2 work continued on the integration branch
+> `feat/76-65-approval-lifecycle`. Its own `docs/BUILD-PLAN.md`, section "Release v0.2", is the
+> current status: what is merged, what is built but unmerged, what is designed but not built,
+> the open owner questions and how to resume. The rest of this section is the 2026-10-23
+> snapshot as seen from `main`; `main` itself is unchanged (v0.1.5).
+
 Development is paused. This section says what works, what is half built, where it lives and
 what to do next. The step statuses further down describe `main`; work done on feature branches
 is listed here and is marked `done` only when it reaches `main`. "Merged" below means merged into the integration branch, not into `main`.
