@@ -87,7 +87,7 @@ func syncFinalSummary(id string) approvalplan.Summary {
 	s := pendingSummary(id)
 	deadline, decided := t0.Add(approvalplan.SyncClaimWindow), t0.Add(20*time.Second)
 	s.Coordinator, s.SyncClaimDeadline, s.DecidedAt = approvalplan.CoordinatorInProcessSync, &deadline, &decided
-	s.ApprovalStatus, s.AssistState, s.AssistRevision = approvalplan.ApprovalApproved, approvalplan.AssistReady, 1
+	s.ApprovalStatus, s.AuthMode, s.AssistState, s.AssistRevision = approvalplan.ApprovalApproved, "human", approvalplan.AssistReady, 1
 	s.ExecutionStatus, s.ExecutionClass = approvalplan.ExecutionFinal, approvalplan.ClassFailed
 	s.ExecutedOrdinals, s.Partial = []int{1, 2}, true
 	s.NotificationStatus, s.Class = approvalplan.NotificationSent, approvalplan.ClassSettled
@@ -98,7 +98,7 @@ func shedGrantSummary(id string) approvalplan.Summary {
 	s := pendingSummary(id)
 	decided, expires := t0.Add(time.Minute), t0.Add(time.Minute+time.Hour)
 	s.Kind, s.Coordinator = approvalplan.KindStandingGrant, ""
-	s.ApprovalStatus, s.DecidedAt, s.AssistState, s.AssistRevision = approvalplan.ApprovalApproved, &decided, approvalplan.AssistUnavailable, 1
+	s.ApprovalStatus, s.DecidedAt, s.AuthMode, s.AssistState, s.AssistRevision = approvalplan.ApprovalApproved, &decided, "human", approvalplan.AssistUnavailable, 1
 	s.ExecutionStatus, s.NotificationStatus, s.Class = approvalplan.ExecutionNotApplicable, approvalplan.NotificationSent, approvalplan.ClassLive
 	s.Pruned, s.GrantID, s.GrantExpiresAt = true, id, &expires
 	return s

@@ -1,6 +1,9 @@
 package approvalplan
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 // View is the summary Get, Wait and List return (SA-6). It is pure: it never
 // writes, reads time only from committed slots, and uses now only for the
@@ -23,6 +26,9 @@ func View(rec R1, now Now, epoch string, s Settings, grantLive bool) Summary {
 	if d := h.Decision; d != nil {
 		at := d.DecidedAt
 		sum.ApprovalStatus, sum.TerminalReason, sum.DecidedAt = d.Status, d.TerminalReason, &at
+		if d.Status == ApprovalApproved {
+			sum.AuthMode = authMode(d.DecidedBy)
+		}
 		if h.Kind == KindStandingGrant && d.Status == ApprovalApproved {
 			exp := GrantExpiresAt(h)
 			sum.GrantID, sum.GrantExpiresAt = h.RequestID, &exp
@@ -35,6 +41,20 @@ func View(rec R1, now Now, epoch string, s Settings, grantLive bool) Summary {
 		sum.ExecutedOrdinals = append([]int(nil), final.ExecutedOrdinals...)
 	}
 	return sum
+}
+
+// authMode is how an approved decision was authorized, the same value
+// signerkit's authMode (daemon.go) stamps on a v1 sign response and audit row:
+// a grant decision's "grant:<id>" verbatim, any other approver "human". A
+// denier is also in decided_by (apply.go), so callers pass approved records only.
+func authMode(decidedBy string) string {
+	switch {
+	case strings.HasPrefix(decidedBy, GrantDecidedPrefix):
+		return decidedBy
+	case decidedBy != "":
+		return "human"
+	}
+	return ""
 }
 
 // RecordKeyOf is the record key a header is stored under: the local file

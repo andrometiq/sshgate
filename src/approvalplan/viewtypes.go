@@ -159,7 +159,8 @@ const (
 )
 
 // Summary is what Get, Wait and List return for one record. It never carries
-// signature material or the claim-token hash (E25).
+// signature material or the claim-token hash (E25). AuthMode is set only on an
+// approved record: "grant:<id>" or "human" (ruling 16).
 type Summary struct {
 	RequestID           string             `json:"request_id"`
 	RecordHandle        string             `json:"record_handle"`
@@ -172,6 +173,7 @@ type Summary struct {
 	ApprovalStatus      ApprovalStatus     `json:"approval_status"`
 	TerminalReason      string             `json:"terminal_reason,omitempty"`
 	DecidedAt           *time.Time         `json:"decided_at,omitempty"`
+	AuthMode            string             `json:"auth_mode,omitempty"`
 	AssistState         AssistState        `json:"assist_state"`
 	AssistRevision      int                `json:"assist_revision"`
 	ExecutionStatus     ExecutionStatus    `json:"execution_status"`
