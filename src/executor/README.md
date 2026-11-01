@@ -55,5 +55,9 @@ without bodies while retaining result metadata. Run it with
 The normal reservation is deliberately too large for a valid record to trigger
 that defensive path.
 
-Process crash hooks and the hosted-proxy harness have separate prerequisites. The contention measurement
+`TestCommandJobThroughHostedProxyBusy` drives one `run` job through an in-process
+hosted server behind the local daemon socket (test-only imports). One SQLite busy
+answer on each of Submit, Claim and Report is resent byte-identically, and the job
+still runs once and ends `succeeded` with an accepted report.
+Process crash hooks have separate prerequisites. The contention measurement
 remains behind `sshgate_perf` and is not part of the race suite.
