@@ -932,7 +932,7 @@ a "Revision 5 changelog" at the top instead (first item below).
 
 **None.** Every item above stays inside the existing status vocabulary, adds no wire field, changes no
 K-ruling, and can be reversed before release. O12 is a reading that is recorded, not asked. If the
-owner meant async for the other tools, that would be a K9 amendment only he can make (S:12), and the
+owner meant async for the other tools, that would be a K9 amendment only the owner can make (S:12), and the
 executor work above already covers it apart from the MCP flag.
 
 ### 6.3 Known pre-existing gap (not caused by Q3; flag only)

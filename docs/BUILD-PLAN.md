@@ -116,7 +116,8 @@ against its full contract, race tests).
   edits in the Q3 port design §4.3a as amended by §8.
 - `wip/a10-5`, `wip/a8-1` (remote copies): older interrupted work. The finished versions are
   merged; don't use these.
-- `feat/v1.2-redactor`: a reference for a later port, not a merge. Keep it.
+- `feat/v1.2-redactor`: a reference for a later port, not a merge. It lives only in the
+  maintainer's clone (not on GitHub); keep it.
 
 **Designed but not built.**
 - **The Q3 port lanes** ([q3-tool-port-design.md](plans/v0.2/q3-tool-port-design.md) §4): A13c (new:

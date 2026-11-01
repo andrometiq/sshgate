@@ -38,7 +38,8 @@ is tagged only when its release gates pass:
   pin, labels, daemon-read verbs inside the jail) are work item 1 of
   [BUILD-PLAN.md](BUILD-PLAN.md).
 - **#76 approval-assist and #65 async approval** — work item 2 of
-  [BUILD-PLAN.md](BUILD-PLAN.md).
+  [BUILD-PLAN.md](BUILD-PLAN.md). Hosted deny-all moves to v0.3 (owner decision
+  2026-11-01).
 - **CI green** on every workflow, including the jail lanes on GitHub's runners.
 - **The combined release checks** — cross-review and integration of the
   outstanding fixes, `make preflight`, `make e2e`, the jail test lanes, and a
