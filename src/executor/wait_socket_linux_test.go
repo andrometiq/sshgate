@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"io"
 	"path/filepath"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -149,8 +150,24 @@ func TestWaiterRealClientMembershipChurnAndCancellation(t *testing.T) {
 	if _, err := engine.AdminCancel(first.RecordHandle, ap.AdminCancel{PlanHash: first.PlanHash, Admin: st.Operator}); err != nil {
 		t.Fatal(err)
 	}
+	// WaitMany answers at once while a decided ID stays in a poll, so commit the
+	// observation the job actor (not running in this fixture) would make.
+	cancelled, err := engine.Get(st.PrincipalA, st.ID(1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.mu.Lock()
+	job, err := store.Load(st.ID(1))
+	if err == nil {
+		command, _ := ap.JobOnAnswer(job, ap.JobMemory{}, ap.JobAction{Kind: ap.JobActObserve}, ap.SignerAnswer{Decision: cancelled.ApprovalStatus, PlanHash: cancelled.PlanHash})
+		_, err = s.commitSubmission(job, command)
+	}
+	s.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
 	next := receiveWait(t, handler.entered)
-	if len(next) != 21 {
+	if len(next) != 20 || slices.Contains(next, st.ID(1)) {
 		t.Fatal("natural reply did not refresh membership", next)
 	}
 	s.Close()
