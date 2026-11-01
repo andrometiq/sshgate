@@ -20,3 +20,21 @@ Callback taps retain their existing handling: unauthorized taps receive a
 `not authorized` answer and a per-tap log entry. This remains an accepted
 limitation for operator-linked legacy group chats; the callback-binding
 carry-forward tests pin these answers.
+
+## `/renotify <handle>`
+
+`/renotify` is the only way to resend an approval notification whose delivery
+is `uncertain` after a restart. It passes the gate above (allowed user, private
+chat, not forwarded, not redelivered) and takes the record handle that every
+review part and `/pending` show. A `request_id` works only when it matches
+exactly one record; otherwise the reply is "ambiguous id — use the handle from
+/pending" and nothing changes. While the lifecycle is recovering, every
+`/renotify` answers "signer recovering — try again".
+
+An accepted `/renotify` commits one change: the record's notification
+generation rises and every card is retired, so old buttons answer "card
+updated — tap again". A new review burst and one card follow from that commit,
+even across a crash. It is refused while a resend is already pending, while a
+send is in progress, once the request is decided, and after the record's eight
+bursts. Each refusal after the gate is audited as `renotify_refused{<reason>}`
+without the command's argument, and the reply goes only to the linked DM.

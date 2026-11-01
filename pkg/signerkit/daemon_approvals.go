@@ -166,6 +166,27 @@ func (r *ApprovalRuntime) Current() (*lifecycle.Engine, error) {
 	return r.engine, nil
 }
 
+// ResolveAdmin composes operator addressing (E64) for admin commands. The v2
+// generation is the only owner (Q4); a legacy owner would be consulted here,
+// with a match in both owners refused as ambiguous. While no generation
+// serves, ambiguity cannot be ruled out, so every resolution is refused.
+func (r *ApprovalRuntime) ResolveAdmin(id string) (*lifecycle.Engine, string, error) {
+	recovering := &ap.CodeError{Code: ap.CodeLifecycleUnavailable, Msg: "signer recovering — try again"}
+	engine, err := r.Current()
+	if err != nil {
+		return nil, "", recovering
+	}
+	handle, err := engine.ResolveAdmin(id)
+	var coded *ap.CodeError
+	if errors.As(err, &coded) && (coded.Code == ap.CodeLifecycleUnavailable || coded.Code == ap.CodeStorageUncertain) {
+		return nil, "", recovering
+	}
+	if err != nil {
+		return nil, "", err
+	}
+	return engine, handle, nil
+}
+
 // Status reports ErrHostedForwarder for a live proxy, or the local recovery cause.
 func (r *ApprovalRuntime) Status() error {
 	if r.config.Forwarder != nil {

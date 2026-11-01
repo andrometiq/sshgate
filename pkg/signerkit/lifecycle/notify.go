@@ -5,8 +5,10 @@ import (
 	"crypto/rand"
 	"crypto/subtle"
 	"errors"
+	"slices"
 	"time"
 
+	"github.com/karthikeyan5/sshgate/internal/faultpoint"
 	ap "github.com/karthikeyan5/sshgate/src/approvalplan"
 )
 
@@ -163,11 +165,14 @@ func (a *notifyActor) run(ctx context.Context) error {
 				break
 			}
 			if step.Kind == ap.NotifyEdit {
-				_, n, ok, err := a.startCard(ctx, true)
+				rec, n, ok, err := a.startCard(ctx, true)
 				if err != nil {
 					return err
 				}
 				if !ok {
+					if err := a.limitReached(ctx, rec); err != nil {
+						return err
+					}
 					continue
 				}
 				a.edit = n
@@ -185,6 +190,7 @@ func (a *notifyActor) run(ctx context.Context) error {
 			if err := a.engine.checkAvailable(); err != nil {
 				return err
 			}
+			faultpoint.Exit("notify.before-edit")
 			outcome, _ := a.engine.config.Notifier.EditCard(ctx, next.MsgID, a.edit)
 			if err := a.engine.checkAvailable(); err != nil {
 				return err
@@ -298,6 +304,7 @@ func (a *notifyActor) burst(ctx context.Context, session BurstSession) error {
 		}
 		switch step.Kind {
 		case ap.NotifyBurst:
+			faultpoint.Exit("notify.before-burst")
 			_, answer, err := a.commit(ctx, ap.BurstStart{})
 			if err != nil {
 				return err
@@ -323,11 +330,14 @@ func (a *notifyActor) burst(ctx context.Context, session BurstSession) error {
 				return a.incomplete(ctx, ids)
 			}
 		case ap.NotifyCard:
-			_, n, ok, err := a.startCard(ctx, false)
+			started, n, ok, err := a.startCard(ctx, false)
 			if err != nil {
 				return err
 			}
 			if !ok {
+				if err := a.limitReached(ctx, started); err != nil {
+					return err
+				}
 				continue
 			}
 			rec, _, err = a.read(ctx)
@@ -355,6 +365,25 @@ func (a *notifyActor) burst(ctx context.Context, session BurstSession) error {
 			return nil
 		}
 	}
+}
+
+// limitReached marks the latest review parts and every delivered card
+// INCOMPLETE once the card-entry limit has ended the request.
+func (a *notifyActor) limitReached(ctx context.Context, rec ap.R1) error {
+	d := rec.Header.Decision
+	if rec.Payload == nil || d == nil || d.TerminalReason != ap.ReasonNotificationLimit {
+		return nil
+	}
+	var ids []int64
+	if bursts := rec.Payload.Bursts; len(bursts) != 0 {
+		ids = append(ids, bursts[len(bursts)-1].PartMsgIDs...)
+	}
+	for _, entry := range rec.Payload.CardEntries {
+		if entry.MsgID != nil && !slices.Contains(ids, *entry.MsgID) {
+			ids = append(ids, *entry.MsgID)
+		}
+	}
+	return a.incomplete(ctx, ids)
 }
 
 func (a *notifyActor) incomplete(ctx context.Context, ids []int64) error {

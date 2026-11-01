@@ -52,6 +52,8 @@ type Engine struct {
 	epoch         string
 	projections   projections
 
+	futureDatedAtStartup int // E59; set once by startup
+
 	legacy *LegacyService
 }
 

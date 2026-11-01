@@ -3,6 +3,7 @@ package lifecycle
 import (
 	"crypto/rand"
 	"fmt"
+	"time"
 
 	ap "github.com/karthikeyan5/sshgate/src/approvalplan"
 )
@@ -45,6 +46,9 @@ func (e *Engine) startup() error {
 		if rec == nil {
 			return fmt.Errorf("lifecycle: listed record missing")
 		}
+		if futureDated(*rec, now.Wall) {
+			e.futureDatedAtStartup++
+		}
 		e.projections.update(entry.Key, nil, *rec, now, e.epoch, e.config.Settings)
 		e.published.loadLocked(entry.Key, rec)
 	}
@@ -58,4 +62,26 @@ func (e *Engine) startup() error {
 		}
 	}
 	return nil
+}
+
+// futureStampMargin is E59's threshold for a stamp reported as future-dated.
+const futureStampMargin = 5 * time.Minute
+
+// futureDated reports a record whose creation or decision stamp is more than
+// the margin ahead of the wall clock: a clock that moved back while stopped.
+func futureDated(rec ap.R1, wall time.Time) bool {
+	limit := wall.Add(futureStampMargin)
+	if rec.Header.CreatedAt.After(limit) {
+		return true
+	}
+	return rec.Header.Decision != nil && rec.Header.Decision.DecidedAt.After(limit)
+}
+
+// FutureDatedAtStartup is E59's "future-dated stamps found at Startup": the
+// records this generation loaded with a stamp more than 5 min ahead. It is
+// reported only; Startup changes nothing because of it.
+func (e *Engine) FutureDatedAtStartup() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.futureDatedAtStartup
 }
