@@ -200,6 +200,9 @@ against its full contract, race tests).
   legacy fixture labels, and a `t.Fatal` off the test goroutine in `replayAnswer`; B1w's test child
   processes have no parent-death signal; socket paths can exceed the length limit under a long
   `TMPDIR`; the A11 mutation-script selector.
+- B2 review P3s: `/renotify` on a full burst set replies `notification_limit` rather than the spec's
+  "notification limit reached; cancel and resubmit"; the limit path edits the live card twice; the
+  ambiguous-ID refusal is not rate-limited like other authenticated refusals (A8 ruling).
 
 **How to resume.**
 1. `git checkout feat/76-65-approval-lifecycle` (or a worktree of it). Read this section, then
