@@ -397,7 +397,7 @@ time (review-1 #5).
 | **C5** | orchestrator, after C2, C3, C4 | `tests/integration/async_*_test.go` | spec `:2178-2196` | `flock $LOCK make e2e` |
 | **D1a** | after B2* (spec: Phase C end; early start pending §5 Q10) | new `pkg/signerkit/lifecycle/snapshots.go` (+test), E49 display states in the actor | in-memory deny-all/cancel snapshots; display states | ACC `./pkg/signerkit/lifecycle/...` |
 | **D1b** | after D1a | `src/signer/backend/telegram_v2_commands.go`, `telegram.go` `dispatch` hook | `/pending`, `/deny_all`, `/cancel` (spec `:2198-2210`) | ACC `./src/signer/...` |
-| **D2** | cut after A11* (Q1); merges only after A12 (merge-only edge, so A12's proxy harness is built on a stable hosted plane) | `pkg/signerkit/hosted/**` incl. `refapp/**` | cancel routes, deny-all snapshot/confirm, v2 pagination, admin UI, contention (spec `:2212-2224`) | ACC `./pkg/signerkit/hosted/...`; `make test-refapp-js`; FROZEN-HOSTED |
+| **D2** | cut after A11* (Q1); merges only after A12 (merge-only edge, so A12's proxy harness is built on a stable hosted plane) | `pkg/signerkit/hosted/**` incl. `refapp/**` | cancel routes (hosted deny-all moved to v0.3, owner decision 2026-11-01), v2 pagination, admin UI, contention (spec `:2212-2224`) | ACC `./pkg/signerkit/hosted/...`; `make test-refapp-js`; FROZEN-HOSTED |
 | **D3** | orchestrator, last | docs, THREAT-MODEL (incl. the 30 s `sigwire.MaxClockSkew`, §7), metrics, CHANGELOG, ROADMAP v0.3 move | spec `:2226-2241` | PHASE-END, `make e2e`, final triple review + the reviewer |
 
 ### 3.5 Disjointness and shared files
