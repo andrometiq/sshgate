@@ -84,7 +84,7 @@ waits for v0.3 ([ROADMAP.md](ROADMAP.md)). Detailed plans: [plans/v0.2/](plans/v
 | `feat/22-p4-g-early` | Lane G (G-1b, G-2, G-3, docs) on top of `feat/22-p3` (`c638e6f`) | All non-root mutation cases are killed. The root and FUSE legs need `sudo make test-jail-root`, which the owner runs. |
 | `feat/22-p4-g` | The older lane G base (G-1a) | Keep it. |
 | `feat/journey-e2e` | Real-use journey test, `make test-journey`, the CI `journey` job, with `main` merged in (`bdabdcc`) | Its `make test` did not complete locally, and the journey test needs a privileged runner. The first hosted CI run is pending. |
-| `feat/v1.2-redactor` | Reference for a port, not a merge | Kept on purpose. Don't merge or delete it. |
+| `feat/v1.2-redactor` | Reference for a port, not a merge | Kept on purpose in the maintainer's clone (not on GitHub). Don't merge or delete it. |
 | `wip/a10-5`, `wip/a8-1`, `wi2/*` lane branches | Lane work already merged into integration | Kept for history. Safe to delete after v0.2. |
 
 **Work item 2 lanes.** The contracts are in [wave3-lanes.md](plans/v0.2/wave3-lanes.md) §3, with
